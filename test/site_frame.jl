@@ -50,6 +50,109 @@
     css = page(htmxo_utility_styles())
     @test contains(css, ".htmxo-skip-link:not(:focus, :focus-visible)")
     @test contains(css, "body > header nav a[aria-current=\"page\"] { font-weight: 600; }")
+    # A header wider than its window continues on further lines, on Pico pages.
+    bridge = repr("text/html", pico_bridge())
+    @test contains(bridge, "body > header nav {\n    flex-wrap: wrap;")
+    @test contains(bridge, "body > header nav ul { flex-wrap: wrap; }")
+    @test contains(page(HTMXObjects.pico_page(h.p("x"))), "body > header nav {\n    flex-wrap: wrap;")
+    @test !contains(page(htmx(h.p("x"))), "body > header nav {\n    flex-wrap: wrap;")
+end
+
+@testitem "a pico_page header wider than the window stays in the page" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # What a reader sees of the header, from the rendered page:
+        # {"overflow": how far the page scrolls sideways, "outside": entries
+        # past the window's edge, "broken": labels on more than one line,
+        # "rows": lines of entries, "indent": where the navigation starts after
+        # the brand's label, "lefts": every entry's left edge}.
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const root = document.documentElement;
+            const items = [...document.querySelectorAll('body > header nav li')];
+            const labelRects = li => { const r = document.createRange(); r.selectNodeContents(li.querySelector('a')); return [...r.getClientRects()]; };
+            const lines = li => new Set(labelRects(li).map(c => Math.round(c.top))).size;
+            const left = li => Math.min(...labelRects(li).map(c => c.left));
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = [
+                root.scrollWidth - root.clientWidth,
+                items.filter(li => li.getBoundingClientRect().right > root.clientWidth).length,
+                items.filter(li => lines(li) > 1).length,
+                new Set(items.map(li => Math.round(li.getBoundingClientRect().top))).size,
+                Math.round(left(items[1]) - left(items[0])),
+                items.map(li => Math.round(li.getBoundingClientRect().left)).join(','),
+            ].join(' ');
+            document.body.appendChild(result);
+        });
+        """))
+        # Real headers: ODLPlaus (its private entry shown) and ArbeitsplatzAtlas,
+        # the longest on `pico_page`. And one that a full 1280 px window cannot hold.
+        odl = Any["Messnetz" => "/", "Modellergebnisse" => "/referenzfit", "In-situ" => "/insitu",
+            "Methodik" => "/methodik", "Daten" => "/daten", private("Angebot" => "/gegenueberstellung")]
+        atlas = Any["Atlas" => "/", "PLZ" => "/plz", "Messorte" => "/messorte", "Methodik" => "/modell", "Bericht" => "/bericht",
+            "Datenquellen" => "/daten", "Glossar" => "/glossar", "Ausschreibung" => "/gegenueberstellung"]
+        long = vcat(odl, Any["Auswertung" => "/a", "Verfahrensvergleich" => "/v", "Langzeitdemonstration" => "/l",
+            "Bericht" => "/b", "Schnittstelle" => "/s", "Dienste" => "/d"])
+        # The control takes the bridge's rule back, leaving Pico's one-line nav.
+        pico_only = h.style(Raw("body > header nav { flex-wrap: nowrap; width: auto; min-width: 0; max-width: none; column-gap: 0; } " *
+            "body > header nav ul { flex-wrap: nowrap; } body > header nav ul:last-of-type { margin-left: 0; }"))
+        shell(nav, extra_head=(); brand="ODL-Plausibilität") = with_audience(:private) do
+            repr("text/html", HTMXObjects.pico_page(h.div(h.p("Text."), driver); brand=brand => "/", nav, lang="de",
+                assets=:vendor, htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false,
+                extra_head))
+        end
+        pages = Dict("/" => shell(odl), "/control" => shell(odl, (pico_only,)), "/long" => shell(long),
+            "/long-control" => shell(long, (pico_only,)), "/atlas" => shell(atlas; brand="ArbeitsplatzAtlas"),
+            "/atlas-control" => shell(atlas, (pico_only,); brand="ArbeitsplatzAtlas"),
+            "/vendor/pico.min.css" => read(HTMXObjects._vendor_file(:pico), String))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            haskey(pages, path) || return HTTP.Response(404)
+            type = endswith(path, ".css") ? "text/css" : "text/html"
+            HTTP.Response(200, ["Content-Type" => type], pages[path])
+        end
+        measure(path, width) = mktempdir() do profile
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --hide-scrollbars --window-size=$width,900 --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port$path`)
+            fields = split(match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)[1])
+            (; overflow=parse(Int, fields[1]), outside=parse(Int, fields[2]), broken=parse(Int, fields[3]),
+               rows=parse(Int, fields[4]), indent=parse(Int, fields[5]), lefts=fields[6])
+        end
+        try
+            # Where Pico's header fits the window, whole, nothing moves, also
+            # where it runs past `.container` (the Atlas header at 980 px, a
+            # phone's browser in desktop view).
+            for (path, width) in (("", 1400), ("", 1280), ("", 1024), ("", 980), ("", 860), ("", 768),
+                    ("atlas", 1400), ("atlas", 1024), ("atlas", 980))
+                framed = measure("/" * path, width)
+                control = measure(isempty(path) ? "/control" : "/$path-control", width)
+                @test (path, width, control.overflow, control.broken) == (path, width, 0, 0)
+                @test (path, width, framed.rows) == (path, width, 1)
+                @test (path, width, framed.lefts) == (path, width, control.lefts)
+            end
+            # The control: where the header is too wide Pico's nav breaks labels
+            # and runs off the page, which is what this measures.
+            for (path, width) in (("/control", 700), ("/control", 600), ("/atlas-control", 860), ("/long-control", 1280))
+                pico = measure(path, width)
+                @test (path, width, pico.overflow > 0, pico.outside > 0) == (path, width, true, true)
+            end
+            @test measure("/control", 767).broken > 0
+            # The header stays in the page, its labels whole, the navigation
+            # below the brand and starting where the brand does.
+            for (path, width) in (("/", 767), ("/", 700), ("/", 600), ("/", 500), ("/atlas", 860), ("/atlas", 700),
+                    ("/long", 1280), ("/long", 1024), ("/long", 700))
+                framed = measure(path, width)
+                @test (path, width, framed.overflow, framed.outside, framed.broken) == (path, width, 0, 0, 0)
+                framed.rows > 1 && @test (path, width, framed.indent) == (path, width, 0)
+            end
+        finally
+            close(server)
+        end
+    end
 end
 
 @testitem "pico_page takes Pico's pin under vendor assets and forwards htmx's keywords" tags=[:unit] begin

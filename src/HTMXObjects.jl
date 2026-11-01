@@ -3547,6 +3547,10 @@ only on itself. Its `href` is compared without a query and with
 percent-encoding undone; an `href` with a `#fragment`, a relative one or
 another site's never is. Outside a request no entry is marked.
 
+A header that does not fit its window on one line continues on further lines:
+the navigation goes below the brand, and its entries wrap whole
+([`pico_bridge`](@ref)).
+
 `nav_label` names the navigation for screen readers: "Main navigation" by
 default, "Hauptnavigation" on a German page (the `lang` keyword or the
 route's `__lang__`). `skip_link=true` puts a "Skip to content" ("Zum Inhalt
@@ -31163,6 +31167,12 @@ later stylesheet (for example in `extra_head`) overrides them:
 `:root { --htmxo-container-max-width: 1800px; --htmxo-container-gutter: 1rem; }`
 tunes the width.
 
+The header of [`pico_page`](@ref), or any `<header><nav>` directly in `<body>`,
+stays in the page. It may run past `.container` while it fits the window, as
+under Pico, and then continues on further lines: the navigation below the brand,
+starting where the brand does, its entries whole. A later
+`body > header nav, body > header nav ul { flex-wrap: nowrap; }` keeps one line.
+
 A button without a colour class (`<button>`, `<input type=submit|button>`,
 `role="button"`, a bare `.outline`) takes Pico's own slate outline — the look
 of `class="secondary outline"` — in place of Pico's azure fill, in its rest,
@@ -31211,6 +31221,23 @@ pico_bridge() = h.style(Raw("""
                        calc(100% - 2 * var(--htmxo-container-gutter, 2rem)));
     }
 }
+/* Pico keeps a `nav` on one line, and `.container`, which holds the header of
+   `pico_page`, is well narrower than the window below 1280 px. So labels broke
+   and then the last entries ran off the page and widened it. The nav may now
+   use the window, up to a 1rem margin: `(100vw + 100%) / 2` is the distance from
+   a centred container's left edge to the window's right edge. Past that it
+   continues on further lines, its entries whole. A nav that fits the container
+   stays as wide as the container. On one line the gap and the margin cancel;
+   on its own line the navigation starts where the brand does. */
+body > header nav {
+    flex-wrap: wrap;
+    width: max-content;
+    min-width: 100%;
+    max-width: calc((100vw + 100%) / 2 - 1rem);
+    column-gap: var(--pico-nav-element-spacing-horizontal);
+}
+body > header nav ul { flex-wrap: wrap; }
+body > header nav ul:last-of-type { margin-left: calc(var(--pico-nav-element-spacing-horizontal) * -1); }
 /* Pico paints a button without a colour class in its primary azure. It takes
    Pico's slate outline (`.secondary.outline`) instead, through the same three
    variables Pico sets on every button; `.secondary` and `.contrast` keep

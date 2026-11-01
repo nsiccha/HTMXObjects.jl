@@ -319,6 +319,11 @@ public answer leaves out the private entry and its comments):
 - `footer` is placed in `<footer class="container">`, or as it is when it is
   an `h.footer` itself. `class` (default `"container"`) is the class of the
   header, `main` and footer.
+- A header that does not fit its window continues on further lines and stays
+  in the page: the navigation goes below the brand, starting where the brand
+  does, and its entries wrap whole. A header that fits its window stays where it
+  was. The rule sits on `body > header nav`, so an app's own header on the
+  `htmx()` shell wraps too.
 
 Without `brand` and `nav` the page has no header and no skip link and is the
 same as before. The stylesheet every page carries ([`htmxo_utility_styles`](@ref))

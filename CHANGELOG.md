@@ -14,6 +14,19 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.36
+
+- A `pico_page` header that does not fit its window continues on further lines
+  and stays in the page. Pico keeps a nav on one line, so labels broke (`In-`
+  over `situ`) and the last entries ran off the right edge, which widened the
+  page. The navigation now goes below the brand, starting where the brand does,
+  and its entries wrap whole, each added line about 56 px tall. A header that
+  fits its window stays where it was, also where it runs past `.container`. The
+  rule is in `pico_bridge` and sits on `body > header nav`, so an app's own
+  header on the `htmx()` shell wraps too. To keep one line, set
+  `body > header nav, body > header nav ul { flex-wrap: nowrap; }` in the app's
+  stylesheet.
+
 ## 0.1.35
 
 - A flat `master_detail_table` passes axe-core's `aria-conditional-attr`. ARIA
