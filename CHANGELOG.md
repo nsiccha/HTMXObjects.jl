@@ -14,6 +14,25 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.34
+
+- A `tabset` follows the ARIA tabs pattern. Its tab bar is a `tablist`, each tab
+  a `tab` with `aria-selected` and `aria-controls`, and each panel a `tabpanel`
+  named by its tab, and these stay right through a click, a URL that names a tab
+  and a static export. New keyword: `tabset(...; label="Auswertungen")` names the
+  tab bar.
+- A `tabset` works from the keyboard. Tab reaches the open tab; the arrow keys,
+  Home and End move the focus along the tabs, and Enter or Space opens the one in
+  focus. Moving the focus opens nothing, so a lazy tab still loads only when it
+  is opened and the URL changes only then. The keys come from `tabset_script()`,
+  which `htmx()` pages carry. A page with its own `<head>` that has not added it
+  keeps every tab as a stop in the page's Tab order, opened with Enter.
+- Opening a tab no longer touches the panels of a `tabset` nested inside it,
+  which used to leave the inner tabset showing a different panel from its open
+  tab.
+- A tabset with `url_param=nothing` now carries the small inline script every
+  other tabset has, for the case above. It still writes nothing to the URL.
+
 ## 0.1.33
 
 - A `sortable_table` that fits its column stays in the page when something in
