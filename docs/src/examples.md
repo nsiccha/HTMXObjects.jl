@@ -98,6 +98,17 @@ passage, a click on a passage goes back to its reference.
 
 [View source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/pdf_panel.jl)
 
+## Card deck {#card-deck}
+
+Flashcards built on [`card_deck`](components.md#card-deck): a grid of cards
+under their groups' headings, or one card at a time, switched by the "Grid"
+and "Carousel" pills. The search filters the cards by their words and says how
+many are left, the group pills filter by group, and the carousel pages over
+what is left, with the arrow keys too. The address keeps the view and the
+current card, so `?view=carousel&card=indices` links to one card.
+
+[View source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/card_deck.jl)
+
 ## Shared settings in a large table
 
 The [standalone source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/shared_settings.jl)

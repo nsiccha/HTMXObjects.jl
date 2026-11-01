@@ -39,6 +39,7 @@ export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, pos
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
 export pdf_panel, pdf_ref, pdf_toggle, pdf_beside, pdf_panel_texts, PdfPanelTexts, pdf_panel_assets, pdf_panel_styles, pdf_panel_script
+export card_deck, card_deck_texts, CardDeckTexts, card_deck_assets, card_deck_styles, card_deck_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,
     vitepress_theme_enhanceapp_snippet, vitepress_head_scripts, vitepress_proxy_config
@@ -5707,6 +5708,12 @@ _private_label(lang) = _lang_entry(_PRIVATE_LABELS, lang)
 _lang_entry(table::NamedTuple, ::Nothing) = table.en
 _lang_entry(table::NamedTuple, lang::AbstractString) =
     get(table, Symbol(lowercase(first(split(lang, '-')))), table.en)
+# The key of that entry: the locale a component's texts take for `lang`.
+_lang_locale(table::NamedTuple, ::Nothing) = :en
+function _lang_locale(table::NamedTuple, lang::AbstractString)
+    primary = Symbol(lowercase(first(split(lang, '-'))))
+    haskey(table, primary) ? primary : :en
+end
 
 # Elements that must stay a direct child of their parent carry the mark
 # themselves; anything else sits in a `span` when it is phrasing content (text
@@ -33676,6 +33683,7 @@ end
 
 include("live_thread.jl")
 include("pdf_panel.jl")
+include("card_deck.jl")
 
 """
     loading_indicator_script()

@@ -1741,6 +1741,76 @@ each chooser document's address. The panel shows the file the export wrote,
 from the bundle's root or a subdirectory, and a document keeps its live title.
 PDF.js still comes from `pdfjs` (by default jsDelivr), which is not rewritten.
 
+### `card_deck` — a searchable deck of cards, as a grid or one at a time {#card-deck}
+
+A deck of cards the reader sees either as a grid or as a carousel (one card
+at a time, with previous and next), and switches between the two. A search
+box filters the cards by their words, a group filter by their group, and the
+carousel pages over the cards they leave. The view and the current card are
+kept in the page address, so a link opens the deck at a card.
+
+```julia
+# Each card is (id, group, content): the deck puts the content in an
+# <article id=id>, under its group's heading.
+@get karten() = card_deck([(k.id, k.gruppe, karte(k)) for k in KARTEN]; id="karten")
+
+# ?view=carousel&card=k12 opens the carousel at card k12
+card_deck(cards; id="karten", view=:carousel)
+# no search box, no group filter, other address parameters, or none
+card_deck(cards; id="karten", search=false, group_filter=false)
+card_deck(cards; id="karten", view_param="ansicht", card_param="karte")
+card_deck(cards; id="karten", view_param=nothing, card_param=nothing)
+```
+
+- **Cards:** each one is `(id, group, content)`, `(id, content)`,
+  `id => content` or `(; id, group, content)`. Its `id` is its `<article>`'s
+  element id, so it must be unique on the page. Cards of a group come under
+  that group's heading (at the level a section would open there, `h2` at the
+  top of a page), in the order the groups' first cards come.
+- **The grid** lays the cards out in columns as wide as
+  `--htmxo-deck-card-width` (default `18rem`) allows. **The carousel** shows
+  the current card alone, at most `--htmxo-deck-carousel-width` (default
+  `46rem`) wide. The previous and next buttons and the position ("3 of 49")
+  sit above it, so they stay where they are from card to card. The bar with
+  the controls stays at the top of the window while the deck scrolls by,
+  below a page's own sticky header (`--htmxo-sticky-top`).
+- **Search:** every word typed must occur, in any order, ignoring case and
+  accents (`burger` finds "Bürger"), in a card's text or its group. While the
+  search or the group filter leaves cards out, the count beside the search
+  says how many are left ("Matches: 7 of 49"), and a note says so when none
+  is left. A group whose cards are all left out drops its heading.
+- **The group filter**, shown when the cards have two groups or more, is "All"
+  and the groups as pills, or as a searchable list (the look of `choice_list`,
+  above) past seven groups.
+- **The current card** is the one the carousel shows. In the grid a click on a
+  card makes it the current card, so switching to the carousel shows the card
+  just read; switching back brings it into view. In the carousel, a current
+  card the search leaves out gives way to the next card left. While no card is
+  left it keeps its place, so clearing the search returns to it.
+- **Keys:** in the carousel the left and right arrow keys go to the previous
+  and next card while the focus is in the deck (outside its search box and
+  choices), or anywhere on a page with one carousel and nothing focused. Home
+  and End, in the deck, go to the first and last card.
+- **The address:** a choice of view or card replaces the history entry (no
+  entry per card) and keeps htmx's history state, as `tabset` does with its
+  tab. A page opened at `?card=<id>`, or at `#<id>` without that parameter,
+  opens at that card. An unknown view or card keeps the default and logs a
+  console warning. Inside `.htmxo-embed` the deck leaves the address alone.
+  Two decks on one page need different `view_param`s and `card_param`s.
+- **Words** follow the page's language (`card_deck_texts(:de)` under
+  `__lang__ = "de"`: "Übersicht", "Einzeln", "Treffer: 7 von 49"); override any
+  with `texts=card_deck_texts(:de; carousel="Karteikarten")`.
+- **Page scripts:** `window.htmxoDeck.show(deck, id)` and
+  `window.htmxoDeck.view(deck, view)` (`deck` an element or its id), and the
+  event `htmxo:deck-change` (`{view, card}`) when the reader changes either.
+
+The deck carries its own style and script (`assets=false` and
+`card_deck_assets()` once in the page for a page with several decks), so it
+needs no route of its own, and everything runs in the browser, so a static
+export works as the live page does. In Markdown (`?plain`) the controls are
+left out: the group headings and the cards remain. A runnable demo is
+[`examples/card_deck.jl`](examples.md#card-deck).
+
 ### `loading_indicator_script()` and `request_feedback_*` {#request-feedback}
 
 Drop once per page to enable a centred loading indicator and click-feedback styling on every HTMX-triggered element.
