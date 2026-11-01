@@ -12,6 +12,10 @@ using TestItemRunner
     # Pico's own rules are overridden at exactly their specificity (`details
     # summary::after` is (0,0,3)), so app rules that beat Pico still win.
     @test contains(css, "details:where(:not(.dropdown, :has(> summary[role]))) > summary::after { content: none; }")
+    # The inner spacing is the bar's and the content's, so the bar needs no
+    # pulling out past a padding that a component may have changed.
+    @test contains(css, box * "::details-content {\n    padding-inline: var(--htmxo-disclosure-padding, 1rem);")
+    @test !contains(css, "margin-inline: calc(-1 * var(--htmxo-disclosure-padding")
     # The caption's toggle is no longer faded.
     @test !contains(repr("text/html", caption_style()), "opacity")
     # Pages that load Pico carry it; pages without Pico do not.
@@ -53,6 +57,20 @@ end
                     css(sum('dropdown'), '::before').backgroundImage === 'none');
                 out.buttonKept = String(css(det('button')).borderTopWidth === '0px');
                 out.appWins = String(css(det('app')).borderTopWidth === '0px' && css(sum('app')).paddingLeft === '0px');
+                // The bar reaches the default box's edges, and bare text sits inside the box.
+                const near = (a, b) => Math.abs(a - b) <= 0.5, border = parseFloat(css(det('open')).borderLeftWidth);
+                out.barToEdges = String(boxes.every(id => near(box(sum(id)).left, box(det(id)).left + border) &&
+                    near(box(sum(id)).right, box(det(id)).right - border)));
+                const bare = document.createRange(); bare.selectNode(det('bare').lastChild);
+                out.bareInside = String(near(bare.getBoundingClientRect().left - box(det('bare')).left, 16 + border));
+                // Padding a component sets does not push the bar out of its box: it insets the bar.
+                const inside = id => box(sum(id)).left >= box(det(id)).left && box(sum(id)).right <= box(det(id)).right;
+                out.noOverhang = String(['app', 'padded', 'flush'].every(inside));
+                out.paddingInsets = String(near(box(sum('padded')).left - box(det('padded')).left, 10));
+                // Controls: the variable drops the inner spacing, and a nested box stays inside.
+                out.flush = String(near(box(det('flush').querySelector('p')).left, box(det('flush')).left) &&
+                    near(box(sum('flush')).left, box(det('flush')).left));
+                out.nestedInside = String(box(det('nested')).left - box(det('outer')).left >= 15);
                 // The label keeps the body text colour open, closed and focused (Pico mutes an
                 // open label and colours a clicked one like a link), in both themes.
                 const colours = () => boxes.every(id => css(sum(id)).color === bodyColor()) &&
@@ -76,11 +94,17 @@ end
             h.details(; id="dropdown", class="dropdown")(h.summary("Menu"), h.ul(h.li("One"))),
             h.details(; id="button")(h.summary(; role="button")("Button summary"), h.p("x")),
             h.details(; id="app", class="htmxo-test-menu")(h.summary("Menu badge"), h.p("x")),
+            h.details(; id="padded", class="htmxo-test-padded", open=true)(h.summary("Own padding"), h.p("x")),
+            h.details(; id="flush", class="htmxo-test-flush", open=true)(h.summary("No inner spacing"), h.p("x")),
+            h.details(; id="bare", open=true)(h.summary("Bare text"), "Text with no element around it"),
+            h.details(; id="outer", open=true)(h.summary("Outer"), h.details(; id="nested", open=true)(h.summary("Nested"), h.p("x"))),
             driver)
         # An app's own class rules, after the shell's stylesheets, as in
         # `extra_head`. Transitions are off, so a colour reads its new value
         # right after the theme switch (Pico eases the summary's colour).
         app = h.style(Raw(".htmxo-test-menu { border: 0; padding: 0; } .htmxo-test-menu > summary { padding: 0; } " *
+                          ".htmxo-test-padded { padding: 0.05rem 0 0.05rem 0.5rem; border: 0; border-left: 2px solid; } " *
+                          ".htmxo-test-flush { --htmxo-disclosure-padding: 0; padding: 0; border: 0; } " *
                           "*, *::before, *::after { transition: none !important; }"))
         dom = mktempdir() do directory
             copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
@@ -93,7 +117,8 @@ end
         end
         @test contains(dom, "data-done=\"1\"")
         for marker in ("pico-loaded", "boxed", "bar", "chevron-before", "open-inside", "caption-opaque",
-                       "dropdown-kept", "button-kept", "app-wins", "light-colours", "dark-colours")
+                       "dropdown-kept", "button-kept", "app-wins", "bar-to-edges", "bare-inside", "no-overhang",
+                       "padding-insets", "flush", "nested-inside", "light-colours", "dark-colours")
             @test contains(dom, "data-$marker=\"true\"")
         end
     end

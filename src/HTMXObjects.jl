@@ -20512,7 +20512,10 @@ function htmxoStickyMeasure(el) {
         table.style.setProperty('--htmxo-table-head-h', (table.tHead ? table.tHead.offsetHeight : 0) + 'px');
     const wrap = table.parentElement;
     if (!wrap.classList.contains('table-wrap')) return;
-    const width = wrap.scrollWidth > wrap.clientWidth + 1 ? 'wide' : 'fits';
+    // The table's own width, not `wrap.scrollWidth`, which also counts anything
+    // poking out of a cell: a few pixels in one open row would box the whole
+    // table, shortening the page and moving the row just clicked off screen.
+    const width = table.offsetWidth > wrap.clientWidth + 1 ? 'wide' : 'fits';
     if (wrap.dataset.htmxoWidth !== width) wrap.dataset.htmxoWidth = width;
 }
 function htmxoStickyQueue(el) {
@@ -22752,10 +22755,12 @@ keyboard or a `#row-…` link scroll into view below both.
 A table that fits its column scrolls with the page. A table wider than its
 column (`data-htmxo-width="wide"` on its `.table-wrap`) becomes a window-tall
 box that scrolls both ways, with its header at the box top and its sideways
-scrollbar on screen. A table inside another table's cell (a detail row) does
-not stick to the window; wider than that cell, it becomes the same box, as
-tall as the window below the outer table's line and header, so its sideways
-scrollbar is on screen too. An app whose page has its own sticky header moves
+scrollbar on screen. Only the table's own width decides this: a block in a row
+that is wider than the column runs past it and the page scrolls sideways, so
+give such a block its own scroll box. A table inside another table's cell (a
+detail row) does not stick to the window; wider than that cell, it becomes the
+same box, as tall as the window below the outer table's line and header, so its
+sideways scrollbar is on screen too. An app whose page has its own sticky header moves
 both below it with `--htmxo-sticky-top` (e.g. `:root { --htmxo-sticky-top: 3.5rem; }`);
 inside a card, set `--htmxo-sticky-bg` to the card's background.
 `sticky=false` keeps one table's line and header in the flow. None of this
@@ -31162,8 +31167,9 @@ line with the chevron at the far edge. Pico's dropdown menus
 (`details.dropdown`) and button summaries (`summary[role]`) keep Pico's looks.
 The box's rules are as weak as Pico's own, so a component that draws its own
 `<details>` (a menu badge) keeps every property it sets in its own class
-rules. `--htmxo-disclosure-padding` (default `1rem`) is the box's inner
-spacing.
+rules. `--htmxo-disclosure-padding` (default `1rem`) is the inner spacing of
+the bar and the content. Padding a component sets on its `<details>` insets
+both, inside its box; `--htmxo-disclosure-padding: 0` drops the inner spacing.
 
 A [`SemanticArtifact`](@ref) download takes the same slate outline, in place
 of Pico's underlined azure link; a later stylesheet restyles it with a
@@ -31228,19 +31234,24 @@ details summary[role=button]:not(.secondary, .contrast)::after,
    bar, the new chevron) has zero specificity and what Pico sets (the label's
    line height and colours, its chevron, the gap under an open label) has
    exactly Pico's, so a component that styles its own `<details>` still wins
-   wherever it sets something. */
+   wherever it sets something. The box itself has no padding: the bar reaches
+   its edges, and the inner spacing sits on the bar and on the content
+   (`::details-content`, which also holds bare text). Padding a component sets
+   on its `<details>` so insets both, and nothing sticks out of its box; a
+   component drops the inner spacing with `--htmxo-disclosure-padding: 0`. */
 :where(details:not(.dropdown, :has(> summary[role]))) {
     --pico-accordion-active-summary-color: var(--pico-accordion-close-summary-color);
     --pico-accordion-open-summary-color: var(--pico-accordion-close-summary-color);
-    padding: 0 var(--htmxo-disclosure-padding, 1rem);
     border: var(--pico-border-width) solid var(--pico-form-element-border-color);
     border-radius: var(--pico-border-radius);
 }
-:where(details:not(.dropdown, :has(> summary[role]))[open]) {
+:where(details:not(.dropdown, :has(> summary[role])))::details-content {
+    padding-inline: var(--htmxo-disclosure-padding, 1rem);
+}
+:where(details:not(.dropdown, :has(> summary[role]))[open])::details-content {
     padding-bottom: var(--htmxo-disclosure-padding, 1rem);
 }
 :where(details:not(.dropdown, :has(> summary[role]))) > :where(summary) {
-    margin-inline: calc(-1 * var(--htmxo-disclosure-padding, 1rem));
     padding: 0.6rem var(--htmxo-disclosure-padding, 1rem);
     border-radius: calc(var(--pico-border-radius) - var(--pico-border-width));
     background: var(--pico-card-sectioning-background-color);
