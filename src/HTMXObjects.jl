@@ -6765,12 +6765,12 @@ function _static_url_files_tree(keyed, i, address, rules)
         return _static_variant_target(rules, address)
     end
     p = keyed[i]
-    entries = JSON.Object{String,Any}()
+    entries = Pair{String,Any}[]
     for v in p.values
         sub = _static_url_files_tree(keyed, i + 1, _url_with_param(address, p.as, v), rules)
-        isnothing(sub) || (entries[v] = sub)
+        isnothing(sub) || push!(entries, v => sub)
     end
-    isempty(entries) ? nothing : entries
+    isempty(entries) ? nothing : JSON.Object{String,Any}(entries)
 end
 
 # A page address htmx writes into the address bar (`hx-push-url`,
@@ -19397,14 +19397,15 @@ _sort_values_json(values) = JSON.json([_sort_value(v) for v in values])
 _sort_value(::Union{Nothing,Missing}) = nothing
 _sort_value(x::Bool) = Int(x)
 _sort_value(x::Integer) = x
-_sort_value(x::Real) = isfinite(x) ? Float64(x) : nothing
+_sort_value(x::Real) = let f = Float64(x); isfinite(f) ? f : nothing; end
 _sort_value(x) = string(x)
+_sort_value_valid(x) = x === nothing || _attribute_string(x) || (x isa Real && !(x isa Bool))
 
 # The number of values in a flat JSON array of numbers, strings and `null`
 # (what `sort_values` writes), to check a cell against its column's keys.
 function _sort_values_count(json::AbstractString)
     values = _parse_attribute_json(json, () -> nothing)
-    values isa Vector && all(v -> v isa Union{Real,AbstractString,Nothing}, values) ? length(values) : -1
+    values isa Vector && all(_sort_value_valid, values) ? length(values) : -1
 end
 
 _interval_missing(x) = x === nothing || x === missing
@@ -22571,61 +22572,9 @@ end
 # `sort_values` writes): `Float64`, `String` or `nothing` each.
 function _sort_values_parse(json::AbstractString)
     bad() = throw(ArgumentError("sortable_table: data-htmxo-sort-keys must be a flat JSON array of numbers, strings and null, got $(repr(json))"))
-    s = collect(strip(json))
-    (length(s) >= 2 && first(s) == '[' && last(s) == ']') || bad()
-    values = Any[]
-    i, stop = 2, length(s)
-    skip() = (while i < stop && isspace(s[i]); i += 1; end)
-    skip()
-    i == stop && return values
-    while true
-        if s[i] == '"'
-            io = IOBuffer()
-            i += 1
-            while true
-                i < stop || bad()
-                c = s[i]
-                c == '"' && break
-                if c == '\\'
-                    i + 1 < stop || bad()
-                    e = s[i += 1]
-                    if e == 'u'
-                        i + 4 < stop || bad()
-                        code = something(tryparse(UInt16, String(s[i+1:i+4]); base=16), 0x0000)
-                        i += 4
-                        if 0xd800 <= code <= 0xdbff && i + 6 < stop && s[i+1] == '\\' && s[i+2] == 'u'
-                            low = something(tryparse(UInt16, String(s[i+3:i+6]); base=16), 0x0000)
-                            if 0xdc00 <= low <= 0xdfff
-                                code = 0x10000 + (UInt32(code - 0xd800) << 10) + (low - 0xdc00)
-                                i += 6
-                            end
-                        end
-                        print(io, isvalid(Char, UInt32(code)) ? Char(UInt32(code)) : '�')
-                    else
-                        print(io, get(Dict('b' => '\b', 'f' => '\f', 'n' => '\n', 'r' => '\r', 't' => '\t'), e, e))
-                    end
-                else
-                    print(io, c)
-                end
-                i += 1
-            end
-            push!(values, String(take!(io)))
-            i += 1
-        else
-            j = i
-            while j < stop && s[j] != ',' && !isspace(s[j]); j += 1; end
-            token = String(s[i:j-1])
-            value = token == "null" ? nothing : tryparse(Float64, token)
-            token == "null" || !isnothing(value) || bad()
-            push!(values, value)
-            i = j
-        end
-        skip()
-        i == stop && return values
-        s[i] == ',' || bad()
-        i += 1
-        skip()
-    end
+    values = _parse_attribute_json(json, bad)
+    values isa Vector && all(_sort_value_valid, values) || bad()
+    map(x -> x isa Real ? Float64(x) : x, values)
 end
 
 # The browser compares texts with `localeCompare`. This approximates its
@@ -25842,7 +25791,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
              (isnothing(link) || isnothing(link_key) ? () : (string(link_key(m)),))...)
             for m in g.members])
         if !isnothing(selectable)
-            attrs[:data_htmxo_select_members] = JSON.json(JSON.Object(string(key(m)) =>
+            attrs[:data_htmxo_select_members] = JSON.json(JSON.Object{String,Any}(string(key(m)) =>
                 (isnothing(select_submit) || select_submit(m) ? leaf_value(m) : nothing)
                 for m in g.members))
         end

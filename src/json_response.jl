@@ -147,7 +147,7 @@ end
 
 _json_sorted_pairs(x::AbstractDict) = sort!(collect(pairs(x)); by=pair -> string(first(pair)))
 _response_pairs(::Type{V}, kvs) where {V} =
-    JSON.Object(string(k) => _response_value(V, v) for (k, v) in kvs)
+    JSON.Object{String,Any}(string(k) => _response_value(V, v) for (k, v) in kvs)
 
 function _response_array(::Type{E}, x) where {E}
     _json_isnull(x) && throw(ArgumentError(

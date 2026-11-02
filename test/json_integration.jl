@@ -30,10 +30,18 @@ using TestItemRunner
     @test_throws ArgumentError HTMXObjects._url_params_decode("[[\"k\",\"k\",null,null],]")
     @test HTMXObjects._sort_values_count("[\"a,b\",null,1]") == 3
     @test HTMXObjects._sort_values_count("[1,]") == -1
+    sorted = HTMXObjects._sort_values_parse(JSON.json([text, 2, nothing, -2.5e3]))
+    @test sorted == [text, 2.0, nothing, -2500.0]
+    @test sorted[2] === 2.0
+    for invalid in ("[true]", "[1,]", "[[1]]", "[\"\\q\"]", "[\"\\ud83d\"]")
+        @test_throws ArgumentError HTMXObjects._sort_values_parse(invalid)
+        @test HTMXObjects._sort_values_count(invalid) == -1
+    end
     trigger = JSON.parse(live_thread_refresh(text; bottom=false))["htmxo:thread-refresh"]
     @test trigger == JSON.Object("bottom" => false, "target" => text)
     @test JSON.parse(sort_values(text, true, missing, NaN).data_htmxo_sort_keys) ==
         [text, 1, nothing, nothing]
+    @test JSON.parse(sort_values(big"1e1000").data_htmxo_sort_keys) == [nothing]
 
     # Reflection deliberately describes Julia types and option pairs as
     # display strings and two-element arrays, rather than generic structs.
