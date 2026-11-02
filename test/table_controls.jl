@@ -819,6 +819,76 @@ end
     end
 end
 
+@testitem "a table's controls stay inside a column narrower than their line" setup=[ChromeDump] tags=[:browser] begin
+    # Snag table-toolbar-se-6067c202: RegionExplorer's view pane (274 px at a
+    # 80 % map share) held a searchable table whose search label kept its text,
+    # field and count on one line, 486 px wide, and widened the page.
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', () => setTimeout(() => {
+                const out = document.body.dataset;
+                const box = e => e.getBoundingClientRect();
+                // A section's toolbar parts whose right edge passes the section's.
+                const past = s => Array.from(s.querySelectorAll('.htmxo-table-toolbar *'))
+                    .filter(e => box(e).width > 0 && box(e).right > box(s).right + 0.5).length;
+                const label = s => s.querySelector('.htmxo-table-toolbar > label');
+                const field = s => label(s).querySelector(':scope > input[type="search"]');
+                for (const s of document.querySelectorAll('section[data-narrow]')) out[s.id] = String(past(s) === 0);
+                out.page = String(document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+                // The label wraps rather than squeezing its field.
+                out.fieldUsable = String(box(field(document.getElementById('n1'))).width >= 127);
+                // A column wide enough keeps the label on one line.
+                const w = document.getElementById('w1'), l = label(w), f = field(w);
+                out.wideOneLine = String(l.offsetHeight <= f.offsetHeight + 2 &&
+                    Math.abs(box(f).top - box(l.querySelector(':scope > small')).top) < 8);
+                // Control: the old rules (one unwrapped line, an 8rem field, an
+                // unbreakable count) poke out of the same column and widen the page.
+                const c = document.getElementById('ctrl');
+                c.hidden = false;
+                out.controlPokesOut = String(past(c) > 0 &&
+                    document.documentElement.scrollWidth > document.documentElement.clientWidth);
+                out.done = '1';
+            }, 100));
+            """))
+        items = [(; id="r$i", name="Messstelle $i", land=["Niedersachsen", "Hessen", "Thüringen"][1 + i % 3]) for i in 1:24]
+        long = table_texts(:de; search="Messstellen suchen (Name oder Kennung)", count="{shown} von {total} Messstellen")
+        md(id, texts; kw...) = master_detail_table(["Messstelle", "Land"], items; key=x -> "$id-$(x.id)",
+            master=x -> (h.td(x.name), h.td(x.land)), detail=x -> h.p(x.id), searchable=true, texts, kw...)
+        full(id) = md(id, table_texts(:de); groupings=["Keine" => nothing, "Land" => x -> x.land],
+            group_by="Keine", selectable="sel-$id")
+        sortable(id) = sortable_table(["Name"], [h.tr(h.td(x.name)) for x in items]; searchable=true, id)
+        column(id, width, table; narrow=true, hidden=false) = h.section(; id, hidden,
+            style="margin: 0 0 2rem auto; width: $(width)px", (narrow ? (; data_narrow="") : (;))...)(table)
+        old = h.style(Raw("""
+            #ctrl .htmxo-table-toolbar > label { flex-wrap: nowrap; min-width: auto; }
+            #ctrl .htmxo-table-toolbar > label > input[type="search"] { min-width: 8rem; }
+            #ctrl .htmxo-table-toolbar > label > small { white-space: nowrap; }"""))
+        content = h.main(; class="container")(old,
+            column("n1", 274, md("n1", long)), column("n2", 274, full("n2")), column("n3", 274, sortable("n3-body")),
+            column("n4", 140, md("n4", long)), column("n5", 140, full("n5")),
+            column("w1", 1100, md("w1", table_texts(:de)); narrow=false),
+            column("ctrl", 274, md("ctrl", long); narrow=false, hidden=true), driver)
+        dom = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, repr("text/html", htmx(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION, htmx_version=nothing,
+                hyperscript_version=nothing, preload_version=nothing)))
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,900 --virtual-time-budget=3000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        @test contains(dom, "data-done=\"1\"")
+        for marker in ("n1", "n2", "n3", "n4", "n5", "page", "field-usable", "wide-one-line", "control-pokes-out")
+            @test contains(dom, "data-$marker=\"true\"")
+        end
+    end
+end
+
 @testitem "a flat table's detail state sits on its control, a tree row's on the row too" tags=[:unit] begin
     using HTMXObjects
     row_tag(html, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>"), html).match
