@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.44
+
+- Add `pico_color` to `htmx` and `pico_page`: the page's accent colour, as the
+  name of one of Pico's 20 colour builds (`:cyan`, `:jade`, …; `:azure` is
+  Pico's default). The shell loads Pico's own `css/pico.<colour>.min.css`, with
+  its light and dark shades, from the CDN or the vendor mount, so an app no
+  longer redeclares Pico's `--pico-primary*` variables in `extra_head`.
+  `vendorfiles` and `copy_vendorfiles` carry every colour build of the pinned
+  Pico. An unknown name, or `pico_color` without Pico, throws an
+  `ArgumentError`.
+
 ## 0.1.43
 
 - **Breaking:** Move `python_service` and its StanBlocks and ReactiveKernelsPPL
