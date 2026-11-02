@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.38
+
+- Text in a table row that hover linking (`link=`) lights or a selection marks
+  stays readable in both themes. Pico's link, muted, slate-button and
+  `del`/`ins` colours sit barely above 4.5:1 on the page, so the rows' tints
+  took them as low as 3.9:1 on a row under the pointer, and to 2.97:1 (light)
+  and 2.36:1 (dark) on a row both selected and lit. Inside such a row these
+  colours now move towards the text colour and keep their hue, so each holds
+  4.5:1. The tints, the outline, `--htmxo-linked-row` and `--htmxo-selected-row`
+  are unchanged; an app that sets a stronger tint checks that contrast itself.
+
 ## 0.1.37
 
 - A caption's long text opens from a small toggle at the end of the caption's
