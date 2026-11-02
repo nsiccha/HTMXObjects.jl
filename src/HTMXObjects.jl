@@ -7343,19 +7343,25 @@ can run inside a serving app (it renders in process with
   links to that address keep the query.
 - **A page that applies its address in the browser is one file.** A page
   address with a query (`/?region=09&jahr=2024`, a zoom link) shares the file
-  of its page (`/`) when that page is in the bundle too and its
-  [`url_params`](@ref) elements declare every parameter of the query with
-  `values` that hold the query's value. Links to the address name the page's
-  file with the query (`index.html?region=09&jahr=2024`); the page's runtime
-  loads the view the query names from the fragment written for it, and the
-  rest of the page is as its own address renders it. Any other page address
-  with a query is a file of its own, rendered with that query: one with a
-  parameter no element declares, or declares without `values`, a value
-  outside them, or a parameter named twice. These addresses are decided once
-  nothing else is left to render, so their page has been met if anything
-  links it; list the page in `pages` when only its addresses with a query
-  are. A `file_name` that names such an address with a query has named it
-  already.
+  of the page it extends when that page is in the bundle with a file of its
+  own and its [`url_params`](@ref) elements declare every parameter it adds
+  with `values` that hold the query's value. The page it extends is the same
+  address with those parameters left out: its path (`/`), or an address that
+  keeps the rest of the query, such as a probe's own page
+  (`/station?kenn=K` for `/station?kenn=K&region=de&ebene=tage`). Links to
+  the address name the page's file with the parameters it adds
+  (`index.html?region=09&jahr=2024`, `station-kenn-K.html?region=de&ebene=tage`);
+  the page's runtime loads the view they name from the fragment written for
+  it, and the rest of the page is as its own address renders it. Where
+  several pages qualify, the one that leaves out the fewest parameters is
+  taken. Any other page address with a query is a file of its own, rendered
+  with that query: one with a parameter no element declares, or declares
+  without `values`, a value outside them, or a parameter named twice. These
+  addresses are decided once nothing else is left to render, those with
+  fewer parameters first, so the page they extend is written by then if
+  anything else links it; list the page in `pages` when only its addresses
+  with a query do. A `file_name` that names such an address with a query has
+  named it already.
 - **Controls** a static site cannot serve (a non-GET `hx-*`, an unmapped
   `hx-get` with a query) follow `controls`: `:remove` (default) leaves them
   out, `:disable` greys them out ([`StaticExport`](@ref)). A page's linked
@@ -7417,19 +7423,17 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     written = _SiteWritten(root)
     i = 0
     # Page addresses with a query wait until nothing else is left, so the page
-    # whose file they may share is written by then (`_site_shares_page!`). One
-    # whose page the crawl has not met waits for the others, which may reach it.
-    queried = Int[]
+    # whose file they may share is written by then (`_site_shares_page!`).
+    waiting = _SiteWaiting()
     while true
-        while i < length(crawl.entries) || !isempty(queried)
+        while true
             if i < length(crawl.entries)
                 i += 1
-                _site_query_page(crawl, i) ? push!(queried, i) :
-                    _site_write!(crawl, written, i, controls, parent, audience)
+                n = _site_query_page(crawl, i)
+                isnothing(n) ? _site_write!(crawl, written, i, controls, parent, audience) :
+                    push!(get!(Vector{Int}, waiting.fresh, n), i)
             else
-                k = popat!(queried, something(findfirst(k -> !isnothing(_site_page_entry(crawl, k)), queried), 1))
-                _site_shares_page!(crawl, written, k) ||
-                    _site_write!(crawl, written, k, controls, parent, audience)
+                _site_decide!(crawl, written, waiting, controls, parent, audience) || break
             end
         end
         # A file rendered before a page it refers to answered as private still
@@ -7473,41 +7477,97 @@ struct _SiteWritten
     marked::Set{Int}
     owners::Dict{String,Int}  # file → entry
     declared::Dict{Int,Vector{Any}}  # page → the parameters its url_params elements declare
+    applied::Dict{String,Set{String}}  # path → the names its pages declare with values
 end
 _SiteWritten(root) = _SiteWritten(root, Dict{Int,String}(), Dict{Int,String}(), Dict{Int,Int}(),
-                                  Set{Int}(), Dict{String,Int}(), Dict{Int,Vector{Any}}())
+                                  Set{Int}(), Dict{String,Int}(), Dict{Int,Vector{Any}}(),
+                                  Dict{String,Set{String}}())
 
-# Whether entry `i` is a page address with a query that `file_name` names
-# without one, and so may share its page's file.
+# The page addresses with a query the crawl holds back, by the number of
+# parameters each names. The page another one shares has fewer, so it is
+# decided first. `fresh` have not tried to share a page yet; `tried` could not
+# and wait, each with the number of files written when it tried.
+struct _SiteWaiting
+    fresh::Dict{Int,Vector{Int}}
+    tried::Dict{Int,Vector{Pair{Int,Int}}}
+end
+_SiteWaiting() = _SiteWaiting(Dict{Int,Vector{Int}}(), Dict{Int,Vector{Pair{Int,Int}}}())
+
+# Decide one waiting address of the fewest parameters, or return `false` when
+# none is left. Each first tries to share a page's file. One that cannot is
+# rendered only after the others of its count have tried, and tries once more
+# then if a file was written since (rendering another may have reached its
+# page).
+function _site_decide!(crawl::_SiteCrawl, written::_SiteWritten, waiting::_SiteWaiting, controls, parent, audience)
+    counts = [n for (n, v) in Iterators.flatten((waiting.fresh, waiting.tried)) if !isempty(v)]
+    isempty(counts) && return false
+    n = minimum(counts)
+    fresh = get(waiting.fresh, n, Int[])
+    if !isempty(fresh)
+        k = popfirst!(fresh)
+        _site_shares_page!(crawl, written, k) ||
+            push!(get!(Vector{Pair{Int,Int}}, waiting.tried, n), k => length(written.paths))
+    else
+        k, seen = popfirst!(waiting.tried[n])
+        seen < length(written.paths) && _site_shares_page!(crawl, written, k) ||
+            _site_write!(crawl, written, k, controls, parent, audience)
+    end
+    true
+end
+
+# The number of parameters entry `i` names when it is a page address with a
+# query that `file_name` names without one, and so may share a page's file;
+# otherwise `nothing`.
 function _site_query_page(crawl::_SiteCrawl, i::Int)
     e = crawl.entries[i]
     path, query = _split_once(e.address, '?')
     !e.fragment && !isnothing(query) && !isempty(query) && isnothing(_static_own_extension(path)) &&
-        isnothing(last(_split_once(crawl.file_name(e.address; fragment=false, ext=".html"), '?')))
+        isnothing(last(_split_once(crawl.file_name(e.address; fragment=false, ext=".html"), '?'))) ||
+        return nothing
+    count(!isempty, split(query, '&'))
 end
 
-# The entry of the page of entry `i` (its address without the query), or
-# `nothing` while the crawl has not met that page.
-function _site_page_entry(crawl::_SiteCrawl, i::Int)
-    key = _site_address(crawl, "/", first(_split_once(crawl.entries[i].address, '?')), :full).key
+# The entry of the page `page` names, or `nothing` while the crawl has not met
+# it. A page whose file `file_name` names with a query is none: its links keep
+# that query, which a link to another address would lose.
+function _site_page_entry(crawl::_SiteCrawl, page::AbstractString)
+    (; address, key, linked) = _site_address(crawl, "/", page, :full)
+    isnothing(linked) || return nothing
     j = lock(() -> get(crawl.keys, key, nothing), crawl.lock)
-    isnothing(j) || crawl.entries[j].fragment ? nothing : j
+    isnothing(j) || crawl.entries[j].fragment ||
+        crawl.strict && _site_identity(crawl.entries[j].address) != _site_identity(address) ? nothing : j
 end
 
-# Entry `i`, a page address with a query, shares the file of its page when
-# that page is in the bundle and applies the query in the browser
-# (`_site_applies`): links to it name the page's file with the query.
+# A query parameter's name, as the page's runtime reads it (`URLSearchParams`:
+# `+` is a space).
+_site_query_name(part::AbstractString) = _static_unescape(replace(first(_split_once(part, '=')), '+' => ' '))
+
+# Entry `i`, a page address with a query, shares the file of the page it
+# extends: the same address with some of its parameters left out (all of them:
+# its path), when that page has a file of its own and applies the left-out
+# parameters in the browser (`_site_applies`). Links to it name the page's
+# file with those parameters. The page that leaves out the fewest is taken,
+# since it renders the most of the address itself. Only a parameter that some
+# page of the path declares with values can be left out.
 function _site_shares_page!(crawl::_SiteCrawl, written::_SiteWritten, i::Int)
-    j = _site_page_entry(crawl, i)
-    (isnothing(j) || !haskey(written.paths, j)) && return false
-    query = last(_split_once(crawl.entries[i].address, '?'))
-    declared = get!(written.declared, j) do
-        file = written.paths[j]
-        endswith(file, ".html") ? _site_url_params(read(file, String)) : Any[]
+    path, query = _split_once(crawl.entries[i].address, '?')
+    parts = split(query, '&'; keepempty=false)
+    names = _site_query_name.(parts)
+    allunique(names) || return false
+    applied = get(written.applied, _site_identity(path), nothing)
+    isnothing(applied) && return false
+    open = findall(in(applied), names)
+    for mask in sort!(collect(1:(1 << length(open)) - 1); by=count_ones)
+        out = Set(open[b] for b in eachindex(open) if isodd(mask >> (b - 1)))
+        kept = [parts[k] for k in eachindex(parts) if !(k in out)]
+        j = _site_page_entry(crawl, isempty(kept) ? path : path * "?" * join(kept, '&'))
+        (isnothing(j) || !haskey(written.paths, j)) && continue
+        rest = join((parts[k] for k in eachindex(parts) if k in out), '&')
+        _site_applies(get(written.declared, j, Any[]), rest) || continue
+        written.links[i] = written.links[j] * "?" * _static_query_link(rest)
+        return true
     end
-    _site_applies(declared, query) || return false
-    written.links[i] = written.links[j] * "?" * _static_query_link(query)
-    true
+    false
 end
 
 # Whether a page whose `url_params` elements declare `declared` shows, from its
@@ -7583,7 +7643,15 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls
     written.paths[i] = file
     written.links[i] = _static_link(name)
     written.rendered[i] = known
-    delete!(written.declared, i)
+    # A page's url_params, which an address with a query that extends it may
+    # apply in the browser (`_site_shares_page!`).
+    if !e.fragment && endswith(name, ".html")
+        declared = written.declared[i] = _site_url_params(body isa AbstractString ? body : String(copy(body)))
+        union!(get!(Set{String}, written.applied, _site_identity(path)),
+               (p.name for p in declared if !isnothing(p.values)))
+    else
+        delete!(written.declared, i)
+    end
     _body_contains(body, crawl.marker) ? push!(written.marked, i) : delete!(written.marked, i)
     ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
     endswith(path, "/" * _PRISM_AUTOLOADER) && _site_follow_autoloader!(crawl, e.address)

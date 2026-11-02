@@ -9,7 +9,7 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
-        InlineSiteApp, QueriedSiteApp, TypedSiteApp, bundle_files, subdirectory_misses
+        InlineSiteApp, QueriedSiteApp, StationSiteApp, TypedSiteApp, bundle_files, subdirectory_misses
 
     const KS = (3.0, 4.0)
     # The mount prefix the apps' links start from (they are mounted at the root).
@@ -125,6 +125,47 @@ using TestItemRunner
         @get queried_other(; k::Int=0) = h.p("other $k")
         @get queried_lone(; k::String="1") = h.div(; hx_get=base * "/queried_other?k=$k", hx_trigger="none",
             url_params(k = k; values = (k = ("1", "2"),))...)("lone $k")
+    end
+
+    # A page whose own address has a query, as a probe's page has its `kenn`:
+    # its frame declares the view it was opened from, and the links that open
+    # it in a view name that address with the view's parameters added (snag
+    # `odlplaus-static-02f57da3`, reporter ODLPlaus:review:ux).
+    const STATION_REGIONS = ("de", "land")
+    const STATION_LAYERS = ("x", "y")
+    const STATION_SIZES = ("k40", "cs137")
+    netz_frame(kenn, region, ebene) =
+        h.div(; id="kontext", hx_get=base * "/station_netz?kenn=$kenn", hx_trigger="none", hx_swap="outerHTML",
+              url_params(region = region, ebene = ebene;
+                         values = (region = STATION_REGIONS, ebene = STATION_LAYERS))...)(
+            h.p("netz $kenn $region $ebene"))
+    insitu_frame(kenn, region, groesse) =
+        h.div(; id="kontext", hx_get=base * "/station_insitu?kenn=$kenn", hx_trigger="none", hx_swap="outerHTML",
+              url_params(region = region, groesse = groesse;
+                         values = (region = STATION_REGIONS, groesse = STATION_SIZES))...)(
+            h.p("insitu $kenn $region $groesse"))
+    @htmx struct StationSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div(
+            h.p("Start"),
+            # The views a probe's page opens in, linked before the page itself.
+            (h.a("$k $r $e"; href=base * "/station?kenn=$k&region=$r&ebene=$e")
+             for k in ("a", "b"), r in STATION_REGIONS, e in STATION_LAYERS)...,
+            h.a("a insitu cs137"; href=base * "/station?kenn=a&ansicht=insitu&region=land&groesse=cs137"),
+            # A value outside the declared ones; a probe whose page is not in the bundle.
+            h.a("a mars"; href=base * "/station?kenn=a&region=mars"),
+            h.a("c de"; href=base * "/station?kenn=c&region=de"),
+            h.a("a"; href=base * "/station?kenn=a"), h.a("b"; href=base * "/station?kenn=b"),
+            h.a("a insitu"; href=base * "/station?kenn=a&ansicht=insitu"))
+        @get station(; kenn::String="", ansicht::String="netz", region::String="de", ebene::String="x",
+                     groesse::String="k40") = h.div(
+            h.p("asked $kenn $region"),
+            (r = region in STATION_REGIONS ? region : "de";
+             ansicht == "insitu" ? insitu_frame(kenn, r, groesse) : netz_frame(kenn, r, ebene)))
+        @get station_netz(; kenn::String="", region::String="de", ebene::String="x") = netz_frame(kenn, region, ebene)
+        @get station_insitu(; kenn::String="", region::String="de", groesse::String="k40") =
+            insitu_frame(kenn, region, groesse)
     end
 
     # Extensionless downloads whose Content-Type the export's own table does
@@ -381,6 +422,47 @@ end
     @test filter(f -> startswith(f, "index"), bundle_files(listed)) ==
           ["index-hinweis-1-region-b.html", "index-region-zz.html", "index.html"]
     @test occursin("href=\"index.html?region=b&amp;measure=y\"", read(joinpath(listed, "index.html"), String))
+end
+
+@testitem "export_site shares the file of a page whose own address has a query" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    using Treebars
+    route!(StationSiteApp())
+    vendorfiles()
+    stations(dir) = filter(f -> startswith(f, "station"), bundle_files(dir))
+    # Linked from the start page only, or listed first (as the reporter's
+    # export does), before the views that open them, or after: the same files.
+    bundles = map((["/"], ["/station?kenn=a", "/station?kenn=b", "/station?kenn=a&ansicht=insitu", "/"],
+                   ["/station?kenn=a&region=land&ebene=y", "/", "/station?kenn=b"])) do pages
+        dir = joinpath(mktempdir(), "site")
+        export_site(dir; pages)
+        dir
+    end
+    dir = first(bundles)
+    files = bundle_files(dir)
+    # Each probe's page is one file per view; a view the page's frame
+    # declares adds no page file of its own. One whose value the frame does
+    # not declare, or whose page is not in the bundle, is a file of its own.
+    @test stations(dir) == ["station-ansicht-insitu-kenn-a.html", "station-kenn-a-region-mars.html",
+                            "station-kenn-a.html", "station-kenn-b.html", "station-kenn-c-region-de.html"]
+    @test all(d -> stations(d) == stations(dir), bundles)
+    # Every view the frames declare is a fragment of its own.
+    for k in ("a", "b"), r in ("de", "land"), e in ("x", "y")
+        @test "hx/station_netz-ebene-$e-kenn-$k-region-$r.html" in files
+    end
+    @test "hx/station_insitu-groesse-cs137-kenn-a-region-land.html" in files
+    # Links to a view name the page's file with the view's parameters, and
+    # nothing the page's own address already carries.
+    for d in bundles
+        index = read(joinpath(d, "index.html"), String)
+        @test occursin("href=\"station-kenn-a.html?region=land&amp;ebene=y\"", index)
+        @test occursin("href=\"station-kenn-b.html?region=de&amp;ebene=x\"", index)
+        @test occursin("href=\"station-ansicht-insitu-kenn-a.html?region=land&amp;groesse=cs137\"", index)
+        @test occursin("href=\"station-kenn-a-region-mars.html\"", index)
+        @test occursin("href=\"station-kenn-c-region-de.html\"", index)
+        @test occursin("href=\"station-kenn-a.html\"", index)
+    end
+    @test occursin("asked a mars", read(joinpath(dir, "station-kenn-a-region-mars.html"), String))
+    @test isempty(subdirectory_misses(dir))
 end
 
 @testitem "export_site names the file of any Content-Type, and file_name one no database lists" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin

@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.41
+
+- `export_site` also shares the file of a page whose own address has a query.
+  A page address with a query that adds parameters to another page in the
+  bundle, such as `/station?kenn=K&region=de&ebene=tage` to a probe's own page
+  `/station?kenn=K`, shares that page's file when its `url_params` elements
+  declare every added parameter with `values` holding its value. Links to it
+  name the page's file with the added parameters only
+  (`station-kenn-K.html?region=de&ebene=tage`). Before, the only page such an
+  address could share was its path (`/station`), so every view of a probe's
+  page was a page file of its own (snag `odlplaus-static-02f57da3`, reporter
+  ODLPlaus). The addresses wait as before until nothing else is left to
+  render; those with fewer parameters are now decided first, so a page's own
+  address with a query is written before the addresses that extend it, in any
+  order of `pages`. Where several pages qualify, the one that leaves out the
+  fewest parameters is taken. Deciding them no longer scans every waiting
+  address each time.
+
 ## 0.1.40
 
 - A table's search field, with its label and count, stays inside a column
