@@ -24696,9 +24696,13 @@ function _md_tree_grouping(groupings, items, key, children, leaf_key, leaf_order
     _MDTree(name, roots, key, children, leaf, first_rows, leaves, depth[])
 end
 
-_md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = [string(k) for k in keys if !isnothing(k)]
+# A grouping's keys for one item, as `String`s. `string` returns an
+# `AbstractString` unchanged, so a key read from a CSV.jl column (a
+# `DataString`, an `InlineString`) would otherwise stay its own type and give
+# one grouping's keys a different type from another's.
+_md_group_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = String[string(k) for k in keys if !isnothing(k)]
 _md_group_keys(::Nothing) = String[]
-_md_group_keys(k) = [string(k)]
+_md_group_keys(k) = String[string(k)]
 
 # The groups `grouping` sorts `items` into, as `key => members` in
 # first-appearance order, or by `rank` (key => place, from `group_order`).
@@ -25726,7 +25730,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     inputs(item) = get!(() -> Any[_md_summary_input(s, item) for (_, s) in summaries], leaf_inputs, string(key(item)))
     function leaf_data(item)
         data = Dict{Symbol,Any}(:data_htmxo_leaf_order => string(place[string(key(item))]),
-            :data_htmxo_leaf_keys => JSON.json(JSON.Object(n => _md_group_keys(by_name[n](item))
+            :data_htmxo_leaf_keys => JSON.json(JSON.Object{String,Vector{String}}(n => _md_group_keys(by_name[n](item))
                                                           for n in grouping_names)))
         isempty(summaries) || (data[:data_htmxo_leaf_values] =
             JSON.json(_md_summary_wire.(inputs(item))))

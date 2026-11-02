@@ -2347,6 +2347,40 @@ end
         detail=t -> "", group_order=["party" => ["Acme"]])
 end
 
+@testitem "group keys of any string type group like Strings" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    html(x) = repr("text/html", x)
+    # A string type of its own, as a CSV.jl column holds (`DataString`,
+    # `InlineString`): `string` returns it unchanged. Snag
+    # grouped-master-d-d1924018: such keys beside a grouping of plain
+    # Strings threw a MethodError building the leaves' `data-htmxo-leaf-keys`
+    # under JSON.jl 1.12 and older, whose `JSON.Object(itr)` takes its value
+    # type from the first grouping.
+    struct ColumnString <: AbstractString
+        s::String
+    end
+    Base.ncodeunits(x::ColumnString) = ncodeunits(x.s)
+    Base.codeunit(::ColumnString) = UInt8
+    Base.codeunit(x::ColumnString, i::Integer) = codeunit(x.s, i)
+    Base.isvalid(x::ColumnString, i::Integer) = isvalid(x.s, i)
+    Base.iterate(x::ColumnString, i::Integer=1) = iterate(x.s, i)
+    @test string(ColumnString("Acme")) isa ColumnString
+    # Keys are Strings whatever the JSON.jl version (1.13 widens the object
+    # instead of throwing, so the renders below agree there either way).
+    @test HTMXObjects._md_group_keys(ColumnString("Acme")) isa Vector{String}
+    @test HTMXObjects._md_group_keys(ColumnString.(["Shops", "Media"])) isa Vector{String}
+    # "party" and "rule" (several keys a leaf) give ColumnStrings, "iban" Strings.
+    column(f) = t -> (k = f(t); k isa AbstractVector ? ColumnString.(k) : ColumnString(k))
+    groupings = [n => (n == "party" || n == "rule" ? column(f) : f) for (n, f) in GROUPINGS]
+    for kw in ((; group_by=["party"]), (; group_by=["rule", "iban"]), (; group_by=["none"]),
+               (; group_by=["party"], group_order=["party" => ["Bakery"], "rule" => k -> k]),
+               (; group_by=["party"], update_rows="p1"), (; group_by=["party"], update_groups="[\"Acme\"]"),
+               (; group_by=["party"], group_by_url="/table", group_rows_url=(k, ms) -> "/rows"),
+               (; group_by=["party"], group_by_url="/table", group_rows="[\"Acme\"]"))
+        @test html(grouped(; groupings, kw...)) == html(grouped(; kw...))
+    end
+end
+
 @testitem "regrouping in the browser builds the server's rows browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
