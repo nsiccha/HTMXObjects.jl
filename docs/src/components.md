@@ -575,7 +575,10 @@ sortable_table(["Party", "Amount"],
 - **Semantics and theme.** `aria-multiselectable` on the table, `aria-selected`
   on rows, one roving `tabindex="0"`. Selected rows are tinted and the active
   row marked from `--htmxo-accent` in light and dark; set
-  `--htmxo-selected-row` to change the tint.
+  `--htmxo-selected-row` to change the tint. Links, muted text, slate buttons
+  and `del`/`ins` in a selected or lit row take a stronger version of their
+  colour, so they keep 4.5:1 on the tint in both themes, also on a row that is
+  both. An app that sets a stronger tint checks that contrast itself.
 
 #### Hover linking {#table-linking}
 
@@ -643,7 +646,8 @@ render_table(summary; link="probes", link_key=r -> r.kenn)
   own scroll box (an `overflow: auto` wrapper), never the page, and only when
   the hover started outside that table.
 - **Theme.** Lit rows are tinted and outlined from `--htmxo-accent`; set
-  `--htmxo-linked-row` to change the tint. The rules ship in
+  `--htmxo-linked-row` to change the tint. Text in a lit row stays readable, as
+  in a selected row (see [Row selection](#table-selection)). The rules ship in
   `sortable_table_styles()`, and the runtime in `sortable_table_js()`; the
   page shell carries both.
 

@@ -469,3 +469,172 @@ end
         end
     end
 end
+
+@testitem "a lit or selected row's text tones are moved in one place" tags=[:unit] begin
+    using HTMXObjects
+    css(x) = repr("text/html", x)
+    rows = ["table[data-htmxo-link] > tbody > tr[data-htmxo-linked=\"\"]",
+            ".htmxo-selectable-table tbody > tr[aria-selected=\"true\"]"]
+    sheets = [css(sortable_table_styles()), HTMXObjects._selection_css()]
+    for (row, sheet) in zip(rows, sheets), (token, name) in HTMXObjects._TINTED_ROW_TONES
+        # Mixed on the row, where the token still holds the page's value, and
+        # re-pointed on the cells: a property cannot read its own inherited value.
+        @test contains(sheet, row * " { ")
+        @test contains(sheet, "--htmxo-tinted-$name: color-mix(in srgb, var($token) 40%, var(--pico-contrast, CanvasText));")
+        @test contains(sheet, "$token: var(--htmxo-tinted-$name);")
+    end
+    # The tints themselves stay what apps override.
+    @test contains(sheets[1], "var(--htmxo-linked-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 18%, transparent))")
+    @test contains(sheets[2], "var(--htmxo-selected-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 22%, transparent))")
+end
+
+# Snag focused-master-d-b37a1471 (reporter ODLPlaus:review:ux): axe read
+# #0172ad on #cce2ec, 3.9:1, on a focused label under the pointer. A selected
+# row's tint is an inset box shadow axe cannot read, so this composites every
+# painted layer itself rather than relying on axe.
+@testitem "text in a lit or selected row keeps 4.5:1 in light and dark browser" setup=[LinkFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        tones(p) = (h.td(p.id), h.td(h.span("muted"; class="u-text-muted")), h.td(h.a("link"; href="#x")),
+            h.td(h.button("Act"; type="button")), h.td(h.del("removed")), h.td(h.ins("added")))
+        table = master_detail_table(["Probe", "Muted", "Link", "Button", "Del", "Ins"], PROBES[1:3];
+            key=p -> p.id, master=tones, detail=p -> h.p("detail"), link="probes", detail_toggle=:label,
+            selectable="s", select_form="f", id="t")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const cv = document.createElement('canvas'); cv.width = cv.height = 1;
+            const c = cv.getContext('2d', {willReadFrequently: true});
+            const rgba = s => { c.clearRect(0, 0, 1, 1); c.fillStyle = 'rgba(0,0,0,0)'; c.fillStyle = s; c.fillRect(0, 0, 1, 1);
+                const d = c.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+            const over = (t, b) => [0, 1, 2].map(i => t[i] * t[3] + b[i] * (1 - t[3]));
+            const lin = v => (v /= 255) <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+            const lum = p => .2126 * lin(p[0]) + .7152 * lin(p[1]) + .0722 * lin(p[2]);
+            const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + .05) / (y + .05); };
+            // Backgrounds and full-cell inset shadows from the root down.
+            const backdrop = el => { const path = []; for (let e = el; e; e = e.parentElement) path.unshift(e);
+                let bg = [255, 255, 255];
+                for (const e of path) { const s = getComputedStyle(e); bg = over(rgba(s.backgroundColor), bg);
+                    for (const m of s.boxShadow.matchAll(/(color\([^)]*\)|rgba?\([^)]*\)) 0px 0px 0px (\d+)px inset/g))
+                        if (+m[2] > 100) bg = over(rgba(m[1]), bg); }
+                return bg; };
+            const row = document.getElementById('row-k1');
+            const tones = {label: '[data-htmxo-detail-toggle]', muted: '.u-text-muted', link: 'td a',
+                button: 'td button:not([data-htmxo-detail-toggle])', del: 'del', ins: 'ins'};
+            const set = (lit, selected, hover) => { row.toggleAttribute('data-hover', hover);
+                htmxoLink('probes', lit ? 'k1' : null); htmxoSelectRows('#t', selected ? [row.id] : []); };
+            const out = [];
+            set(false, false, false);
+            const rest = backdrop(row.querySelector('td:nth-child(2)'));
+            const rootTone = n => rgba(getComputedStyle(document.documentElement).getPropertyValue(n).trim());
+            const states = {lit: [true, false, false], 'lit hover': [true, false, true], selected: [false, true, false],
+                'selected hover': [false, true, true], 'selected lit': [true, true, false], 'selected lit hover': [true, true, true]};
+            for (const [name, [lit, selected, hover]] of Object.entries(states)) {
+                set(lit, selected, hover);
+                // A state that did not apply would pass by measuring the untinted row.
+                out.push(`applied ${name}: ` + ((row.getAttribute('data-htmxo-linked') === '') === lit &&
+                    (row.getAttribute('aria-selected') === 'true') === selected));
+                const cell = backdrop(row.querySelector('td:nth-child(2)'));
+                out.push(`tinted ${name}: ` + (lum(cell) !== lum(rest)));
+                // Unmoved, the page's own tone does not survive this tint.
+                out.push(`control ${name}: ` + ratio(over(rootTone('--pico-muted-color'), cell), cell).toFixed(2));
+                for (const [tone, sel] of Object.entries(tones)) {
+                    const e = row.querySelector(sel), bg = backdrop(e);
+                    out.push(`${name} ${tone}: ` + ratio(over(rgba(getComputedStyle(e).color), bg), bg).toFixed(2));
+                }
+            }
+            const result = document.createElement('pre'); result.id = 'checks'; result.textContent = out.join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        off = "*, *::before, *::after { transition: none !important; }"
+        page = repr("text/html", htmx(table, h.form(; id="f"), driver; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION,
+            htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false,
+            extra_head=(h.style(Raw(off)),)))
+        # Headless Chrome has no pointer: the row's own `:hover` rule keys off an attribute.
+        hovered = replace(page, r":hover(?=[^{]*\{\s*background)" => "[data-hover]")
+        @test hovered != page
+        pages = Dict("/light" => hovered, "/dark" => replace(hovered, "<html" => "<html data-theme=\"dark\""; count=1),
+            "/vendor/pico.min.css" => read(HTMXObjects._vendor_file(:pico), String))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            haskey(pages, path) || return HTTP.Response(404)
+            HTTP.Response(200, ["Content-Type" => endswith(path, ".css") ? "text/css" : "text/html"], pages[path])
+        end
+        measure(path) = mktempdir() do profile
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port$path`)
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            isnothing(checks) ? Dict{String,String}() :
+                Dict(String(k) => String(v) for (k, v) in (split(l, ": "; limit=2) for l in split(checks[1], '\n')))
+        end
+        states = ["lit", "lit hover", "selected", "selected hover", "selected lit", "selected lit hover"]
+        try
+            for path in ("/light", "/dark")
+                read = measure(path)
+                @test length(read) == length(states) * 9
+                for state in states
+                    @test get(read, "applied $state", "") == "true"
+                    @test get(read, "tinted $state", "") == "true"
+                    @test parse(Float64, get(read, "control $state", "0")) < 4.5
+                    for tone in ("label", "muted", "link", "button", "del", "ins")
+                        @test parse(Float64, get(read, "$state $tone", "0")) >= 4.5
+                    end
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "a lit row without Pico keeps its link colour" setup=[LinkFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        table = master_detail_table(["Probe", "Muted"], PROBES[1:2]; key=p -> p.id,
+            master=p -> (h.td(p.id), h.td(h.span("muted"; class="u-text-muted"))),
+            detail=p -> h.p("detail"), link="probes", detail_toggle=:label, id="t")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const row = document.getElementById('row-k1'), color = s => getComputedStyle(row.querySelector(s)).color;
+            const read = () => [color('[data-htmxo-detail-toggle]'), color('.u-text-muted')];
+            const rest = read(); htmxoLink('probes', 'k1'); const lit = read();
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = ['lit: ' + (row.getAttribute('data-htmxo-linked') === ''), 'label: ' + rest[0] + ' / ' + lit[0],
+                'muted: ' + rest[1] + ' / ' + lit[1]].join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(table, driver; pico_version=nothing, htmx_version=nothing, hyperscript_version=nothing,
+            feedback=false, compose=false, overlay=false, extra_head=(h.style(Raw("*, *::before, *::after { transition: none !important; }")),)))
+        @test !contains(page, "pico.min.css")
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            HTTP.Response(200, ["Content-Type" => "text/html"], page)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            read = Dict(String(k) => String(v) for (k, v) in (split(l, ": "; limit=2) for l in split(checks[1], '\n')))
+            @test read["lit"] == "true"
+            rest, lit = split(read["label"], " / ")
+            @test rest == lit                                   # LinkText, untouched
+            mrest, mlit = split(read["muted"], " / ")
+            @test !isempty(mlit) && mlit != "rgba(0, 0, 0, 0)"  # never transparent
+        finally
+            close(server)
+        end
+    end
+end

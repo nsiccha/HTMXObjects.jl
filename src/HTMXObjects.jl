@@ -21797,6 +21797,26 @@ function htmxoSortState(target) {
 }
 """
 
+# A tinted row keeps its text readable. Pico's link, slate and muted tones sit
+# barely above 4.5:1 on the page (dark muted text at 4.6:1), so any tint that
+# still shows drops them below it, and a tint pale enough not to (1% in dark) is
+# no marker at all. So inside the row each tone moves towards the text colour,
+# keeping its hue: a link still reads as a link, a deletion as a deletion. A
+# custom property cannot read its own inherited value, so the mix sits on the row
+# and the cells re-point Pico's token at it; `a` and `button` then rewrite their
+# local `--pico-color` from the new value. Without Pico its tokens have nothing
+# to mix, so they stay unset and each `var()` keeps its fallback. A row both
+# selected and lit stacks the two tints, the darkest a row gets: that row sets
+# how far the tones move.
+const _TINTED_ROW_TONES = ("--pico-primary" => "primary", "--pico-primary-hover" => "primary-hover",
+    "--pico-secondary" => "secondary", "--pico-secondary-hover" => "secondary-hover",
+    "--pico-muted-color" => "muted", "--htmxo-muted" => "htmxo-muted",
+    "--pico-del-color" => "del", "--pico-ins-color" => "ins")
+_tinted_row_css(rows) = """
+$rows { $(join(("--htmxo-tinted-$name: color-mix(in srgb, var($token) 40%, var(--pico-contrast, CanvasText));" for (token, name) in _TINTED_ROW_TONES), " ")) }
+$rows > td { $(join(("$token: var(--htmxo-tinted-$name);" for (token, name) in _TINTED_ROW_TONES), " ")) }
+"""
+
 """
     sortable_table_styles()
 
@@ -21875,6 +21895,7 @@ function sortable_table_styles()
    the layout or covers the row's own text. */
 table[data-htmxo-link] > tbody > tr[data-htmxo-linked] { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: -2px; }
 table[data-htmxo-link] > tbody > tr[data-htmxo-linked=""] > td { background-color: var(--htmxo-linked-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 18%, transparent)); }
+$(_tinted_row_css("table[data-htmxo-link] > tbody > tr[data-htmxo-linked=\"\"]"))
 table[data-htmxo-link] > tbody > tr[data-htmxo-linked="inside"] { outline-style: dashed; }
 table[data-htmxo-link] > tbody > tr > td[data-htmxo-linked-note] { position: relative; }
 table[data-htmxo-link] > tbody > tr > td[data-htmxo-linked-note]::after { content: attr(data-htmxo-linked-note); position: absolute; z-index: 1; inset-inline-start: .5rem; top: 0; transform: translateY(-50%); padding: 0 .5em; border: 1px dashed var(--htmxo-accent, Highlight); border-radius: 1em; background: var(--pico-background-color, Canvas); color: var(--pico-color, CanvasText); font-size: .7em; line-height: 1.5; white-space: nowrap; pointer-events: none; }
@@ -22871,7 +22892,9 @@ fires a bubbling `htmxo:selection-changed` event on the wrapper with `detail`
 `{name, keys, rows, submitted, hidden}`. `htmxoSelectRows(target, keys)` sets
 the selection (`[]` clears) and `htmxoSelectedKeys(target)` reads it. The
 selected row is tinted and the active row marked with `--htmxo-accent`
-(override the tint with `--htmxo-selected-row`). Selection needs
+(override the tint with `--htmxo-selected-row`). Links, muted text, slate
+buttons and `del`/`ins` in a selected or lit row take a stronger version of
+their colour, so they keep 4.5:1 on the tint. Selection needs
 [`sortable_table_js`](@ref) on the page, which the [`htmx`](@ref) shell carries.
 
 # Hover linking
@@ -23112,7 +23135,7 @@ _selection_css() = """
 .htmxo-selectable-table tbody > tr[data-htmxo-active] > td:first-child { box-shadow: inset 3px 0 0 var(--htmxo-accent, Highlight); }
 .htmxo-selectable-table tbody > tr[aria-selected="true"][data-htmxo-active] > td:first-child { box-shadow: inset 3px 0 0 var(--htmxo-accent, Highlight), inset 0 0 0 100vmax var(--htmxo-selected-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 22%, transparent)); }
 .htmxo-selectable-table tbody > tr[aria-selected]:focus-visible { outline: 2px solid var(--htmxo-accent, Highlight); outline-offset: -2px; }
-"""
+$(_tinted_row_css(".htmxo-selectable-table tbody > tr[aria-selected=\"true\"]"))"""
 
 # The selection's live count with its select-all-shown / clear controls. It
 # sits in the search field's toolbar when the table has one, else in a toolbar
