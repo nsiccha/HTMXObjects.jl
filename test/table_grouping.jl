@@ -2365,6 +2365,10 @@ end
     Base.isvalid(x::ColumnString, i::Integer) = isvalid(x.s, i)
     Base.iterate(x::ColumnString, i::Integer=1) = iterate(x.s, i)
     @test string(ColumnString("Acme")) isa ColumnString
+    # Keys are Strings whatever the JSON.jl version (1.13 widens the object
+    # instead of throwing, so the renders below agree there either way).
+    @test HTMXObjects._md_group_keys(ColumnString("Acme")) isa Vector{String}
+    @test HTMXObjects._md_group_keys(ColumnString.(["Shops", "Media"])) isa Vector{String}
     # "party" and "rule" (several keys a leaf) give ColumnStrings, "iban" Strings.
     column(f) = t -> (k = f(t); k isa AbstractVector ? ColumnString.(k) : ColumnString(k))
     groupings = [n => (n == "party" || n == "rule" ? column(f) : f) for (n, f) in GROUPINGS]
