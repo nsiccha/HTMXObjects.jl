@@ -663,8 +663,9 @@ end
                     out[name + 'FitsBefore'] = String(wrap.dataset.htmxoWidth === 'fits');
                     row.querySelector('td').click();
                     // A one-shot `--dump-dom` run renders no frames, so the ResizeObserver
-                    // that measures after a row opens never fires. A settle measures the same way.
-                    document.body.dispatchEvent(new CustomEvent('htmx:afterSettle', {bubbles: true}));
+                    // that measures after a row opens never fires: queue what it queues.
+                    htmxoStickyQueue(wrap);
+                    htmxoStickyQueue(wrap.querySelector(':scope > table'));
                     setTimeout(() => {
                         out[name + 'Fits'] = String(wrap.dataset.htmxoWidth === 'fits' && getComputedStyle(wrap).overflowY === 'visible');
                         // The clicked row does not move and the page only grows.

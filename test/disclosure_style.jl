@@ -6,15 +6,22 @@ using TestItemRunner
     box = ":where(details:not(.dropdown, :has(> summary[role])))"
     # An open or clicked label keeps the closed label's colour, Pico's text
     # colour (Pico mutes the one and colours the other like a link).
-    @test contains(css, box * " {\n    --pico-accordion-active-summary-color: var(--pico-accordion-close-summary-color);")
+    @test contains(css, box * " {\n    --htmxo-disclosure-inset: var(--htmxo-disclosure-padding, 1rem);\n" *
+        "    --pico-accordion-active-summary-color: var(--pico-accordion-close-summary-color);")
     @test contains(css, "border: var(--pico-border-width) solid var(--pico-form-element-border-color);")
-    @test contains(css, box * " > :where(summary)::before {\n    content: \"\";")
+    @test contains(css, ":where(details:not(.dropdown) > summary:not([role]))::before {\n    content: \"\";")
     # Pico's own rules are overridden at exactly their specificity (`details
     # summary::after` is (0,0,3)), so app rules that beat Pico still win.
-    @test contains(css, "details:where(:not(.dropdown, :has(> summary[role]))) > summary::after { content: none; }")
+    @test contains(css, "details:where(:not(.dropdown)) > summary:where(:not([role]))::after { content: none; }")
     # The inner spacing is the bar's and the content's, so the bar needs no
     # pulling out past a padding that a component may have changed.
-    @test contains(css, box * "::details-content {\n    padding-inline: var(--htmxo-disclosure-padding, 1rem);")
+    @test contains(css, ":where(details)::details-content { padding-inline: var(--htmxo-disclosure-inset); }")
+    # Snag table-geometry-m-bec37646: only the box's own rule asks `:has()`.
+    # A `:has()` on a rule for the summary or the content made Chrome restyle
+    # everything inside a `<details>` on any change in it (the KB's roster, a
+    # table in a disclosure: two restyles of ~15,500 elements per cell update).
+    @test count(":has(> summary[role])", css) == 1
+    @test contains(css, ":last-child:where(details:not(.dropdown) > *):where(:not(summary[role], summary[role] ~ *))")
     @test !contains(css, "margin-inline: calc(-1 * var(--htmxo-disclosure-padding")
     # The caption's toggle is no longer faded.
     @test !contains(repr("text/html", caption_style()), "opacity")
@@ -59,6 +66,11 @@ end
                 out.appWins = String(css(det('app')).borderTopWidth === '0px' && css(sum('app')).paddingLeft === '0px');
                 // The bar reaches the default box's edges, and bare text sits inside the box.
                 const near = (a, b) => Math.abs(a - b) <= 0.5, border = parseFloat(css(det('open')).borderLeftWidth);
+                // A button disclosure's content has no inset, nor has one inside a box,
+                // which inherits the box's spacing variable (snag table-geometry-m-bec37646).
+                const flushLeft = id => near(box(det(id).querySelector(':scope > p')).left, box(det(id)).left);
+                out.buttonFlush = String(flushLeft('button') && flushLeft('innerbutton') &&
+                    box(det('innerbutton')).left - box(det('outerbutton')).left >= 15);
                 out.barToEdges = String(boxes.every(id => near(box(sum(id)).left, box(det(id)).left + border) &&
                     near(box(sum(id)).right, box(det(id)).right - border)));
                 const bare = document.createRange(); bare.selectNode(det('bare').lastChild);
@@ -92,7 +104,9 @@ end
             h.div(; id="semantic")(Raw(repr("text/html", SemanticDisclosure("Stan program", SemanticCode("stan", "model { }"))))),
             h.div(; id="caption")(with_caption(spec, h.div("plot"))),
             h.details(; id="dropdown", class="dropdown")(h.summary("Menu"), h.ul(h.li("One"))),
-            h.details(; id="button")(h.summary(; role="button")("Button summary"), h.p("x")),
+            h.details(; id="button", open=true)(h.summary(; role="button")("Button summary"), h.p("x")),
+            h.details(; id="outerbutton", open=true)(h.summary("Box around a button disclosure"),
+                h.details(; id="innerbutton", open=true)(h.summary(; role="button")("Inner button"), h.p("x"))),
             h.details(; id="app", class="htmxo-test-menu")(h.summary("Menu badge"), h.p("x")),
             h.details(; id="padded", class="htmxo-test-padded", open=true)(h.summary("Own padding"), h.p("x")),
             h.details(; id="flush", class="htmxo-test-flush", open=true)(h.summary("No inner spacing"), h.p("x")),
@@ -118,7 +132,7 @@ end
         @test contains(dom, "data-done=\"1\"")
         for marker in ("pico-loaded", "boxed", "bar", "chevron-before", "open-inside", "caption-opaque",
                        "dropdown-kept", "button-kept", "app-wins", "bar-to-edges", "bare-inside", "no-overhang",
-                       "padding-insets", "flush", "nested-inside", "light-colours", "dark-colours")
+                       "padding-insets", "flush", "nested-inside", "light-colours", "dark-colours", "button-flush")
             @test contains(dom, "data-$marker=\"true\"")
         end
     end
