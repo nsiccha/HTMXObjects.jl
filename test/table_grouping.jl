@@ -2136,17 +2136,17 @@ end
     # German texts write German numbers.
     de = html(grouped(group_by="rule", texts=table_texts(:de),
         group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount * 100; digits=2)]))
-    @test cell(row(de, group_row(de, "Shops")), 0) == "-23.000,00" && number(row(de, group_row(de, "Shops")), 0) == "-23000.00"
+    @test cell(row(de, group_row(de, "Shops")), 0) == "−23.000,00" && number(row(de, group_row(de, "Shops")), 0) == "-23000.00"
     # Significant digits: Acme's and Bakery's amounts × 28.5 sum to -2850, a
     # half, which rounds away from zero. The CSV gets the rounded number, and
     # no power of ten where the cell shows one.
     sig = html(grouped(group_by="party", texts=table_texts(:de), group_summary=[
         "IBAN" => ColumnSummary(:mean, t -> t.amount * 1e-6; sigdigits=2),
         "Amount" => ColumnSummary(:sum, t -> t.amount * 28.5; sigdigits=2)]))
-    @test cell(row(sig, group_row(sig, "Acme")), 1) == "-2.900" && number(row(sig, group_row(sig, "Acme")), 1) == "-2900"
-    @test cell(row(sig, group_row(sig, "Bakery")), 1) == "-2.900" && cell(row(sig, group_row(sig, "Prime Video")), 1) == "-1.400"
-    @test cell(row(sig, group_row(sig, "Acme Prime")), 1) == "-860"
-    @test cell(row(sig, group_row(sig, "Acme")), 0) == "-3,3·10⁻⁵" && number(row(sig, group_row(sig, "Acme")), 0) == "-0.000033"
+    @test cell(row(sig, group_row(sig, "Acme")), 1) == "−2.900" && number(row(sig, group_row(sig, "Acme")), 1) == "-2900"
+    @test cell(row(sig, group_row(sig, "Bakery")), 1) == "−2.900" && cell(row(sig, group_row(sig, "Prime Video")), 1) == "−1.400"
+    @test cell(row(sig, group_row(sig, "Acme Prime")), 1) == "−860"
+    @test cell(row(sig, group_row(sig, "Acme")), 0) == "−3,3·10⁻⁵" && number(row(sig, group_row(sig, "Acme")), 0) == "-0.000033"
     @test contains(sig, "&quot;summary&quot;:[{&quot;reduce&quot;:&quot;mean&quot;,&quot;sigdigits&quot;:2}," *
         "{&quot;reduce&quot;:&quot;sum&quot;,&quot;sigdigits&quot;:2}]")
     # The cells' `format_number(x; digits | sigdigits)` writes the same text: test/number_format.jl.
@@ -2454,7 +2454,7 @@ end
             const pill = name => n().querySelector('[data-htmxo-group-name="' + name + '"] > button');
             pill('iban').click();
             check('pills-add', await parity(n(), '/nested?group_by=party&group_by=iban', true));
-            check('german', row('n--group--Acme--DE01').querySelector('[data-htmxo-group-summary="0"]').textContent === '-80,0' &&
+            check('german', row('n--group--Acme--DE01').querySelector('[data-htmxo-group-summary="0"]').textContent === '−80,0' &&
                 row('group--Acme--DE01--np1').dataset.htmxoLeaf === 'np1');
             document.getElementById('n-group-iban-earlier').click();
             check('pills-move', n().dataset.htmxoGrouped === '["iban","party"]' && await parity(n(), '/nested?group_by=iban&group_by=party', true));
@@ -2711,10 +2711,10 @@ end
             for (const v of ['iban', 'rule', 'media', 'none', 'party'])
                 (regroup(v), check('parity-' + v, await parity(s(), '/s?group_by=' + v)));
             const cell = (id, i) => document.getElementById('row-' + id).querySelector('[data-htmxo-group-summary="' + i + '"]');
-            check('half', cell('s--group--Acme', 1).textContent === '-2.900' && cell('s--group--Acme', 1).dataset.htmxoNumber === '-2900');
-            check('power-of-ten', cell('s--group--Acme', 0).textContent === '-3,3·10⁻⁵' && cell('s--group--Acme', 0).dataset.htmxoNumber === '-0.000033');
+            check('half', cell('s--group--Acme', 1).textContent === '−2.900' && cell('s--group--Acme', 1).dataset.htmxoNumber === '-2900');
+            check('power-of-ten', cell('s--group--Acme', 0).textContent === '−3,3·10⁻⁵' && cell('s--group--Acme', 0).dataset.htmxoNumber === '-0.000033');
             const numbers = document.createElement('pre'); numbers.id = 'numbers';
-            numbers.textContent = CASES.map(([x, k]) => htmxoSummaryText(x, {sigdigits: k}, ',', '.', false) + '\t' +
+            numbers.textContent = CASES.map(([x, k]) => htmxoSummaryText(x, {sigdigits: k}, ',', '.', false, '\u2212') + '\t' +
                 htmxoSummaryText(x, {sigdigits: k}, '.', '', true)).join('\n');
             document.body.appendChild(numbers);
             finish();

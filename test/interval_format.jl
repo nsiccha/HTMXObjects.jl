@@ -17,8 +17,15 @@
     @test f(1.23e-5, 1.05e-5, 1.41e-5) == "1.23·10⁻⁵ (1.05·10⁻⁵–1.41·10⁻⁵)"
     @test f(2.2e16, 1.0e16, 3.0e16; texts=de) == "2,2·10¹⁶ (1,0·10¹⁶–3,0·10¹⁶)"
     # A negative bound: a word, since the dash would read as a minus.
-    @test f(-5.2, -8.1, -2.3) == "-5.2 (-8.1 to -2.3)" && f(-5.2, -8.1, -2.3; texts=de) == "-5,2 (-8,1 bis -2,3)"
-    @test f(0.004, -0.01, 0.02) == "0.004 (-0.010 to 0.020)"
+    @test f(-5.2, -8.1, -2.3) == "-5.2 (-8.1 to -2.3)" && f(-5.2, -8.1, -2.3; texts=de) == "−5,2 (−8,1 bis −2,3)"
+    @test f(0.004, -0.01, 0.02) == "0.004 (-0.010 to 0.020)" && f(0.004, -0.01, 0.02; texts=de) == "0,004 (−0,010 bis 0,020)"
+    # German writes the minus sign U+2212, as German typography does, on
+    # either sign of the interval; the word follows it.
+    @test f(-0.42, -0.61, -0.25; texts=de) == "−0,42 (−0,61 bis −0,25)"
+    @test f(-0.12, -0.30, 0.05; texts=de) == "−0,12 (−0,30 bis 0,05)"
+    @test f(-0.12, 0.01, 0.05; texts=de) == "−0,120 (0,010–0,050)" && f(-1.5, -Inf, 2.0; texts=de) == "−1,5 (−∞ bis 2)"
+    @test f(-5.2, -8.1, -2.3; texts=table_texts(:de; minus="-")) == "-5,2 (-8,1 bis -2,3)"
+    @test f(-1.2e-5, -1.41e-5, -1.05e-5; texts=de) == "−1,20·10⁻⁵ (−1,41·10⁻⁵ bis −1,05·10⁻⁵)"
     # The other rules.
     @test f(52, 31, 78; width_digits=1) == "50 (30–80)"
     @test f(0.5, 0.02, 3.1) == "0.5 (0.0–3.1)" && f(0.5, 0.02, 3.1; log=true) == "0.5 (0.02–3)"
@@ -60,6 +67,10 @@ end
     gap = html(interval_cell(missing, 13.1, 34.2))
     @test text(gap) == "– (13–34)" && isnothing(attr(gap, "data-sort-value")) && attr(gap, "data-htmxo-number") == ""
     @test attr(gap, "data-htmxo-interval") == "[\"\",\"13.1\",\"34.2\"]"
+    # A German negative shows the minus sign; the sort keys and CSV keep `-`.
+    neg = html(interval_cell(-0.42, -0.61, -0.25; texts=table_texts(:de)))
+    @test text(neg) == "−0,42 (−0,61 bis −0,25)" && attr(neg, "data-sort-value") == "-0.42"
+    @test attr(neg, "data-htmxo-interval") == "[\"-0.42\",\"-0.61\",\"-0.25\"]"
     # Further attributes reach the cell; the digits keywords are format_interval's.
     styled = html(interval_cell(52, 31, 78; width_digits=1, class="num"))
     @test text(styled) == "50 (30–80)" && attr(styled, "class") == "num" && attr(styled, "data-htmxo-interval") == "[\"52\",\"31\",\"78\"]"

@@ -741,8 +741,14 @@ How much is written:
 A [group summary](#table-regrouping) takes the same `digits` or `sigdigits`
 and writes the same text.
 
+A negative number starts with the table's `minus` text: `-1,234.5` in
+English, and in German the minus sign German typography writes (U+2212),
+`−1.234,5`; `table_texts(:de; minus = "-")` keeps the hyphen. The sort key
+and the CSV keep `-`, and the search field finds `−0,42` when the reader
+types `-0,42`.
+
 `missing` and `nothing` write `–` (no sort key, an empty CSV field); `Inf`,
-`-Inf` and `NaN` write `∞`, `-∞` and `NaN`. The cell carries its value twice:
+`-Inf` and `NaN` write `∞`, `-∞` (German `−∞`) and `NaN`. The cell carries its value twice:
 `data-sort-value` for sorting and `data-htmxo-number` for the CSV. A cell you
 build yourself can carry them too, for example a number with a unit:
 `h.td("6,28 €/m²"; data_sort_value = string(x), data_htmxo_number = string(x))`
@@ -797,9 +803,10 @@ so the numbers end together:
   `format_number`.
 - Without both bounds the estimate is written alone, with every digit, since
   there is no width to set them. Without an estimate it is `–`. A width of
-  zero sets no digits either. A negative bound turns the dash into a word,
-  `-5 (-8 to -2)` (German `bis`). The `interval` and `interval_signed` texts
-  hold both forms.
+  zero sets no digits either. A negative number is written with the table's
+  `minus`, as `format_number` writes it. A negative bound turns the dash
+  into a word, `-5 (-8 to -2)` (German `−5 (−8 bis −2)`). The `interval` and
+  `interval_signed` texts hold both forms.
 
 **Sorting.** A column of interval cells sorts by the estimate, by either bound,
 and by the interval's absolute and relative width. It gets the five
@@ -1003,8 +1010,8 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   browser computes the summaries again for every grouping the reader picks,
   rounded to `digits` decimals (default 0) or to `sigdigits` significant
   digits, halves away from zero, and written as `format_number` writes them,
-  with the table's `decimal` and `thousands` texts (`texts = table_texts(:de)`
-  writes `1.234,5`); the CSV download writes the rounded number (`1234.5`).
+  with the table's `decimal`, `thousands` and `minus` texts (`texts = table_texts(:de)`
+  writes `1.234,5` and `−1.234,5`); the CSV download writes the rounded number (`1234.5`).
   A sum of estimates that are each good to two digits shows no more than
   that with `ColumnSummary(:sum, r -> r.estimate; sigdigits = 2)`: `29.000`,
   not `29.210`. Group rows sort among themselves by the same columns; leaves
