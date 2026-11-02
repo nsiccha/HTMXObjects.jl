@@ -28,6 +28,7 @@ export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
 export decorated_link
 export Glossary, GlossaryTerm, glossary_section, term, link_terms, glossary_script
 export safely, record_error, ERROR_DIR, CallerFault, ErrorTexts, error_texts
+export ErrorRecorder, record_error!
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
@@ -52,6 +53,8 @@ export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracke
     runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
     clear_runtime_history!, runtime_jobs, track_job!, jobs_board,
     configure_job_queue!
+export poll_trigger, process_rss_bytes, system_load_panel,
+    collect_and_measure!, last_memory_collection, memory_collect_panel
 export reflect, select_routes, precompile_routes!, prewarm_routes!, prewarm_workload!, dispatch, dispatch_parent
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
@@ -12106,6 +12109,8 @@ fallback and just need the trace recorded.
     end
 """
 record_error(err, bt, req) = _record_error(err, bt, req; status=nothing)
+
+include("error_recorder.jl")
 
 """
     _default_error_render(uid, path, texts=_EN_ERROR_TEXTS)
@@ -26234,6 +26239,8 @@ include("routes/resource_routes.jl")
 include("routes/shared_ops_routes.jl")
 
 include("runtime.jl")
+
+include("runtime_panels.jl")
 
 include("routes/runtime_routes.jl")
 

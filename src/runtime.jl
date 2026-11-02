@@ -1143,10 +1143,8 @@ function _runtime_process_row(tracker::RuntimeTracker, running_jobs::Int)
        threads_default=Threads.nthreads(:default),
        threads_interactive=Threads.nthreads(:interactive),
        running_jobs,
-       live_bytes=Base.gc_live_bytes(),
+       _runtime_memory()...,
        gc_time=gc.total_time / 1.0e9,
-       free_memory=Float64(Sys.free_memory()),
-       total_memory=Float64(Sys.total_memory()),
        total_requests=tracker.total_requests,
        total_jobs=tracker.total_jobs)
 end
