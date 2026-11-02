@@ -14,6 +14,22 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.46
+
+- `IntervalEstimate(estimate, lower, upper; width_digits, log, digits,
+  sigdigits)` keeps `format_interval`'s rounding options on the value, and
+  every table writes it with them: a `render_table` or `SemanticTable` column,
+  a bare `master` cell of `master_detail_table` / `master_detail_pair`, and
+  Markdown/PDF. A positive quantity spanning decades is
+  `IntervalEstimate(0.5, 0.02, 3.1; log = true)`, written `0.5 (0.02–3)`
+  instead of `0.5 (0.0–3.1)`, with no hand-built `interval_cell` rows. Options
+  `format_interval` refuses for the interval are refused when the value is
+  made. A keyword given to `format_interval(x)` or `interval_cell(x)` replaces
+  the value's (`width_digits` alone; `log`, `digits` and `sigdigits` as one
+  rule). The value prints as the call that makes it. Values made without
+  options, and `format_interval` / `interval_cell` on three numbers, are
+  written as before.
+
 ## 0.1.45
 
 - Add the `minus` text to `TableTexts`: the sign of a negative number that
