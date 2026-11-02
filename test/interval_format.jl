@@ -134,6 +134,66 @@ end
     @test !isnothing(err) && contains(err, "drop `sort_keys`")
 end
 
+@testitem "an IntervalEstimate keeps its rounding options wherever a table writes it" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string
+    html(x) = repr("text/html", x)
+    de = table_texts(:de)
+    # The value keeps format_interval's options and is written with them.
+    conc = IntervalEstimate(0.5, 0.02, 3.1; log=true)
+    @test format_interval(conc) == "0.5 (0.02–3)" && format_interval(conc; texts=de) == "0,5 (0,02–3)"
+    @test (conc.estimate, conc.lower, conc.upper, conc.log, conc.width_digits) == (0.5, 0.02, 3.1, true, 2)
+    @test format_interval(IntervalEstimate(52, 31, 78; width_digits=1)) == "50 (30–80)"
+    @test format_interval(IntervalEstimate(52, 31, 78; digits=1)) == "52.0 (31.0–78.0)"
+    @test format_interval(IntervalEstimate(0.523, 0.361, 0.712; sigdigits=1)) == "0.5 (0.4–0.7)"
+    # Without options it is written as before; options are the same as given in the call.
+    @test format_interval(IntervalEstimate(0.5, 0.02, 3.1)) == "0.5 (0.0–3.1)"
+    @test format_interval(conc) == format_interval(0.5, 0.02, 3.1; log=true)
+    # A keyword in the call replaces the value's: width_digits alone, and log,
+    # digits and sigdigits as one rule.
+    @test format_interval(conc; digits=1) == "0.5 (0.0–3.1)" && format_interval(conc; log=false) == "0.5 (0.0–3.1)"
+    @test format_interval(IntervalEstimate(52, 31, 78; digits=1); width_digits=1) == "52.0 (31.0–78.0)"
+    @test format_interval(IntervalEstimate(52, 31, 78; width_digits=1); digits=0) == "52 (31–78)"
+    @test format_interval(IntervalEstimate(0.5, 0.02, 3.1; width_digits=3)) == "0.50 (0.02–3.10)"
+    @test format_interval(IntervalEstimate(0.5, 0.02, 3.1; width_digits=3); log=true) == "0.5 (0.02–3.1)"
+    # Its cell is the cell the same options give for the three numbers, the
+    # exact numbers for sorting and the CSV included.
+    @test html(interval_cell(conc; texts=de)) == html(interval_cell(0.5, 0.02, 3.1; texts=de, log=true))
+    @test html(interval_cell(conc; texts=de, digits=1)) == html(interval_cell(0.5, 0.02, 3.1; texts=de, digits=1))
+    # Every table writes it with its options (log: 10 (3–40), where the default
+    # writes 12 (3–40)): render_table, a SemanticTable
+    # (HTML, Markdown and the tab-separated exact text) and bare master cells.
+    table = (Probe=["A", "B"], Konzentration=[conc, IntervalEstimate(12.0, 3.0, 40.0; log=true)])
+    r = html(render_table(table; texts=de))
+    @test contains(r, ">0,5 (0,02–3)</td>") && contains(r, ">10 (3–40)</td>")
+    @test contains(r, "data-htmxo-interval=\"[&quot;0.5&quot;,&quot;0.02&quot;,&quot;3.1&quot;]\"")
+    @test contains(to_markdown_string(render_table(table; texts=de)), "| A | 0,5 (0,02–3) |")
+    st = SemanticTable(table)
+    @test contains(html(st), ">0.5 (0.02–3)</td>") && contains(repr("text/markdown", st), "| A | 0.5 (0.02–3) |")
+    @test contains(repr("text/plain", st), "A\t0.5\t0.02\t3.1\n")
+    items = [(id="a", e=conc), (id="b", e=IntervalEstimate(12.0, 3.0, 40.0; log=true))]
+    m = html(master_detail_table(["Probe", "Konzentration"], items; key=it -> it.id,
+        master=it -> (h.td(it.id), it.e), detail=it -> h.p("d"), texts=de))
+    @test contains(m, ">0,5 (0,02–3)</td>") && contains(m, ">10 (3–40)</td>")
+    pair = html(h.tbody(master_detail_pair("a", Any[h.td("a"), conc], h.p("d"), 2; texts=de)...))
+    @test contains(pair, ">0,5 (0,02–3)</td>")
+    # It is written as the call that makes it.
+    @test repr(IntervalEstimate(22.3, 13.1, 34.2)) == "IntervalEstimate(22.3, 13.1, 34.2)"
+    @test repr(conc) == "IntervalEstimate(0.5, 0.02, 3.1; log = true)"
+    @test repr(IntervalEstimate(1 // 2, missing, nothing; digits=1, width_digits=1)) ==
+          "IntervalEstimate(1//2, missing, nothing; width_digits = 1, digits = 1)"
+    # refused when the value is made: options format_interval would refuse for
+    # this interval (dev §1: at the source, not when a table renders it).
+    @test_throws ArgumentError IntervalEstimate(1, 0, 2; log=true)
+    @test_throws ArgumentError IntervalEstimate(1, 0.5, 2; log=true, digits=1)
+    @test_throws ArgumentError IntervalEstimate(1, 0, 2; digits=1, sigdigits=1)
+    @test_throws ArgumentError IntervalEstimate(1, 0, 2; width_digits=0)
+    @test_throws ArgumentError IntervalEstimate(1, 0, 2; digits=11)
+    @test contains(sprint(showerror, try IntervalEstimate(1, 0, 2; log=true) catch e; e end), "IntervalEstimate: log=true")
+    # A log value without both bounds has no ratio to refuse.
+    @test format_interval(IntervalEstimate(0.5, missing, 3.1; log=true)) == "0.5"
+end
+
 @testitem "an interval column sorts by its bounds and exports three CSV columns browser" setup=[ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects
     import HTMXObjects: h

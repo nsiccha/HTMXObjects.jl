@@ -801,6 +801,21 @@ so the numbers end together:
   where the default writes `0.5 (0.0–3.1)`.
 - `digits` or `sigdigits` set one precision for every number instead, as in
   `format_number`.
+- **The value keeps these options.** `IntervalEstimate(estimate, lower, upper;
+  log = true)` (likewise `width_digits`, `digits`, `sigdigits`) is written
+  with them by every table, so a `render_table` or `master_detail_table` of
+  concentrations or ratios needs no cells built by hand. Options that
+  `format_interval` refuses for the interval (`log = true` with a lower bound
+  of zero or below, `log` with `digits`, `digits` with `sigdigits`) are
+  refused when the value is made. A keyword given to `format_interval(x)` or
+  `interval_cell(x)` replaces the value's: `width_digits` alone, and `log`,
+  `digits` and `sigdigits` together.
+
+  ```julia
+  conc = select(samples, :probe,
+      [:q50, :q2_5, :q97_5] => ByRow((m, l, u) -> IntervalEstimate(m, l, u; log = true)) => "Konzentration")
+  render_table(conc; texts = DE)                     # 0,5 (0,02–3), not 0,5 (0,0–3,1)
+  ```
 - Without both bounds the estimate is written alone, with every digit, since
   there is no width to set them. Without an estimate it is `–`. A width of
   zero sets no digits either. A negative number is written with the table's

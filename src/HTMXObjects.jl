@@ -25293,7 +25293,7 @@ _number_key(x::Integer) = string(x)
 _number_key(x::AbstractFloat) = isinf(x) ? (x > 0 ? "Infinity" : "-Infinity") : string(x)
 
 """
-    IntervalEstimate(estimate, lower, upper)
+    IntervalEstimate(estimate, lower, upper; width_digits=2, log=false, digits=nothing, sigdigits=nothing)
 
 An estimate with its interval as one value, such as a posterior median with
 its 95 % credible interval. A table writes it as one cell, `22 (13–34)`, with
@@ -25318,22 +25318,54 @@ master_detail_table(["Zone", "Employees"], zones; key, detail,
     master = z -> (h.td(z.name), IntervalEstimate(z.mean, z.q025, z.q975)))
 ```
 
+The keywords are the rounding options of [`format_interval`](@ref), kept on
+the value, so every table writes it with them: a positive quantity whose
+interval spans orders of magnitude is `IntervalEstimate(0.5, 0.02, 3.1; log =
+true)`, written `0.5 (0.02–3)` (the default writes `0.5 (0.0–3.1)`). Options
+that `format_interval` refuses are refused here, when the value is made:
+`log = true` with a lower bound of zero or below, `log` together with
+`digits` or `sigdigits`, and `digits` together with `sigdigits`.
+
+```julia
+band = select(df, :sample, [:q50, :q2_5, :q97_5] => ByRow((m, l, u) -> IntervalEstimate(m, l, u; log = true)) => "Konzentration")
+```
+
 Each of `estimate`, `lower` and `upper` is a real number, `missing` or
-`nothing`; the fields keep them as given (`x.estimate`, `x.lower`, `x.upper`).
+`nothing`; the fields keep them as given (`x.estimate`, `x.lower`, `x.upper`),
+beside the options (`x.width_digits`, `x.log`, `x.digits`, `x.sigdigits`).
 `lower > upper` throws.
 """
 struct IntervalEstimate
     estimate::Union{Real,Missing,Nothing}
     lower::Union{Real,Missing,Nothing}
     upper::Union{Real,Missing,Nothing}
-    function IntervalEstimate(estimate, lower, upper)
+    width_digits::Int
+    log::Bool
+    digits::Union{Nothing,Int}
+    sigdigits::Union{Nothing,Int}
+    function IntervalEstimate(estimate, lower, upper; width_digits::Integer=2, log::Bool=false,
+                              digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing)
         _interval_value(estimate)
         lo, hi = _interval_value(lower), _interval_value(upper)
         # Refused: an interval that ends before it starts has no width to set digits by.
         isnothing(lo) || isnothing(hi) || !(lo > hi) || throw(ArgumentError(string(
             "IntervalEstimate: the lower bound ", lo, " is above the upper bound ", hi)))
-        new(estimate, lower, upper)
+        # Refused here rather than when a table writes the value: options
+        # `format_interval` would refuse for this interval.
+        _interval_rounding(lo, hi, width_digits, log, digits, sigdigits, "IntervalEstimate")
+        new(estimate, lower, upper, width_digits, log, digits, sigdigits)
     end
+end
+
+# Written as the call that makes it, options only where they are not the defaults.
+function Base.show(io::IO, x::IntervalEstimate)
+    print(io, "IntervalEstimate(")
+    join(io, (repr(v; context=io) for v in (x.estimate, x.lower, x.upper)), ", ")
+    options = [string(name, " = ", repr(value)) for (name, value, default) in
+               ((:width_digits, x.width_digits, 2), (:log, x.log, false), (:digits, x.digits, nothing),
+                (:sigdigits, x.sigdigits, nothing)) if value !== default]
+    isempty(options) || print(io, "; ", join(options, ", "))
+    print(io, ")")
 end
 
 # A value of an `IntervalEstimate` as `format_number` takes it: `nothing` for
@@ -25377,6 +25409,12 @@ that place, so the last digit shown is one the uncertainty supports:
   [`format_number`](@ref): `digits = 1` writes every number of a column with
   one decimal.
 
+An [`IntervalEstimate`](@ref) keeps these options itself, and
+`format_interval(x)` writes it with them. A keyword given in the call replaces
+the value's: `width_digits` on its own, and `log`, `digits` and `sigdigits`
+together, as one rule, so `format_interval(IntervalEstimate(0.5, 0.02, 3.1;
+log = true); digits = 1)` is `0.5 (0.0–3.1)`.
+
 A number below 10⁻⁴ or from 10¹⁶ up is written as a power of ten
 (`1.20·10⁻⁵`), as `format_number` writes it. Without both bounds the estimate
 is written alone (`format_number`'s digits, since there is no width); without
@@ -25387,12 +25425,11 @@ in German. A negative bound changes the dash to a word (`-5 (-8 to -2)`,
 German `−5 (−8 bis −2)`): the `interval` and `interval_signed` texts.
 """
 format_interval(estimate, lower, upper; kw...) = format_interval(IntervalEstimate(estimate, lower, upper); kw...)
-function format_interval(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Integer=2,
-                         log::Bool=false, digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing)
+function format_interval(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Union{Nothing,Integer}=nothing,
+                         log::Union{Nothing,Bool}=nothing, digits::Union{Nothing,Integer}=nothing,
+                         sigdigits::Union{Nothing,Integer}=nothing)
     est, lo, hi = _interval_parts(x)
-    1 <= width_digits <= _MAX_SIGDIGITS || throw(ArgumentError(string(
-        "format_interval: width_digits must be between 1 and ", _MAX_SIGDIGITS, ", got ", width_digits)))
-    rounding = _interval_rounding(lo, hi, _number_rounding(digits, sigdigits, "format_interval"), width_digits, log)
+    rounding = _interval_rounding(lo, hi, _interval_options(x, width_digits, log, digits, sigdigits)..., "format_interval")
     shown(v) = _format_interval_number(v, texts, rounding)
     (isnothing(lo) || isnothing(hi)) && return shown(est)
     lower, upper = shown(lo), shown(hi)
@@ -25400,19 +25437,31 @@ function format_interval(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS,
     _table_text(texts, signed ? :interval_signed : :interval; estimate=shown(est), lower, upper)
 end
 
+# The rounding options `format_interval(x; …)` writes `x` with, in
+# `_interval_rounding`'s order: the value's own, each replaced by one the call
+# gives (not `nothing`); `log`, `digits` and `sigdigits` are one rule, so a
+# call naming any of them replaces all three.
+_interval_options(x::IntervalEstimate, width_digits, log, digits, sigdigits) =
+    (something(width_digits, x.width_digits),
+     (isnothing(log) && isnothing(digits) && isnothing(sigdigits) ? (x.log, x.digits, x.sigdigits) :
+      (something(log, false), digits, sigdigits))...)
+
 # How the numbers of an interval are rounded: the caller's `digits` or
 # `sigdigits`; else at the decimal place its width sets (`_PlaceDigits`), or
 # with `log` to the significant digits its ratio sets; `nothing` (every digit)
-# without a finite, nonzero width.
+# without a finite, nonzero width. `who` names the caller in what it refuses.
 struct _PlaceDigits; p::Int; end
-function _interval_rounding(lo, hi, rounding, width_digits, log)
+function _interval_rounding(lo, hi, width_digits, log, digits, sigdigits, who)
+    1 <= width_digits <= _MAX_SIGDIGITS || throw(ArgumentError(string(
+        who, ": width_digits must be between 1 and ", _MAX_SIGDIGITS, ", got ", width_digits)))
+    rounding = _number_rounding(digits, sigdigits, who)
     # Refused: two rules for one interval's digits.
     log && !isnothing(rounding) && throw(ArgumentError(
-        "format_interval: give log=true or digits/sigdigits, not both"))
+        "$who: give log=true or digits/sigdigits, not both"))
     isnothing(rounding) || return rounding
     (isnothing(lo) || isnothing(hi) || !isfinite(lo) || !isfinite(hi) || hi == lo) && return nothing
     log || return _PlaceDigits(_decade(Float64(hi) - Float64(lo)) - (width_digits - 1))
-    lo > 0 || throw(ArgumentError(string("format_interval: log=true is for positive quantities; the lower bound is ", lo)))
+    lo > 0 || throw(ArgumentError(string(who, ": log=true is for positive quantities; the lower bound is ", lo)))
     _SigDigits(clamp(width_digits - 1 - _decade(log10(Float64(hi) / Float64(lo))), 1, _MAX_SIGDIGITS))
 end
 
@@ -25469,8 +25518,10 @@ upper; …)` and keeps the exact numbers:
   lower and the upper bound.
 
 [`render_table`](@ref) and the master cells of [`master_detail_table`](@ref)
-make an [`IntervalEstimate`](@ref) this cell by themselves; pass the table's
-`texts` to cells you build for [`sortable_table`](@ref). `attrs` are further
+make an [`IntervalEstimate`](@ref) this cell by themselves, with the value's
+own rounding options; pass the table's `texts` to cells you build for
+[`sortable_table`](@ref). On an `IntervalEstimate`, a rounding keyword given
+here replaces the value's, as in `format_interval`. `attrs` are further
 attributes of the `<td>`.
 
 ```julia
@@ -25479,8 +25530,8 @@ sortable_table(["Zone", "Employees"],
 ```
 """
 interval_cell(estimate, lower, upper; kw...) = interval_cell(IntervalEstimate(estimate, lower, upper); kw...)
-function interval_cell(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Integer=2,
-                       log::Bool=false, digits::Union{Nothing,Integer}=nothing,
+function interval_cell(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Union{Nothing,Integer}=nothing,
+                       log::Union{Nothing,Bool}=nothing, digits::Union{Nothing,Integer}=nothing,
                        sigdigits::Union{Nothing,Integer}=nothing, attrs...)
     text = format_interval(x; texts, width_digits, log, digits, sigdigits)
     est, lo, hi = _interval_parts(x)
