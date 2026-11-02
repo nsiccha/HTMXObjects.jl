@@ -22818,13 +22818,15 @@ document.addEventListener('htmxo:table-filtered', e => {
 The controls a table draws itself share one line above it (`div.htmxo-table-toolbar`):
 the search field with its count, then a [`master_detail_table`](@ref)'s *Group
 by* and *Expand all* / *Collapse all*, then the selection bar. The line wraps
-only when the window is too narrow. With `sticky=true` (the default) the line
-stays at the top of the window while the table is in view, and the column
-headers stay just below it, so a reader scrolling a long table keeps the
-search, the grouping and the column names. A table without controls keeps
-only its header in view. The table runtime measures the line and the header
-(`--htmxo-table-toolbar-h`, `--htmxo-table-head-h`), and rows moved to by the
-keyboard or a `#row-…` link scroll into view below both.
+only when the table's column is too narrow, and the search field's label, the
+field and the count wrap inside it too, so a narrow column (a sidebar, a split
+pane) keeps them inside it instead of widening the page. With `sticky=true`
+(the default) the line stays at the top of the window while the table is in
+view, and the column headers stay just below it, so a reader scrolling a long
+table keeps the search, the grouping and the column names. A table without
+controls keeps only its header in view. The table runtime measures the line and
+the header (`--htmxo-table-toolbar-h`, `--htmxo-table-head-h`), and rows moved
+to by the keyboard or a `#row-…` link scroll into view below both.
 
 A table that fits its column scrolls with the page. A table wider than its
 column (`data-htmxo-width="wide"` on its `.table-wrap`) becomes a window-tall
@@ -32320,7 +32322,11 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
 
 /* A table's own controls (the search field with its count, Group by,
    Expand/Collapse all, the selection bar) share one line, wrapping only when
-   the window is too narrow. With `sticky=true` (the default) the line stays
+   the table's column is too narrow. The search label wraps too (its text,
+   the field and the count each move to a further line only when they no
+   longer fit), and the field and the count shrink with the column, so a
+   narrow column (a sidebar, a split pane) keeps them inside it instead of
+   widening the page. With `sticky=true` (the default) the line stays
    at the top of the window while its table is in view, with the column
    headers just below it; `--htmxo-sticky-top` moves both below an app's own
    sticky header. The table runtime measures the line
@@ -32337,9 +32343,9 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
 .htmxo-table-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem 1rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
 .htmxo-table-toolbar[hidden], .htmxo-table-toolbar > label[hidden] { display: none; }
 .htmxo-table-toolbar > * { margin: 0; }
-.htmxo-table-toolbar > label { display: flex; flex: 1 1 22rem; align-items: center; gap: .5rem; font-size: .875em; }
-.htmxo-table-toolbar > label > input[type="search"] { flex: 1 1 8rem; width: auto; min-width: 8rem; height: auto; margin: 0; padding-block: .3em; font-size: inherit; }
-.htmxo-table-toolbar > label > small { display: inline; width: auto; margin: 0; font-size: inherit; white-space: nowrap; }
+.htmxo-table-toolbar > label { display: flex; flex: 1 1 22rem; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; font-size: .875em; }
+.htmxo-table-toolbar > label > input[type="search"] { flex: 1 1 8rem; width: auto; min-width: min(8rem, 100%); height: auto; margin: 0; padding-block: .3em; font-size: inherit; }
+.htmxo-table-toolbar > label > small { display: inline; width: auto; margin: 0; font-size: inherit; }
 .htmxo-table-toolbar > .htmxo-tree-controls, .htmxo-table-toolbar > .htmxo-selection-bar { margin: 0; }
 .htmxo-table-toolbar[data-htmxo-sticky] { position: sticky; top: var(--htmxo-sticky-top, 0px); z-index: 3; padding-block: .35rem; background: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
 table[data-htmxo-sticky] > thead { position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px)); z-index: 2; }

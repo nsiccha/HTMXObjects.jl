@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.40
+
+- A table's search field, with its label and count, stays inside a column
+  narrower than their line instead of widening the page. The label kept its
+  text, the field (at least 8rem) and the unbroken count on one line, so in a
+  column narrower than that line (about 480 px with German texts: a sidebar, a
+  split pane, RegionExplorer's view pane at an 80 % map share) it ran past the
+  column. The label now wraps: its text, the field and the count each move to a
+  further line only when they no longer fit, the field shrinks below 8rem only
+  in a column narrower than that, and the count breaks only when it alone is
+  wider than the column. This covers `sortable_table`,
+  `render_table(searchable=true)` and `master_detail_table`. Where the line
+  fits, nothing moves. Two layouts change just above that width: a long search
+  text puts the count under the field instead of breaking its own text beside
+  them, and a grouped or selectable table can put the search beside its
+  *Group by* pills, one line fewer, where the search used to take a line of its
+  own.
+
 ## 0.1.39
 
 - A table cell with `data-status` shows its status under Pico, as the docs say:

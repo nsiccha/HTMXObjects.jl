@@ -454,10 +454,12 @@ document.addEventListener('htmxo:table-filtered', e => {
 The controls a table draws itself share one line above it: the search field
 with its count, then a `master_detail_table`'s *Group by* pills and
 *Expand all* / *Collapse all*, then the selection bar. The line wraps only
-when the window is too narrow. While the table is in view, that line stays at
-the top of the window and the column headers stay just below it, so a reader
-scrolling a long table keeps the search, the grouping and the column names in
-sight. This is the default for `sortable_table`, `render_table` and
+when the table's column is too narrow, and the search field's label, the field
+and the count wrap inside it too, so a narrow column (a sidebar, a split pane)
+keeps them inside it instead of widening the page. While the table is in view,
+that line stays at the top of the window and the column headers stay just
+below it, so a reader scrolling a long table keeps the search, the grouping and
+the column names in sight. This is the default for `sortable_table`, `render_table` and
 `master_detail_table`; a table without controls keeps only its header in view.
 
 - **A table that fits its column** scrolls with the page.
