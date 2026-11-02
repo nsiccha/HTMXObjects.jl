@@ -10,70 +10,16 @@
 # routes refer to it (`_schema_document`); `?inherited=inline` serves the flat
 # `reflect` array, which repeats every inherited `@param` on every route.
 
-# RFC-8259 string escaping. Mirrors Claude/src/services.jl:115's _json_encode.
-function _schema_json_encode(io::IO, x::AbstractString)
-    write(io, '"')
-    for c in x
-        if c == '"';      write(io, "\\\"")
-        elseif c == '\\'; write(io, "\\\\")
-        elseif c == '\b'; write(io, "\\b")
-        elseif c == '\f'; write(io, "\\f")
-        elseif c == '\n'; write(io, "\\n")
-        elseif c == '\r'; write(io, "\\r")
-        elseif c == '\t'; write(io, "\\t")
-        elseif c < ' ';   write(io, "\\u", lpad(string(UInt32(c); base=16), 4, '0'))
-        else;              write(io, c)
-        end
-    end
-    write(io, '"')
-end
-_schema_json_encode(io::IO, ::Nothing)  = write(io, "null")
-_schema_json_encode(io::IO, x::Bool)   = write(io, x ? "true" : "false")
-_schema_json_encode(io::IO, x::Integer) = write(io, string(x))
-function _schema_json_encode(io::IO, x::AbstractFloat)
-    isfinite(x) ? write(io, string(x)) : write(io, "null")
-end
-_schema_json_encode(io::IO, x::Symbol)           = _schema_json_encode(io, String(x))
-_schema_json_encode(io::IO, ::Type{T}) where {T} = _schema_json_encode(io, string(T))
-function _schema_json_encode(io::IO, xs::AbstractVector)
-    write(io, '[')
-    for (i, x) in enumerate(xs)
-        i == 1 || write(io, ',')
-        _schema_json_encode(io, x)
-    end
-    write(io, ']')
-end
-function _schema_json_encode(io::IO, xs::Tuple)
-    write(io, '[')
-    for (i, x) in enumerate(xs)
-        i == 1 || write(io, ',')
-        _schema_json_encode(io, x)
-    end
-    write(io, ']')
-end
-function _schema_json_encode(io::IO, dict::AbstractDict)
-    write(io, '{')
-    ordered = sort!(collect(pairs(dict)); by=pair -> string(first(pair)))
-    for (i, (k, v)) in enumerate(ordered)
-        i == 1 || write(io, ',')
-        _schema_json_encode(io, string(k))
-        write(io, ':')
-        _schema_json_encode(io, v)
-    end
-    write(io, '}')
-end
-function _schema_json_encode(io::IO, nt::NamedTuple)
-    write(io, '{')
-    for (i, (k, v)) in enumerate(pairs(nt))
-        i == 1 || write(io, ',')
-        _schema_json_encode(io, String(k))
-        write(io, ':')
-        _schema_json_encode(io, v)
-    end
-    write(io, '}')
-end
-_schema_json_encode(io::IO, x) = _schema_json_encode(io, string(x))
-_schema_json_encode(x) = sprint(_schema_json_encode, x)
+# Schema descriptors include Julia types and other display values. Project
+# those to their documented strings; JSON.jl handles all JSON syntax.
+_schema_value(x::Union{Nothing,Bool,Integer,AbstractString}) = x
+_schema_value(x::AbstractFloat) = isfinite(x) ? x : nothing
+_schema_value(x::Union{AbstractVector,Tuple,NamedTuple}) = map(_schema_value, x)
+_schema_value(x::AbstractDict) =
+    JSON.Object{String,Any}(string(k) => _schema_value(v) for (k, v) in _json_sorted_pairs(x))
+_schema_value(x::Pair) = (_schema_value(first(x)), _schema_value(last(x)))
+_schema_value(x) = string(x)
+_schema_json(x) = JSON.json(_schema_value(x))
 
 """
 Wire values of `GET /schema?inherited=`: `shared` (the default) describes each
@@ -172,7 +118,7 @@ and other tooling that needs a machine-readable route index.
 
     @get index(; inherited::SchemaInherited.Mode=SchemaInherited.shared) =
         MIMEResponse("application/json",
-                     _schema_json_encode(_schema_payload(root, inherited)))
+                     _schema_json(_schema_payload(root, inherited)))
 end
 
 """

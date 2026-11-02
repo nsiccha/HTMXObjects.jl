@@ -13278,7 +13278,7 @@ end
         @test request_job.scope === :request
         # The provider key never reaches a row, not even as its digest.
         @test !hasproperty(alice, :session)
-        @test !contains(HTMXObjects._schema_json_encode(runtime_snapshot(session_tracker)),
+        @test !contains(HTMXObjects._schema_json(runtime_snapshot(session_tracker)),
                         "alice")
 
         alice_board = board("alice")

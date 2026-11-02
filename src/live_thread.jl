@@ -184,12 +184,9 @@ is `@direct` because its answer IS the response headers: under the default
 fragment, not the original response's `HX-Trigger`.
 """
 function live_thread_refresh(target=nothing; bottom::Bool=true)
-    fields = String["\"bottom\":$(bottom)"]
-    isnothing(target) || push!(fields, "\"target\":" * _json_string(string(target)))
-    "{\"htmxo:thread-refresh\":{" * join(fields, ",") * "}}"
+    JSON.json((; var"htmxo:thread-refresh"=(; bottom,
+        (isnothing(target) ? (;) : (; target=string(target)))...)))
 end
-
-_json_string(s::AbstractString) = "\"" * escape_string(s, "\"") * "\""
 
 # `key => content` → the keyed item wrapper. The digest covers the rendered
 # content only, so the client can tell an unchanged item without comparing

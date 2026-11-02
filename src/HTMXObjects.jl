@@ -74,6 +74,7 @@ using LazyArtifacts
 import Dates
 import Random
 import CommonMark
+import JSON
 # gzip for `serve`'s response compression. HTTP.jl depends on it already.
 import CodecZlib
 # The file extension `export_site` gives an answer whose `Content-Type` its own
@@ -6654,7 +6655,7 @@ function url_params(; values=(;), params...)
     sent = [p.as for p in entries]
     allunique(sent) || throw(ArgumentError(
         "url_params: two parameters send the same request name ($(join(sent, ", ")))"))
-    (; data_htmxo_url_params = "[" * join((_url_param_json(p) for p in entries), ",") * "]")
+    (; data_htmxo_url_params = JSON.json([(p.name, p.as, p.value, p.values) for p in entries]))
 end
 
 # One declared parameter: its address name, the request name its value is sent
@@ -6673,19 +6674,15 @@ _url_param_wire(value) = _option_wire_string(value)
 _url_param_domain(::Nothing) = nothing
 _url_param_domain(domain) = String[_option_wire_string(v) for v in domain]
 
-_url_param_json(p) = "[" * _md_json_string(p.name) * "," * _md_json_string(p.as) * "," *
-    _json_or_null(_md_json_string, p.value) * "," * _json_or_null(_md_json_list, p.values) * "]"
-_json_or_null(f, ::Nothing) = "null"
-_json_or_null(f, x) = f(x)
-
 # The parameters `url_params` declared, read back from its attribute.
 function _url_params_decode(s::AbstractString)
     bad() = throw(ArgumentError("data-htmxo-url-params: not what url_params writes: $(repr(s))"))
-    tree = _json_string_tree(s, bad)
+    tree = _parse_attribute_json(s, bad)
     tree isa Vector || bad()
     map(tree) do p
-        p isa Vector && length(p) == 4 && p[1] isa String && p[2] isa String &&
-            p[3] isa Union{String,Nothing} && (isnothing(p[4]) || p[4] isa Vector && all(v -> v isa String, p[4])) || bad()
+        p isa Vector && length(p) == 4 && _attribute_string(p[1]) && _attribute_string(p[2]) &&
+            (isnothing(p[3]) || _attribute_string(p[3])) &&
+            (isnothing(p[4]) || p[4] isa Vector && all(_attribute_string, p[4])) || bad()
         (; name=p[1], as=p[2], value=p[3], values=isnothing(p[4]) ? nothing : String.(p[4]))
     end
 end
@@ -6760,21 +6757,20 @@ function _static_url_files(declared, address::AbstractString, rules::_StaticRule
     isempty(keyed) && return "{}", nothing
     own = any(p -> isnothing(p.value), keyed) ? nothing :
         _static_variant_target(rules, foldl((a, p) -> _url_with_param(a, p.as, p.value), keyed; init=address))
-    something(_static_url_files_json(keyed, 1, address, rules), "{}"), own
+    JSON.json(something(_static_url_files_tree(keyed, 1, address, rules), JSON.Object())), own
 end
 _static_url_files(declared, ::Nothing, rules::_StaticRules) = "{}", nothing
-function _static_url_files_json(keyed, i, address, rules)
+function _static_url_files_tree(keyed, i, address, rules)
     if i > length(keyed)
-        target = _static_variant_target(rules, address)
-        return isnothing(target) ? nothing : _md_json_string(target)
+        return _static_variant_target(rules, address)
     end
     p = keyed[i]
-    entries = String[]
+    entries = Pair{String,Any}[]
     for v in p.values
-        sub = _static_url_files_json(keyed, i + 1, _url_with_param(address, p.as, v), rules)
-        isnothing(sub) || push!(entries, _md_json_string(v) * ":" * sub)
+        sub = _static_url_files_tree(keyed, i + 1, _url_with_param(address, p.as, v), rules)
+        isnothing(sub) || push!(entries, v => sub)
     end
-    isempty(entries) ? nothing : "{" * join(entries, ",") * "}"
+    isempty(entries) ? nothing : JSON.Object{String,Any}(entries)
 end
 
 # A page address htmx writes into the address bar (`hx-push-url`,
@@ -11921,12 +11917,10 @@ _error_texts_value(texts) = throw(ArgumentError(string(
 
 # The texts the page shell's toast and request-feedback runtimes write, as the
 # JSON object they read.
-_toast_texts_json(texts::ErrorTexts) = string("{",
-    join((string(_md_json_string(string(n)), ":", _md_json_string(getfield(texts, n)))
-          for n in (:request_failed, :no_response, :timed_out, :dismiss, :loading, :loading_named)), ","),
-    ",\"reasons\":{",
-    join((string(_md_json_string(string(code)), ":", _md_json_string(phrase))
-          for (code, phrase) in texts.reasons), ","), "}}")
+_toast_texts_json(texts::ErrorTexts) = JSON.json((;
+    (n => getfield(texts, n) for n in
+        (:request_failed, :no_response, :timed_out, :dismiss, :loading, :loading_named))...,
+    reasons=JSON.Object(string(code) => phrase for (code, phrase) in texts.reasons)))
 
 # The `<html>` attributes that carry a page's toast texts; English is the
 # runtime's own default, so an English page stays byte-identical.
@@ -19399,31 +19393,19 @@ sort_values(values...) = (; data_htmxo_sort_keys = _sort_values_json(values))
 
 # One JSON array: a finite number as a number, a missing value as `null`,
 # anything else as its text.
-_sort_values_json(values) = "[" * join((_sort_value_json(v) for v in values), ",") * "]"
-_sort_value_json(::Union{Nothing,Missing}) = "null"
-_sort_value_json(x::Bool) = string(Int(x))
-_sort_value_json(x::Integer) = string(x)
-_sort_value_json(x::Real) = isfinite(x) ? string(Float64(x)) : "null"   # `2.0e4` is valid JSON
-_sort_value_json(x) = _md_json_string(string(x))
+_sort_values_json(values) = JSON.json([_sort_value(v) for v in values])
+_sort_value(::Union{Nothing,Missing}) = nothing
+_sort_value(x::Bool) = Int(x)
+_sort_value(x::Integer) = x
+_sort_value(x::Real) = let f = Float64(x); isfinite(f) ? f : nothing; end
+_sort_value(x) = string(x)
+_sort_value_valid(x) = x === nothing || _attribute_string(x) || (x isa Real && !(x isa Bool))
 
 # The number of values in a flat JSON array of numbers, strings and `null`
 # (what `sort_values` writes), to check a cell against its column's keys.
 function _sort_values_count(json::AbstractString)
-    s = strip(json)
-    startswith(s, '[') && endswith(s, ']') || return -1
-    inner = strip(SubString(s, 2, prevind(s, lastindex(s))))
-    isempty(inner) && return 0
-    n, quoted, escaped = 1, false, false
-    for c in inner
-        if quoted
-            escaped ? (escaped = false) : c == '\\' ? (escaped = true) : c == '"' && (quoted = false)
-        elseif c == '"'
-            quoted = true
-        elseif c == ','
-            n += 1
-        end
-    end
-    n
+    values = _parse_attribute_json(json, () -> nothing)
+    values isa Vector && all(_sort_value_valid, values) ? length(values) : -1
 end
 
 _interval_missing(x) = x === nothing || x === missing
@@ -21258,7 +21240,7 @@ function htmxoRegroupConfig(wrapper) {
     }
     return wrapper.htmxoRegroupConfig;
 }
-// `_md_safe_key` and `_md_json_list`, as the server writes them.
+// `_md_safe_key` and JSON.jl string arrays, as the server writes them.
 function htmxoSafeKey(key) { return String(key).replace(/[^A-Za-z0-9_\-]/gu, '--'); }
 // A group row's id holds the name of its table (`data-htmxo-group-scope`,
 // see `_grouped_master_detail_table`). Give `rows`, rendered under the name
@@ -21278,13 +21260,7 @@ function htmxoRescope(rows, from, to) {
     });
     return rename;
 }
-function htmxoJsonString(s) {
-    let out = '"';
-    for (const c of String(s))
-        out += c === '"' ? '\\' + '"' : c === '\\' ? '\\\\' : c < ' ' ? '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0') : c;
-    return out + '"';
-}
-function htmxoJsonList(xs) { return '[' + xs.map(htmxoJsonString).join(',') + ']'; }
+function htmxoJsonList(xs) { return JSON.stringify(xs.map(String)); }
 // A group summary over its leaves' inputs (`_md_summary_value`), folded left
 // to right, and written as the table writes numbers (`_md_summary_cell`).
 function htmxoSummaryValue(reduce, inputs) {
@@ -22390,9 +22366,7 @@ interval_sort_values(estimate, lower, upper) = sort_values(_interval_values(esti
 _table_text(texts::TableTexts, name::Symbol; values...) = _fill_text(getfield(texts, name); values...)
 
 # The texts as the JSON object `htmxoText` reads.
-_table_texts_json(texts::TableTexts) =
-    "{" * join((string(_md_json_string(string(n)), ":", _md_json_string(getfield(texts, n)))
-               for n in fieldnames(TableTexts)), ",") * "}"
+_table_texts_json(texts::TableTexts) = JSON.json(texts)
 
 # The outermost element of a table carries its texts for the browser runtime,
 # which writes the count, selection and lazy-detail lines; English is the
@@ -22598,61 +22572,9 @@ end
 # `sort_values` writes): `Float64`, `String` or `nothing` each.
 function _sort_values_parse(json::AbstractString)
     bad() = throw(ArgumentError("sortable_table: data-htmxo-sort-keys must be a flat JSON array of numbers, strings and null, got $(repr(json))"))
-    s = collect(strip(json))
-    (length(s) >= 2 && first(s) == '[' && last(s) == ']') || bad()
-    values = Any[]
-    i, stop = 2, length(s)
-    skip() = (while i < stop && isspace(s[i]); i += 1; end)
-    skip()
-    i == stop && return values
-    while true
-        if s[i] == '"'
-            io = IOBuffer()
-            i += 1
-            while true
-                i < stop || bad()
-                c = s[i]
-                c == '"' && break
-                if c == '\\'
-                    i + 1 < stop || bad()
-                    e = s[i += 1]
-                    if e == 'u'
-                        i + 4 < stop || bad()
-                        code = something(tryparse(UInt16, String(s[i+1:i+4]); base=16), 0x0000)
-                        i += 4
-                        if 0xd800 <= code <= 0xdbff && i + 6 < stop && s[i+1] == '\\' && s[i+2] == 'u'
-                            low = something(tryparse(UInt16, String(s[i+3:i+6]); base=16), 0x0000)
-                            if 0xdc00 <= low <= 0xdfff
-                                code = 0x10000 + (UInt32(code - 0xd800) << 10) + (low - 0xdc00)
-                                i += 6
-                            end
-                        end
-                        print(io, isvalid(Char, UInt32(code)) ? Char(UInt32(code)) : '�')
-                    else
-                        print(io, get(Dict('b' => '\b', 'f' => '\f', 'n' => '\n', 'r' => '\r', 't' => '\t'), e, e))
-                    end
-                else
-                    print(io, c)
-                end
-                i += 1
-            end
-            push!(values, String(take!(io)))
-            i += 1
-        else
-            j = i
-            while j < stop && s[j] != ',' && !isspace(s[j]); j += 1; end
-            token = String(s[i:j-1])
-            value = token == "null" ? nothing : tryparse(Float64, token)
-            token == "null" || !isnothing(value) || bad()
-            push!(values, value)
-            i = j
-        end
-        skip()
-        i == stop && return values
-        s[i] == ',' || bad()
-        i += 1
-        skip()
-    end
+    values = _parse_attribute_json(json, bad)
+    values isa Vector && all(_sort_value_valid, values) || bad()
+    map(x -> x isa Real ? Float64(x) : x, values)
 end
 
 # The browser compares texts with `localeCompare`. This approximates its
@@ -24788,91 +24710,24 @@ Malformed input throws an `ArgumentError`.
 """
 function group_path(key::AbstractString)
     bad() = throw(ArgumentError("group_path: not a JSON array of strings: $(repr(key))"))
-    path = _json_string_tree(key, bad)
-    path isa Vector && all(x -> x isa String, path) || bad()
+    path = _parse_attribute_json(key, bad)
+    path isa Vector && all(_attribute_string, path) || bad()
     String.(path)
 end
 
-# A JSON value built from strings, `null` and arrays only — the shapes the
-# tables and `url_params` write into attributes: a `String`, `nothing` or a
-# `Vector{Any}` of those. Anything else calls `bad()`.
-function _json_string_tree(json::AbstractString, bad)
-    s = String(json)
-    value, i = _json_string_tree_value(s, _md_json_skip(s, 1), bad)
-    _md_json_skip(s, i) > ncodeunits(s) || bad()
-    value
-end
-function _json_string_tree_value(s, i, bad)
-    i <= ncodeunits(s) || bad()
-    s[i] == '"' && return _md_json_read_string(s, i, bad)
-    if s[i] == 'n'
-        startswith(SubString(s, i), "null") || bad()
-        return nothing, i + 4
-    end
-    s[i] == '[' || bad()
-    out = Any[]
-    i = _md_json_skip(s, i + 1)
-    i <= ncodeunits(s) || bad()
-    s[i] == ']' && return out, i + 1
-    while true
-        value, i = _json_string_tree_value(s, i, bad)
-        push!(out, value)
-        i = _md_json_skip(s, i)
-        i <= ncodeunits(s) || bad()
-        s[i] == ']' && return out, i + 1
-        s[i] == ',' || bad()
-        i = _md_json_skip(s, i + 1)
+# Attribute values are Unicode strings; JSON.jl can also represent a lone
+# surrogate as an invalid Julia string, which is not a valid group/URL value.
+_attribute_string(x) = x isa String && isvalid(x)
+
+# Keep attribute-specific diagnostics while JSON.jl owns parsing and escaping.
+function _parse_attribute_json(s::AbstractString, bad)
+    try
+        JSON.parse(s)
+    catch err
+        err isa ArgumentError || rethrow()
+        bad()
     end
 end
-
-# Whitespace, quotes, brackets and commas are ASCII, so stepping a byte at a
-# time over them is safe; string contents go through `nextind`.
-_md_json_skip(s, i) = (while i <= ncodeunits(s) && s[i] in (' ', '\t', '\n', '\r'); i += 1; end; i)
-
-const _MD_JSON_ESCAPES = Dict('"' => '"', '\\' => '\\', '/' => '/', 'b' => '\b',
-    'f' => '\f', 'n' => '\n', 'r' => '\r', 't' => '\t')
-
-# One JSON string literal starting at `i` (its opening quote): its value and
-# the index after its closing quote.
-function _md_json_read_string(s, i, bad)
-    i <= ncodeunits(s) && s[i] == '"' || bad()
-    io = IOBuffer()
-    i += 1
-    while true
-        i <= ncodeunits(s) || bad()
-        c = s[i]
-        if c == '"'
-            return String(take!(io)), i + 1
-        elseif c == '\\'
-            i += 1
-            i <= ncodeunits(s) || bad()
-            e = s[i]
-            if e == 'u'
-                u = _md_json_hex4(s, i, bad)
-                i += 4
-                if 0xd800 <= u <= 0xdbff
-                    i + 6 <= ncodeunits(s) && s[i+1] == '\\' && s[i+2] == 'u' || bad()
-                    lo = _md_json_hex4(s, i + 2, bad)
-                    0xdc00 <= lo <= 0xdfff || bad()
-                    print(io, Char(0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00)))
-                    i += 6
-                else
-                    0xdc00 <= u <= 0xdfff && bad()
-                    print(io, Char(u))
-                end
-            else
-                print(io, get(bad, _MD_JSON_ESCAPES, e))
-            end
-        else
-            c < ' ' && bad()
-            print(io, c)
-        end
-        i = nextind(s, i)
-    end
-end
-# The four hex digits after the `u` at `i`.
-_md_json_hex4(s, i, bad) = i + 4 <= ncodeunits(s) && all(j -> isxdigit(Char(codeunit(s, j))), i+1:i+4) ?
-    parse(UInt32, s[i+1:i+4]; base=16) : bad()
 
 # How a number is rounded (`format_number`, `number_cell`, `ColumnSummary`):
 # to fixed decimals or to significant digits, halves away from zero; `nothing`
@@ -25005,11 +24860,8 @@ _md_tally_part!(parts, (c, n)::Pair) = let x = _md_summary_number(n)
 end
 _md_tally_part!(parts, c) = push!(parts, c => 1.0)
 
-_md_json_number(::Nothing) = "null"
-_md_json_number(x::Float64) = string(x)
-_md_json_number((a, b)::Tuple) = string("[", _md_json_number(a), ",", _md_json_number(b), "]")
-_md_json_number(parts::Vector{Pair{Any,Float64}}) =
-    "[" * join(("[" * _md_json_string(string(c)) * "," * _md_json_number(n) * "]" for (c, n) in parts), ",") * "]"
+_md_summary_wire(x) = x
+_md_summary_wire(parts::Vector{Pair{Any,Float64}}) = [(string(c), n) for (c, n) in parts]
 
 # A group's summary over its leaves' inputs, folded left to right as the
 # browser does (`htmxoSummaryValue`), so both round the same number.
@@ -25154,11 +25006,6 @@ _md_tally_scale_style(longest) = join(("--htmxo-tally-max-$(c)-$(l):$(_md_js_num
 _md_tally_order(cats, t::_Tally) = let known = Set(c.key for c in cats)
     [cats; [_TallyCategory(k, k, "var(--htmxo-category-other)") for (k, _) in t.counts if !(k in known)]]
 end
-# The JSON the browser regroups a :tally by: its categories.
-_md_summary_categories_json(::Nothing) = ""
-_md_summary_categories_json(cats::Vector{_TallyCategory}) = ",\"categories\":[" * join(("{\"key\":" * _md_json_string(c.key) *
-    ",\"label\":" * _md_json_string(c.label) * ",\"color\":" * _md_json_string(c.color) * "}" for c in cats), ",") * "]"
-
 """
     summary_cell(summary::ColumnSummary, items; texts=table_texts())
 
@@ -25181,8 +25028,8 @@ _summary_key(x::Float64, r::_SigDigits) = let (negative, ds, point) = _round_sig
     _format_digits(negative, ds, point, ".", "", false)
 end
 # How the browser rounds a summary: `"digits":k` or `"sigdigits":k`.
-_summary_rounding_json(r::_FixedDigits) = "\"digits\":$(r.k)"
-_summary_rounding_json(r::_SigDigits) = "\"sigdigits\":$(r.k)"
+_summary_rounding_fields(r::_FixedDigits) = (; digits=r.k)
+_summary_rounding_fields(r::_SigDigits) = (; sigdigits=r.k)
 
 """
     format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing) -> String
@@ -25567,7 +25414,7 @@ function interval_cell(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, w
 end
 # The three exact numbers the ⬇ CSV writes for an interval cell, as JSON
 # strings (`""` for no value).
-_interval_csv_json(values...) = "[" * join((isnothing(v) ? "\"\"" : _md_json_string(_number_key(v)) for v in values), ",") * "]"
+_interval_csv_json(values...) = JSON.json(map(v -> isnothing(v) ? "" : _number_key(v), values))
 
 # An `IntervalEstimate` is its cell wherever a table makes a float a
 # `number_cell`: a `render_table` column, a bare `master` cell, and the text
@@ -25651,17 +25498,6 @@ _md_text(x::Raw) = replace(x.html, r"<[^>]*>" => " ")
 _md_text(c::_LabelledControl) = _md_text(c.control)
 _md_text(::Nothing) = ""
 _md_text(x) = string(x)
-
-function _md_json_string(s::AbstractString)
-    io = IOBuffer()
-    print(io, '"')
-    for c in s
-        c == '"' ? print(io, "\\\"") : c == '\\' ? print(io, "\\\\") :
-        c < ' ' ? print(io, "\\u", string(UInt16(c); base=16, pad=4)) : print(io, c)
-    end
-    print(io, '"')
-    String(take!(io))
-end
 
 # Write each computed sort key's value of `item` on its column's cell
 # (`sort_values`); `cells` is the table's own copy of the master cells.
@@ -25748,11 +25584,11 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     ranked = _md_group_ranks(items, names, by_name, group_order)
     ranks = Dict(n => Dict(k => i for (i, k) in enumerate(ks)) for (n, ks) in ranked)
     level_ranks = [get(ranks, n, nothing) for n in glevels]
-    order_json = isempty(ranked) ? nothing :
-        "{" * join((_md_json_string(n) * ":" * _md_json_list(ks) for (n, ks) in ranked), ",") * "}"
+    order = isempty(ranked) ? nothing : JSON.Object(ranked)
+    order_json = isnothing(order) ? nothing : JSON.json(order)
     # What the rows are grouped by (a row update must match it), and the
     # `group_by` values a request sends to render this grouping again.
-    grouped_by = _md_json_list(levels)
+    grouped_by = JSON.json(levels)
     group_by_values = isempty(levels) ? [something(flat_name, "")] : levels
     nlevels == 0 && !isnothing(group_rows) && throw(ArgumentError(
         "master_detail_table: group_rows needs a grouping, but $(repr(requested)) is ungrouped"))
@@ -25820,7 +25656,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # name (`grow`). A leaf's row key names the group it is listed under
     # (`gid`, the caller's key keeps it unique); the flat view lists each
     # leaf once, under its own key.
-    gkey(path) = _md_json_list(path)
+    gkey(path) = JSON.json(path)
     gpath(k) = group_path(string(k))
     gid(path) = "group:" * join(path, "/")
     grow(path) = row_scope * gid(path)
@@ -25835,10 +25671,10 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     inputs(item) = get!(() -> Any[_md_summary_input(s, item) for (_, s) in summaries], leaf_inputs, string(key(item)))
     function leaf_data(item)
         data = Dict{Symbol,Any}(:data_htmxo_leaf_order => string(place[string(key(item))]),
-            :data_htmxo_leaf_keys => "{" * join((_md_json_string(n) * ":" * _md_json_list(_md_group_keys(by_name[n](item)))
-                                                 for n in grouping_names), ",") * "}")
+            :data_htmxo_leaf_keys => JSON.json(JSON.Object(n => _md_group_keys(by_name[n](item))
+                                                          for n in grouping_names)))
         isempty(summaries) || (data[:data_htmxo_leaf_values] =
-            "[" * join((_md_json_number(x) for x in inputs(item)), ",") * "]")
+            JSON.json(_md_summary_wire.(inputs(item))))
         data
     end
     # A :tally's categories over every leaf, so a category keeps its place
@@ -25949,14 +25785,15 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         # (with their keys at the levels below), the count counts each once,
         # a selection keeps their keys (and submits their values), and a
         # hover lights the group by their `link_key`, a third entry when given.
-        attrs[:data_htmxo_lazy_leaves] = "[" * join(("[" * _md_json_string(string(key(m))) * "," *
-            _md_json_string(join([[k for d in length(g.path)+1:nlevels for k in _md_group_keys(fns[d](m))]; leaf_text(m)], " ")) *
-            (isnothing(link) || isnothing(link_key) ? "" : "," * _md_json_string(string(link_key(m)))) * "]"
-            for m in g.members), ",") * "]"
+        attrs[:data_htmxo_lazy_leaves] = JSON.json([
+            (string(key(m)),
+             join([[k for d in length(g.path)+1:nlevels for k in _md_group_keys(fns[d](m))]; leaf_text(m)], " "),
+             (isnothing(link) || isnothing(link_key) ? () : (string(link_key(m)),))...)
+            for m in g.members])
         if !isnothing(selectable)
-            attrs[:data_htmxo_select_members] = "{" * join((string(_md_json_string(string(key(m))), ":",
-                isnothing(select_submit) || select_submit(m) ? _md_json_string(leaf_value(m)) : "null")
-                for m in g.members), ",") * "}"
+            attrs[:data_htmxo_select_members] = JSON.json(JSON.Object{String,Any}(string(key(m)) =>
+                (isnothing(select_submit) || select_submit(m) ? leaf_value(m) : nothing)
+                for m in g.members))
         end
         attrs
     end
@@ -26038,7 +25875,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     isnothing(target) || return h.tbody(; data_htmxo_group_rows=string(group_rows),
         data_htmxo_group_scope=row_scope)(built[length(target)+1:end]...)
     update && return built
-    grouping = (; data_htmxo_grouped=grouped_by, data_htmxo_group_by=_md_json_list(group_by_values),
+    grouping = (; data_htmxo_grouped=grouped_by, data_htmxo_group_by=JSON.json(group_by_values),
         data_htmxo_group_scope=row_scope)
     browser || return h.div(; grouping..., scale_style...)(built)
     # The browser builds each group row from this one, rendered like the
@@ -26056,13 +25893,13 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
     # the browser puts them back when the reader picks the tree again.
     stash = isnothing(outline) ? () : (html_only(h.template(; data_htmxo_tree="")(
         (tree_active ? () : outline_rows(true))...)),)
-    config = string("{\"names\":", _md_json_list([n for n in names if !isnothing(by_name[n])]),
-        ",\"flat\":", isnothing(flat_name) ? "null" : _md_json_string(flat_name),
-        isnothing(outline) ? "" : ",\"tree\":" * _md_json_string(outline.name),
-        ",\"open\":", initially_open === true, ",\"refresh\":", refresh,
-        ",\"summary\":[", join(("{\"reduce\":\"$(s.reduce)\",$(_summary_rounding_json(s.rounding))$(_md_summary_categories_json(categories[i]))}"
-                                 for (i, (_, s)) in enumerate(summaries)), ","), "]",
-        isnothing(order_json) ? "" : ",\"order\":" * order_json, "}")
+    config = JSON.json((; names=[n for n in names if !isnothing(by_name[n])], flat=flat_name,
+        (isnothing(outline) ? (;) : (; tree=outline.name))...,
+        open=initially_open === true, refresh,
+        summary=[(; reduce=string(s.reduce), _summary_rounding_fields(s.rounding)...,
+                    (isnothing(categories[i]) ? (;) : (; categories=categories[i]))...)
+                 for (i, (_, s)) in enumerate(summaries)],
+        (isnothing(order) ? (;) : (; order))...))
     h.div(; grouping..., scale_style..., data_htmxo_regroup=config)(template..., store, stash..., built)
 end
 
@@ -26126,8 +25963,6 @@ _md_update_keys(::Nothing) = String[]
 _md_update_keys(keys::Union{AbstractVector,Tuple,AbstractSet}) = unique!([string(k) for k in keys])
 _md_update_keys(k) = [string(k)]
 
-_md_json_list(xs) = "[" * join((_md_json_string(string(x)) for x in xs), ",") * "]"
-
 # Where an update's rows sit among their siblings in the full table, for the
 # runtime to put a row that is new to the page, or has moved, where a full
 # render would: for each listed row whose preceding sibling is not listed, the
@@ -26161,11 +25996,11 @@ function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[]
     isnothing(group_scope) || push!(attrs, :data_htmxo_group_scope => group_scope)
     isnothing(order) || push!(attrs, :data_htmxo_group_order => order)
     group_masters && push!(attrs, :data_htmxo_group_masters => "")
-    isempty(ids) || push!(attrs, :data_htmxo_update_ids => _md_json_list(ids))
-    isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => _md_json_list(leaves))
-    isempty(groups) || push!(attrs, :data_htmxo_update_groups => _md_json_list(groups))
+    isempty(ids) || push!(attrs, :data_htmxo_update_ids => JSON.json(ids))
+    isempty(leaves) || push!(attrs, :data_htmxo_update_leaves => JSON.json(leaves))
+    isempty(groups) || push!(attrs, :data_htmxo_update_groups => JSON.json(groups))
     isempty(places) || push!(attrs, :data_htmxo_update_places =>
-        "{" * join((_md_json_string(row) * ":" * _md_json_list(around) for (row, around) in places), ",") * "}")
+        JSON.json(JSON.Object(places)))
     h.tbody(; attrs...)(rows...)
 end
 
@@ -27355,7 +27190,7 @@ function _relevance_wrapped(control, obj, param)
     relevance === nothing && return control
     hidden_attrs = _param_relevant(obj, param.name) ? (;) : (; hidden=true)
     client_attrs = isnothing(relevance.client) ? (;) :
-        (; data_show_when=sprint(_schema_json_encode, relevance.client))
+        (; data_show_when=_schema_json(relevance.client))
     h.div(control; class="htmxo-relevant", data_htmxo_relevant=string(param.name),
           hidden_attrs..., client_attrs...)
 end
@@ -28894,7 +28729,7 @@ function _semantic_address_attrs(defaults, params)
     isnothing(defaults) && return (;)
     kept = Dict{String,Any}(string(param.name) => defaults[param.name]
                             for param in params if haskey(defaults, param.name))
-    isempty(kept) ? (;) : (; data_htmxo_address=sprint(_schema_json_encode, kept))
+    isempty(kept) ? (;) : (; data_htmxo_address=_schema_json(kept))
 end
 
 """
@@ -32758,7 +32593,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // status line over its visible box naming what is coming. The words are
     // the page's error texts (`htmx(...; error_texts)` puts them on <html>).
     var LOADING_DELAY = 300;
-    var ENGLISH = {loading: $(_md_json_string(_EN_ERROR_TEXTS.loading)), loading_named: $(_md_json_string(_EN_ERROR_TEXTS.loading_named))};
+    var ENGLISH = {loading: $(JSON.json(_EN_ERROR_TEXTS.loading)), loading_named: $(JSON.json(_EN_ERROR_TEXTS.loading_named))};
     function loadingTexts() {
         var raw = document.documentElement.getAttribute('data-htmxo-error-texts');
         var t = raw ? JSON.parse(raw) : {};

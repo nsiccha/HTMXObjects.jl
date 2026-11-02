@@ -134,7 +134,7 @@ using TestItemRunner
     function demo_models()
         x, y, z = [1.0, 2.0, 3.0], [0.4, 1.1, 1.3], [[0.1, -0.2], [0.3]]
         alpha, sigma = [0.5, -0.3], [1.2, 0.8]
-        stan = _PyModel("stan", ["model.stan" => STAN, "interface.json" => HTMXObjects._schema_json_encode(INTERFACE)],
+        stan = _PyModel("stan", ["model.stan" => STAN, "interface.json" => HTMXObjects._schema_json(INTERFACE)],
             [_PyModelVar("x", numbers), _PyModelVar("y", numbers),
              _PyModelVar("z", Dict{String,Any}("type" => "array", "items" => numbers))],
             [_PyModelVar("alpha", number), _PyModelVar("sigma", number)], 0,
