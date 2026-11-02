@@ -38,26 +38,11 @@ jobs:
       - uses: quarto-dev/quarto-actions/setup@v2
         with:
           version: 1.10.18
-      # python_service's generated FastAPI service is checked with pycodestyle,
-      # pytest and FastAPI's test client, in the Python HTMXO_TEST_PYTHON names.
-      - uses: actions/setup-python@v5
-        id: python
-        with:
-          python-version: '3.12'
-      # Installed from Julia, so pip picks wheels for the architecture the
-      # tests start Python in: on the arm64 macOS runner the x64 Julia runs
-      # under Rosetta, and its children run the universal2 Python as x86_64.
-      - name: Install the generated Python service's dependencies
-        shell: bash
-        env:
-          HTMXO_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
-        run: julia --color=no -e 'run(`$(ENV["HTMXO_TEST_PYTHON"]) -m pip install fastapi pydantic uvicorn python-multipart httpx pytest pycodestyle`)'
       - name: Run tests
         shell: bash
         env:
           HTMXO_TEST_PROGRESS: "1"
           HTMXO_QUARTO_TESTS: "1"
-          HTMXO_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set +e
           julia --project=. --color=no -e 'using Pkg; Pkg.test(; coverage=true)' 2>&1 | tee test-output.log
@@ -87,76 +72,3 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
         with:
           fail_ci_if_error: false
-  # python_service(…; models=): the StanBlocks and ReactiveKernelsPPL
-  # extensions, and the generated nutpie/BridgeStan and NumPyro runtimes
-  # checked against the Julia models (test/python_models.jl). The matrix skips
-  # both: they need a Julia project with the two packages (HTMXO_TEST_MODELS)
-  # and a Python with the model runtimes (HTMXO_TEST_PYTHON_MODELS=1 makes a
-  # skip fail).
-  models:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      # The releases python_service pins (src/python_models.jl); a :unit item
-      # of test/python_models.jl checks that these agree.
-      BRIDGESTAN_VERSION: '2.9.0'
-      NUTPIE_VERSION: '0.16.11'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure git for private repos
-        run: git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
-      - uses: julia-actions/setup-julia@v2
-        with:
-          version: 'lts'
-      - uses: julia-actions/cache@v2
-      - name: Install unregistered dependencies
-        run: julia --project=. test/provision.jl
-      - uses: julia-actions/julia-buildpkg@v1
-      # Outside the checkout, so TestItemRunner does not scan their test items.
-      - name: Julia project with StanBlocks and ReactiveKernelsPPL
-        run: |
-          deps="$RUNNER_TEMP/ci-deps"
-          mkdir -p "$deps"
-          git clone -q -b dev https://github.com/nsiccha/HTMX.jl "$deps/HTMX.jl"
-          git clone -q -b pre-inference https://github.com/nsiccha/DynamicObjects.jl "$deps/DynamicObjects.jl"
-          git clone -q https://github.com/nsiccha/OutputSignatures.jl "$deps/OutputSignatures.jl"
-          # The revision HTMXObjects' [sources] pins (Julia 1.10 ignores [sources]).
-          treebars=$(julia --startup-file=no -e 'import TOML; s = TOML.parsefile("Project.toml")["sources"]["Treebars"]; print(s["url"], " ", s["rev"])')
-          read -r treebars_url treebars_rev <<< "$treebars"
-          git clone -q "$treebars_url" "$deps/Treebars.jl"
-          git -C "$deps/Treebars.jl" checkout -q "$treebars_rev"
-          git clone -q -b main https://github.com/nsiccha/ReactiveKernels.jl "$deps/ReactiveKernels.jl"
-          git clone -q -b devibe https://github.com/nsiccha/StanBlocks.jl "$deps/StanBlocks.jl"
-          julia --project="$RUNNER_TEMP/models-env" -e '
-            using Pkg
-            deps = joinpath(ENV["RUNNER_TEMP"], "ci-deps")
-            rk = joinpath(deps, "ReactiveKernels.jl")
-            Pkg.develop([PackageSpec(path=pwd()),
-                         PackageSpec(path=joinpath(deps, "HTMX.jl")),
-                         PackageSpec(path=joinpath(deps, "DynamicObjects.jl")),
-                         PackageSpec(path=joinpath(deps, "OutputSignatures.jl")),
-                         PackageSpec(path=joinpath(deps, "Treebars.jl")),
-                         PackageSpec(path=rk),
-                         PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsDistributionKernels")),
-                         PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsPPL")),
-                         PackageSpec(path=joinpath(deps, "StanBlocks.jl"))])
-            Pkg.instantiate()
-            Pkg.precompile()'
-      - uses: actions/setup-python@v5
-        id: python
-        with:
-          python-version: '3.12'
-      - name: Install the generated service's dependencies and the model runtimes
-        run: ${{ steps.python.outputs.python-path }} -m pip install fastapi pydantic uvicorn python-multipart httpx pytest pycodestyle "bridgestan==$BRIDGESTAN_VERSION" "nutpie[stan]==$NUTPIE_VERSION" jax numpyro scipy
-      # BridgeStan's C++ source with the Stan compiler and the libraries its
-      # first compile builds; the runtime downloads it there when it is missing.
-      - uses: actions/cache@v4
-        with:
-          path: ~/.bridgestan
-          key: bridgestan-${{ env.BRIDGESTAN_VERSION }}-${{ runner.os }}
-      - name: Run test/python_models.jl
-        env:
-          HTMXO_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
-          HTMXO_TEST_PYTHON_MODELS: "1"
-          HTMXO_TEST_MODELS: ${{ runner.temp }}/models-env
-        run: julia --project=. --color=no test/select.jl --file=test/python_models.jl

@@ -48,7 +48,7 @@ export GalleryItem, Gallery, gallery_grid, gallery_toolbar, gallery_controls_scr
     gallery_card, default_gallery_card, htmxo_gallery_styles, htmxo_syntax_head, find_item, section_items, parse_gallery_metadata
 export TestItemInfo, discover_test_items
 export test_list, test_output, test_run!, test_run_all!, test_run_failed!, test_run_missing!, test_run_batch!, test_run_tag!, test_clear_cache!
-export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes, python_service
+export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes, openapi, SwaggerRoutes
 export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracker,
     runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
     clear_runtime_history!, runtime_jobs, track_job!, jobs_board,
@@ -26063,9 +26063,6 @@ include("routes/structure_routes.jl")
 include("json_response.jl")
 
 include("routes/openapi_routes.jl")
-
-include("python_service.jl")
-include("python_models.jl")
 
 include("routes/reflection_routes.jl")
 
