@@ -5191,23 +5191,27 @@ end
         # Selected packages only, created dir, load order (not request order).
         written = copy_vendorfiles(out; packages=(:pico, :htmx))
         @test written[1:2] == [joinpath(out, "htmx.min.js"), joinpath(out, "pico.min.css")]
+        # Pico's 19 colour builds follow its default build (`pico_color`).
+        pico = [joinpath(out, file) for file in first.(HTMXObjects._vendor_files(:pico))]
+        @test length(pico) == 20 && written[2:21] == pico
         # The page runtime follows, under `htmxo/` as `vendorfiles` mounts it.
-        @test !isempty(written[3:end]) && all(f -> dirname(f) == joinpath(out, "htmxo"), written[3:end])
-        @test sort(readdir(out)) == ["htmx.min.js", "htmxo", "pico.min.css"]
+        @test !isempty(written[22:end]) && all(f -> dirname(f) == joinpath(out, "htmxo"), written[22:end])
+        @test sort(readdir(out)) == sort(["htmx.min.js", "htmxo", basename.(pico)...])
         # Byte-identical to what `vendorfiles` serves.
         vendorfiles()
-        for f in ("htmx.min.js", "pico.min.css", "htmxo/theme.css")
+        for f in ("htmx.min.js", "pico.min.css", "pico.cyan.min.css", "htmxo/theme.css")
             @test read(joinpath(out, f), String) == String(dispatch(:GET, "/vendor/$f").body)
         end
         # Copies are writable, so a re-copy overwrites in place; the runtime
         # is skipped on request.
         @test copy_vendorfiles(out; packages=["htmx"], runtime=false) == [joinpath(out, "htmx.min.js")]
-        # The default copies all eight pins: six library files, KaTeX's
-        # stylesheet, script and 60 fonts, and PrismJS's core, autoloader and
-        # 297 language grammars, each package in its own directory.
+        # The default copies all eight pins: six library files and Pico's 19
+        # colour builds, KaTeX's stylesheet, script and 60 fonts, and
+        # PrismJS's core, autoloader and 297 language grammars, KaTeX and
+        # PrismJS each in its own directory.
         copied = copy_vendorfiles(joinpath(dir, "all"); runtime=false)
-        @test length(filter(isfile, copied)) == 6 + 2 + 60 + 2 + 297
-        @test count(f -> dirname(f) == joinpath(dir, "all"), copied) == 6
+        @test length(filter(isfile, copied)) == 6 + 19 + 2 + 60 + 2 + 297
+        @test count(f -> dirname(f) == joinpath(dir, "all"), copied) == 6 + 19
         @test_throws ArgumentError copy_vendorfiles(dir; packages=(:jquery,))
     end
 
