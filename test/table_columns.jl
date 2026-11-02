@@ -225,3 +225,154 @@ using TestItemRunner
         end
     end
 end
+
+# Snag table-geometry-m-bec37646: every htmx swap anywhere on the page made the
+# table runtime read layout for every table (`clientWidth` after each
+# `htmx:afterSwap`, every sticky toolbar and header after each
+# `htmx:afterSettle`), so the browser restyled and laid out the page inside
+# those reads, once per swap and per settle. A swap that changes no size now
+# reads nothing: it puts back what a morph dropped from the values last
+# measured, and the ResizeObserver measures any change of size. Positive
+# controls: the stripped values come back, and a taller toolbar is measured.
+# On the base runtime the three read counts fail.
+@testitem "a swap that changes no table's size reads no table geometry" tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        items = [(; id="r$i", name="Agent $i", kind=isodd(i) ? "busy" : "idle") for i in 1:40]
+        cell(t) = h.td(; id="act-" * t.id)(t.id * " s")
+        roster = master_detail_table(["Name", "Kind", "Last activity"], items; key=t -> "row-" * t.id,
+            master=t -> (h.td(t.name), h.td(t.kind), cell(t)), detail=t -> h.p(t.name),
+            groupings=["None" => nothing, "Kind" => t -> t.kind], group_by="None", searchable=true, id="roster")
+        driver = h.script(Raw(raw"""
+        const pause = ms => new Promise(r => setTimeout(r, ms));
+        const report = body => fetch('/complete', {method: 'POST', body});
+        window.addEventListener('error', e => report('error ' + e.message));
+        // Geometry reads made from the table runtime's own functions.
+        let reads = 0;
+        const counted = () => { if (/htmxo(Columns|Sticky)/.test(new Error().stack)) reads++; };
+        [[Element.prototype, ['clientWidth', 'clientHeight', 'scrollWidth', 'scrollHeight']],
+         [HTMLElement.prototype, ['offsetWidth', 'offsetHeight', 'offsetTop', 'offsetLeft', 'offsetParent']]]
+          .forEach(([proto, names]) => names.forEach(name => {
+            const get = Object.getOwnPropertyDescriptor(proto, name).get;
+            Object.defineProperty(proto, name, {configurable: true, get() { counted(); return get.call(this); }});
+          }));
+        const rect = Element.prototype.getBoundingClientRect;
+        Element.prototype.getBoundingClientRect = function() { counted(); return rect.call(this); };
+        const style = window.getComputedStyle;
+        window.getComputedStyle = function(...args) { counted(); return style.apply(this, args); };
+        // A real htmx swap, then time for the observer and the queued tasks.
+        const swap = (target, url, how) => new Promise(resolve => {
+          document.addEventListener('htmx:afterSettle', () => setTimeout(resolve, 400), {once: true});
+          htmx.ajax('GET', url, {target, swap: how, source: target});
+        });
+        window.addEventListener('load', async () => {
+          await pause(500);
+          const out = {}, table = document.querySelector('table[data-htmxo-sticky]'), wrap = table.parentElement;
+          const toolbar = document.querySelector('.htmxo-table-toolbar[data-htmxo-sticky]');
+          const state = () => [table.dataset.htmxoColumns, table.style.width,
+            Array.from(table.querySelectorAll(':scope > colgroup > col')).map(c => c.style.width).join(' '),
+            table.style.getPropertyValue('--htmxo-table-head-h'), wrap.dataset.htmxoWidth,
+            toolbar.parentElement.style.getPropertyValue('--htmxo-table-toolbar-h')].join('|');
+          const held = state();
+          out.measured = held.startsWith('held|') && !held.includes('||') ? 1 : 0;
+          try {
+            // One cell of the table answered as it was, then a swap outside every table.
+            reads = 0;
+            await swap(document.getElementById('act-r7'), '/cell?id=r7', 'outerHTML');
+            out.cellReads = reads;
+            out.cellSame = state() === held ? 1 : 0;
+            reads = 0;
+            await swap(document.getElementById('panel'), '/panel', 'innerHTML');
+            out.panelReads = reads;
+            // A morph to the server's markup drops the colgroup and every measured
+            // value during the swap; the swap puts them all back as they were.
+            const panel = document.getElementById('panel');
+            panel.addEventListener('htmx:afterSwap', () => {
+              table.querySelector(':scope > colgroup[data-htmxo-columns]').remove();
+              table.removeAttribute('style');
+              table.dataset.htmxoColumns = '';
+              delete wrap.dataset.htmxoWidth;
+              toolbar.parentElement.removeAttribute('style');
+              out.stripped = state() === held ? 0 : 1;
+            }, {once: true});
+            reads = 0;
+            await swap(panel, '/panel', 'innerHTML');
+            out.restored = state() === held ? 1 : 0;
+            out.restoreReads = reads;
+            // A toolbar grown taller is measured anew, by the observer: its padding
+            // too, which leaves its content box as it was.
+            reads = 0;
+            toolbar.style.paddingBottom = '40px';
+            await pause(500);
+            const grown = toolbar.parentElement.style.getPropertyValue('--htmxo-table-toolbar-h');
+            out.regrown = grown === toolbar.offsetHeight + 'px' && grown !== held.split('|')[5] ? 1 : 0;
+            out.growReads = reads;
+          } catch (e) { return report('error ' + e.message); }
+          report(Object.entries(out).map(([k, v]) => k + ' ' + v).join('\n'));
+        });
+        """))
+        vendor = Dict(HTMXObjects._vendor_files(:htmx)..., HTMXObjects._vendor_files(:pico)...)
+        content = h.main(; class="container")(h.div(; id="panel")("load 0"), roster, driver)
+        page = repr("text/html", htmx(content; assets="/vendor", pico_version=HTMXObjects._PICO_VERSION,
+            sse_version=nothing, ws_version=nothing, hyperscript_version=nothing, preload_version=nothing,
+            katex_version=nothing))
+        html(s) = HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], s)
+        result = Channel{String}(1)
+        served = String[]
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            path = uri.path
+            push!(served, req.target)
+            path == "/" && return html(page)
+            if startswith(path, "/vendor/") && haskey(vendor, path[9:end])
+                type = endswith(path, ".css") ? "text/css" : "application/javascript"
+                return HTTP.Response(200, ["Content-Type" => type], read(vendor[path[9:end]]))
+            end
+            if path == "/cell"
+                t = items[findfirst(t -> t.id == HTTP.queryparams(uri)["id"], items)]
+                return html(repr("text/html", cell(t)))
+            end
+            path == "/panel" && return html("load 1")
+            path == "/complete" && (isready(result) || put!(result, String(req.body)); return HTTP.Response(204))
+            HTTP.Response(404)
+        end
+        got = try
+            mktempdir() do profile
+                log = joinpath(profile, "browser.log")
+                browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,1000 --enable-logging=stderr --v=0 --user-data-dir=$profile http://127.0.0.1:$port/`;
+                    stdout=devnull, stderr=log); wait=false)
+                try
+                    timedwait(() -> isready(result) || process_exited(browser), 60; pollint=0.1)
+                    isready(result) || error("the page reported nothing; requests: " * join(served, ", ") *
+                        "\nbrowser log:\n" * read(log, String))
+                    body = take!(result)
+                    startswith(body, "error ") && error("the page failed: " * body[7:end] *
+                        "\nrequests: " * join(served, ", "))
+                    Dict(first(kv) => parse(Int, last(kv)) for kv in split.(split(body, '\n')))
+                finally
+                    process_exited(browser) || kill(browser)
+                    wait(browser)
+                end
+            end
+        finally
+            close(server)
+        end
+        @info "Geometry reads per swap" got
+        @test got["measured"] == 1
+        @test got["cellReads"] == 0
+        @test got["cellSame"] == 1
+        @test got["panelReads"] == 0
+        @test got["stripped"] == 1
+        @test got["restored"] == 1
+        @test got["restoreReads"] == 0
+        @test got["regrown"] == 1
+        @test got["growReads"] > 0
+    end
+end
