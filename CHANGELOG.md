@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.39
+
+- A table cell with `data-status` shows its status under Pico, as the docs say:
+  `<td data-status="success">` and `th` are bold and take the status colour.
+  Pico's own cell rule hid both before, so such cells become coloured and bold,
+  and a `muted` cell becomes grey and bold. An app's stylesheet still wins, even
+  a bare `td`, and `tr[data-status]` leaves its cells as they are.
+- `--htmxo-success`, `--htmxo-warning` and `--htmxo-error` now hold 4.5:1 as
+  text in light as well as in dark: `light-dark(#217d72, #2a9d8f)`,
+  `light-dark(#9c6311, #e9a23b)` and `light-dark(#ca3f1c, #e76f51)`. The dark
+  shades are unchanged. In light they were 3.32, 2.17 and 3.09:1 on a white page.
+  Filled badges, `SemanticStatus` and banner edges use the same tones. A page
+  that declares no `color-scheme` gets the light shades. `pico_bridge()` no longer
+  names `--pico-color-green-550` and its siblings, which Pico's page stylesheet
+  never defined.
+- Status text in a hover-lit or selected table row moves towards the text
+  colour like the row's other tones, so it keeps 4.5:1 on the tint.
+
 ## 0.1.38
 
 - Text in a table row that hover linking (`link=`) lights or a selection marks

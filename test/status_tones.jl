@@ -19,6 +19,10 @@ using TestItemRunner
     for status in ("success", "error", "warning", "muted")
         @test contains(bridge, ":is(td, th):where([data-status=\"$status\"]) { color: var(--htmxo-$status); }")
     end
+    # They move with a tinted row's other tones (test/table_linking.jl measures it).
+    for token in ("--htmxo-success", "--htmxo-warning", "--htmxo-error")
+        @test token in first.(HTMXObjects._TINTED_ROW_TONES)
+    end
     # Every page gets the tones; only a Pico page has a cell rule to outweigh.
     @test contains(css(htmx(h.p("x"))), "light-dark(#217d72, #2a9d8f)")
     @test !contains(css(htmx(h.p("x"))), ":is(td, th):where([data-status")

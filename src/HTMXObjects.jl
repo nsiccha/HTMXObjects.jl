@@ -21797,10 +21797,10 @@ function htmxoSortState(target) {
 }
 """
 
-# A tinted row keeps its text readable. Pico's link, slate and muted tones sit
-# barely above 4.5:1 on the page (dark muted text at 4.6:1), so any tint that
-# still shows drops them below it, and a tint pale enough not to (1% in dark) is
-# no marker at all. So inside the row each tone moves towards the text colour,
+# A tinted row keeps its text readable. Pico's link, slate and muted tones and
+# HTMXO's status tones sit barely above 4.5:1 on the page (dark muted text at
+# 4.6:1), so any tint that still shows drops them below it, and a tint pale
+# enough not to (1% in dark) is no marker at all. So inside the row each tone moves towards the text colour,
 # keeping its hue: a link still reads as a link, a deletion as a deletion. A
 # custom property cannot read its own inherited value, so the mix sits on the row
 # and the cells re-point Pico's token at it; `a` and `button` then rewrite their
@@ -21811,7 +21811,8 @@ function htmxoSortState(target) {
 const _TINTED_ROW_TONES = ("--pico-primary" => "primary", "--pico-primary-hover" => "primary-hover",
     "--pico-secondary" => "secondary", "--pico-secondary-hover" => "secondary-hover",
     "--pico-muted-color" => "muted", "--htmxo-muted" => "htmxo-muted",
-    "--pico-del-color" => "del", "--pico-ins-color" => "ins")
+    "--pico-del-color" => "del", "--pico-ins-color" => "ins",
+    "--htmxo-success" => "success", "--htmxo-warning" => "warning", "--htmxo-error" => "error")
 _tinted_row_css(rows) = """
 $rows { $(join(("--htmxo-tinted-$name: color-mix(in srgb, var($token) 40%, var(--pico-contrast, CanvasText));" for (token, name) in _TINTED_ROW_TONES), " ")) }
 $rows > td { $(join(("$token: var(--htmxo-tinted-$name);" for (token, name) in _TINTED_ROW_TONES), " ")) }
@@ -22892,9 +22893,9 @@ fires a bubbling `htmxo:selection-changed` event on the wrapper with `detail`
 `{name, keys, rows, submitted, hidden}`. `htmxoSelectRows(target, keys)` sets
 the selection (`[]` clears) and `htmxoSelectedKeys(target)` reads it. The
 selected row is tinted and the active row marked with `--htmxo-accent`
-(override the tint with `--htmxo-selected-row`). Links, muted text, slate
-buttons and `del`/`ins` in a selected or lit row take a stronger version of
-their colour, so they keep 4.5:1 on the tint. Selection needs
+(override the tint with `--htmxo-selected-row`). Links, muted text, status
+text, slate buttons and `del`/`ins` in a selected or lit row take a stronger
+version of their colour, so they keep 4.5:1 on the tint. Selection needs
 [`sortable_table_js`](@ref) on the page, which the [`htmx`](@ref) shell carries.
 
 # Hover linking
