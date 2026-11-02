@@ -467,7 +467,7 @@ end
         # A row update marked as the group rows of this grouping: nothing in
         # its scope to remove, only where the first row of each level goes.
         @test startswith(answer, "<tbody data-htmxo-row-update=\"g\" data-htmxo-grouped=\"" *
-            replace(HTMXObjects._md_json_list(group_by), "\"" => "&quot;") * "\" data-htmxo-group-scope=\"g:\" data-htmxo-group-masters=\"\" data-htmxo-update-places=")
+            replace(HTMXObjects.JSON.json(group_by), "\"" => "&quot;") * "\" data-htmxo-group-scope=\"g:\" data-htmxo-group-masters=\"\" data-htmxo-update-places=")
         @test !contains(answer, "data-htmxo-update-ids") && !contains(answer, "data-htmxo-update-leaves") &&
             !contains(answer, "data-htmxo-update-groups")
     end

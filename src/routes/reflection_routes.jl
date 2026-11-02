@@ -22,19 +22,6 @@
 # scoped stylesheet; native headings, links, forms, tables, details and
 # `aria-*` state keep the entire surface usable without JavaScript.
 
-# `Vector{Pair{Symbol,NamedTuple}}` is the shape DynamicObjects uses for
-# `@options` declarations, and the shared encoder has no Pair method (nothing
-# in `reflect`'s output is a Pair, which is why `/schema` never needed one).
-# Encoded as a 2-element array so key and value stay distinguishable — the
-# catch-all would otherwise stringify the whole pair into one opaque `"a => b"`.
-function _schema_json_encode(io::IO, p::Pair)
-    write(io, '[')
-    _schema_json_encode(io, first(p))
-    write(io, ',')
-    _schema_json_encode(io, last(p))
-    write(io, ']')
-end
-
 # --- small view helpers ----------------------------------------------------
 
 _view_code(x) = h.code(string(x))
@@ -888,14 +875,14 @@ or neither.
                                   live_available=target !== nothing)
     end
     @get graph() = MIMEResponse("application/json",
-                                _schema_json_encode(semantic_descriptor(root).graph))
+                                _schema_json(semantic_descriptor(root).graph))
     @get descriptor() = MIMEResponse("application/json",
-        _schema_json_encode(application_descriptor(root; contributions)))
+        _schema_json(application_descriptor(root; contributions)))
     @get observations() = begin
         target === nothing && throw(ArgumentError(
             "ReflectionRoutes observations require an explicit target object"))
         local app_graph = application_descriptor(root; contributions)
         MIMEResponse("application/json",
-                     _schema_json_encode(application_observations(target, app_graph)))
+                     _schema_json(application_observations(target, app_graph)))
     end
 end

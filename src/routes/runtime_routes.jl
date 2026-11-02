@@ -484,7 +484,7 @@ headers, cookies or bodies.
     @fresh @direct @get snapshot() = begin
         _runtime_hide_request!(__req__)
         MIMEResponse("application/json",
-            _schema_json_encode(runtime_snapshot(something(tracker, runtime_tracker()))))
+            _schema_json(runtime_snapshot(something(tracker, runtime_tracker()))))
     end
     @direct @post clear(; live::Bool=true, limit::Int=100) = begin
         _runtime_hide_request!(__req__)

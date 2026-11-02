@@ -94,13 +94,13 @@ end
     default = dispatch(:GET, "/sd_schema")
     @test default.status == 200
     @test body(default) ==
-          HTMXObjects._schema_json_encode(HTMXObjects._schema_document(SDRoot))
+          HTMXObjects._schema_json(HTMXObjects._schema_document(SDRoot))
     @test startswith(body(default), "{\"routes\":")
     @test body(dispatch(:GET, "/sd_schema?inherited=shared")) == body(default)
 
     inline = dispatch(:GET, "/sd_schema?inherited=inline")
     @test inline.status == 200
-    @test body(inline) == HTMXObjects._schema_json_encode(HTMXObjects.reflect(SDRoot))
+    @test body(inline) == HTMXObjects._schema_json(HTMXObjects.reflect(SDRoot))
     @test startswith(body(inline), "[")
 
     bad = dispatch(:GET, "/sd_schema?inherited=sometimes")

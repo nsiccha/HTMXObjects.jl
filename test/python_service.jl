@@ -127,7 +127,7 @@ end
 
     # The shipped document is the one `openapi` renders.
     @test read_file("ps_service", "openapi.json") ==
-        HTMXObjects._schema_json_encode(openapi(PSApp; title="PS service", version="1.2.0")) * "\n"
+        HTMXObjects._schema_json(openapi(PSApp; title="PS service", version="1.2.0")) * "\n"
 
     # Models: struct docstrings, field docstrings, nullable fields, enums as
     # literals, a NamedTuple type named after where it appears, wire names a
@@ -240,7 +240,7 @@ end
             @test response.status == 200
             answers[method * " " * target] = String(response.body)
         end
-        write(joinpath(dir, "julia_answers.json"), HTMXObjects._schema_json_encode(answers))
+        write(joinpath(dir, "julia_answers.json"), HTMXObjects._schema_json(answers))
         write(joinpath(dir, "fixture_backend.py"), """
             from ps_service.backend import Backend, CallerFault
 

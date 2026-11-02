@@ -236,7 +236,7 @@ end
     # Every other route keeps the plain `200: OK`.
     @test doc.paths["/html"]["get"].responses == Dict("200" => (description="OK",))
 
-    encoded = HTMXObjects._schema_json_encode(doc)
+    encoded = HTMXObjects._schema_json(doc)
     @test contains(encoded, "\"\$ref\":\"#/components/schemas/JRAlarm\"")
 
     # No `components` without a schema to hold, and `reflect` keeps its shape.

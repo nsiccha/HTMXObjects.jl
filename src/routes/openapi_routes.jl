@@ -1,7 +1,7 @@
 # --- OpenAPI endpoint -------------------------------------------------------
 #
 # `openapi(T)` renders `reflect(T)` as an OpenAPI 3.1 document (plain
-# NamedTuples/Dicts/Vectors, JSON-serializable via `_schema_json_encode`),
+# NamedTuples/Dicts/Vectors, JSON-serializable via `_schema_json`),
 # and `OpenAPIRoutes` serves it opt-in via @include:
 #
 #   @include openapi = OpenAPIRoutes(; root=MyApp)   # → GET /openapi
@@ -45,7 +45,7 @@ function _openapi_type_schema(t)
 end
 
 # Normalize a `reflect` param `default` (already `_unquote`d) into a
-# `_schema_json_encode`-compatible value. Structured values pass through;
+# `_schema_json`-compatible value. Structured values pass through;
 # anything else degrades to its string rendering rather than failing the
 # whole document.
 _openapi_default(x::AbstractString) = string(x)
@@ -132,7 +132,7 @@ end
 # --- Response schemas -----------------------------------------------------------
 #
 # A route declared `::JSONResponse{T}` (src/json_response.jl) answers `T` as
-# `_json_write` encodes it; `_openapi_response_schema` describes `T` by the same
+# `_response_value` projects it; `_openapi_response_schema` describes `T` by the same
 # rules, so the document and the payload read one declaration. Each struct type
 # is described once under `components.schemas` and referenced by `$ref`:
 # `schemas` holds the descriptions, `names` each type's component name (set
@@ -146,7 +146,7 @@ _OpenAPIComponents() = _OpenAPIComponents(Dict{String,Any}(), Dict{Any,String}()
 const _OPENAPI_REF = Symbol("\$ref")
 
 # Leaves are described as parameters are (`_openapi_type_schema`). A float may
-# be `null`: JSON has no `NaN` or `±Inf`, so `_json_write` sends those as `null`.
+# be `null`: JSONResponse configures JSON.jl to write `NaN` and `±Inf` as `null`.
 _openapi_response_schema(c, ::Type{Any}) = (;)
 _openapi_response_schema(c, ::Type{Nothing}) = (type="null",)
 _openapi_response_schema(c,
@@ -182,7 +182,7 @@ function _openapi_nullable(schema)
 end
 
 # An object of exactly `T`'s fields, listed in their declared order (a
-# NamedTuple keeps it; the encoder sorts a Dict's keys). `_json_write` sends
+# NamedTuple keeps it; the encoder sorts a Dict's keys). `_response_value` sends
 # every declared field (`null` when it holds nothing), so every one is
 # required; a field's type says whether it may be `null`.
 function _openapi_object_schema(c, ::Type{T}) where {T}
@@ -443,7 +443,7 @@ documentation generators, and anything else that speaks OpenAPI.
     servers::Vector = []
 
     @get index() = MIMEResponse("application/json",
-        _schema_json_encode(openapi(root; title, version, description, servers)))
+        _schema_json(openapi(root; title, version, description, servers)))
 end
 
 # --- Swagger UI endpoint ----------------------------------------------------
@@ -480,7 +480,7 @@ function _swagger_html(; title::AbstractString, spec_url::AbstractString,
         <script>
             window.onload = () => {
                 window.ui = SwaggerUIBundle({
-                    url: $(_schema_json_encode(String(spec_url))),
+                    url: $(_schema_json(String(spec_url))),
                     dom_id: '#swagger-ui',
                 });
             };

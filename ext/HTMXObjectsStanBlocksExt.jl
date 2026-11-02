@@ -6,7 +6,7 @@ BridgeStan and nutpie, with the operations `stan_descriptor` offers (`:fit`,
 """
 module HTMXObjectsStanBlocksExt
 
-using HTMXObjects: HTMXObjects, _PyModel, _PyModelVar, _py_nested_schema, _schema_json_encode
+using HTMXObjects: HTMXObjects, _PyModel, _PyModelVar, _py_nested_schema, _schema_json
 using StanBlocks
 using StanBlocks: BridgeStan, JSON
 using Random: Xoshiro, randn
@@ -16,7 +16,7 @@ HTMXObjects._py_model(m::Union{StanBlocks.SlicModel,StanBlocks.StanModel}, name;
 
 function HTMXObjects._py_model(d::StanBlocks.ModelDescriptor, name; reference_draws=2)
     # The interface as plain JSON data (string keys, vectors).
-    interface = JSON.parse(_schema_json_encode(stan_interface(d)))
+    interface = JSON.parse(_schema_json(stan_interface(d)))
     offered = Set(op.name for op in d.operations)
     outputs = Dict(o["name"] => o for o in interface["outputs"])
     inputs = [_PyModelVar(e["name"], _sb_input_schema(e)) for e in interface["data"] if e["supplied"]]
@@ -26,7 +26,7 @@ function HTMXObjects._py_model(d::StanBlocks.ModelDescriptor, name; reference_dr
     likelihoods = kind("pointwise_loglik", :pointwise_loglik)
     reference = reference_draws > 0 && !isempty(parameters) && !isempty(likelihoods) ?
         _sb_reference(d, interface, likelihoods, reference_draws) : nothing
-    _PyModel("stan", ["model.stan" => stan_code(d.model), "interface.json" => _schema_json_encode(interface)],
+    _PyModel("stan", ["model.stan" => stan_code(d.model), "interface.json" => _schema_json(interface)],
              inputs, parameters, 0, kind("draw", :predict), likelihoods, :fit in offered, reference)
 end
 

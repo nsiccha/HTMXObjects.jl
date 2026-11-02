@@ -1265,7 +1265,7 @@ function python_service(T::Type, dir::AbstractString; package::AbstractString,
         push!(written, path)
     end
     path = joinpath(dir, package, "openapi.json")
-    write(path, _schema_json_encode(doc) * '\n')
+    write(path, _schema_json(doc) * '\n')
     push!(written, path)
     for (model, m) in specs
         for (file, text) in m.files
@@ -1276,7 +1276,7 @@ function python_service(T::Type, dir::AbstractString; package::AbstractString,
         m.reference === nothing && continue
         path = joinpath(dir, "tests", "references", model * ".json")
         mkpath(dirname(path))
-        write(path, _schema_json_encode(Dict{String,Any}("data" => m.reference.data,
+        write(path, _schema_json(Dict{String,Any}("data" => m.reference.data,
             "draws" => m.reference.draws, "log_likelihood" => m.reference.log_likelihood)) * '\n')
         push!(written, path)
     end

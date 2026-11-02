@@ -2,8 +2,8 @@
 #
 # A route declared `@get f(…)::JSONResponse{T} = value` returns its plain value.
 # `_run_operation` wraps it (`_as_declared`), and `_finalized_response` encodes
-# it through `T` (`_json_write`). `openapi` describes the same `T` as the route's
-# response schema (`_openapi_response_schema`, src/routes/openapi_routes.jl), so
+# it through `T`, using JSON.jl for serialization. `openapi` describes the same
+# `T` as the response schema (`_openapi_response_schema`, openapi_routes.jl), so
 # the payload and its document read one declaration.
 
 """
@@ -67,7 +67,8 @@ JSONResponse(value) = JSONResponse{Any}(value)
 
 to_response(r::JSONResponse{T}) where {T} =
     HTTP.Response(200, ["Content-Type" => "application/json; charset=utf-8"];
-                  body=sprint(_json_write, T, r.value))
+                  body=JSON.json(_response_value(T, r.value);
+                                 allownan=true, nan="null", inf="null", ninf="null"))
 _finalized_response(r::JSONResponse) = to_response(r)
 
 # The payload type a `JSONResponse` declaration names.
@@ -83,79 +84,61 @@ _as_declared(::Type{<:JSONResponse},
              value::Union{HTTP.Response,MIMEResponse,JSONResponse,_PreloadSkipped,_Prestarted}) =
     value
 
-# --- Encoding through the declared type ---
+# --- Project values through the declared response type ---
+# JSON.jl owns the wire format. This layer only selects and validates the
+# values promised by the OpenAPI schema, including Tables.jl column access.
 
-# The declared type without `Nothing`/`Missing`, and whether a value is either.
 _json_nonnull(T) = Base.nonmissingtype(Base.nonnothingtype(T))
 _json_isnull(x) = x === nothing || x === missing
-
-# A concrete struct the encoder writes as an object of its fields. Numbers,
-# strings, dates, tuples and collections have JSON forms of their own.
 _json_object_type(T) =
     T isa DataType && isconcretetype(T) && isstructtype(T) && fieldcount(T) > 0 &&
     !(T <: Union{Tuple,Number,AbstractString,AbstractArray,AbstractDict,Dates.TimeType})
 
-_json_string(io::IO, x) = _schema_json_encode(io, string(x))
-_json_number(io::IO, x::Integer) = print(io, x)
-_json_number(io::IO, x::Real) = (f = Float64(x); isfinite(f) ? print(io, f) : write(io, "null"))
+_response_value(::Type{Any}, x) = _response_value(x)
+_response_value(::Type{Nothing}, ::Nothing) = nothing
+_response_value(::Type{Missing}, ::Missing) = nothing
+_response_value(::Type{<:Bool}, x::Bool) = x
+_response_value(::Type{T}, x::Real) where {T<:Integer} = convert(T, x)
+_response_value(::Type{<:Real}, x::Real) = _response_value(x)
+_response_value(::Type{<:Union{AbstractString,Symbol,Char}}, x) = string(x)
+_response_value(::Type{T}, x::T) where {T<:Union{Enum,Dates.TimeType}} = string(x)
+_response_value(::Type{T}, x) where {T<:AbstractVector} = _response_array(eltype(T), x)
+_response_value(::Type{T}, x::AbstractDict) where {T<:AbstractDict} =
+    _response_pairs(valtype(T), _json_sorted_pairs(x))
+_response_value(::Type{T}, x::NamedTuple) where {T<:AbstractDict} =
+    _response_pairs(valtype(T), pairs(x))
 
-_json_write(io::IO, ::Type{Any}, x) = _json_by_value(io, x)
-_json_write(io::IO, ::Type{Nothing}, ::Nothing) = write(io, "null")
-_json_write(io::IO, ::Type{Missing}, ::Missing) = write(io, "null")
-_json_write(io::IO, ::Type{<:Bool}, x::Bool) = _json_by_value(io, x)
-_json_write(io::IO, ::Type{T}, x::Real) where {T<:Integer} = _json_number(io, convert(T, x))
-_json_write(io::IO, ::Type{<:Real}, x::Real) = _json_number(io, x)
-_json_write(io::IO, ::Type{<:Union{AbstractString,Symbol,Char}}, x) = _json_string(io, x)
-_json_write(io::IO, ::Type{T}, x::T) where {T<:Union{Enum,Dates.TimeType}} = _json_string(io, x)
-_json_write(io::IO, ::Type{T}, x) where {T<:AbstractVector} = _json_array(io, eltype(T), x)
-_json_write(io::IO, ::Type{T}, x::AbstractDict) where {T<:AbstractDict} =
-    _json_pairs(io, valtype(T), _json_sorted_pairs(x))
-_json_write(io::IO, ::Type{T}, x::NamedTuple) where {T<:AbstractDict} =
-    _json_pairs(io, valtype(T), pairs(x))
-
-function _json_write(io::IO, ::Type{T}, x) where {T}
+function _response_value(::Type{T}, x) where {T}
     S = _json_nonnull(T)
     if S !== T && S !== Union{}
-        return _json_isnull(x) ? write(io, "null") : _json_write(io, S, x)
+        return _json_isnull(x) ? nothing : _response_value(S, x)
     end
-    _json_object_type(T) && return _json_object(io, T, x)
-    # An abstract or union declaration (`Number`, `Union{Int,String}`) says
-    # less than the value does; a concrete one the value does not fit is an error.
+    _json_object_type(T) && return _response_object(T, x)
     isconcretetype(T) && !(x isa T) && throw(ArgumentError(
         "JSONResponse: cannot encode a `$(typeof(x))` value as the declared `$T`"))
-    _json_by_value(io, x)
+    _response_value(x)
 end
 
-# Declared `Any`: the value's own shape. A struct value is written through its
-# own type's fields.
-_json_by_value(io::IO, ::Union{Nothing,Missing}) = write(io, "null")
-_json_by_value(io::IO, x::Bool) = write(io, x ? "true" : "false")
-_json_by_value(io::IO, x::Real) = _json_number(io, x)
-_json_by_value(io::IO, x::Union{AbstractString,Symbol,Char,Enum,Dates.TimeType}) = _json_string(io, x)
-_json_by_value(io::IO, x::NamedTuple) = _json_pairs(io, Any, pairs(x))
-_json_by_value(io::IO, x::AbstractDict) = _json_pairs(io, Any, _json_sorted_pairs(x))
-_json_by_value(io::IO, x::Union{AbstractVector,Tuple}) = _json_array(io, Any, x)
-function _json_by_value(io::IO, x)
-    Tables.istable(x) && return _json_table(io, Any, x)
-    _json_object_type(typeof(x)) && return _json_object(io, typeof(x), x)
+_response_value(::Union{Nothing,Missing}) = nothing
+_response_value(x::Union{Bool,Integer}) = x
+_response_value(x::Real) = Float64(x)
+_response_value(x::Union{AbstractString,Symbol,Char,Enum,Dates.TimeType}) = string(x)
+_response_value(x::NamedTuple) = map(_response_value, x)
+_response_value(x::AbstractDict) = _response_pairs(Any, _json_sorted_pairs(x))
+_response_value(x::Union{AbstractVector,Tuple}) = map(_response_value, x)
+function _response_value(x)
+    Tables.istable(x) && return _response_table(Any, x)
+    _json_object_type(typeof(x)) && return _response_object(typeof(x), x)
     throw(ArgumentError("JSONResponse: no JSON form for a `$(typeof(x))` value"))
 end
 
-function _json_object(io::IO, ::Type{T}, x) where {T}
-    write(io, '{')
-    for (i, name) in enumerate(fieldnames(T))
-        i == 1 || write(io, ',')
-        _json_string(io, name)
-        write(io, ':')
-        F = fieldtype(T, name)
-        _json_write(io, F, _json_field(T, F, x, name))
-    end
-    write(io, '}')
-end
+_response_object(::Type{T}, x) where {T} = NamedTuple{fieldnames(T)}(map(fieldnames(T)) do name
+    F = fieldtype(T, name)
+    _response_value(F, _response_field(T, F, x, name))
+end)
 
-# A declared field, read from the value by name.
-_json_field(::Type{T}, F, x::T, name) where {T} = getfield(x, name)
-function _json_field(::Type{T}, F, x, name) where {T}
+_response_field(::Type{T}, F, x::T, name) where {T} = getfield(x, name)
+function _response_field(::Type{T}, F, x, name) where {T}
     hasproperty(x, name) && return getproperty(x, name)
     _json_nonnull(F) === F && throw(ArgumentError(
         "JSONResponse: `$T` field `$name` is missing from the returned `$(typeof(x))`"))
@@ -163,34 +146,19 @@ function _json_field(::Type{T}, F, x, name) where {T}
 end
 
 _json_sorted_pairs(x::AbstractDict) = sort!(collect(pairs(x)); by=pair -> string(first(pair)))
+_response_pairs(::Type{V}, kvs) where {V} =
+    JSON.Object(string(k) => _response_value(V, v) for (k, v) in kvs)
 
-function _json_pairs(io::IO, ::Type{V}, kvs) where {V}
-    write(io, '{')
-    for (i, (k, v)) in enumerate(kvs)
-        i == 1 || write(io, ',')
-        _json_string(io, k)
-        write(io, ':')
-        _json_write(io, V, v)
-    end
-    write(io, '}')
-end
-
-function _json_array(io::IO, ::Type{E}, x) where {E}
+function _response_array(::Type{E}, x) where {E}
     _json_isnull(x) && throw(ArgumentError(
         "JSONResponse: a `$(typeof(x))` value for the declared `Vector{$E}`"))
-    x isa Union{AbstractVector,Tuple} || !Tables.istable(x) || return _json_table(io, E, x)
-    write(io, '[')
-    for (i, element) in enumerate(x)
-        i == 1 || write(io, ',')
-        _json_write(io, E, element)
-    end
-    write(io, ']')
+    x isa Union{AbstractVector,Tuple} || !Tables.istable(x) || return _response_table(E, x)
+    [_response_value(E, element) for element in x]
 end
 
-# A Tables.jl table (a `DataFrame`) for a declared `AbstractVector{E}`: one
-# object per row. Each declared field of `E` is found as a column once, not per
-# row; a declared `Any` row keeps every column.
-function _json_table(io::IO, ::Type{E}, table) where {E}
+# Resolve each declared column once. Rows contain only declared fields, in
+# declaration order; an untyped table keeps every column.
+function _response_table(::Type{E}, table) where {E}
     columns = Tables.columns(table)
     typed = _json_object_type(E)
     typed || E === Any || throw(ArgumentError(
@@ -204,17 +172,7 @@ function _json_table(io::IO, ::Type{E}, table) where {E}
             "JSONResponse: `$E` field `$name` is not a column of the returned table"))
         nothing
     end
-    write(io, '[')
-    for row in 1:Tables.rowcount(columns)
-        row == 1 || write(io, ',')
-        write(io, '{')
-        for (i, (name, F, cell)) in enumerate(zip(names, types, cells))
-            i == 1 || write(io, ',')
-            _json_string(io, name)
-            write(io, ':')
-            _json_write(io, F, cell === nothing ? nothing : cell[row])
-        end
-        write(io, '}')
-    end
-    write(io, ']')
+    [NamedTuple{names}(map(types, cells) do F, cell
+        _response_value(F, cell === nothing ? nothing : cell[row])
+    end) for row in 1:Tables.rowcount(columns)]
 end
