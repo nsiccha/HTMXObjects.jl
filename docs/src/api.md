@@ -388,10 +388,11 @@ Pico draws a disclosure (`<details>`) as one borderless line with a small
 chevron at the far edge, which readers miss. Under the shell every disclosure
 is a bordered box instead: its summary is a bold, tinted bar with the chevron
 right before the label, and its content opens inside the box. That covers a
-hand-written `h.details(h.summary(…), …)`, [`SemanticDisclosure`](@ref), the
-later views of [`SemanticAlternatives`](@ref) and a caption's "More", so no app
-restyles `<details>` itself. Pico's dropdown menus (`details.dropdown`) and
-button summaries (`summary[role=button]`) keep Pico's looks. The box's rules
+hand-written `h.details(h.summary(…), …)`, [`SemanticDisclosure`](@ref) and the
+later views of [`SemanticAlternatives`](@ref), so no app restyles `<details>`
+itself. Pico's dropdown menus (`details.dropdown`) and button summaries
+(`summary[role=button]`) keep Pico's looks, and a caption's "More" is a small
+button beside the caption's actions ([`caption_style`](@ref)). The box's rules
 are no stronger than Pico's own, so a component that uses `<details>` for
 something else, such as a menu badge, keeps whatever its own class rules set
 (`border: 0`, its own summary padding). `--htmxo-disclosure-padding` (default

@@ -167,3 +167,120 @@ end
         end
     end
 end
+
+@testitem "a caption's toggle is a small control beside its header" tags=[:unit] begin
+    using HTMXObjects
+    # The markup keeps the native disclosure; only the style moves it, so an
+    # app's own markup, the Markdown and the static export do not change.
+    @test contains(repr("text/html", render_caption(CaptionSpec(; title="T", long="L"))),
+        "</div><details class=\"caption-long\"><summary>More</summary><div>L</div></details></figcaption>")
+    css = repr("text/html", caption_style())
+    @test contains(css, "figcaption.caption > details.caption-long { display: contents; }")
+    # Unlayered, because Pico's and the Pico bridge's `details` rules are: a
+    # layered rule loses to them whatever its specificity.
+    @test findfirst("figcaption.caption > details.caption-long", css).start > last(findfirst("@layer htmxo {", css))
+    @test findfirst("figcaption.caption > details.caption-long", css).start > findfirst(".caption-actions > .caption-action", css).start
+end
+
+@testitem "a caption's toggle takes no row, and its text opens across the figure" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', function() {
+                const out = document.body.dataset, css = (e, p) => getComputedStyle(e, p), box = e => e.getBoundingClientRect();
+                const near = (a, b, d = 1.5) => Math.abs(a - b) <= d;
+                const fig = id => document.querySelector('#' + id + ' figure');
+                const det = id => document.querySelector('#' + id + ' details.caption-long');
+                const sum = id => det(id).querySelector('summary');
+                const body = id => document.querySelector('#' + id + ' .plot, #' + id + ' .table-wrap');
+                const offset = id => box(body(id)).top - box(fig(id)).top;
+                const button = id => document.querySelector('#' + id + ' .caption-action');
+                // Positive control: an ordinary disclosure on this page is the bridge's full-width box.
+                const plain = document.querySelector('#plain');
+                out.boxControl = String(near(box(plain).width, box(plain.parentElement).width) && css(plain).borderTopStyle === 'solid');
+                // No row of its own: beside a button of its height a closed long text moves
+                // the figure by nothing, and with no button, by at most what it is taller
+                // than a line of text.
+                out.noRow = String(near(offset('wide'), offset('without')));
+                out.noRowAlone = String(offset('table') - offset('tableWithout') >= 0 && offset('table') - offset('tableWithout') <= 4);
+                // It reads as a control: as tall as the button beside it, level with it,
+                // outlined, with the chevron before the label, and not the bold bar.
+                out.likeButton = String(near(box(sum('wide')).height, box(button('wide')).height) &&
+                    near(box(sum('wide')).top, box(button('wide')).top, 3) &&
+                    box(sum('wide')).left >= box(button('wide')).right &&
+                    css(sum('wide')).borderTopStyle === 'solid' && css(sum('wide')).borderTopWidth !== '0px' &&
+                    css(sum('wide'), '::before').backgroundImage.startsWith('url(') &&
+                    Number(css(sum('wide')).fontWeight) < 600);
+                out.reachable = String((sum('wide').focus(), document.activeElement === sum('wide')));
+                // A caption with no actions has the toggle at the end of the title's line.
+                out.noActions = String(near(box(sum('bare')).right, box(fig('bare')).right) && near(box(sum('bare')).top, box(fig('bare')).top, 12));
+                // The actions keep their one compact row in a 500 px column, below the title,
+                // and the toggle stays on the title's line.
+                const buttons = [...document.querySelectorAll('#narrow .caption-action')];
+                const title = box(document.querySelector('#narrow .caption-header').firstElementChild);
+                out.narrowRow = String(new Set(buttons.map(b => Math.round(box(b).top))).size === 1 &&
+                    box(buttons[0]).top >= title.bottom && box(sum('narrow')).top < title.bottom);
+                // Below 16rem plus the toggle, it moves under the header; nothing overflows.
+                out.tiny = String(box(sum('tiny')).top >= box(document.querySelector('#tiny .caption-header')).bottom &&
+                    fig('tiny').scrollWidth <= fig('tiny').clientWidth && document.documentElement.scrollWidth <= innerWidth);
+                // Opened: the text spans the figure below the header, the figure moves below
+                // the text, the toggle stays put and its chevron turns; closed again, all returns.
+                const content = det('wide').querySelector('div');
+                const before = { top: box(sum('wide')).top - box(fig('wide')).top, left: box(sum('wide')).left, offset: offset('wide'),
+                                 chevron: css(sum('wide'), '::before').transform };
+                sum('wide').click();
+                out.opens = String(det('wide').open && near(box(sum('wide')).top - box(fig('wide')).top, before.top) && near(box(sum('wide')).left, before.left) &&
+                    box(content).top >= box(document.querySelector('#wide .caption-header')).bottom &&
+                    box(content).left - box(fig('wide')).left < 24 && box(fig('wide')).right - box(content).right < 24 &&
+                    box(content).width > 0.9 * box(fig('wide')).width && box(body('wide')).top >= box(content).bottom &&
+                    css(sum('wide'), '::before').transform !== before.chevron);
+                sum('wide').click();
+                out.closes = String(!det('wide').open && near(offset('wide'), before.offset));
+                // A table's caption gets the same toggle.
+                sum('table').click();
+                out.table = String(box(det('table').querySelector('div')).width > 0.9 * box(fig('table')).width);
+                sum('table').click();
+                // Dark: the outline still shows against the page.
+                const lightBorder = css(sum('wide')).borderTopColor;
+                document.documentElement.dataset.theme = 'dark';
+                out.dark = String(css(sum('wide')).borderTopColor !== lightBorder);
+                out.done = '1';
+            });
+            """))
+        actions = (h.button("Export"; type="button", class="outline caption-action"),)
+        many = Tuple(h.button("⬇ $kind"; type="button", class="outline caption-action")
+                     for kind in ("CSV", "PNG", "SVG", "HTML"))
+        long = h.div(h.p("Each point is one station."), h.p("Grey marks a station without a value."))
+        spec = CaptionSpec(; title="Measured values", short="Latest value per station. Grey: no value.", long)
+        without = CaptionSpec(; title=spec.title, short=spec.short)
+        plot = h.div(; class="plot", style="height: 60px")("plot")
+        rows = (name=["a", "b"], value=[1, 2])
+        tablecell(id, caption) = h.div(; id)(render_table(rows; caption, download=false))
+        cell(id, width, s; acts=actions) = h.div(; id, style="width: $width")(with_caption(s, plot; actions=acts))
+        content = h.main(; class="container")(
+            h.div(h.details(; id="plain")(h.summary("Ordinary"), h.p("x"))),
+            cell("wide", "1000px", spec), cell("without", "1000px", without),
+            cell("bare", "1000px", spec; acts=()),
+            cell("narrow", "500px", spec; acts=many), cell("tiny", "200px", spec),
+            tablecell("table", spec), tablecell("tableWithout", without),
+            driver)
+        dom = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, repr("text/html", htmx(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION, htmx_version=nothing,
+                hyperscript_version=nothing, preload_version=nothing,
+                extra_head=(h.style(Raw("*, *::before, *::after { transition: none !important; }")),))))
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,1000 --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        @test contains(dom, "data-done=\"1\"")
+        for marker in ("box-control", "no-row", "no-row-alone", "like-button", "reachable", "no-actions", "narrow-row", "tiny", "opens", "closes", "table", "dark")
+            @test contains(dom, "data-$marker=\"true\"")
+        end
+    end
+end
