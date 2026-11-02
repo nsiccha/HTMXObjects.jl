@@ -2670,6 +2670,14 @@ const _HYPERSCRIPT_VERSION = "0.9.14"
 # Vendor pin only: the CDN surface stays `nothing` (`htmx()`) / floating
 # `"2"` (`pico_page`), so vendor mode serves pico solely at this exact pin.
 const _PICO_VERSION = "2.1.1"
+# Pico 2's colour builds, `htmx(...; pico_color)`: `css/pico.<colour>.min.css`
+# beside the default `css/pico.min.css`, which is azure. Each build is Pico
+# whole, with Pico's own light and dark shades of that colour; they differ only
+# in the `--pico-primary*` variables and `--pico-text-selection-color`. The
+# vendored artifact carries every one (test/pico_color.jl checks this list
+# against it).
+const _PICO_COLORS = (:amber, :azure, :blue, :cyan, :fuchsia, :green, :grey, :indigo, :jade, :lime,
+    :orange, :pink, :pumpkin, :purple, :red, :sand, :slate, :violet, :yellow, :zinc)
 # KaTeX typesets the math `render_markdown` marks (`math_script`). The shell
 # only names where it lives; the runtime fetches it when a page shows math.
 const _KATEX_VERSION = "0.19.0"
@@ -2731,15 +2739,29 @@ _vendor_prefix(assets) = assets === :vendor ? "/vendor" : rstrip(assets, '/')
 # vendor mode is a loud error, never a silent CDN fallback. `versioned`
 # (a linked runtime) appends the pin, so the browser may cache the file
 # for good.
-function _head_asset_src(pkg::Symbol, version, cdn_src, assets; versioned::Bool=false)
+function _head_asset_src(pkg::Symbol, version, cdn_src, assets; versioned::Bool=false,
+        file::AbstractString=_VENDOR_ASSETS[pkg].file)
     assets === :cdn && return cdn_src
     _check_assets_mode(assets)
     spec = _VENDOR_ASSETS[pkg]
     version == spec.version ||
         error("htmx(...; assets=:vendor): vendored $pkg is pinned at $(spec.version), got $version — pass the pinned version or stay on assets=:cdn.")
-    src = _vendor_prefix(assets) * "/" * spec.file
+    src = _vendor_prefix(assets) * "/" * file
     return versioned ? src * "?v=" * spec.version : src
 end
+
+# The stylesheet file of a Pico colour build (`htmx(...; pico_color)`), in
+# Pico's `css/` directory on the CDN and on the vendor mount alike. `nothing`
+# and `:azure` are Pico's default build.
+_pico_file(::Nothing) = _VENDOR_ASSETS[:pico].file
+_pico_file(color::AbstractString) = _pico_file(Symbol(color))
+function _pico_file(color::Symbol)
+    color in _PICO_COLORS || throw(ArgumentError(string("htmx: pico_color=", repr(color),
+        " is not one of Pico's colour builds; use one of ", join(repr.(_PICO_COLORS), ", "), ".")))
+    color === :azure ? _VENDOR_ASSETS[:pico].file : "pico.$color.min.css"
+end
+_pico_file(color) = throw(ArgumentError(string("htmx: pico_color takes the name of one of Pico's ",
+    "colour builds (", join(repr.(_PICO_COLORS), ", "), "), got ", repr(color), ".")))
 
 # The head node for one asset: pico is a stylesheet, every other vendored
 # library a script. Shared by the `htmx()` shell and `vendor_head`.
@@ -2796,6 +2818,8 @@ vendorfiles()                                  # → GET /vendor/htmx.min.js, �
 __page__(content) = htmx(content; assets=:vendor)
 ```
 
+Pico is served with every colour build of its pinned release beside the
+default, `/<mountdir>/pico.<colour>.min.css`, for `htmx(...; pico_color)`.
 KaTeX, which typesets Markdown math ([`render_markdown`](@ref)), is served
 as a directory, `/<mountdir>/katex/katex.min.css`, `…/katex.min.js` and the
 `…/katex/fonts/` its stylesheet loads. PrismJS, which highlights code
@@ -2869,6 +2893,13 @@ _vendor_file(pkg::Symbol) = joinpath(_vendor_artifact(Val(pkg)), _VENDOR_ASSETS[
 # PrismJS's core, autoloader and every language grammar for `:prism`.
 _vendor_files(pkg::Symbol) = _vendor_files(Val(pkg))
 _vendor_files(::Val{P}) where {P} = [_VENDOR_ASSETS[P].file => _vendor_file(P)]
+# Pico: its default build, then every colour build (`pico_color`) from the
+# same `css/` directory of the pinned release.
+function _vendor_files(::Val{:pico})
+    dir = dirname(_vendor_file(:pico))
+    [_pico_file(nothing) => _vendor_file(:pico);
+     [_pico_file(c) => joinpath(dir, _pico_file(c)) for c in _PICO_COLORS if c !== :azure]]
+end
 function _vendor_files(::Val{:katex})
     dir, served = _vendor_file(:katex), _VENDOR_ASSETS[:katex].file
     fonts = sort!(readdir(joinpath(dir, "fonts")))
@@ -2892,6 +2923,8 @@ _prism_languages(dir=_vendor_file(:prism)) = sort!(filter(
 Copy the vendored head assets — the same files [`vendorfiles`](@ref)
 serves — into `dir` (created if missing), for a static bundle that has no
 routes to serve them from. `packages` selects which pinned libraries to copy;
+`:pico` is `pico.min.css` and every colour build beside it
+(`pico.<colour>.min.css`, for `pico_color`), and
 `:katex` is the directory `dir/katex/` (stylesheet, script and fonts) that
 typesets Markdown math on pages whose `assets` prefix names `dir`, and
 `:prism` the directory `dir/prism/` (core, autoloader and every language's
@@ -3118,7 +3151,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, pico_color=nothing, katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -3190,6 +3223,21 @@ element carries a `preload` attribute — see the `preload` keyword of
 [`htmxo_breadcrumb`](@ref) and [`hx_link`](@ref) — and speculative requests do
 work only on routes marked `@preload`.
 
+`pico_color` is the page's accent colour, as the name of one of Pico's 20
+colour builds: `:amber`, `:azure` (Pico's default), `:blue`, `:cyan`,
+`:fuchsia`, `:green`, `:grey`, `:indigo`, `:jade`, `:lime`, `:orange`,
+`:pink`, `:pumpkin`, `:purple`, `:red`, `:sand`, `:slate`, `:violet`,
+`:yellow` or `:zinc`. The shell then loads that build,
+`css/pico.<colour>.min.css`, in place of `css/pico.min.css`, from the CDN or
+the vendor mount alike. Each build is Pico whole, with Pico's own light and dark
+shades of the colour for links, focus rings, tab underlines, checked form
+controls, range sliders, progress bars and text selection, and with them
+`--htmxo-accent` ([`pico_bridge`](@ref)). Buttons keep the bridge's neutral
+look. So an app chooses its accent here instead of redeclaring Pico's
+`--pico-primary*` variables for light, dark and `[data-theme=dark]` in
+`extra_head`. Another name, or `pico_color` without `pico_version`, throws an
+`ArgumentError`. `nothing` (the default) is Pico's default build.
+
 `assets=:vendor` serves the same files same-origin from `/vendor/...`
 (byte-identical to the CDN files at the pinned versions) instead of the CDN,
 so the page loads fully offline — mount them with [`vendorfiles`](@ref) and
@@ -3235,6 +3283,7 @@ function htmx(args...;
     hyperscript_version = _HYPERSCRIPT_VERSION,
     preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
+    pico_color          = nothing,
     katex_version       = _KATEX_VERSION,
     prism_version       = _PRISM_VERSION,
     assets              = :cdn,
@@ -3274,7 +3323,11 @@ function htmx(args...;
         _head_asset_node(Val(:preload), _head_asset_src(:preload, preload_version, "https://cdn.jsdelivr.net/npm/htmx-ext-preload@$(preload_version)/dist/preload.min.js", assets; versioned)),
         _runtime_head(:preload_runtime, mount))
     isnothing(hyperscript_version) || push!(cdn, _head_asset_node(Val(:hyperscript), _head_asset_src(:hyperscript, hyperscript_version, "https://unpkg.com/hyperscript.org@$(hyperscript_version)", assets; versioned)))
-    isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/pico.min.css", assets; versioned)))
+    isnothing(pico_version) && !isnothing(pico_color) && throw(ArgumentError(string(
+        "htmx: pico_color=", repr(pico_color), " picks a Pico colour build, but the page ",
+        "loads no Pico (pico_version=nothing). Pass pico_version, or use pico_page.")))
+    pico_file = _pico_file(pico_color)
+    isnothing(pico_version)        || push!(cdn, _head_asset_node(Val(:pico), _head_asset_src(:pico, pico_version, "https://cdn.jsdelivr.net/npm/@picocss/pico@$(pico_version)/css/$(pico_file)", assets; versioned, file=pico_file)))
     # jsdelivr, not cdnjs: cdnjs was measured serving KaTeX 0.16.21's fonts
     # one byte short, which browsers reject as invalid font data.
     isnothing(katex_version)       || push!(cdn, _head_asset_node(Val(:katex), _head_asset_src(:katex, katex_version, "https://cdn.jsdelivr.net/npm/katex@$(katex_version)/dist", assets; versioned)))
@@ -3566,7 +3619,9 @@ header, `main` and footer.
 
 `pico_version` defaults to Pico's floating `"2"` from the CDN and to the
 pinned release under vendor assets (`assets=:vendor` or a mount path), which
-serve only that pin. Every other keyword (`extra_head`, `runtime`, `tables`,
+serve only that pin. `pico_color` picks the page's accent among Pico's colour
+builds, light and dark mode alike: `pico_page(content; pico_color=:cyan)`
+([`htmx`](@ref) lists the names). Every other keyword (`extra_head`, `runtime`, `tables`,
 `error_texts`, `title`, the library versions, …) goes to [`htmx`](@ref):
 `pico_page(content; assets=:vendor, runtime=:linked)` is an offline page
 with a cacheable head, and `pico_page(content; lang="de",
@@ -31206,7 +31261,8 @@ automatically by [`htmx`](@ref) (and so [`pico_page`](@ref)) when
 It remaps `--htmxo-*` to Pico's color tokens, so HTMXO components pick up the
 host's page background, accent and muted colors. Borders keep the text color.
 The status colors are the ones of [`htmxo_theme`](@ref): Pico's page stylesheet
-has none.
+has none. The accent is Pico's primary colour, which the shell's `pico_color`
+keyword chooses among Pico's colour builds ([`htmx`](@ref)).
 
 It also sets the page's text size and width, which Pico ties to the window:
 
