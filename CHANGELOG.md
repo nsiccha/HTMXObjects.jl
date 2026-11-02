@@ -14,6 +14,45 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.37
+
+- A caption's long text opens from a small toggle at the end of the caption's
+  row, beside its actions, in the look of the caption's buttons, instead of a
+  full-width box in a row of its own. Beside an action a closed long text moves
+  the figure by nothing, 63 px less per figure at 16 px text; in a caption with
+  no actions it adds at most 4 px. Opened, the text spans the figure below the
+  header, in a thin frame, and the toggle stays where it was. This covers
+  `render_caption`, `with_caption`, `render_table(caption=)` and every caller of
+  them. The markup and the Markdown are unchanged: `caption_style` moves the
+  native `<details>`. Every other disclosure stays the Pico bridge's box. CSS an
+  app wrote for `.caption-long` may need revisiting: the `<details>` now has
+  `display: contents`, so rules on its own box no longer apply.
+
+## 0.1.36
+
+- A `pico_page` header that does not fit its window continues on further lines
+  and stays in the page. Pico keeps a nav on one line, so labels broke (`In-`
+  over `situ`) and the last entries ran off the right edge, which widened the
+  page. The navigation now goes below the brand, starting where the brand does,
+  and its entries wrap whole, each added line about 56 px tall. A header that
+  fits its window stays where it was, also where it runs past `.container`. The
+  rule is in `pico_bridge` and sits on `body > header nav`, so an app's own
+  header on the `htmx()` shell wraps too. To keep one line, set
+  `body > header nav, body > header nav ul { flex-wrap: nowrap; }` in the app's
+  stylesheet.
+
+## 0.1.35
+
+- A flat `master_detail_table` passes axe-core's `aria-conditional-attr`. ARIA
+  allows `aria-expanded` on a row only inside a `treegrid`, so its rows no longer
+  carry it: the row's native detail control (▸/▾, or the label with
+  `detail_toggle=:label`) carries `aria-expanded` and `aria-controls`, and the row
+  carries `data-htmxo-detail-open="true"|"false"`. Hierarchy and grouped tables
+  are `treegrid`s and keep `aria-expanded` on their rows. **Breaking:** CSS or
+  script that reads `tr[aria-expanded]` on a flat `master_detail_table` row reads
+  `tr[data-htmxo-detail-open]` instead. Rows built with `master_detail_pair`
+  directly are unchanged, and still fail that rule in a `sortable_table`.
+
 ## 0.1.34
 
 - A `tabset` follows the ARIA tabs pattern. Its tab bar is a `tablist`, each tab

@@ -855,7 +855,11 @@ text) keeps its own behaviour: it neither toggles nor selects the row. Only
 controls inside the row count, so a table inside a `<form>` or a `<details>`
 still toggles. Every branch and detail control is a native button carrying
 `aria-controls`/`aria-expanded`, so it supports keyboard activation, as do
-auto-wired sort headers. Sorting, search and CSV export read the cell's content,
+auto-wired sort headers. ARIA allows `aria-expanded` on a row only inside a
+`treegrid`, so a flat `master_detail_table` row carries
+`data-htmxo-detail-open="true"|"false"` and its button tells assistive
+technology; key a row's open look off that attribute. A hierarchy or grouped
+table is a `treegrid`, and its rows carry `aria-expanded` too. Sorting, search and CSV export read the cell's content,
 not its controls. However narrow the first column, its controls stay on their
 label's line: the cell never wraps between a control and its label, only the
 label's own text wraps. To keep a label on one line, give its content
@@ -1961,4 +1965,4 @@ cap = CaptionSpec(; title="Posterior fit", short="Median and 95% interval per do
 with_caption(cap, plot_node; actions=(h.a("⬇ CSV"; href=csv_url, class="caption-action"),))
 ```
 
-`title` and `short` form the caption's header line, and `long` is folded behind a **More** toggle. The toggle's word comes from `texts=`: `with_caption(cap, plot_node; texts=caption_texts(:de))` shows **Mehr**, and `caption_texts(:de; more="Erläuterung")` replaces it with the app's own word. `render_caption` takes the same keyword. An unknown locale or text name throws an `ArgumentError`. The page shell carries `caption_style()` unless `tables=false`; otherwise include it once per page.
+`title` and `short` form the caption's header line, and `long` is folded behind a small **More** toggle at the end of that line, beside the actions. It takes no row of its own: opened, the text spans the figure below the header, and the toggle stays where it was. The toggle's word comes from `texts=`: `with_caption(cap, plot_node; texts=caption_texts(:de))` shows **Mehr**, and `caption_texts(:de; more="Erläuterung")` replaces it with the app's own word. `render_caption` takes the same keyword. An unknown locale or text name throws an `ArgumentError`. The page shell carries `caption_style()` unless `tables=false`; otherwise include it once per page.

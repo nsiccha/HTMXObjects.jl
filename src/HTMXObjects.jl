@@ -3547,6 +3547,10 @@ only on itself. Its `href` is compared without a query and with
 percent-encoding undone; an `href` with a `#fragment`, a relative one or
 another site's never is. Outside a request no entry is marked.
 
+A header that does not fit its window on one line continues on further lines:
+the navigation goes below the brand, and its entries wrap whole
+([`pico_bridge`](@ref)).
+
 `nav_label` names the navigation for screen readers: "Main navigation" by
 default, "Hauptnavigation" on a German page (the `lang` keyword or the
 route's `__lang__`). `skip_link=true` puts a "Skip to content" ("Zum Inhalt
@@ -19050,9 +19054,15 @@ const _EN_CAPTION_TEXTS = caption_texts(:en)
     caption_style()
 
 Return a `<style>` node with default CSS for `render_caption` / `with_caption`:
-flex layout for the caption header (title left, actions right) and small
-spacing for the `<details>` body. [`htmx`](@ref) (so `pico_page` too) carries
-it unless `tables=false`; otherwise include it once per page.
+flex layout for the caption header (title left, actions right) and the toggle
+of a long text. [`htmx`](@ref) (so `pico_page` too) carries it unless
+`tables=false`; otherwise include it once per page.
+
+The toggle is a small control in the look of the caption's buttons, at the end
+of the header's row, so a closed long text takes no row of its own. Opened, the
+text takes the whole width below the header, in a thin frame, and the toggle
+stays where it was. The toggle moves below the header only when the header would
+keep less than `16rem` beside it.
 
 The actions stay one compact row. When the title would keep less than `16rem`
 beside them, they move below it, wrapping only if the row itself is wider than
@@ -19063,19 +19073,59 @@ the column. The `.caption-action` button sizing is deliberately **outside any
 caption_style() = h.style(Raw("""
 @layer htmxo {
 figure.captioned { margin: 0 0 1rem 0; }
-figcaption.caption { margin-bottom: 0.5rem; }
+/* The header takes what the toggle of a long text leaves of the row. */
+figcaption.caption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.5rem; margin-bottom: 0.5rem; }
+figcaption.caption > .caption-header { flex: 1 1 16rem; min-width: 0; }
 .caption-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.25rem 1rem; }
 /* The title keeps 16rem beside the actions, else they wrap below it. An empty
    placeholder (the uncaptioned download header) takes no basis, so its button
    stays on the right. */
 .caption-header > :first-child:not(:empty) { flex: 1 1 16rem; min-width: 0; }
 .caption-actions { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
-.caption-long { margin-top: 0.25rem; }
-.caption-long > summary { font-size: 0.9em; }
 }
 /* Caption buttons — INTENTIONALLY UNLAYERED, at (0,2,0) so they beat Pico's
    unlayered button and [type=button] rules (0,0,1)/(0,1,0) in any order. */
 .caption-actions > .caption-action { padding: 0.1rem 0.5rem; font-size: 0.85em; margin: 0; }
+/* The toggle of a long text, drawn like those buttons: the one disclosure that
+   is not the Pico bridge's full-width box, because it repeats on every figure
+   and a row of its own would push the figure down. The `<details>` gives up its
+   box, so its label and its content are items of the caption's row; closed
+   content stays out of that row. INTENTIONALLY UNLAYERED, and stronger than
+   Pico's and the bridge's `details` rules in any order. */
+figcaption.caption > details.caption-long { display: contents; }
+figcaption.caption > details.caption-long > summary {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0.1rem 0.5rem;
+    border: var(--pico-border-width, 1px) solid var(--pico-secondary, currentColor);
+    border-radius: var(--pico-border-radius, 0.25rem);
+    background: transparent;
+    color: var(--pico-secondary, inherit);
+    font-size: 0.85em;
+    font-weight: 400;
+    line-height: var(--pico-line-height, 1.5);
+}
+figcaption.caption > details.caption-long > summary:is(:hover, :focus-visible) {
+    border-color: var(--pico-secondary-hover, currentColor);
+    background: transparent;
+    color: var(--pico-secondary-hover, inherit);
+}
+figcaption.caption > details.caption-long > summary::before {
+    width: 0.85rem;
+    height: 0.85rem;
+    margin-inline-end: 0.25rem;
+    background-size: 0.85rem auto;
+}
+figcaption.caption > details.caption-long::details-content { position: absolute; padding: 0; }
+figcaption.caption > details.caption-long[open]::details-content {
+    position: static;
+    flex: 1 0 100%;
+    box-sizing: border-box;
+    padding: 0.75rem 1rem;
+    border: var(--pico-border-width, 1px) solid var(--pico-form-element-border-color, currentColor);
+    border-radius: var(--pico-border-radius, 0.25rem);
+}
+figcaption.caption > details.caption-long > :last-child > :last-child { margin-bottom: 0; }
 """))
 
 _wrap_long(s::AbstractString) = h.div(s)
@@ -19087,6 +19137,8 @@ _wrap_long(s) = s
 Return a `<figcaption>` node for `spec`. `actions` is an iterable of nodes
 (buttons, links, …) rendered on the right side of the caption header, or in
 one row below the title in a narrow column (see [`caption_style`](@ref)).
+`long` opens from a small toggle at the end of that row, as a native
+`<details>`, so it takes no row of its own until the reader opens it.
 `texts` (a [`CaptionTexts`](@ref)) holds the caption's own words, such as the
 toggle that opens `long`; pass `caption_texts(:de)` on a German page.
 
@@ -23285,7 +23337,9 @@ function htmxoRowControl(row, target) {
 function htmxoMdToggle(row, event, key, slot) {
     if (htmxoRowControl(row, event.target)) return;
     var d = document.getElementById('detail-' + key); if (!d) return;
-    var show = row.dataset.htmxoDetailOpen === undefined ? d.hidden : row.dataset.htmxoDetailOpen !== 'true';
+    // A flat row's detail says whether it is open; a tree row's may be hidden
+    // only because a search or a closed branch hides it.
+    var show = row.dataset.htmxoParent === undefined ? d.hidden : row.dataset.htmxoDetailOpen !== 'true';
     htmxoMdShow(row, d, show);
     if (show && slot) {
         var s = document.getElementById(slot === 1 ? 'detail-slot-' + key : slot);
@@ -23295,10 +23349,15 @@ function htmxoMdToggle(row, event, key, slot) {
 }
 // Open or close a row's detail `d`, mirroring the state on the row and on its
 // detail control. A row update re-applies it to the rows it replaces.
+// `aria-expanded` is valid on a row only inside a treegrid, so a flat table's
+// row (`data-htmxo-detail-open` without `data-htmxo-parent`) keeps its state in
+// the data attribute, and its detail control tells assistive technology.
 function htmxoMdShow(row, d, show) {
     d.hidden = !show;
     if (row.dataset.htmxoDetailOpen !== undefined) row.dataset.htmxoDetailOpen = String(show);
-    if (row.dataset.htmxoTreeOpen === undefined) row.setAttribute('aria-expanded', show);
+    if (row.dataset.htmxoTreeOpen === undefined &&
+        (row.dataset.htmxoDetailOpen === undefined || row.dataset.htmxoParent !== undefined))
+        row.setAttribute('aria-expanded', show);
     var control = row.querySelector('[data-htmxo-detail-toggle]');
     if (control) {
         control.setAttribute('aria-expanded', show);
@@ -23432,7 +23491,9 @@ pair. The snippet ignores clicks on the row's own controls (`a`, `button`,
 its `<summary>`, editable text) — only those inside the row, so a table inside
 a `<form>` or `<details>` still toggles — toggles the
 `#detail-<safe_key>` row's `hidden` attribute, and mirrors the open state
-to `aria-expanded` on the master. `safe_key` MUST already be CSS-safe
+to the master row and to its detail control (`aria-expanded` on the control,
+and on the row where ARIA allows it: see [`master_detail_table`](@ref)).
+`safe_key` MUST already be CSS-safe
 (see [`master_detail_safe_key`](@ref)).
 
 The snippet is a short call into the page's master/detail runtime
@@ -23660,7 +23721,8 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             initially_open::Bool=false,
                             detail_url=nothing,
                             row_toggle::Bool=true,
-                            texts::TableTexts=_EN_TABLE_TEXTS)
+                            texts::TableTexts=_EN_TABLE_TEXTS,
+                            _row_expanded::Bool=true)
     safe = _md_safe_key(key)
     lazy = !isnothing(detail_url)
     tr_kwargs = Dict{Symbol,Any}(:id => "row-$safe")
@@ -23669,15 +23731,13 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     row_toggle && (tr_kwargs[:onclick] = lazy ?
         master_detail_toggle_js(safe; lazy_slot_id="detail-slot-$safe") :
         master_detail_toggle_js(safe))
-    # Every master row is expandable, so it always carries aria-expanded
-    # reflecting state: "true" open, "false" collapsed. This matches what
-    # master_detail_toggle_js sets on click (so the initial render and the
-    # post-click DOM agree) and is the a11y-correct shape. Collapsed-look
-    # CSS can key off `[aria-expanded="false"]` or the equivalent
-    # `:not([aria-expanded="true"])`. (Pre-HTMX-116ab2c the `h` builder
-    # dropped every string `"false"`, forcing a no-attr + `:not(...)`
-    # workaround; that drop is now scoped to true boolean attrs.)
-    tr_kwargs[:aria_expanded] = initially_open ? "true" : "false"
+    # A row built here on its own has no native control, so it carries
+    # aria-expanded reflecting state: "true" open, "false" collapsed, which
+    # is what master_detail_toggle_js sets on click. ARIA allows that only on
+    # a treegrid's row, so a flat `master_detail_table` passes
+    # `_row_expanded=false`: its row writes `data-htmxo-detail-open` and its
+    # native detail control carries aria-expanded instead.
+    _row_expanded && (tr_kwargs[:aria_expanded] = initially_open ? "true" : "false")
     isnothing(master_class) || (tr_kwargs[:class] = master_class)
     cells, row_attrs = _md_master_row(master_cells, texts)
     given = _md_merge_row_attrs!(Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(master_attrs)),
@@ -23763,6 +23823,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 
 # Keyword arguments
 - `key(item)`: function returning the row key (sanitised internally).
+- A flat table's row shows its state as `data-htmxo-detail-open="true"|"false"`;
+  key CSS off that. `aria-expanded` sits on the row's native detail control
+  (and on a row only in a hierarchy or grouped table, whose `role="treegrid"`
+  allows it). HTMXObjects ≥ 0.1.35.
 - `master(item)`: function returning the master row's `<td>` cells
   (vector or tuple of nodes), or one `<tr>` holding them. A bare float among
   them becomes a [`number_cell`](@ref) in the table's language (`texts`). A row's attributes
@@ -24269,7 +24333,7 @@ function master_detail_table(headers, items;
             end
         end
         if has_detail
-            isnothing(children) || (attrs[:data_htmxo_detail_open] = string(detail_open))
+            attrs[:data_htmxo_detail_open] = string(detail_open)
             # Plain hierarchy leaves use their label as the keyboard detail
             # control. Linked leaves and branches with their own details keep
             # a separate icon, so links and child-row expansion remain distinct.
@@ -24304,7 +24368,7 @@ function master_detail_table(headers, items;
             (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
                                     initially_open=detail_open && ancestors_open, detail_url=url,
-                                    row_toggle=!selecting, texts)
+                                    row_toggle=!selecting, texts, _row_expanded=!isnothing(children))
             push!(rows, m, d)
         end
         visit_children(descendants, safe, level, ancestors_open && branch_open)
@@ -31151,6 +31215,12 @@ later stylesheet (for example in `extra_head`) overrides them:
 `:root { --htmxo-container-max-width: 1800px; --htmxo-container-gutter: 1rem; }`
 tunes the width.
 
+The header of [`pico_page`](@ref), or any `<header><nav>` directly in `<body>`,
+stays in the page. It may run past `.container` while it fits the window, as
+under Pico, and then continues on further lines: the navigation below the brand,
+starting where the brand does, its entries whole. A later
+`body > header nav, body > header nav ul { flex-wrap: nowrap; }` keeps one line.
+
 A button without a colour class (`<button>`, `<input type=submit|button>`,
 `role="button"`, a bare `.outline`) takes Pico's own slate outline — the look
 of `class="secondary outline"` — in place of Pico's azure fill, in its rest,
@@ -31159,12 +31229,13 @@ Pico's looks. To colour a button otherwise, set `--pico-background-color`,
 `--pico-color` and `--pico-border-color` on it from a later stylesheet, with a
 selector at least as specific as two classes (`.app .cta`).
 
-A disclosure (`<details>`, so also [`SemanticDisclosure`](@ref), the later
-views of [`SemanticAlternatives`](@ref) and a caption's "More") is a bordered
-box: its summary is a bold, tinted bar with the chevron right before the
-label, and its content opens inside the box. Pico draws it as one borderless
-line with the chevron at the far edge. Pico's dropdown menus
-(`details.dropdown`) and button summaries (`summary[role]`) keep Pico's looks.
+A disclosure (`<details>`, so also [`SemanticDisclosure`](@ref) and the later
+views of [`SemanticAlternatives`](@ref)) is a bordered box: its summary is a
+bold, tinted bar with the chevron right before the label, and its content opens
+inside the box. Pico draws it as one borderless line with the chevron at the far
+edge. Pico's dropdown menus (`details.dropdown`) and button summaries
+(`summary[role]`) keep Pico's looks, and a caption's "More" is a small button
+beside the caption's actions ([`caption_style`](@ref)).
 The box's rules are as weak as Pico's own, so a component that draws its own
 `<details>` (a menu badge) keeps every property it sets in its own class
 rules. `--htmxo-disclosure-padding` (default `1rem`) is the inner spacing of
@@ -31199,6 +31270,23 @@ pico_bridge() = h.style(Raw("""
                        calc(100% - 2 * var(--htmxo-container-gutter, 2rem)));
     }
 }
+/* Pico keeps a `nav` on one line, and `.container`, which holds the header of
+   `pico_page`, is well narrower than the window below 1280 px. So labels broke
+   and then the last entries ran off the page and widened it. The nav may now
+   use the window, up to a 1rem margin: `(100vw + 100%) / 2` is the distance from
+   a centred container's left edge to the window's right edge. Past that it
+   continues on further lines, its entries whole. A nav that fits the container
+   stays as wide as the container. On one line the gap and the margin cancel;
+   on its own line the navigation starts where the brand does. */
+body > header nav {
+    flex-wrap: wrap;
+    width: max-content;
+    min-width: 100%;
+    max-width: calc((100vw + 100%) / 2 - 1rem);
+    column-gap: var(--pico-nav-element-spacing-horizontal);
+}
+body > header nav ul { flex-wrap: wrap; }
+body > header nav ul:last-of-type { margin-left: calc(var(--pico-nav-element-spacing-horizontal) * -1); }
 /* Pico paints a button without a colour class in its primary azure. It takes
    Pico's slate outline (`.secondary.outline`) instead, through the same three
    variables Pico sets on every button; `.secondary` and `.contrast` keep
