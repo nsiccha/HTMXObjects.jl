@@ -14,6 +14,19 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.45
+
+- Add the `minus` text to `TableTexts`: the sign of a negative number that
+  `format_number`, `number_cell`, `format_interval`, `interval_cell` and the
+  group summaries of `ColumnSummary` write, on the server and in the browser.
+  English keeps `-`; German writes the minus sign `−` (U+2212), so
+  `format_interval(-0.42, -0.61, -0.25; texts = table_texts(:de))` is
+  `−0,42 (−0,61 bis −0,25)`. Sort keys, `data-htmxo-number` and the ⬇ CSV
+  keep `-`, and a table's search finds `−0,42` from a typed `-0,42`.
+  **Breaking:** German text with a negative number changes from `-` to `−`;
+  a dependant that compares it with a hyphen writes `−`, or passes
+  `table_texts(:de; minus = "-")` to keep the hyphen.
+
 ## 0.1.44
 
 - Add `pico_color` to `htmx` and `pico_page`: the page's accent colour, as the

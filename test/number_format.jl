@@ -5,9 +5,9 @@
     # Every digit Julia prints, in German; a float's trailing `.0` is no digit.
     @test f(0.15623) == "0,15623" && f(2.0) == "2" && f(-0.0) == "0" && f(0.0) == "0"
     @test f(1234567.25) == "1.234.567,25" && f(1234567.0) == "1.234.567" && f(123456.0) == "123.456"
-    @test f(100000.0) == "100.000" && f(-1234.5) == "-1.234,5" && f(0.001) == "0,001"
+    @test f(100000.0) == "100.000" && f(-1234.5) == "−1.234,5" && f(0.001) == "0,001"
     # A power of ten below 10⁻⁴ and from 10¹⁵ up, with superscript digits.
-    @test f(3.81e-5) == "3,81·10⁻⁵" && f(-3.81e-5) == "-3,81·10⁻⁵" && f(1e-5) == "1·10⁻⁵"
+    @test f(3.81e-5) == "3,81·10⁻⁵" && f(-3.81e-5) == "−3,81·10⁻⁵" && f(1e-5) == "1·10⁻⁵"
     @test f(1e-4) == "0,0001" && f(9.99e-5) == "9,99·10⁻⁵"
     @test f(1e15) == "1·10¹⁵" && f(1.5e15) == "1,5·10¹⁵" && f(999999999999999.0) == "999.999.999.999.999"
     @test f(5e-324) == "5·10⁻³²⁴" && f(floatmax()) == "1,7976931348623157·10³⁰⁸"
@@ -15,8 +15,8 @@
     @test format_number(0.15623) == "0.15623" && format_number(3.81e-5) == "3.81·10⁻⁵"
     @test format_number(1234567) == "1,234,567" && format_number(1234567.25; texts=en) == "1,234,567.25"
     # Integers keep every digit, grouped, and never switch to a power of ten.
-    @test f(1234567) == "1.234.567" && f(-1234) == "-1.234" && f(42) == "42" && f(0) == "0"
-    @test f(10^18) == "1.000.000.000.000.000.000" && f(typemin(Int)) == "-9.223.372.036.854.775.808"
+    @test f(1234567) == "1.234.567" && f(-1234) == "−1.234" && f(42) == "42" && f(0) == "0"
+    @test f(10^18) == "1.000.000.000.000.000.000" && f(typemin(Int)) == "−9.223.372.036.854.775.808"
     @test f(big(10)^20) == "100.000.000.000.000.000.000"
     # Significant digits round first, halves away from zero like fixed
     # decimals (`round(x; sigdigits=2)` gives 2800 and 0.12), carrying into a
@@ -24,7 +24,7 @@
     @test f(0.15623; sigdigits=3) == "0,156" && f(3.81234e-5; sigdigits=3) == "3,81·10⁻⁵"
     @test f(1234567; sigdigits=3) == "1.230.000" && f(1234567.25; sigdigits=2) == "1.200.000"
     @test f(9.9996e-5; sigdigits=3) == "0,0001"
-    @test f(2850; sigdigits=2) == "2.900" && f(2850.0; sigdigits=2) == "2.900" && f(-2850.0; sigdigits=2) == "-2.900"
+    @test f(2850; sigdigits=2) == "2.900" && f(2850.0; sigdigits=2) == "2.900" && f(-2850.0; sigdigits=2) == "−2.900"
     @test f(0.125; sigdigits=2) == "0,13" && f(2.5; sigdigits=1) == "3" && f(29210.0; sigdigits=2) == "29.000"
     @test f(9.96; sigdigits=2) == "10" && f(99.96; sigdigits=3) == "100" && f(-0.0; sigdigits=2) == "0"
     @test f(1.5e15; sigdigits=1) == "2·10¹⁵" && f(999999999999999.0; sigdigits=15) == "999.999.999.999.999"
@@ -36,11 +36,18 @@
     @test f(1234; digits=2) == "1.234,00" && f(1234; digits=0) == "1.234" && f(1e15; digits=0) == "1.000.000.000.000.000"
     @test [format_number(x; texts=en, digits=d) for (x, d) in ((1234567.891, 2), (0.125, 2), (-0.004, 2), (999.5, 0), (1e15, 0))] ==
         ["1,234,567.89", "0.13", "0.00", "1,000", "1,000,000,000,000,000"]
-    @test format_number(-1234.5; texts=de, digits=1) == "-1.234,5"
+    @test format_number(-1234.5; texts=de, digits=1) == "−1.234,5"
+    # A negative number takes the sign of `texts`: the minus sign U+2212 in
+    # German, the hyphen-minus in English, whichever rule writes it; the
+    # hyphen can be kept by keyword.
+    @test de.minus == "\u2212" && en.minus == "-"
+    @test f(-1234; digits=2) == "−1.234,00" && f(-0.004; digits=2) == "0,00" && f(-1234567; sigdigits=2) == "−1.200.000"
+    @test format_number(-1234.5; texts=en) == "-1,234.5" && format_number(-3.81e-5; texts=en) == "-3.81·10⁻⁵"
+    @test format_number(-1234.5; texts=table_texts(:de; minus="-")) == "-1.234,5"
     @test format_number(1234.5; texts=table_texts(:de; thousands=" "), digits=1) == "1 234,5"
     # No value, infinities and NaN; other reals as their float.
     @test f(missing) == "–" && f(nothing) == "–" && f(missing; digits=2) == "–"
-    @test f(Inf) == "∞" && f(-Inf) == "-∞" && f(NaN) == "NaN" && f(Inf; digits=2) == "∞"
+    @test f(Inf) == "∞" && f(-Inf) == "−∞" && f(NaN) == "NaN" && f(Inf; digits=2) == "∞"
     @test f(1 // 4) == "0,25" && f(Float32(0.1)) == "0,1" && f(Float16(0.5)) == "0,5" && f(π; sigdigits=3) == "3,14"
     # Refused: digits outside the group sums' range, sigdigits outside 1 to
     # 15 (the digits the browser's group sums round exactly), both at once,
@@ -71,6 +78,9 @@ end
     @test attr(html(number_cell(1234567)), "data-sort-value") == "1234567" && text(html(number_cell(1234567))) == "1,234,567"
     # `parseFloat` does not know `Inf`.
     @test attr(html(number_cell(-Inf)), "data-sort-value") == "-Infinity" && text(html(number_cell(-Inf))) == "-∞"
+    # A German negative shows the minus sign; its sort key and CSV keep `-`.
+    neg = html(number_cell(-0.15623; texts=de, sigdigits=3))
+    @test text(neg) == "−0,156" && attr(neg, "data-sort-value") == "-0.15623" && attr(neg, "data-htmxo-number") == "-0.15623"
     # No value: a dash, no sort key, an empty CSV field.
     gap = html(number_cell(missing; texts=de))
     @test text(gap) == "–" && isnothing(attr(gap, "data-sort-value")) && attr(gap, "data-htmxo-number") == ""
@@ -127,7 +137,7 @@ end
     lazy = html(master_detail_table(["Party", "Amount"], tx; key=t -> t.id,
         master=t -> (h.td(t.party), t.amount), detail=t -> h.p("d"), texts=de,
         groupings=["party" => t -> t.party], group_by=["party"], group_rows_url=(k, ms) -> "/rows?key=$k"))
-    @test contains(lazy, "[&quot;p1&quot;,&quot;Acme -1.000,5&quot;]")
+    @test contains(lazy, "[&quot;p1&quot;,&quot;Acme −1.000,5&quot;]")
 end
 
 @testitem "German number cells sort by value and export their number browser" setup=[ChromeDump] tags=[:unit, :browser] begin

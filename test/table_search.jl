@@ -162,6 +162,76 @@ end
     end
 end
 
+@testitem "a German table's search finds a minus sign from a typed hyphen browser" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        de = table_texts(:de)
+        # German writes a negative number with the minus sign U+2212; a reader
+        # types the hyphen-minus, and either finds the other.
+        german = sortable_table(["Name", "Wert"], [
+            h.tr(h.td("Neg"), number_cell(-0.42; texts=de); id="row-neg"),
+            h.tr(h.td("Pos"), number_cell(0.42; texts=de); id="row-pos"),
+            h.tr(h.td("Band"), interval_cell(-0.12, -0.30, 0.05; texts=de); id="row-band")]; searchable=true, id="de", texts=de)
+        english = sortable_table(["Name", "Value"], [
+            h.tr(h.td("Neg"), number_cell(-1.5); id="row-en-neg"),
+            h.tr(h.td("Pos"), number_cell(1.5); id="row-en-pos")]; searchable=true, id="en")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const table = id => document.getElementById(id);
+            const input = id => table(id).closest('.htmxo-searchable-table').querySelector('input[type="search"]');
+            const filter = (id, v) => { const i = input(id); i.value = v; i.dispatchEvent(new Event('input', {bubbles: true})); };
+            const shown = id => Array.from(table(id).rows).filter(r => !r.hidden).map(r => r.id).join(',');
+            check('german-text', document.getElementById('row-neg').cells[1].textContent === '−0,42' &&
+                document.getElementById('row-band').cells[1].textContent === '−0,12 (−0,30 bis 0,05)');
+            filter('de', '-0,42');
+            check('hyphen-finds-minus', shown('de') === 'row-neg');
+            filter('de', '−0,42');
+            check('minus-finds-minus', shown('de') === 'row-neg');
+            filter('de', '-0,30 bis');
+            check('hyphen-finds-interval', shown('de') === 'row-band');
+            filter('de', '0,42');
+            check('unsigned-finds-both', shown('de') === 'row-neg,row-pos');
+            filter('en', '−1.5');
+            check('minus-finds-hyphen', shown('en') === 'row-en-neg');
+            filter('en', '-1.5');
+            check('hyphen-finds-hyphen', shown('en') === 'row-en-neg');
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(german, english, driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()), pico_version=nothing,
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            HTTP.URI(req.target).path == "/" ?
+                HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 7
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "table search survives a re-render browser" setup=[ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"

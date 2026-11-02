@@ -20017,7 +20017,10 @@ function htmxoFilterTable(target) {
     state.input = raw;
     const query = raw.toLocaleLowerCase().trim().replace(/\s+/g, ' ');
     const registered = state.filters;
-    const phrase = (row, ctx) => ctx.text.includes(ctx.query);
+    // A German table writes a negative number with the minus sign `−`
+    // (`TableTexts.minus`); the `-` a keyboard types finds it, and back.
+    const unsigned = t => t.replace(/\u2212/g, '-');
+    const phrase = (row, ctx) => unsigned(ctx.text).includes(unsigned(ctx.query));
     const filters = [['search', registered.get('search') || phrase],
         ...Array.from(registered).filter(([name]) => name !== 'search')];
     const visible = new Set();
@@ -21347,10 +21350,11 @@ function htmxoGrouped(whole, thousands) {
     }
     return out;
 }
-function htmxoFixed(x, digits, decimal, thousands) {
+// `_format_fixed`; `minus` is the sign (a machine-read key keeps `-`).
+function htmxoFixed(x, digits, decimal, thousands, minus = '-') {
     const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
     const s = BigInt(scaled).toString().padStart(digits + 1, '0');
-    const out = (x < 0 && scaled !== 0 ? '-' : '') + htmxoGrouped(s.slice(0, s.length - digits), thousands);
+    const out = (x < 0 && scaled !== 0 ? minus : '') + htmxoGrouped(s.slice(0, s.length - digits), thousands);
     return digits > 0 ? out + decimal + s.slice(s.length - digits) : out;
 }
 // `_round_sig`: x to k significant digits, halves away from zero, as
@@ -21367,28 +21371,29 @@ function htmxoSigDigits(x, k) {
     return [x < 0, s.replace(/0+$/, ''), s.length + e + 1 - k];
 }
 // `_format_digits`: ±0.ds × 10^point, as a power of ten (`sci`) or positionally.
-function htmxoDigitsText(negative, ds, point, decimal, thousands, sci) {
+function htmxoDigitsText(negative, ds, point, decimal, thousands, sci, minus = '-') {
     if (!ds) return '0';
     const sup = n => (n < 0 ? '⁻' : '') + String(Math.abs(n)).replace(/[0-9]/g, c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]);
-    const out = negative ? '-' : '';
+    const out = negative ? minus : '';
     if (sci) return out + ds[0] + (ds.length > 1 ? decimal + ds.slice(1) : '') + '·10' + sup(point - 1);
     if (point <= 0) return out + '0' + decimal + '0'.repeat(-point) + ds;
     if (point >= ds.length) return out + htmxoGrouped(ds + '0'.repeat(point - ds.length), thousands);
     return out + htmxoGrouped(ds.slice(0, point), thousands) + decimal + ds.slice(point);
 }
 // `_md_summary_cell`: a summary `s` as the table writes it, or as the ⬇ CSV
-// does (`csv`: no power of ten).
-function htmxoSummaryText(x, s, decimal, thousands, csv) {
-    if (!s.sigdigits) return htmxoFixed(x, s.digits, decimal, thousands);
+// does (`csv`: no power of ten, and `-` whatever `minus` is).
+function htmxoSummaryText(x, s, decimal, thousands, csv, minus = '-') {
+    if (csv) minus = '-';
+    if (!s.sigdigits) return htmxoFixed(x, s.digits, decimal, thousands, minus);
     const [negative, ds, point] = htmxoSigDigits(x, s.sigdigits);
-    return htmxoDigitsText(negative, ds, point, decimal, thousands, !csv && (point <= -4 || point >= 16));
+    return htmxoDigitsText(negative, ds, point, decimal, thousands, !csv && (point <= -4 || point >= 16), minus);
 }
 // `_md_summary_cell(::Val{:tally})`: a :tally cell's total, then one bar
 // segment per category with a count, in the table's category order (others
 // after them, grey), named for the screen reader as the Markdown writes it.
 // The bar takes its length from the scale of the column's rows of `level`
 // (`htmxoTallyScale`).
-function htmxoTallyFill(cell, counts, s, decimal, thousands, level) {
+function htmxoTallyFill(cell, counts, s, decimal, thousands, level, minus = '-') {
     const value = cell.querySelector('[data-htmxo-tally]');
     let total = 0;
     if (counts) counts.forEach(n => { total += n; });
@@ -21401,7 +21406,7 @@ function htmxoTallyFill(cell, counts, s, decimal, thousands, level) {
         cell.removeAttribute('data-htmxo-number');
         return;
     }
-    const num = x => htmxoSummaryText(x, s, decimal, thousands, false);
+    const num = x => htmxoSummaryText(x, s, decimal, thousands, false, minus);
     const known = new Set(s.categories.map(c => c.key));
     const shown = [...s.categories, ...Array.from(counts.keys()).filter(k => !known.has(k))
         .map(k => ({key: k, label: k, color: 'var(--htmxo-category-other)'}))]
@@ -21583,14 +21588,14 @@ function htmxoRegroup(wrapper, levels) {
         cfg.summary.forEach((s, i) => {
             const cell = row.querySelector('[data-htmxo-group-summary="' + i + '"]');
             const x = htmxoSummaryValue(s.reduce, list.map(m => m.values[i]));
-            const decimal = htmxoText(table, 'decimal'), thousands = htmxoText(table, 'thousands');
+            const decimal = htmxoText(table, 'decimal'), thousands = htmxoText(table, 'thousands'), minus = htmxoText(table, 'minus');
             const target = cell.querySelector('[data-htmxo-summary-value]') || cell;
-            if (s.reduce === 'tally') htmxoTallyFill(cell, x, s, decimal, thousands, level);
+            if (s.reduce === 'tally') htmxoTallyFill(cell, x, s, decimal, thousands, level, minus);
             else if (x === null) {
                 target.textContent = '';
                 cell.removeAttribute('data-htmxo-number');
             } else {
-                target.textContent = htmxoSummaryText(x, s, decimal, thousands, false);
+                target.textContent = htmxoSummaryText(x, s, decimal, thousands, false, minus);
                 cell.dataset.htmxoNumber = htmxoSummaryText(x, s, '.', '', true);
             }
         });
@@ -22183,10 +22188,12 @@ end
 The words a table's built-in controls show: the search field, its count and
 empty state, the selection bar, *Expand all* / *Collapse all*, the *Group by*
 control, lazy-detail status lines, the CSV button, the toggle of its
-caption's long text (`more`, as in [`caption_texts`](@ref)), the number
-separators of the numbers the table writes (`decimal`, `thousands`: its float
-cells and [`number_cell`](@ref)s, see [`format_number`](@ref), and the group
-sums of `group_summary` in [`master_detail_table`](@ref)) and the note on a row that holds a hovered item
+caption's long text (`more`, as in [`caption_texts`](@ref)), the marks of
+the numbers the table writes (`decimal`, `thousands` and the sign of a
+negative number, `minus`: `-` in English, the minus sign `−` (U+2212) in
+German; its float cells and [`number_cell`](@ref)s, see
+[`format_number`](@ref), the estimates of [`format_interval`](@ref), and the
+group sums of `group_summary` in [`master_detail_table`](@ref)) and the note on a row that holds a hovered item
 in a collapsed group (`linked_inside`, `linked_deep`, `linked_inside_many`; see
 *Hover linking* in [`sortable_table`](@ref)), the `▾` menu of a column with
 several sort keys (`sort_by`, `sort_ascending`, `sort_descending`) and the
@@ -22195,7 +22202,7 @@ names [`interval_sort_keys`](@ref) gives its five orders (`sort_estimate`,
 also names an interval column's bounds with `sort_lower` and `sort_upper`) and
 the text of an estimate with its interval ([`format_interval`](@ref):
 `interval`, `22 (13–34)`, and `interval_signed` for a negative bound,
-`-5 (-8 to -2)`). Build one with
+`-5 (-8 to -2)`, German `−5 (−8 bis −2)`). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -22240,6 +22247,7 @@ struct TableTexts
     more::String                # the caption's long-text toggle (`CaptionTexts`)
     decimal::String             # the decimal mark of the numbers the table writes
     thousands::String           # their thousands separator
+    minus::String               # their sign when negative (sort keys and the ⬇ CSV keep `-`)
     linked_inside::String       # note: the hovered item is in this collapsed row
     linked_deep::String         # note: ... several levels down
     linked_inside_many::String  # note: several hovered items are in this collapsed row
@@ -22296,6 +22304,7 @@ const _TABLE_TEXT_LOCALES = (
         more = _CAPTION_TEXT_LOCALES.en.more,
         decimal = _SEMANTIC_TEXT_LOCALES.en.decimal,
         thousands = ",",
+        minus = "-",
         linked_inside = "↳ inside",
         linked_deep = "↳ {levels} levels down",
         linked_inside_many = "↳ {count} inside",
@@ -22340,6 +22349,7 @@ const _TABLE_TEXT_LOCALES = (
         more = _CAPTION_TEXT_LOCALES.de.more,
         decimal = _SEMANTIC_TEXT_LOCALES.de.decimal,
         thousands = ".",
+        minus = "\u2212",
         linked_inside = "↳ darin",
         linked_deep = "↳ {levels} Ebenen tiefer",
         linked_inside_many = "↳ {count} darin",
@@ -24962,13 +24972,15 @@ _md_reduce(::Val{:min}, xs) = minimum(xs)
 _md_reduce(::Val{:max}, xs) = maximum(xs)
 
 # A number with `digits` decimals, halves away from zero, written with the
-# given decimal mark and thousands separator: group summaries and
-# `format_number(x; digits)`. `htmxoFixed` writes the same text in the browser.
-function _format_fixed(x::Float64, digits::Int, decimal::AbstractString, thousands::AbstractString)
+# given decimal mark, thousands separator and sign (`minus`; a machine-read
+# key keeps `-`): group summaries and `format_number(x; digits)`. `htmxoFixed`
+# writes the same text in the browser.
+function _format_fixed(x::Float64, digits::Int, decimal::AbstractString, thousands::AbstractString;
+                       minus::AbstractString="-")
     scaled = round(abs(x) * _SUMMARY_POW10[digits + 1], RoundNearestTiesAway)
     s = lpad(string(BigInt(scaled)), digits + 1, '0')
     io = IOBuffer()
-    x < 0 && scaled != 0 && print(io, '-')
+    x < 0 && scaled != 0 && print(io, minus)
     _print_grouped(io, s[1:end-digits], thousands)
     digits > 0 && print(io, decimal, s[end-digits+1:end])
     String(take!(io))
@@ -25117,8 +25129,10 @@ The group sums of [`ColumnSummary`](@ref) take the same `digits` or
 `sigdigits` and write the same text, in the browser too.
 
 `missing` and `nothing` write `–`; `Inf`, `-Inf` and `NaN` write `∞`, `-∞` and
-`NaN`. A negative number starts with `-`. Other real numbers (a `Rational`, an
-irrational, a decimal type) are written as their `float`.
+`NaN`. A negative number starts with the `minus` of `texts`: `-` in English,
+and in German the minus sign `−` (U+2212) German typography writes, `−1.234,5`
+and `−∞` (`table_texts(:de; minus="-")` keeps the hyphen). Other real numbers
+(a `Rational`, an irrational, a decimal type) are written as their `float`.
 
 [`number_cell`](@ref) puts the text in a table cell that sorts by the exact
 value. Unlike [`fmt_number`](@ref), which shortens a number with an English
@@ -25167,12 +25181,12 @@ _number_value(x) = throw(ArgumentError(string(
 _format_number(::Nothing, texts, rounding) = "–"
 _format_number(x::Integer, texts, rounding) = _format_finite(x, texts, rounding)
 _format_number(x::AbstractFloat, texts, rounding) =
-    isnan(x) ? "NaN" : isinf(x) ? (x > 0 ? "∞" : "-∞") : _format_finite(x, texts, rounding)
+    isnan(x) ? "NaN" : isinf(x) ? (x > 0 ? "∞" : string(texts.minus, "∞")) : _format_finite(x, texts, rounding)
 
 function _format_finite(x::Integer, texts, ::Nothing)
     io = IOBuffer()
     s = string(x)
-    x < 0 && print(io, '-')
+    x < 0 && print(io, texts.minus)
     _print_grouped(io, lstrip(s, '-'), texts.thousands)
     String(take!(io))
 end
@@ -25180,17 +25194,17 @@ _format_finite(x::Integer, texts, r::_FixedDigits) =
     r.k == 0 ? _format_finite(x, texts, nothing) :
     string(_format_finite(x, texts, nothing), texts.decimal, repeat('0', r.k))
 _format_finite(x::AbstractFloat, texts, r::_FixedDigits) =
-    _format_fixed(Float64(x), r.k, texts.decimal, texts.thousands)
+    _format_fixed(Float64(x), r.k, texts.decimal, texts.thousands; texts.minus)
 # Rounding an integer to significant digits leaves an integer, which keeps
 # every digit; a float switches to a power of ten as it does unrounded.
 _format_finite(x::Integer, texts, r::_SigDigits) = let (negative, ds, point) = _round_sig(Float64(x), r.k)
-    _format_digits(negative, ds, point, texts.decimal, texts.thousands, false)
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, false; texts.minus)
 end
 _format_finite(x::AbstractFloat, texts, r::_SigDigits) = let (negative, ds, point) = _round_sig(Float64(x), r.k)
-    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point))
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point); texts.minus)
 end
 _format_finite(x::AbstractFloat, texts, ::Nothing) = let (negative, ds, point) = _shortest_digits(x)
-    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point))
+    _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point); texts.minus)
 end
 
 # A float is written as a power of ten below 10⁻⁴ and from 10¹⁵ up: for
@@ -25198,14 +25212,15 @@ end
 _float_sci(point) = point <= -4 || point >= 16
 
 # The number ±0.`ds` × 10^`point` (`ds` without leading or trailing zeros;
-# zero has none) written with `decimal` and `thousands`: as a power of ten
-# (`sci`), written by `exponent` (superscript digits by default), else
-# positionally. `htmxoDigitsText` writes the same text in the browser.
+# zero has none) written with `decimal`, `thousands` and `minus` (a
+# machine-read key keeps `-`): as a power of ten (`sci`), written by
+# `exponent` (superscript digits by default), else positionally.
+# `htmxoDigitsText` writes the same text in the browser.
 function _format_digits(negative::Bool, ds::AbstractString, point::Int, decimal, thousands, sci::Bool;
-                        exponent=_superscript_exponent)
+                        exponent=_superscript_exponent, minus="-")
     isempty(ds) && return "0"
     io = IOBuffer()
-    negative && print(io, '-')
+    negative && print(io, minus)
     if sci
         print(io, ds[1])
         length(ds) > 1 && print(io, decimal, ds[2:end])
@@ -25366,8 +25381,10 @@ A number below 10⁻⁴ or from 10¹⁶ up is written as a power of ten
 (`1.20·10⁻⁵`), as `format_number` writes it. Without both bounds the estimate
 is written alone (`format_number`'s digits, since there is no width); without
 an estimate it is `–`. An interval of width zero, or with an infinite or `NaN`
-bound, sets no digits either. A negative bound changes the dash to a word
-(`-5 (-8 to -2)`, German `bis`): the `interval` and `interval_signed` texts.
+bound, sets no digits either. A negative number is written with the `minus` of
+`texts`, as `format_number` writes it: `-0.42` in English, `−0,42` (U+2212)
+in German. A negative bound changes the dash to a word (`-5 (-8 to -2)`,
+German `−5 (−8 bis −2)`): the `interval` and `interval_signed` texts.
 """
 format_interval(estimate, lower, upper; kw...) = format_interval(IntervalEstimate(estimate, lower, upper); kw...)
 function format_interval(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Integer=2,
@@ -25379,8 +25396,8 @@ function format_interval(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS,
     shown(v) = _format_interval_number(v, texts, rounding)
     (isnothing(lo) || isnothing(hi)) && return shown(est)
     lower, upper = shown(lo), shown(hi)
-    _table_text(texts, startswith(lower, '-') || startswith(upper, '-') ? :interval_signed : :interval;
-        estimate=shown(est), lower, upper)
+    signed = !isempty(texts.minus) && (startswith(lower, texts.minus) || startswith(upper, texts.minus))
+    _table_text(texts, signed ? :interval_signed : :interval; estimate=shown(est), lower, upper)
 end
 
 # How the numbers of an interval are rounded: the caller's `digits` or
@@ -25422,7 +25439,7 @@ function _format_place(x::Float64, p::Int, texts)
     isempty(ds) && return p < 0 ? string('0', texts.decimal, repeat('0', -p)) : "0"
     digits = ds * repeat('0', point - p - length(ds))     # |x| / 10^p, rounded
     io = IOBuffer()
-    negative && print(io, '-')
+    negative && print(io, texts.minus)
     if _float_sci(point)
         print(io, digits[1])
         length(digits) > 1 && print(io, texts.decimal, digits[2:end])
