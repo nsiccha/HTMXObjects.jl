@@ -575,10 +575,10 @@ sortable_table(["Party", "Amount"],
 - **Semantics and theme.** `aria-multiselectable` on the table, `aria-selected`
   on rows, one roving `tabindex="0"`. Selected rows are tinted and the active
   row marked from `--htmxo-accent` in light and dark; set
-  `--htmxo-selected-row` to change the tint. Links, muted text, slate buttons
-  and `del`/`ins` in a selected or lit row take a stronger version of their
-  colour, so they keep 4.5:1 on the tint in both themes, also on a row that is
-  both. An app that sets a stronger tint checks that contrast itself.
+  `--htmxo-selected-row` to change the tint. Links, muted text, status text,
+  slate buttons and `del`/`ins` in a selected or lit row take a stronger version
+  of their colour, so they keep 4.5:1 on the tint in both themes, also on a row
+  that is both. An app that sets a stronger tint checks that contrast itself.
 
 #### Hover linking {#table-linking}
 

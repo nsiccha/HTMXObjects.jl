@@ -500,8 +500,10 @@ end
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         tones(p) = (h.td(p.id), h.td(h.span("muted"; class="u-text-muted")), h.td(h.a("link"; href="#x")),
-            h.td(h.button("Act"; type="button")), h.td(h.del("removed")), h.td(h.ins("added")))
-        table = master_detail_table(["Probe", "Muted", "Link", "Button", "Del", "Ins"], PROBES[1:3];
+            h.td(h.button("Act"; type="button")), h.td(h.del("removed")), h.td(h.ins("added")),
+            h.td("ok"; data_status="success"), h.td("warn"; data_status="warning"), h.td("bad"; data_status="error"),
+            h.td(h.span("bad"; data_status="error")))
+        table = master_detail_table(["Probe", "Muted", "Link", "Button", "Del", "Ins", "Ok", "Warn", "Bad", "Span"], PROBES[1:3];
             key=p -> p.id, master=tones, detail=p -> h.p("detail"), link="probes", detail_toggle=:label,
             selectable="s", select_form="f", id="t")
         driver = h.script(Raw(raw"""
@@ -523,7 +525,9 @@ end
                 return bg; };
             const row = document.getElementById('row-k1');
             const tones = {label: '[data-htmxo-detail-toggle]', muted: '.u-text-muted', link: 'td a',
-                button: 'td button:not([data-htmxo-detail-toggle])', del: 'del', ins: 'ins'};
+                button: 'td button:not([data-htmxo-detail-toggle])', del: 'del', ins: 'ins',
+                success: 'td[data-status="success"]', warning: 'td[data-status="warning"]',
+                error: 'td[data-status="error"]', span: 'span[data-status="error"]'};
             const set = (lit, selected, hover) => { row.toggleAttribute('data-hover', hover);
                 htmxoLink('probes', lit ? 'k1' : null); htmxoSelectRows('#t', selected ? [row.id] : []); };
             const out = [];
@@ -576,12 +580,12 @@ end
         try
             for path in ("/light", "/dark")
                 read = measure(path)
-                @test length(read) == length(states) * 9
+                @test length(read) == length(states) * 13
                 for state in states
                     @test get(read, "applied $state", "") == "true"
                     @test get(read, "tinted $state", "") == "true"
                     @test parse(Float64, get(read, "control $state", "0")) < 4.5
-                    for tone in ("label", "muted", "link", "button", "del", "ins")
+                    for tone in ("label", "muted", "link", "button", "del", "ins", "success", "warning", "error", "span")
                         @test parse(Float64, get(read, "$state $tone", "0")) >= 4.5
                     end
                 end

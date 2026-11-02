@@ -21797,10 +21797,10 @@ function htmxoSortState(target) {
 }
 """
 
-# A tinted row keeps its text readable. Pico's link, slate and muted tones sit
-# barely above 4.5:1 on the page (dark muted text at 4.6:1), so any tint that
-# still shows drops them below it, and a tint pale enough not to (1% in dark) is
-# no marker at all. So inside the row each tone moves towards the text colour,
+# A tinted row keeps its text readable. Pico's link, slate and muted tones and
+# HTMXO's status tones sit barely above 4.5:1 on the page (dark muted text at
+# 4.6:1), so any tint that still shows drops them below it, and a tint pale
+# enough not to (1% in dark) is no marker at all. So inside the row each tone moves towards the text colour,
 # keeping its hue: a link still reads as a link, a deletion as a deletion. A
 # custom property cannot read its own inherited value, so the mix sits on the row
 # and the cells re-point Pico's token at it; `a` and `button` then rewrite their
@@ -21811,7 +21811,8 @@ function htmxoSortState(target) {
 const _TINTED_ROW_TONES = ("--pico-primary" => "primary", "--pico-primary-hover" => "primary-hover",
     "--pico-secondary" => "secondary", "--pico-secondary-hover" => "secondary-hover",
     "--pico-muted-color" => "muted", "--htmxo-muted" => "htmxo-muted",
-    "--pico-del-color" => "del", "--pico-ins-color" => "ins")
+    "--pico-del-color" => "del", "--pico-ins-color" => "ins",
+    "--htmxo-success" => "success", "--htmxo-warning" => "warning", "--htmxo-error" => "error")
 _tinted_row_css(rows) = """
 $rows { $(join(("--htmxo-tinted-$name: color-mix(in srgb, var($token) 40%, var(--pico-contrast, CanvasText));" for (token, name) in _TINTED_ROW_TONES), " ")) }
 $rows > td { $(join(("$token: var(--htmxo-tinted-$name);" for (token, name) in _TINTED_ROW_TONES), " ")) }
@@ -22892,9 +22893,9 @@ fires a bubbling `htmxo:selection-changed` event on the wrapper with `detail`
 `{name, keys, rows, submitted, hidden}`. `htmxoSelectRows(target, keys)` sets
 the selection (`[]` clears) and `htmxoSelectedKeys(target)` reads it. The
 selected row is tinted and the active row marked with `--htmxo-accent`
-(override the tint with `--htmxo-selected-row`). Links, muted text, slate
-buttons and `del`/`ins` in a selected or lit row take a stronger version of
-their colour, so they keep 4.5:1 on the tint. Selection needs
+(override the tint with `--htmxo-selected-row`). Links, muted text, status
+text, slate buttons and `del`/`ins` in a selected or lit row take a stronger
+version of their colour, so they keep 4.5:1 on the tint. Selection needs
 [`sortable_table_js`](@ref) on the page, which the [`htmx`](@ref) shell carries.
 
 # Hover linking
@@ -31179,6 +31180,15 @@ semantic_follow_script() = h.script(Raw(raw"""
 
 # --- Theme ---
 
+# A status word is text, so each tone holds 4.5:1 on the page and on a striped
+# row in both of Pico's themes. No single shade can: one dark enough for a white
+# page is too dark for Pico's near-black one. `light-dark()` picks the shade by
+# the `color-scheme` where the tone is used, so a nested `data-theme` works too.
+const _STATUS_TONE_CSS = """
+--htmxo-success: light-dark(#217d72, #2a9d8f);
+--htmxo-warning: light-dark(#9c6311, #e9a23b);
+--htmxo-error:   light-dark(#ca3f1c, #e76f51);"""
+
 """
     htmxo_theme()
 
@@ -31192,6 +31202,13 @@ so any host's `:root { --htmxo-...: ... }` override wins automatically — no
 specificity wars, no host detection in component code. See [`pico_bridge`](@ref)
 and [`vitepress_bridge`](@ref) for one-line adapters.
 
+`--htmxo-success`, `--htmxo-warning` and `--htmxo-error` are text colours: each
+holds 4.5:1 on Pico's light and dark pages, through `light-dark()`. So a page
+that declares no `color-scheme` gets the light shades; a dark page of that kind
+declares `color-scheme: dark` or sets its own colours. `light-dark()` needs
+Chrome 123, Firefox 120 or Safari 17.5; older browsers show status text in the
+inherited colour.
+
 `--htmxo-bg` is the page background, for surfaces that must cover content
 behind them (the sticky gallery toolbar) or contrast with a filled badge.
 Its default `Canvas` is the browser's page background, which follows the
@@ -31202,9 +31219,7 @@ htmxo_theme() = h.style(Raw("""
     :where(:root) {
         --htmxo-bg:      Canvas;
         --htmxo-accent:  #4a90d9;
-        --htmxo-success: #2a9d8f;
-        --htmxo-warning: #e9a23b;
-        --htmxo-error:   #e76f51;
+$(_STATUS_TONE_CSS)
         --htmxo-border:  currentColor;
         --htmxo-muted:   color-mix(in srgb, currentColor 60%, transparent);
     }
@@ -31220,8 +31235,9 @@ automatically by [`htmx`](@ref) (and so [`pico_page`](@ref)) when
 `pico_version` is non-`nothing`.
 
 It remaps `--htmxo-*` to Pico's color tokens, so HTMXO components pick up the
-host's page background, accent, muted and status colors. Borders keep the
-text color.
+host's page background, accent and muted colors. Borders keep the text color.
+The status colors are the ones of [`htmxo_theme`](@ref): Pico's page stylesheet
+has none.
 
 It also sets the page's text size and width, which Pico ties to the window:
 
@@ -31268,14 +31284,18 @@ both, inside its box; `--htmxo-disclosure-padding: 0` drops the inner spacing.
 A [`SemanticArtifact`](@ref) download takes the same slate outline, in place
 of Pico's underlined azure link; a later stylesheet restyles it with a
 selector at least as specific as `.app a.htmxo-semantic-artifact`.
+
+A table cell with `data-status` (`<td data-status="success">`) shows its text
+bold in the status colour, as a `span` does. Pico sets the colour and weight of
+every cell, so the cell rules live here, as weak as Pico's own: any later
+stylesheet overrides them, even a bare `td`. `tr[data-status]` leaves its cells
+as they are.
 """
 pico_bridge() = h.style(Raw("""
 :root {
     --htmxo-bg:      var(--pico-background-color, Canvas);
     --htmxo-accent:  var(--pico-primary, #4a90d9);
-    --htmxo-success: var(--pico-color-green-550, #2a9d8f);
-    --htmxo-warning: var(--pico-color-amber-550, #e9a23b);
-    --htmxo-error:   var(--pico-color-red-550, #e76f51);
+$(_STATUS_TONE_CSS)
     /* Pico has no root-level border color: `--pico-border-color` exists only
        on form controls and buttons, and its divider color
        (`--pico-muted-border-color`) is too faint for a status banner's edge. */
@@ -31437,6 +31457,16 @@ a.htmxo-semantic-artifact > small {
     font-size: .85em;
     white-space: nowrap;
 }
+/* Pico's unlayered `td, th` rule sets every cell's colour and weight, and beats
+   any rule in a layer, so the `data-status` rules of `htmxo_utility_styles()`
+   never reach a cell. These match that rule's specificity and follow it, so an
+   app's rule still wins. Only the cell's own attribute counts: the KB's
+   `tr[data-status]` keeps Pico's cells. */
+:is(td, th):where([data-status]) { font-weight: bold; }
+:is(td, th):where([data-status="success"]) { color: var(--htmxo-success); }
+:is(td, th):where([data-status="error"]) { color: var(--htmxo-error); }
+:is(td, th):where([data-status="warning"]) { color: var(--htmxo-warning); }
+:is(td, th):where([data-status="muted"]) { color: var(--htmxo-muted); }
 """))
 
 """
@@ -31782,7 +31812,8 @@ dl > div:not([hidden]) {
 
 /* `data-status` on a leaf text element (cells, badges, pills) colors the
    text by status; on a container with `.htmxo-status-banner` it colors the
-   left border instead (see banner rules below). */
+   left border instead (see banner rules below). Under Pico, a cell takes these
+   from `pico_bridge()`, because Pico's own cell rule is unlayered. */
 td[data-status], th[data-status], span[data-status], small[data-status] { font-weight: bold; }
 [data-status="success"]:not(.htmxo-status-banner) { color: var(--htmxo-success); }
 [data-status="error"]:not(.htmxo-status-banner)   { color: var(--htmxo-error); }
