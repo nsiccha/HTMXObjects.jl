@@ -322,6 +322,8 @@ function _runtime_process_summary(p)
                    title="More long-running jobs than :default threads: they are time-sharing the pool and will all finish later.") :
             "$(p.running_jobs) running jobs",
         "heap " * fmt_bytes(p.live_bytes),
+        "RSS " * fmt_bytes(p.rss_bytes),
+        "load " * string(round(first(p.load_average); digits=2)),
         "GC " * fmt_time(p.gc_time),
         "free " * fmt_bytes(p.free_memory) * " / " * fmt_bytes(p.total_memory),
         "$(p.total_requests) requests · $(p.total_jobs) jobs since start",

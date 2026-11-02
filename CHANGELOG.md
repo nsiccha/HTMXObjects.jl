@@ -14,6 +14,16 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.42
+
+- Add opt-in `ErrorRecorder` / `record_error!` for error-hook capture metadata
+  (git HEAD, worktree status and UTC time) and a bounded, deduplicated failing-URL
+  index. Existing error responses and logs keep their standard behavior.
+- Add visibility-aware `poll_trigger`, `process_rss_bytes`, `system_load_panel`,
+  and explicit `collect_and_measure!` / `last_memory_collection` /
+  `memory_collect_panel`. Runtime snapshots and the dashboard now include
+  current RSS and load averages alongside their existing memory measurements.
+
 ## 0.1.41
 
 - `export_site` also shares the file of a page whose own address has a query.

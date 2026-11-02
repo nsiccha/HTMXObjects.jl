@@ -1199,6 +1199,35 @@ pdf_report
 | `filter_errors(html)` | Walk a Node tree and keep only nodes with `data-error="true"` (and their ancestors); used by the response pipeline when `?error` is on the query |
 | `ERROR_DIR`           | `Ref{String}` — directory where caught route exceptions are logged (default `joinpath(tempdir(), "htmxo_errors")`, override via `HTMXO_ERROR_DIR` env var) |
 
+### Capture metadata and failing URLs {#error-recorder}
+
+From **0.1.42**, an app can enrich its standard error logs through the existing
+`__on_error__` hook:
+
+```julia
+recorder = ErrorRecorder(; repo_root=pwd(), state_dir=joinpath(tempdir(), "app-errors"))
+@htmx struct CapturedApp
+    __on_error__ = (err, uid, path) -> record_error!(recorder, uid, path, __req__)
+    @get example() = error("Example failure")
+end
+```
+
+Each existing log gains git HEAD, clean/dirty worktree status and a UTC timestamp.
+These describe the checkout **at capture time**, not the source loaded by the
+running process. A git failure is written explicitly; a filesystem failure reaches
+the framework's hook-failure logger. The standard error response, ID and trace are
+unchanged. To enrich a recovered error, use the `(uid, path)` returned by
+`record_error(err, bt, req)` and then call `record_error!` explicitly.
+
+The recorder atomically rewrites `state_dir/failing-urls.tsv`, keeping the latest
+`max_urls=1000` distinct URLs. Entries contain `url`, `verb`, `log`, `first_seen`
+and `last_seen`; a repeated URL refreshes the entry and preserves `first_seen`.
+The oldest last-seen URL is evicted when full. `label="App"` names the metadata
+section; `urls_env=""` optionally names an environment variable that overrides
+the TSV path. Use one shared recorder per application and separate paths per
+process. This opt-in index contains request URLs; store it with the error logs,
+under the app's access policy.
+
 ### Error articles in the app's language {#error-texts}
 
 A failed route answers with a small error article: for a recorded server
@@ -3719,7 +3748,7 @@ end
   progress trees.
 - A process line: thread-pool sizes, running jobs against `:default` threads
   (highlighted when jobs outnumber compute threads and are time-sharing it),
-  heap, GC time and free memory.
+  heap, current RSS, load average, GC time and free memory.
 
 The human dashboard is the primary operations surface. It refreshes itself
 every two seconds (`RuntimeRoutes(; refresh="5s")` to change; *Pause* stops
@@ -3730,6 +3759,42 @@ and `POST /runtime/clear` forgets the history. The dashboard's routes are
 behind a saturated compute pool (its reads are also `@fresh`, so each shows the
 ledger now); its own requests and executions are left out
 of what it shows.
+
+#### Load and memory fragments
+
+From **0.1.42**, `runtime_snapshot().process` also includes `rss_bytes` (current
+resident memory, not peak RSS) and `load_average` (1-, 5- and 15-minute load).
+`system_load_panel` displays the same measurements as a reusable fragment:
+
+```julia
+@htmx struct MonitoredApp
+    @fresh @direct @get load() = system_load_panel(__self__/"load"; interval="2s")
+    @direct @post collect_memory() = memory_collect_panel(__self__/"collect_memory";
+        measurement=collect_and_measure!())
+    @get index() = h.div(
+        lazy(__self__/"load"),
+        memory_collect_panel(__self__/"collect_memory"))
+end
+```
+
+`poll_trigger("2s")` returns `every 2s [!document.hidden]`: the load fragment
+pauses refreshes while its tab is hidden. Add `"load, "` for an initial fetch
+when using the trigger on a placeholder. A returning tab refreshes on the next
+interval; hiding the tab does not cancel server work already started.
+
+`collect_and_measure!()` performs a full garbage collection only on the explicit
+POST above. All Julia threads pause during collection. Its result contains
+`at` (Unix completion time), `seconds`, `rss_before`, `heap_before`, `rss_after`
+and `heap_after`, in bytes. `last_memory_collection()` reads the latest result
+or `nothing`; concurrent collection requests are serialized and only one result
+is retained. Rendering either panel never triggers collection. Keep the result
+panel outside the polling load fragment so refreshes do not replace it.
+
+RSS includes resident mapped files, native allocations and compiled code as well
+as the heap; collection need not lower RSS. `Base.gc_live_bytes()` before a
+collection can include unreachable allocations, whereas the heap immediately
+after collection measures retained Julia data. `process_rss_bytes()` exposes
+the current libuv RSS measurement directly.
 
 Recording is independent of the server. Requests are recorded by
 [`track_requests`](@ref), a plain HTTP.jl middleware
