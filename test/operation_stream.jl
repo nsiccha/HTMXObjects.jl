@@ -10,8 +10,8 @@ using TestItemRunner
     using HTMXObjects, HTTP, Sockets
     import HTMXObjects: h
 
-    export StreamApp, StreamBrowserApp, reset_stream!, release!, runs, poll_url,
-        stream_token, open_stream, events_until, BEACONS, frames
+    export StreamApp, StreamBrowserApp, StreamOvertakenApp, reset_stream!, release!,
+        runs, poll_url, stream_token, open_stream, events_until, BEACONS, frames
 
     const stream_lock = ReentrantLock()
     const gates = Dict{String,Base.Event}()
@@ -99,6 +99,60 @@ using TestItemRunner
         @get stream_browser_part(; key::String) = work(key)
         "Where the driver reports"
         @get stream_beacon(; text::String="") =
+            (lock(() -> push!(BEACONS, (time(), text)), stream_lock); h.p("ok"))
+    end
+
+    # A page in the default shell whose poll the stream's first answer overtakes.
+    # Its driver reports that answer and the poll's end, so the test can hold
+    # each step until the one before has happened, then what the page logged.
+    const OVERTAKEN_DRIVER = h.script(HTMXObjects.Raw(raw"""
+    (function () {
+    const seen = { errors: [], htmxErrors: 0, pollEnds: [] };
+    const error = console.error;
+    console.error = function () {
+      seen.errors.push(Array.from(arguments).map(String).join(' '));
+      return error.apply(console, arguments);
+    };
+    document.addEventListener('htmx:error', () => seen.htmxErrors++, true);
+    const beacon = text => fetch('/stream_overtaken_beacon?text=' + encodeURIComponent(text));
+    const isPoll = url => /[?&]__htmxo_poll=1(&|#|$)/.test(url || '');
+    const open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      this.__pollUrl = String(url);
+      return open.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function () {
+      if (isPoll(this.__pollUrl)) this.addEventListener('loadend', () => {
+        seen.pollEnds.push(this.status);
+        beacon('poll-ended');
+      });
+      return send.apply(this, arguments);
+    };
+    window.addEventListener('load', async function () {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const update = window.treebarUpdatePoller;
+      let pushed = false;
+      window.treebarUpdatePoller = function () {
+        if (!pushed) { pushed = true; beacon('pushed'); }
+        return update.apply(this, arguments);
+      };
+      let n = 0;
+      for (; n < 4800 && !document.querySelector('#done-overtaken'); n++) await sleep(25);
+      await beacon(n < 4800 ? 'report:' + JSON.stringify(seen) : 'never-landed');
+    });
+    })();
+    """))
+
+    @htmx struct StreamOvertakenApp
+        __page__(body) = htmx(h.main(body); assets=:vendor, pico_version=nothing,
+            hyperscript_version=nothing)
+        "The page"
+        @get stream_overtaken() = h.section(
+            lazy("/stream_overtaken_part?key=overtaken"; id="part"), OVERTAKEN_DRIVER)
+        "Its fragment"
+        @get stream_overtaken_part(; key::String) = work(key)
+        "Where the driver reports"
+        @get stream_overtaken_beacon(; text::String="") =
             (lock(() -> push!(BEACONS, (time(), text)), stream_lock); h.p("ok"))
     end
 
@@ -534,6 +588,79 @@ end
             @test runs("browser") == 1
         finally
             release!("browser")
+            terminate()
+            HTMXObjects.OPERATION_LOG[] = operation_log
+        end
+    end
+end
+
+# Treebars aborted a poll still out at a poller's first pushed answer, and htmx
+# reports every aborted request as an error: `console.error` and `htmx:error`
+# for `htmx:afterRequest` and `htmx:sendAbort` on a healthy page (snag
+# `completed-operat-3cd69da4`). Treebars 727eb1d lets that poll finish and drops
+# its answer.
+@testitem "a poll the stream's first answer overtakes ends without a browser error" setup=[OperationStreamFixtures, HTMXOTestPorts] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Test
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_stream!()
+        route!(StreamOvertakenApp())
+        vendorfiles()
+        # The stream reaches the app only once a poll is out (the poller sends
+        # one when a stream has brought nothing for three seconds), and that
+        # poll's answer waits until the page has applied the stream's first.
+        poll_out, answer_poll = Base.Event(), Base.Event()
+        polls = Threads.Atomic{Int}(0)
+        ordering(handler) = function (req)
+            get(req.context, :htmxo_push, false) && return handler(req)
+            if contains(req.target, "__htmxo_operations=")
+                wait(poll_out)
+            elseif contains(req.target, "__htmxo_poll=1")
+                Threads.atomic_add!(polls, 1)
+                notify(poll_out)
+                wait(answer_poll)
+            end
+            handler(req)
+        end
+        beacon(text) = findfirst(b -> startswith(b[2], text), BEACONS)
+        port = free_port()
+        operation_log = HTMXObjects.OPERATION_LOG[]
+        serve(; port, async=true, access_log=nothing, operation_log=nothing,
+              middleware=[ordering])
+        url = "http://127.0.0.1:$port/stream_overtaken"
+        try
+            # Compiled before Chrome asks, so the page itself is not polled.
+            HTTP.get(url; retry=false)
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $url`
+                proc = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> beacon("pushed") !== nothing, 120.0; pollint=0.02) === :ok
+                    notify(answer_poll)
+                    @test timedwait(() -> beacon("poll-ended") !== nothing, 30.0; pollint=0.02) === :ok
+                    release!("overtaken")
+                    @test timedwait(() -> beacon("report:") !== nothing ||
+                                          beacon("never-landed") !== nothing,
+                                    60.0; pollint=0.02) === :ok
+                finally
+                    process_exited(proc) || kill(proc)
+                    wait(proc)
+                end
+            end
+            # One poll, which the app answered (an abort would end it with 0),
+            # no error of any kind, and the fragment landed.
+            report = beacon("report:")
+            @test report !== nothing
+            report === nothing ||
+                @test BEACONS[report][2] == """report:{"errors":[],"htmxErrors":0,"pollEnds":[200]}"""
+            @test polls[] == 1
+            @test runs("overtaken") == 1
+        finally
+            notify(poll_out)
+            notify(answer_poll)
+            release!("overtaken")
             terminate()
             HTMXObjects.OPERATION_LOG[] = operation_log
         end
