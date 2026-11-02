@@ -285,8 +285,14 @@ end
                 const out = document.body.dataset, css = e => getComputedStyle(e);
                 const control = document.querySelector('thead th > .htmxo-sort-control');
                 const th = control.closest('th'), plain = document.getElementById('plain');
-                // Positive control: Pico is loaded and fills an ordinary button.
-                out.picoFillsButtons = String(css(plain).backgroundColor !== 'rgba(0, 0, 0, 0)');
+                // Positive control: Pico is loaded and styles an ordinary button: a
+                // solid border in the page's font, where the browser alone draws an
+                // outset border in a smaller system font. Its colours prove nothing:
+                // the browser fills the button grey, and the shell gives a button
+                // without a colour class Pico's transparent slate outline.
+                out.picoStylesButtons = String(css(plain).borderTopStyle === 'solid' &&
+                    css(plain).fontFamily === css(document.body).fontFamily &&
+                    css(plain).fontSize === css(document.body).fontSize);
                 out.transparent = String(css(control).backgroundColor === 'rgba(0, 0, 0, 0)');
                 out.headingColor = String(css(control).color === css(th).color);
                 out.headingFont = String(css(control).fontWeight === css(th).fontWeight &&
@@ -299,8 +305,9 @@ end
         content = h.main(; class="container")(
             sortable_table(["Name", "Score"], [h.tr(h.td("a"), h.td("1"))]),
             h.button("Plain"; type="button", id="plain"), driver)
-        dom = mktempdir() do directory
+        render(; pico) = mktempdir() do directory
             copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            pico || rm(joinpath(directory, "vendor", "pico.min.css"))
             fixture = joinpath(directory, "page.html")
             # The page shell exactly as an app builds it: Pico from the vendor
             # copy, and no `sortable_table_styles()` in `extra_head`.
@@ -312,11 +319,17 @@ end
             cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$fixture`
             dump_dom(cmd)
         end
+        dom = render(; pico=true)
         @test contains(dom, "data-done=\"1\"")
-        for marker in ("pico-fills-buttons", "transparent", "heading-color", "heading-font",
+        for marker in ("pico-styles-buttons", "transparent", "heading-color", "heading-font",
                        "no-padding", "no-border")
             @test contains(dom, "data-$marker=\"true\"")
         end
+        # The control fails on the same page without Pico, so the markers above
+        # were measured under Pico (without it they all hold trivially).
+        bare = render(; pico=false)
+        @test contains(bare, "data-done=\"1\"")
+        @test contains(bare, "data-pico-styles-buttons=\"false\"")
     end
 end
 
