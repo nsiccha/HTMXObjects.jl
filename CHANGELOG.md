@@ -14,6 +14,14 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.43
+
+- **Breaking:** Move `python_service` and its StanBlocks and ReactiveKernelsPPL
+  model runtimes to PythonServices.jl. Add PythonServices with a compat floor
+  of `0.1.0` and import `using PythonServices: python_service`; existing
+  `python_service(AppType, dir; ...)` calls work when HTMXObjects is loaded.
+  `openapi`, `OpenAPIRoutes`, `SwaggerRoutes`, and `JSONResponse` remain here.
+
 ## 0.1.42
 
 - Add opt-in `ErrorRecorder` / `record_error!` for error-hook capture metadata
