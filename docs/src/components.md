@@ -18,7 +18,14 @@ linput((; name=""), "Type a name")  # explicit placeholder
 ```julia
 sinput((; method="A"), ["A", "B", "C"])
 sinput((; method="A"), ["A" => "Method A", "B" => "Method B"])  # value => label
+sinput((; method="A"), ["A" => "Method A",
+                        (; value="B", label="Method B", disabled=true, help="Needs a licence")])
 ```
+
+Options are written as for every choice control: see
+[options that cannot be chosen, help and groups](#form-options). An app does
+not offer a choice through a native `<select>`; `radio_group` and `choice_list`
+below are the controls to reach for.
 
 ### `sinput_custom` — `<select>` with a "custom value" option
 
@@ -30,6 +37,7 @@ sinput_custom((; level="info"), ["info", "warn", "error"]; placeholder="other…
 
 ```julia
 h.select(soption("a"; selected_value="a"), soption("b"))
+h.select(soption((; value="c", label="C", disabled=true)))   # an option record
 ```
 
 ### `rinput` — range slider with read-out
@@ -105,6 +113,39 @@ built in).
 Generated forms (`semantic_app`, `operation_form`) render a single choice as
 `radio_group`'s pills up to `radio_max` options (default 8) and as this list
 past it, so an app does not offer a choice through a native `<select>`.
+
+### Options that cannot be chosen, help and groups {#form-options}
+
+`radio_group`, `choice_list`, `sinput`, `sinput_custom` and `soption` take the
+same option spellings, in any mix:
+
+- a plain value, labelled `string(value)`;
+- `value => label` (or the tuple `(value, label)`);
+- a record: a `NamedTuple` with a `value` field and any of `label` (default
+  `string(value)`), `disabled`, `help` and `group`. These are the spellings of
+  DynamicObjects' `option_domain`, and an `option_domain` (what an `@options`
+  declaration returns) may be passed whole.
+
+```julia
+bundles = [(; value="v1", label="Bundle 1"),
+           (; value="v2", label="Bundle 2", disabled=true, help="Its files are not on this host")]
+radio_group((; bundle="v1"), bundles; label="Bundle")
+choice_list((; bundle="v1"), bundles; label="Bundle")
+choice_list((; study), property_options(app, :study))   # an @options domain, labels kept
+```
+
+| Field | `radio_group` (pills) | `choice_list` | `sinput` / `soption` |
+| --- | --- | --- | --- |
+| `disabled=true` | a faded pill that cannot be chosen | a faded row that cannot be chosen; the arrow keys skip it | a disabled `<option>` |
+| `help` | after the label: `Bundle 2 — Its files…` | a second line under the label, read by the search | the option's tooltip (`title`) |
+| `group` | not shown | a heading over the group's rows | an `<optgroup>` |
+
+The records render through the same code as the controls `semantic_app`
+generates for an `@options` domain, so a hand-placed choice and a generated one
+look and behave alike. A disabled option is not submitted, so make another
+option the chosen `value`. A `NamedTuple` without a `value` field is not a
+record but an option value like any other, identified by its `key`
+([`option_wire_value`](@ref)).
 
 ### `Long`
 

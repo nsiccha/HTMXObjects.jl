@@ -95,9 +95,8 @@ end
                 h.fieldset(; id="handwritten")(h.legend("Sex"),
                     h.label(h.input(; type="radio", name="sex", value="f"), " female"),
                     h.label(h.input(; type="radio", name="sex", value="m", checked="true"), " male")),
-                h.fieldset(; id="disabled")(h.legend("Disabled"),
-                    h.label(h.input(; type="radio", name="d", value="a", checked="true"), "A"),
-                    h.label(h.input(; type="radio", name="d", value="b", disabled="true"), "B")),
+                h.div(; id="disabled")(radio_group("d", ["a" => "A", (; value="b", label="B", disabled=true)];
+                                                   label="Disabled", value="a")),
                 h.div(; id="narrow")(radio_group("flag", ["g" => "g: gültig", "u" => "u: vom Land als unplausibel, aber korrekt markiert",
                                                           "f" => "f: fehlerhaft, wird ersetzt", "x" => "x: fehlt"]; value="u")),
                 h.fieldset(; id="checks")(h.legend("Checks"), h.label(h.input(; type="checkbox", name="c"), "One")),

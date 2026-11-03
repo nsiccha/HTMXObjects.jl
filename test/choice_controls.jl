@@ -287,7 +287,8 @@ end
             h.form(; id="form")(
                 # A small box that clips its content: the open list is not clipped.
                 h.div(; id="fruits", style="height: 7rem; overflow: hidden; width: 18rem;")(
-                    HTMXObjects._choice_list(:fruit, "Fruit", options, "b"))),
+                    # The hand-placed list takes the records a generated list reads.
+                    choice_list((; fruit="b"), options; label="Fruit"))),
             h.div(; id="probe")("probe"),
             driver)
         app = h.style(Raw("*, *::before, *::after { transition: none !important; }"))

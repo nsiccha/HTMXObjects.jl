@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.47
+
+- `sinput`, `sinput_custom`, `soption`, `radio_group` and `choice_list` take
+  option records besides plain values and `value => label` pairs: a
+  `NamedTuple` with a `value` field and any of `label`, `disabled`, `help` and
+  `group`, the spellings of DynamicObjects' `option_domain`, which may also be
+  passed whole. A `disabled=true` option is shown but cannot be chosen (a
+  faded pill, a faded list row the arrow keys skip, a disabled `<option>`); `help`
+  follows a pill's label, is a list row's second line and a select option's
+  tooltip; `group` heads list rows and makes `<optgroup>`s. They render through
+  the same code as the controls `semantic_app` generates for an `@options`
+  domain, so a hand-placed option that must show but not be chosen needs no
+  hand-built `<select>` or fieldset. An `option_domain` passed whole keeps its
+  labels, which iterating it lost. Every earlier spelling renders as before,
+  including a `NamedTuple` without a `value` field (an option object
+  identified by its `key`). Typing a disabled option's value into
+  `sinput_custom`'s box does not choose it.
+
 ## 0.1.46
 
 - `IntervalEstimate(estimate, lower, upper; width_digits, log, digits,
