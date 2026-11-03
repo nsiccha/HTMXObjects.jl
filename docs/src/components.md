@@ -1549,6 +1549,15 @@ host page and is left alone. `htmx()` pages carry the script that does
 this, `tabset_script()`; a page with its own `<head>` adds it next to
 `tabset_styles()`.
 
+Each tabset switches only its own panels, also beside tabsets with the same
+labels, such as one pair of tabs in each section of a page. Its default `id`
+comes from its labels and what its panels say, so it stays the same from one
+render to the next as long as they do, and it changes with them. `private`
+content does not count, only its public stand-in, and a value of a type
+HTMXObjects cannot read counts by its type. Tabsets alike in all of it share an
+id and still work. Pass `id=` for anything that has to name the tabset, such as
+the link above.
+
 #### Tabs for the keyboard and assistive technology {#tabset-accessibility}
 
 A `tabset` follows the ARIA tabs pattern, so a screen reader announces each tab,

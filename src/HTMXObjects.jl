@@ -34178,7 +34178,7 @@ tabset_script() = h.script(Raw("""
         const shown = from && panelOf(ts, from), target = panelOf(ts, a);
         if (shown && shown.hasAttribute('hx-get')) {
             from.setAttribute('hx-get', shown.getAttribute('hx-get'));
-            from.setAttribute('hx-target', '#' + shown.id);
+            from.setAttribute('hx-target', 'next #' + shown.id);
             from.setAttribute('hx-swap', 'innerHTML');
             from.setAttribute('hx-trigger', 'click once');
             if (ts.dataset.tabPreload) from.setAttribute('preload', ts.dataset.tabPreload);
@@ -34297,10 +34297,12 @@ end
 # the first click only — which is also what lets `preload` warm it on hover.
 # `tabset_script` moves these attributes and the panel's when a page opened
 # with the tab in its URL shows another tab than `active`; keep the two alike.
+# `next`: the panel after this link, so tabsets that share an id (`_tabset_key`)
+# each load into their own; a plain `#id` is the first one on the page.
 _tabset_lazy_link_attrs(content::AbstractString, i, active, id, preload) =
     i == active ? (;) : (;
         hx_get=content,
-        hx_target="#" * _tabset_panel_id(id, i),
+        hx_target="next #" * _tabset_panel_id(id, i),
         hx_swap="innerHTML",
         hx_trigger="click once",
         _preload_attrs(preload)...,
@@ -34414,13 +34416,44 @@ function _tabset_markdown(label, url::AbstractString)
     string("**[", isempty(name) ? url : name, "](", url, ")**")
 end
 
+# What a tabset's default id is made of: its labels and what its panels say, so
+# tabsets with the same labels have ids of their own and a page renders to the
+# same bytes however often and in whatever order (`export_site`). It reads the
+# values, rendering nothing: a large panel is not rendered twice, and a function
+# is not called. Private content is left out, because a public reader sees the
+# id; only the stand-in that reader sees counts. A value it cannot read counts
+# by its type, never by its identity, which would differ on every render.
+# Tabsets that come out alike share an id, which is why a tab reaches its panel
+# from where it stands (`_tabset_lazy_link_attrs`, the click in `tabset`).
+_tabset_key(x, h::UInt) = hash(string(nameof(typeof(x))), h)
+_tabset_key(x::Union{AbstractString,Number,Char}, h::UInt) = hash(x, h)
+_tabset_key(x::Symbol, h::UInt) = hash(String(x), h)
+_tabset_key(x::Raw, h::UInt) = hash(String(x), hash("raw", h))
+_tabset_key(x::Union{Tuple,NamedTuple,AbstractVector,AbstractDict}, h::UInt) =
+    foldl((k, value) -> _tabset_key(value, k), x; init=hash(length(x), h))
+_tabset_key(x::Pair, h::UInt) = _tabset_key(x.second, _tabset_key(x.first, h))
+_tabset_key(x::Node, h::UInt) =
+    _tabset_key(HTMX.children(x), _tabset_key(HTMX.attrs(x), _tabset_key(HTMX.tag(x), h)))
+_tabset_key(x::_TabsetPart, h::UInt) = _tabset_key(x.node, h)
+_tabset_key(x::HtmlOnly, h::UInt) = _tabset_key(x.content, h)
+_tabset_key(x::Private, h::UInt) = _tabset_key(x.public, hash("private", h))
+function _tabset_key(x::SemanticNode, h::UInt)
+    h = hash(string(nameof(typeof(x))), h)
+    for name in fieldnames(typeof(x))
+        h = _tabset_key(getfield(x, name), h)
+    end
+    h
+end
+
+_tabset_default_id(tabs) = "tabset-" * string(_tabset_key(tabs, zero(UInt)); base=36)
+
 # After the value types its walk sees through (`_TabsetPart` above).
 include("glossary.jl")
 
 include("comparison.jl")
 
 """
-    tabset(tabs::Pair...; active=1, id="tabset-\$(hash(first.(tabs)))", preload=nothing,
+    tabset(tabs::Pair...; active=1, id=<from the labels and content>, preload=nothing,
            url_param="tab", names=nothing, label=nothing)
 
 Client-side tabs using Pico CSS nav + hyperscript.
@@ -34440,6 +34473,13 @@ Mixed (eager + lazy):
 
 `preload=true` starts fetching a lazy tab while the pointer rests on it (see
 [`hx_link`](@ref) for the other values and what the route does with it).
+
+Each tabset switches only its own panels, also beside tabsets with the same
+labels. `id` comes from the labels and from what the panels say, so it stays the
+same from one render to the next as long as they do, and it changes with them.
+[`private`](@ref) content does not count, only its public stand-in. Tabsets
+alike in all of it share an id, and still work. Pass `id="…"` for anything that
+has to name the tabset, such as a link to it.
 
 The open tab lives in the page URL: a tab click replaces the URL's `tab`
 parameter with the tab's name (no new history entry), and a page opened with
@@ -34483,7 +34523,7 @@ and body. A tab whose content its reader does not see ([`private`](@ref)
 content read publicly, with no stand-in) is left out with its label, and a lazy
 tab is its label as a link to its address (`**[Details](/api/details)**`).
 """
-function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", preload=nothing,
+function tabset(tabs::Pair...; active=1, id=_tabset_default_id(tabs), preload=nothing,
                 url_param="tab", names=nothing, label::Union{Nothing,AbstractString}=nothing)
     tab_names = isnothing(url_param) && isnothing(names) && active isa Integer ? nothing :
         _tabset_checked_names(_tabset_names(tabs, names))
@@ -34503,7 +34543,7 @@ function tabset(tabs::Pair...; active=1, id="tabset-$(hash(first.(tabs)))", prel
                         add @aria-selected='false' to <a/> in closest <nav/>
                         add @aria-selected='true' to me
                         add .u-hidden to <:scope > .tab-panel/> in closest <.tabset/>
-                        remove .u-hidden from #{my @aria-controls}
+                        remove .u-hidden from <:scope > .tab-panel[data-panel='tab-$i']/> in closest <.tabset/>
                     ",
                     data_panel="tab-$i",
                     _tabset_name_attrs(url_param, tab_names, i)...,

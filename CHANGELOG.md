@@ -14,6 +14,21 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.49
+
+- Tabsets with the same labels on one page switch only their own panels. Before,
+  they shared their ids, so a tab click could hide its own panels and show
+  another tabset's, leaving an empty panel that the other tab could not bring
+  back. A `tabset`'s default `id` now comes from its labels and what its panels
+  say, not from its labels alone. It stays the same from one render to the next
+  as long as they do, and it changes with them. `private` content does not
+  count, only its public stand-in, and a value of a type HTMXObjects cannot read
+  counts by its type. Anything that names a tabset, such as a link to it, passes
+  `id=`.
+- Tabsets alike in all of it share an id and still work, eager and lazy: a tab
+  finds its panel inside its own tabset. A lazy tab's `hx-target` is now
+  `next #<panel id>`, not `#<panel id>`.
+
 ## 0.1.48
 
 - A route's keyword splat receives the submitted fields it does not declare:

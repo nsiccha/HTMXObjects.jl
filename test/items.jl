@@ -6331,7 +6331,7 @@ end
     @test !contains(lhtml, "revealed")
     link = match(r"<a[^>]*hx-get=\"/api/lazy\"[^>]*>", lhtml)
     @test link !== nothing
-    @test contains(link.match, "hx-target=\"#ts-tab-2\"")
+    @test contains(link.match, "hx-target=\"next #ts-tab-2\"")
     @test contains(link.match, "hx-trigger=\"click once\"")
     @test contains(link.match, "hx-swap=\"innerHTML\"")
     @test !contains(link.match, "preload")
