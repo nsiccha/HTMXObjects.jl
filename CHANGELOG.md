@@ -14,6 +14,16 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.50
+
+- A plain string works wherever a caption is taken:
+  `render_table(df; caption="AUC by dose")`, and likewise the `caption` keyword
+  of `sortable_table` and `master_detail_table`, and `with_caption` and
+  `render_caption`. It is a caption with only that title, the same as
+  `CaptionSpec(; title="AUC by dose")`, as a string already is for
+  AlgebraOfVega's `with_plot_caption`. Before, a table renderer took the string
+  and then failed with a `MethodError` from `with_caption`.
+
 ## 0.1.49
 
 - Tabsets with the same labels on one page switch only their own panels. Before,

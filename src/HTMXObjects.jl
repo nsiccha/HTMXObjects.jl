@@ -19193,6 +19193,11 @@ not part of the spec: it comes from the renderer's `texts=` ([`caption_texts`](@
 `long` may be a `String` or any HTMX `Node` (e.g. `h.div(h.p(...), h.p(...))`).
 In markdown the three tiers join with `" — "` into a single paragraph; a
 blank or absent `long` leaves the compact title/short caption.
+
+A plain string works wherever a caption is taken ([`render_caption`](@ref),
+[`with_caption`](@ref) and the `caption` keyword of [`render_table`](@ref),
+[`sortable_table`](@ref) and [`master_detail_table`](@ref)). It is a caption with
+only that `title`: `caption="Scores"` is `caption=CaptionSpec(; title="Scores")`.
 """
 struct CaptionSpec
     title::String
@@ -19320,9 +19325,10 @@ _wrap_long(s::AbstractString) = h.div(s)
 _wrap_long(s) = s
 
 """
-    render_caption(spec::CaptionSpec; actions=(), texts=caption_texts())
+    render_caption(spec; actions=(), texts=caption_texts())
 
-Return a `<figcaption>` node for `spec`. `actions` is an iterable of nodes
+Return a `<figcaption>` node for `spec`, a [`CaptionSpec`](@ref) or a plain
+string for a caption with only that title. `actions` is an iterable of nodes
 (buttons, links, …) rendered on the right side of the caption header, or in
 one row below the title in a narrow column (see [`caption_style`](@ref)).
 `long` opens from a small toggle at the end of that row, as a native
@@ -19351,21 +19357,23 @@ function render_caption(spec::CaptionSpec; actions=(), texts::CaptionTexts=_EN_C
     long_md = lstrip(to_markdown_string(long))
     h.figcaption(; class="caption")(header, isempty(long_md) ? "" : markdown_only(" — " * long_md), body)
 end
+render_caption(title::AbstractString; kwargs...) = render_caption(CaptionSpec(; title); kwargs...)
 
 _as_children(content) = (content,)
 _as_children(content::Tuple) = content
 _as_children(content::AbstractVector) = content
 
 """
-    with_caption(spec::CaptionSpec, content; actions=(), id=nothing, texts=caption_texts())
+    with_caption(spec, content; actions=(), id=nothing, texts=caption_texts())
 
 Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
-caption rendered above it. Pass `actions` (e.g. download buttons) to populate
+caption rendered above it. `spec` is a [`CaptionSpec`](@ref), or a plain string
+for a caption with only that title. Pass `actions` (e.g. download buttons) to populate
 the right side of the caption header (below the title in a narrow column), `id` to give the `<figure>` an id, and
 `texts` (a [`CaptionTexts`](@ref)) for the caption's own words, as in
 [`render_caption`](@ref).
 """
-function with_caption(spec::CaptionSpec, content; actions=(), id=nothing, texts::CaptionTexts=_EN_CAPTION_TEXTS)
+function with_caption(spec::Union{CaptionSpec,AbstractString}, content; actions=(), id=nothing, texts::CaptionTexts=_EN_CAPTION_TEXTS)
     fig_attrs = isnothing(id) ? (; class="captioned") : (; class="captioned", id)
     h.figure(; fig_attrs...)(render_caption(spec; actions, texts), _as_children(content)...)
 end
@@ -22527,7 +22535,8 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   Placed in the caption header when `caption` is given, otherwise above the table.
 - `download_filename`: filename for the CSV download (default: `id * ".csv"`
   when `id` is supplied, otherwise `"table.csv"`)
-- `caption`: a `CaptionSpec` to render above the table inside a `<figure>`
+- `caption`: a [`CaptionSpec`](@ref), or a plain string for a caption with only
+  that title, to render above the table inside a `<figure>`
 - `columns`: give columns a header other than their name, as `name => label`
   or `name => ColumnSpec(...)` pairs (a `Dict` or `NamedTuple` works too), e.g.
   an explanation or several sort orders computed from each Tables.jl row:

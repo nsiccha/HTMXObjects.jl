@@ -2043,4 +2043,6 @@ cap = CaptionSpec(; title="Posterior fit", short="Median and 95% interval per do
 with_caption(cap, plot_node; actions=(h.a("⬇ CSV"; href=csv_url, class="caption-action"),))
 ```
 
+A plain string works in place of the spec, for a caption with only a title: `render_table(table; caption="Posterior fit")` is `render_table(table; caption=CaptionSpec(; title="Posterior fit"))`. The same goes for `sortable_table`, `master_detail_table`, `with_caption` and `render_caption`.
+
 `title` and `short` form the caption's header line, and `long` is folded behind a small **More** toggle at the end of that line, beside the actions. It takes no row of its own: opened, the text spans the figure below the header, and the toggle stays where it was. The toggle's word comes from `texts=`: `with_caption(cap, plot_node; texts=caption_texts(:de))` shows **Mehr**, and `caption_texts(:de; more="Erläuterung")` replaces it with the app's own word. `render_caption` takes the same keyword. An unknown locale or text name throws an `ArgumentError`. The page shell carries `caption_style()` unless `tables=false`; otherwise include it once per page.

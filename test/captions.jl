@@ -70,6 +70,63 @@ using TestItemRunner
     @test !contains(String(response.body), "results.Crossing")
 end
 
+@testitem "a plain string is a caption with only that title" tags=[:unit] begin
+    using HTMXObjects
+
+    title = "AUC by dose"
+    spec = CaptionSpec(; title)
+    html(node) = repr("text/html", node)
+    markdown(node) = HTMXObjects.to_markdown_string(node)
+    same(a, b) = html(a) == html(b) && markdown(a) == markdown(b)
+
+    table = (dose=[10.0, 20.0], auc=[1.5, 3.25])
+    rows = [h.tr(h.td("10"), h.td("1.5"))]
+    items = [(; id="a", dose="10")]
+    actions = (h.button("Export"; class="caption-action"),)
+    texts = caption_texts(:de)
+
+    # Every entry point draws the same figure from the string as from its spec,
+    # with the keywords that reach the caption.
+    @test same(render_caption(title), render_caption(spec))
+    @test same(render_caption(title; actions, texts), render_caption(spec; actions, texts))
+    @test same(with_caption(title, h.p("Plot.")), with_caption(spec, h.p("Plot.")))
+    @test same(with_caption(title, h.p("Plot."); actions, id="fig", texts),
+        with_caption(spec, h.p("Plot."); actions, id="fig", texts))
+    @test same(render_table(table; caption=title), render_table(table; caption=spec))
+    @test same(sortable_table(["Dose", "AUC"], rows; download=true, caption=title),
+        sortable_table(["Dose", "AUC"], rows; download=true, caption=spec))
+    md_table(caption) = master_detail_table(["Dose"], items; key=r -> r.id,
+        master=r -> (h.td(r.dose),), detail=r -> h.p("Detail."), caption)
+    @test same(md_table(title), md_table(spec))
+
+    # Any string type, as `CaptionSpec` itself takes.
+    @test same(render_table(table; caption=SubString("  $title", 3)), render_table(table; caption=spec))
+
+    # The figure itself, so the comparisons above cannot agree on a missing caption.
+    page = html(render_table(table; sortable=true, download=true, caption=title))
+    @test contains(page, "<strong>AUC by dose</strong>")
+    @test occursin(r"<figure class=\"captioned\">.*caption-actions.*<table"s, page)
+    @test contains(markdown(render_table(table; caption=title)), "**AUC by dose**")
+
+    # A string is the one shorthand: other values fail at the call, not rendered as text.
+    @test_throws MethodError render_table(table; caption=1)
+    @test_throws MethodError with_caption(1, h.p("Plot."))
+    @test_throws MethodError render_caption(1)
+
+    # A route answers with the table, not a 500 (Bruno's report table embed).
+    @htmx struct StringCaptionApp
+        @get auc() = render_table((dose=[10.0, 20.0], auc=[1.5, 3.25]);
+            sortable=true, download=true, caption="AUC by dose")
+    end
+    route!(StringCaptionApp())
+    response = dispatch(:GET, "/auc"; headers=["HX-Request" => "true"])
+    @test response.status == 200
+    @test contains(String(response.body), "<strong>AUC by dose</strong>")
+    response = dispatch(:GET, "/auc"; headers=["Accept" => "text/markdown"])
+    @test response.status == 200
+    @test contains(String(response.body), "**AUC by dose**")
+end
+
 @testitem "caption texts replace the long-text toggle's word" tags=[:unit] begin
     using HTMXObjects
 
