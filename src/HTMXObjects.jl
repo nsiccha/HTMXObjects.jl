@@ -26660,13 +26660,24 @@ _aname(name::AbstractString) = name
 _avalue(nt::NamedTuple, default=nothing) = first(nt)
 _avalue(::AbstractString, default=nothing) = default
 
-# Normalize option entries: a plain value `v` becomes `(v, v)`; pre-paired
-# entries (Tuple or Pair) are returned as-is. Used by radio_group / sinput.
-_option_pair(o) = (o, o)
-_option_pair(o::Tuple) = o
-_option_pair(o::Pair) = o
-_option_key(o) = o
-_option_key(o::Pair) = first(o)
+# The options of a hand-placed choice (`sinput`, `sinput_custom`, `soption`,
+# `radio_group`, `choice_list`) as the records a generated control reads:
+# `(; value, label, group, help, disabled)`, one per option, in order.
+# DynamicObjects' `option_domain` owns the spellings and their defaults (a bare
+# value, `value => label`, or a NamedTuple with a `value` field), so a
+# hand-placed control and an `@options` domain read the same lists. Two
+# spellings are HTMXObjects' own and are kept: a `(value, label)` tuple, and a
+# NamedTuple without a `value` field, which is a plain option value (an option
+# object identified by its `key`, `option_wire_value`) labelled `string(o)` as
+# before; DynamicObjects would read it as a record and refuse it. An
+# `option_domain` passed whole keeps its labels; iterating it would yield only
+# its values.
+_option_records(options::DynamicObjects.OptionDomain) = option_records(options)
+_option_records(options) = NamedTuple[_option_record(o) for o in options]
+_option_record(o) = only(option_records(option_domain((o,))))
+_option_record(o::Tuple) = _option_record(o[1] => o[2])
+_option_record(o::NamedTuple) = haskey(o, :value) ? only(option_records(option_domain((o,)))) :
+    merge(_option_record(""), (; value=o, label=string(o)))
 # Wrap a scalar value into a single-element vector; pass vectors through.
 _as_vector(v::AbstractVector) = v
 _as_vector(v) = [v]
@@ -26703,21 +26714,32 @@ end
 """
     sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...)
 
-A labeled `<select>` wrapped in a `<label>`. Each element of `options` is rendered
-via [`soption`](@ref). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go on the `<select>`.
+A labeled `<select>` wrapped in a `<label>`, one `<option>` per element of
+`options` ([`soption`](@ref)). Extra `kwargs` (e.g. `hx_get`, `hx_target`) go
+on the `<select>`.
+
+Options are spelled as for [`choice_list`](@ref): plain values,
+`value => label` pairs, or records `(; value, label, disabled, help, group)`.
+A `disabled=true` option is shown but cannot be chosen, `help` is its tooltip
+and options sharing a `group` sit under that `<optgroup>`:
+
+    sinput((; bundle), ["v1" => "Bundle 1",
+                        (; value="v2", label="Bundle 2", disabled=true, help="Not on this host")])
 
 When `show_when=(field, op, value)` is set, the label gets `data-show-when-*`
 attributes and starts `hidden`. Include [`show_when_script`](@ref) once per
 page to wire up the client-side visibility logic.
+
+A choice among a few options reads better as [`radio_group`](@ref)'s pills and
+one among many as [`choice_list`](@ref)'s searchable list.
 """
 sinput(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
     name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     h.label(
         label,
-        h.select([
-            soption(option; selected_value=value) for option in options
-        ]...; name, aria_label=label, kwargs...);
+        h.select(_option_nodes(_option_records(options), value)...;
+                 name, aria_label=label, kwargs...);
         show_attrs...
     )
 end
@@ -26727,8 +26749,9 @@ end
 
 Like [`sinput`](@ref), but includes a text input and button for adding custom
 options client-side. The custom value is appended to the `<select>` and
-auto-selected so it is included in form submissions. Duplicates are skipped.
-Extra `kwargs` go on the `<select>`.
+auto-selected so it is included in form submissions. Duplicates are skipped,
+and typing a disabled option's value does not choose it. Options are spelled as
+for [`sinput`](@ref). Extra `kwargs` go on the `<select>`.
 """
 sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, placeholder="Add custom…", kwargs...) = begin
     name = _aname(nv)
@@ -26736,16 +26759,16 @@ sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
     uid = string(hash(name), base=16)
     sel_id = "sinput_custom_sel_$(uid)"
     inp_id = "sinput_custom_inp_$(uid)"
-    option_values = Set(_option_wire_string.([_option_key(o) for o in options]))
+    records = _option_records(options)
+    option_values = Set(_option_wire_string(option.value) for option in records)
     extra_options = isnothing(value) ? [] : [v for v in _as_vector(value)
                                               if !(_option_wire_string(v) in option_values)]
-    all_options = vcat(options, extra_options)
+    all_records = vcat(records, _option_records(extra_options))
     h.label(
         label,
         h.div(
-            h.select([
-                soption(option; selected_value=value) for option in all_options
-            ]...; id=sel_id, name, aria_label=label, kwargs...),
+            h.select(_option_nodes(all_records, value)...;
+                     id=sel_id, name, aria_label=label, kwargs...),
             h.span(
                 h.input(; id=inp_id, type="text", placeholder,
                     class="u-grow",
@@ -26763,7 +26786,7 @@ sinput_custom(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
                         var sel=document.getElementById('$(sel_id)');
                         var v=inp.value.trim();
                         if(!v) return;
-                        for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){sel.options[i].selected=true;inp.value='';return;}}
+                        for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===v){if(sel.options[i].disabled)return;sel.options[i].selected=true;inp.value='';return;}}
                         var o=document.createElement('option');
                         o.value=v;o.text=v;o.selected=true;
                         sel.add(o);inp.value='';
@@ -26780,18 +26803,55 @@ end
 """
     soption(option; value=option, selected_value=nothing, kwargs...)
     soption((value, label)::Union{Tuple,Pair}; kwargs...)
+    soption((; value, label, disabled, help)::NamedTuple; selected_value=nothing, kwargs...)
 
 Render an `<option>` tag. When given a `Pair` or `Tuple`, the first element is the
-value attribute and the second is the display label.
+value attribute and the second is the display label. A record (a `NamedTuple`
+with a `value` field, as [`sinput`](@ref) takes) renders its `label`, is
+`disabled` when `disabled=true` and shows its `help` as a tooltip (`title`).
 """
 soption((value, option)::Union{Tuple,Pair}; kwargs...) = soption(option; value, kwargs...)
+soption(option::NamedTuple; kwargs...) = haskey(option, :value) ?
+    _option_node(_option_record(option); kwargs...) : _soption(option; kwargs...)
+soption(option; kwargs...) = _soption(option; kwargs...)
 _is_selected(value, selected_value) = value == selected_value
 _is_selected(value, selected_value::AbstractVector) =
     _option_wire_string(value) in _option_wire_string.(selected_value)
-soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
+_soption(option; value=option, selected_value=nothing, kwargs...) = h.option(
     option; value=_option_wire_string(value),
     selected=string(_is_selected(value, selected_value)), kwargs...
 )
+
+# One `<option>` for an option record (`_option_records`, or a resolved
+# domain's option): its label, selected when its value is, `disabled`, and
+# its help as the tooltip.
+function _option_node(option; selected_value=nothing, kwargs...)
+    disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
+    help = get(option, :help, nothing)
+    help_attrs = isnothing(help) ? (;) : (; title=help)
+    h.option(option.label; value=_option_wire_string(option.value),
+             selected=string(_is_selected(option.value, selected_value)),
+             disabled_attrs..., help_attrs..., kwargs...)
+end
+
+# The `<option>`s of a select over option records: the ungrouped ones first,
+# then one `<optgroup>` per `group`, in the order the groups first appear.
+function _option_nodes(options, selected)
+    ungrouped = Any[]
+    grouped = Dict{Any,Vector{Any}}()
+    group_order = Any[]
+    for option in options
+        node = _option_node(option; selected_value=selected)
+        group = get(option, :group, nothing)
+        if isnothing(group)
+            push!(ungrouped, node)
+        else
+            haskey(grouped, group) || (grouped[group] = Any[]; push!(group_order, group))
+            push!(grouped[group], node)
+        end
+    end
+    Any[ungrouped..., (h.optgroup(grouped[group]...; label=group) for group in group_order)...]
+end
 
 # The text a number control (`ninput`, `rinput`) shows for `value`. A float is
 # written as `format_number` writes it, in the form `<input type="number">`
@@ -26886,8 +26946,11 @@ end
     radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...)
 
 A `<fieldset>` of radio buttons. Each element of `options` becomes
-`<label><input type="radio" .../> Label</label>`. Options can be plain values
-or `value => label` pairs. Extra `kwargs` go on each `<input>`.
+`<label><input type="radio" .../> Label</label>`. Options are spelled as for
+[`choice_list`](@ref): plain values, `value => label` pairs, or records
+`(; value, label, disabled, help)`. A `disabled=true` option is shown faded and
+cannot be chosen; its `help` follows the label (`"Label — help"`). Extra
+`kwargs` go on each `<input>`.
 
 Every [`htmx`](@ref) page draws it as a row of pills, one per option, the
 chosen one filled in the text colour ([`htmxo_utility_styles`](@ref)). The
@@ -26897,20 +26960,25 @@ keyboard chooses with the arrow keys.
 radio_group(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing, kwargs...) = begin
     name = _aname(nv)
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    chosen = _option_wire_string(value)
     h.fieldset(
         h.legend(label),
-        [begin
-            opt_value, opt_label = _option_pair(option)
-            checked_attrs = _option_wire_string(opt_value) == _option_wire_string(value) ?
-                            (; checked="true") : (;)
-            h.label(
-                h.input(; type="radio", name, value=_option_wire_string(opt_value),
-                        checked_attrs..., kwargs...),
-                string(opt_label)
-            )
-        end for option in options]...;
+        [_radio_option(name, option, _option_wire_string(option.value) == chosen; kwargs...)
+         for option in _option_records(options)]...;
         show_attrs...
     )
+end
+
+# One radio of a choice drawn as pills (`radio_group`, a generated choice up
+# to `radio_max` options): the radio inside its label, `disabled` when the
+# option is, and its help after the label.
+function _radio_option(name, option, checked::Bool; attrs...)
+    disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
+    help = get(option, :help, nothing)
+    h.label(
+        h.input(; type="radio", name=string(name), value=_option_wire_string(option.value),
+                (checked ? (; checked="true") : (;))..., disabled_attrs..., attrs...),
+        isnothing(help) ? option.label : "$(option.label) — $(help)")
 end
 
 """
@@ -26920,8 +26988,22 @@ end
 A single choice among many options: a field showing the chosen option that
 opens a list of them with a search field. Typing filters the list (ignoring
 case and accents), the arrow keys move through it, and Enter or a click
-chooses and closes it; Escape or a click elsewhere closes it unchanged. Options
-can be plain values or `value => label` pairs, as for [`radio_group`](@ref).
+chooses and closes it; Escape or a click elsewhere closes it unchanged.
+
+Each option is a plain value, a `value => label` pair, or a record: a
+`NamedTuple` with a `value` field and any of `label` (default `string(value)`),
+`disabled`, `help` and `group`, the spellings of DynamicObjects'
+`option_domain`, which may also be passed whole. A `disabled=true` option is
+listed, faded, but cannot be chosen, and the arrow keys skip it; `help` is a
+second line under the label that the search also reads; options sharing a
+`group` are listed under its heading. The same spellings work for
+[`radio_group`](@ref), [`sinput`](@ref), [`sinput_custom`](@ref) and
+[`soption`](@ref), and they render as a generated control renders an
+`@options` domain:
+
+    choice_list((; bundle), [(; value="v1", label="Bundle 1", group="Prepared"),
+                             (; value="v2", label="Bundle 2", group="Prepared",
+                                disabled=true, help="Its files are not on this host")])
 
 The list holds one radio button per option, so the choice submits with its
 form, validates and drives `show_when` exactly like a radio group, and a
@@ -26940,10 +27022,8 @@ past `radio_max` options.
 """
 choice_list(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
         required::Bool=false, texts::ErrorTexts=_EN_ERROR_TEXTS) = begin
-    entries = map(options) do option
-        opt_value, opt_label = _option_pair(option)
-        (; value=_option_wire_string(opt_value), label=string(opt_label))
-    end
+    entries = [merge(option, (; value=_option_wire_string(option.value)))
+               for option in _option_records(options)]
     selected = isnothing(value) ? nothing : _option_wire_string(value)
     _choice_list(_aname(nv), label, entries, selected; required, texts,
                  attrs=isnothing(show_when) ? (;) : _show_when_attrs(show_when))
@@ -27040,33 +27120,8 @@ function _semantic_form_values(obj, route, provided)
     values
 end
 
-function _semantic_option_node(option, selected)
-    selected_attrs = _is_selected(option.value, selected) ? (; selected="true") : (;)
-    disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
-    help = get(option, :help, nothing)
-    help_attrs = isnothing(help) ? (;) : (; title=help)
-    h.option(option.label; value=_option_wire_string(option.value),
-             selected_attrs..., disabled_attrs...,
-             help_attrs...)
-end
-
 function _semantic_select(name, label, domain, selected; required=false)
-    options = get(domain, :options, NamedTuple[])
-    ungrouped = Any[]
-    grouped = Dict{Any,Vector{Any}}()
-    group_order = Any[]
-    for option in options
-        node = _semantic_option_node(option, selected)
-        group = get(option, :group, nothing)
-        if isnothing(group)
-            push!(ungrouped, node)
-        else
-            haskey(grouped, group) || (grouped[group] = Any[]; push!(group_order, group))
-            push!(grouped[group], node)
-        end
-    end
-    nodes = copy(ungrouped)
-    append!(nodes, [h.optgroup(grouped[group]...; label=group) for group in group_order])
+    nodes = _option_nodes(get(domain, :options, NamedTuple[]), selected)
     required_attrs = required ? (; required="true") : (;)
     multiple_attrs = get(domain, :multiple, false) ? (; multiple="true") : (;)
     h.label(label,
@@ -27152,18 +27207,8 @@ function _semantic_radio(name, label, domain, selected; required=false)
     required_attrs = required ? (; required="true") : (;)
     h.fieldset(
         h.legend(label),
-        [begin
-            checked_attrs = _is_selected(option.value, selected) ? (; checked="true") : (;)
-            disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
-            help = get(option, :help, nothing)
-            option_label = isnothing(help) ? option.label : "$(option.label) — $(help)"
-            h.label(
-                h.input(; type="radio", name=string(name),
-                        value=_option_wire_string(option.value),
-                        checked_attrs..., disabled_attrs..., required_attrs...),
-                option_label,
-            )
-        end for option in get(domain, :options, NamedTuple[])]...,
+        [_radio_option(name, option, _is_selected(option.value, selected); required_attrs...)
+         for option in get(domain, :options, NamedTuple[])]...,
     )
 end
 
