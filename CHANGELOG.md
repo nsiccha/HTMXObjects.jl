@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.48
+
+- A route's keyword splat receives the submitted fields it does not declare:
+  `@post create(; template, fields...)` gets every other form field in
+  `fields`, under its own name (`fields[:dose]`, `for (name, value) in
+  fields`), so a form whose fields come from data needs no paired-list
+  encoding. Values are as submitted: a `String`, a `Vector{String}` for a
+  repeated field, an `Upload` for a multipart file. A field a declared keyword
+  or the struct's `@param`s read, an empty value (an unchecked checkbox, a
+  blank text field) and a framework name (`plain`, `markdown`, `error`, `v`,
+  every `__`-prefixed marker) are not in it. A POST, PUT or PATCH reads the
+  body and then the query string, as for a declared keyword. Generated forms
+  render no control for the splat, `reflect` lists no parameter for it, and
+  `route_url` accepts keywords such a GET route does not declare. A route
+  without a splat still ignores the fields it does not declare. Before, the
+  splat was read as a required field named `fields` and every request
+  answered 400.
+
 ## 0.1.47
 
 - `sinput`, `sinput_custom`, `soption`, `radio_group` and `choice_list` take
