@@ -7241,16 +7241,33 @@ struct _SiteCrawl
     lock::ReentrantLock
 end
 
+# What one render of an address found, for the crawl to take in when it writes
+# the answer (`_site_write!`): each address the walk named, in order, with its
+# entry's key; the number a key the crawl did not know yet stands under in the
+# answer (`<marker>p<n>x`, `_site_settle`); and each private-page check that
+# answered no. A render therefore changes nothing in the crawl, so pages can
+# render ahead on other threads and be written in the crawl's own order.
+struct _SiteLog
+    targets::Vector{Tuple{String,String,Bool}}  # key, address, fragment
+    provisional::Dict{String,Int}
+    checks::Vector{Tuple{String,String,Symbol}}  # base, url, kind
+    lock::ReentrantLock  # a route may name addresses from several tasks
+end
+_SiteLog() = _SiteLog(Tuple{String,String,Bool}[], Dict{String,Int}(), Tuple{String,String,Symbol}[],
+                      ReentrantLock())
+
 # The `url_map` of one dispatch in the crawl: `base` is the address being
 # rendered, against which a relative address resolves.
 struct _SiteMap
     crawl::_SiteCrawl
     base::String
+    log::_SiteLog
 end
-_url_map_target(m::_SiteMap, url, kind) = _site_target!(m.crawl, m.base, url, kind)
-_url_map_private(m::_SiteMap, url, kind) = _site_private(m.crawl, m.base, url, kind)
+_url_map_target(m::_SiteMap, url, kind) = _site_target!(m.log, m.crawl, m.base, url, kind)
+_url_map_private(m::_SiteMap, url, kind) = _site_private(m.log, m.crawl, m.base, url, kind)
 
 _site_marker(crawl::_SiteCrawl, i::Integer) = string(crawl.marker, i, 'x')
+_site_provisional(crawl::_SiteCrawl, n::Integer) = string(crawl.marker, 'p', n, 'x')
 
 # Whether `url` is an address of this app the bundle carries (not an anchor, a
 # query of the page itself, another site or a scheme such as `data:`).
@@ -7296,16 +7313,18 @@ function _site_private(crawl::_SiteCrawl, base::AbstractString, url::AbstractStr
         !isnothing(i) && haskey(crawl.private, i)
     end
 end
+# A render records each check that answers no: should one of those addresses
+# be found private before the answer is written, it is rendered again.
+function _site_private(log::_SiteLog, crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
+    _site_private(crawl, base, url, kind) && return true
+    lock(() -> push!(log.checks, (String(base), String(url), kind)), log.lock)
+    false
+end
 
-# Queue `url` (if new) and return what the page writes for it: the marker of
-# its file, then the query the link keeps (one `file_name` names after a `?`,
-# or a file address's own) and the `#id`.
-function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
-    _site_internal(url) || return nothing
-    (; address, fragment, key, linked, id) = _site_address(crawl, base, url, kind)
-    path, query = _split_once(address, '?')
-    own = _static_own_extension(path)
-    i = lock(crawl.lock) do
+# The entry of `key` (queued now if new), after checking that under the
+# default names `address` does not share another address's file.
+function _site_register!(crawl::_SiteCrawl, key::AbstractString, address::AbstractString, fragment::Bool)
+    lock(crawl.lock) do
         i = get(crawl.keys, key, nothing)
         if isnothing(i)
             push!(crawl.entries, _SiteEntry(address, fragment))
@@ -7317,8 +7336,61 @@ function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractStr
         end
         i
     end
+end
+
+# What a page writes for an address it names: the marker of its file, then
+# the query the link keeps (one `file_name` names after a `?`, or a file
+# address's own) and the `#id`.
+function _site_link_text(marker::AbstractString, query, linked, own, id)
     kept = something(linked, isnothing(own) ? nothing : query, Some(nothing))
-    _site_marker(crawl, i) * (isnothing(kept) ? "" : "?" * kept) * (isnothing(id) ? "" : "#" * id)
+    marker * (isnothing(kept) ? "" : "?" * kept) * (isnothing(id) ? "" : "#" * id)
+end
+
+# Queue `url` (if new) and return what the page writes for it.
+function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
+    _site_internal(url) || return nothing
+    (; address, fragment, key, linked, id) = _site_address(crawl, base, url, kind)
+    path, query = _split_once(address, '?')
+    i = _site_register!(crawl, key, address, fragment)
+    _site_link_text(_site_marker(crawl, i), query, linked, _static_own_extension(path), id)
+end
+# During a render the address is only recorded: an entry the crawl knows
+# already is named by its marker, a new one by a provisional marker the write
+# replaces once it has queued the entry.
+function _site_target!(log::_SiteLog, crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
+    _site_internal(url) || return nothing
+    (; address, fragment, key, linked, id) = _site_address(crawl, base, url, kind)
+    path, query = _split_once(address, '?')
+    i = lock(() -> get(crawl.keys, key, nothing), crawl.lock)
+    marker = lock(log.lock) do
+        push!(log.targets, (key, address, fragment))
+        isnothing(i) ? _site_provisional(crawl, get!(log.provisional, key, length(log.provisional) + 1)) :
+            _site_marker(crawl, i)
+    end
+    _site_link_text(marker, query, linked, _static_own_extension(path), id)
+end
+
+# Queue the addresses one render named, in the order it named them, as the
+# crawl would have when it rendered them, and return the entry each of its
+# provisional markers stands for.
+function _site_register!(crawl::_SiteCrawl, log::_SiteLog)
+    entries = zeros(Int, length(log.provisional))
+    for (key, address, fragment) in log.targets
+        i = _site_register!(crawl, key, address, fragment)
+        n = get(log.provisional, key, nothing)
+        isnothing(n) || (entries[n] = i)
+    end
+    entries
+end
+
+# An answer's body with each provisional marker replaced by the marker of the
+# entry it stands for.
+function _site_settle(crawl::_SiteCrawl, body, entries::Vector{Int})
+    prefix = crawl.marker * "p"
+    (isempty(entries) || !_body_contains(body, prefix)) && return body
+    text = body isa AbstractString ? String(body) : String(copy(body))
+    replace(text, Regex(prefix * "([0-9]+)x") =>
+        m -> _site_marker(crawl, entries[parse(Int, SubString(m, ncodeunits(prefix) + 1, ncodeunits(m) - 1))]))
 end
 
 # The file extension an answer's `Content-Type` calls for, or `nothing`: the
@@ -7352,23 +7424,142 @@ end
 # `.html`) is fetched as its route answers it; anything else is rendered as a
 # static export, and a route that returns a finished response (a download, an
 # API's JSON) is fetched as it answers too.
-function _site_fetch(crawl::_SiteCrawl, e::_SiteEntry, controls::Symbol, parent, audience::Symbol)
+function _site_fetch(crawl::_SiteCrawl, e::_SiteEntry, log::_SiteLog, controls::Symbol, parent, audience::Symbol)
     headers = e.fragment ? ["HX-Request" => "true"] : Pair{String,String}[]
     plain() = dispatch(:GET, e.address; headers, parent, operation_policy=:blocking, audience)
     own = _static_own_extension(first(_split_once(e.address, '?')))
     isnothing(own) || own == ".html" || own == ".htm" || return plain()
     try
         dispatch(:GET, e.address; headers, parent,
-                 static=StaticExport(_SiteMap(crawl, e.address), controls, "", :linked, audience))
+                 static=StaticExport(_SiteMap(crawl, e.address, log), controls, "", :linked, audience))
     catch err
         err isa StaticExportRefused || rethrow()
         plain()
     end
 end
 
+# How the crawl renders: the export's settings, and the renders running ahead
+# of it, by entry, at most `window` at a time (none for `parallel=false`), of
+# which `rendering` lets as many run at once as the process has CPUs.
+struct _SiteRun
+    controls::Symbol
+    parent::Any
+    audience::Symbol
+    window::Int
+    rendering::Base.Semaphore
+    ahead::Dict{Int,Task}
+    dropped::Vector{Task}
+end
+
+# The CPUs this process can keep busy at once: its default threads, or fewer
+# when a CPU quota allows fewer (a container, a systemd scope with
+# `CPUQuota=`). More renders than that only wait for each other, and under a
+# quota a render that waits for Julia's compiler (one compiles at a time;
+# on Julia 1.10 the others spin) takes CPU time from the one compiling.
+function _usable_cpus()
+    n = Threads.nthreads(:default)
+    quota = _cgroup_cpu_quota()
+    isnothing(quota) ? n : clamp(ceil(Int, quota - 1e-6), 1, n)
+end
+
+# Whether rendering pages concurrently pays: the process has more than one
+# default thread and no more than it has CPUs (the host's, or a quota's).
+# Measured on ODLPlaus's private export (Julia 1.10, a two-CPU quota): one
+# page at a time 1,322-1,362 s; two threads rendering 1,122 s; eight threads
+# 1,709 s, and 1,706 s with at most two of them rendering at once, since
+# threads beyond the CPUs spend the quota spinning.
+function _parallel_pays(n::Integer=Threads.nthreads(:default), quota=_cgroup_cpu_quota())
+    cpus = min(Sys.CPU_THREADS, isnothing(quota) ? typemax(Int) : ceil(Int, quota - 1e-6))
+    1 < n <= cpus
+end
+
+# The CPU quota of the Linux cgroup (v2) this process runs in, as a number of
+# CPUs: the smallest `cpu.max` of its cgroup and every cgroup above it, or
+# `nothing` where none sets one (`max`) or there is no cgroup v2.
+function _cgroup_cpu_quota(; cgroup::AbstractString="/proc/self/cgroup", root::AbstractString="/sys/fs/cgroup")
+    Sys.islinux() && isfile(cgroup) || return nothing
+    lines = readlines(cgroup)
+    i = findfirst(startswith("0::"), lines)
+    isnothing(i) && return nothing
+    parts = split(chopprefix(lines[i], "0::"), '/'; keepempty=false)
+    quota = nothing
+    for k in length(parts):-1:0
+        file = joinpath(root, parts[1:k]..., "cpu.max")
+        isfile(file) || continue
+        limit, period = (split(read(file, String))..., "", "")
+        q, p = tryparse(Float64, limit), tryparse(Float64, period)
+        isnothing(q) || isnothing(p) || p <= 0 || (quota = min(something(quota, Inf), q / p))
+    end
+    quota
+end
+
+# One render of an entry: its answer (or the `PrivateContentEscaped` it threw),
+# what it found, and how many private pages were known when it started.
+struct _SiteRendered
+    answer::Union{HTTP.Response,PrivateContentEscaped}
+    log::_SiteLog
+    known::Int
+end
+
+function _site_render(crawl::_SiteCrawl, e::_SiteEntry, run::_SiteRun)
+    Base.acquire(run.rendering)
+    try
+        known = lock(() -> length(crawl.private), crawl.lock)
+        log = _SiteLog()
+        answer = try
+            _site_fetch(crawl, e, log, run.controls, run.parent, run.audience)
+        catch err
+            err isa PrivateContentEscaped || rethrow()
+            err
+        end
+        _SiteRendered(answer, log, known)
+    finally
+        Base.release(run.rendering)
+    end
+end
+
+# Start rendering the first entries of `ks` that are not rendering yet, on
+# tasks of their own, while fewer than `run.window` are.
+function _site_ahead!(run::_SiteRun, crawl::_SiteCrawl, ks)
+    for k in ks
+        length(run.ahead) < run.window || break
+        haskey(run.ahead, k) && continue
+        e = crawl.entries[k]
+        run.ahead[k] = Threads.@spawn _site_render(crawl, e, run)
+    end
+end
+
+# Entry `i`'s render: the one running ahead, or one made now.
+function _site_rendered!(run::_SiteRun, crawl::_SiteCrawl, i::Int)
+    task = pop!(run.ahead, i, nothing)
+    isnothing(task) ? _site_render(crawl, crawl.entries[i], run) : fetch(task)
+end
+
+# Entry `i` is not rendered after all (it shares a page's file): its render
+# running ahead is left to finish, and its answer unused.
+function _site_drop!(run::_SiteRun, i::Int)
+    task = pop!(run.ahead, i, nothing)
+    isnothing(task) || push!(run.dropped, task)
+end
+
+# Wait for every render still running, so none outlives the export. Their
+# failures are not the export's: a dropped render's answer was never needed,
+# and the others are only left when the export is failing already.
+function _site_finish!(run::_SiteRun)
+    for task in Iterators.flatten((values(run.ahead), run.dropped))
+        try
+            wait(task)
+        catch
+        end
+    end
+    empty!(run.ahead)
+    empty!(run.dropped)
+end
+
 """
     export_site(dir; pages, file_name=static_file_name, controls=:remove,
-                aliases=Dict{String,String}(), parent=nothing, audience=:public)
+                aliases=Dict{String,String}(), parent=nothing, audience=:public,
+                parallel=<threads ≤ CPUs>)
         -> (; files, bytes)
 
 Write the mounted app into the new or empty directory `dir` as a static site
@@ -7441,6 +7632,24 @@ can run inside a serving app (it renders in process with
   at another address, whose file is linked instead:
   `Dict("/api/v1/docs" => "/api/v1/openapi.json")`.
 - `parent` is the progress node each route's work hangs under (`dispatch`).
+- **Threads.** With `parallel=true` pages render concurrently, as many at
+  once as the process can keep busy: its default threads (`julia -t 8`), or
+  fewer when a CPU quota allows fewer (a container, a systemd scope with
+  `CPUQuota=`). Up to four per CPU render ahead of the crawl, each on a task
+  of its own, and their files are written one at a time in the order a
+  one-thread crawl writes them, so the bundle has the files, links and
+  failures of `parallel=false`, which renders one page after another. A value
+  a page draws anew for each render (a random id, the next number of a
+  process-wide counter, such as a `choice_list`'s element ids) differs, as it
+  does between any two exports. `parallel=true` is the default when the
+  process has more than one default thread and no more than it has CPUs:
+  threads beyond the CPUs cost more time than rendering concurrently saves
+  (on Julia 1.10 idle threads spin), so start Julia with as many threads as
+  it has CPUs (`julia -t 2` under a two-CPU quota). Julia compiles one method
+  at a time, so an export that spends much of its time compiling the routes'
+  code gains less. The routes run as they run under `serve`, several
+  requests at once: state a route keeps between requests needs a lock, as it
+  does for a server, and `file_name` is called from several threads.
 - **Private content.** `audience` says who reads the site: `:public` (default)
   or `:private`. A public site shows the stand-in of each [`private`](@ref)
   part, or nothing, and never follows a link inside what it leaves out. A page
@@ -7475,7 +7684,7 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])
 ```
 """
 function export_site(dir::AbstractString; pages, file_name=static_file_name, controls::Symbol=:remove,
-                     aliases=Dict{String,String}(), parent=nothing, audience=:public)
+                     aliases=Dict{String,String}(), parent=nothing, audience=:public, parallel::Bool=_parallel_pays())
     # refuses a `controls` or `audience` it does not know
     audience = StaticExport(nothing, controls, "", :linked, audience).audience
     isdir(dir) && !isempty(readdir(dir)) && throw(ArgumentError(
@@ -7492,26 +7701,41 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
         Dict{Int,Int}(), ReentrantLock())
     foreach(p -> _site_target!(crawl, "/", p, :full), pages)
     written = _SiteWritten(root)
+    cpus = parallel ? _usable_cpus() : 1
+    run = _SiteRun(controls, parent, audience, parallel ? 4 * cpus : 0, Base.Semaphore(cpus),
+                   Dict{Int,Task}(), Task[])
     i = 0
+    scanned = 0  # the entries up to here render ahead, or wait
     # Page addresses with a query wait until nothing else is left, so the page
     # whose file they may share is written by then (`_site_shares_page!`).
     waiting = _SiteWaiting()
-    while true
+    try
         while true
-            if i < length(crawl.entries)
-                i += 1
-                n = _site_query_page(crawl, i)
-                isnothing(n) ? _site_write!(crawl, written, i, controls, parent, audience) :
-                    push!(get!(Vector{Int}, waiting.fresh, n), i)
-            else
-                _site_decide!(crawl, written, waiting, controls, parent, audience) || break
+            while true
+                if i < length(crawl.entries)
+                    i += 1
+                    n = _site_query_page(crawl, i)
+                    if isnothing(n)
+                        scanned = _site_ahead_pages!(run, crawl, max(scanned, i - 1))
+                        _site_write!(crawl, written, i, run)
+                    else
+                        push!(get!(Vector{Int}, waiting.fresh, n), i)
+                    end
+                else
+                    _site_decide!(crawl, written, waiting, run) || break
+                end
+            end
+            # A file rendered before a page it refers to answered as private still
+            # refers to it; rendered again, the walk leaves those references out.
+            stale = _site_stale(crawl, written)
+            isempty(stale) && break
+            for (j, k) in enumerate(stale)
+                _site_ahead!(run, crawl, view(stale, j:lastindex(stale)))
+                _site_write!(crawl, written, k, run)
             end
         end
-        # A file rendered before a page it refers to answered as private still
-        # refers to it; rendered again, the walk leaves those references out.
-        stale = _site_stale(crawl, written)
-        isempty(stale) && break
-        foreach(k -> _site_write!(crawl, written, k, controls, parent, audience), stale)
+    finally
+        _site_finish!(run)
     end
     for k in sort!(collect(written.marked)), j in unique(_site_markers(crawl, read(written.paths[k], String)))
         haskey(crawl.private, j) && push!(crawl.failed, crawl.entries[j].address =>
@@ -7569,7 +7793,7 @@ _SiteWaiting() = _SiteWaiting(Dict{Int,Vector{Int}}(), Dict{Int,Vector{Pair{Int,
 # rendered only after the others of its count have tried, and tries once more
 # then if a file was written since (rendering another may have reached its
 # page).
-function _site_decide!(crawl::_SiteCrawl, written::_SiteWritten, waiting::_SiteWaiting, controls, parent, audience)
+function _site_decide!(crawl::_SiteCrawl, written::_SiteWritten, waiting::_SiteWaiting, run::_SiteRun)
     counts = [n for (n, v) in Iterators.flatten((waiting.fresh, waiting.tried)) if !isempty(v)]
     isempty(counts) && return false
     n = minimum(counts)
@@ -7579,9 +7803,16 @@ function _site_decide!(crawl::_SiteCrawl, written::_SiteWritten, waiting::_SiteW
         _site_shares_page!(crawl, written, k) ||
             push!(get!(Vector{Pair{Int,Int}}, waiting.tried, n), k => length(written.paths))
     else
-        k, seen = popfirst!(waiting.tried[n])
-        seen < length(written.paths) && _site_shares_page!(crawl, written, k) ||
-            _site_write!(crawl, written, k, controls, parent, audience)
+        # Those that could not share are rendered in turn, unless one can
+        # share by then, so they render ahead.
+        tried = waiting.tried[n]
+        _site_ahead!(run, crawl, Iterators.map(first, tried))
+        k, seen = popfirst!(tried)
+        if seen < length(written.paths) && _site_shares_page!(crawl, written, k)
+            _site_drop!(run, k)
+        else
+            _site_write!(crawl, written, k, run)
+        end
     end
     true
 end
@@ -7683,16 +7914,34 @@ function _site_file_name(crawl::_SiteCrawl, e::_SiteEntry, ext::AbstractString, 
     name, nothing
 end
 
-# Fetch entry `i` and write its file, or record why not.
-function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls, parent, audience)
-    e = crawl.entries[i]
-    known = lock(() -> length(crawl.private), crawl.lock)
-    resp = try
-        _site_fetch(crawl, e, controls, parent, audience)
-    catch err
-        err isa PrivateContentEscaped || rethrow()
-        return lock(() -> push!(crawl.failed, e.address => sprint(showerror, err)), crawl.lock)
+# Start rendering the entries after `scanned` that the crawl writes in turn
+# (a page address with a query waits instead) while the window has room, and
+# return how far that got.
+function _site_ahead_pages!(run::_SiteRun, crawl::_SiteCrawl, scanned::Int)
+    while length(run.ahead) < run.window && scanned < length(crawl.entries)
+        scanned += 1
+        isnothing(_site_query_page(crawl, scanned)) && _site_ahead!(run, crawl, (scanned,))
     end
+    scanned
+end
+
+# Write entry `i`'s file from its render, or record why not, and queue what
+# the render found. Only this task changes the crawl, entry after entry in
+# the crawl's order, so what is written does not depend on which renders ran
+# ahead. A render made before an address it found not private was found
+# private is made again, since it would still name that page.
+function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, run::_SiteRun)
+    e = crawl.entries[i]
+    rendered = _site_rendered!(run, crawl, i)
+    if length(crawl.private) > rendered.known &&
+       any(((base, url, kind),) -> _site_private(crawl, base, url, kind), rendered.log.checks)
+        rendered = _site_render(crawl, e, run)
+    end
+    known = length(crawl.private)
+    entries = _site_register!(crawl, rendered.log)
+    resp = rendered.answer
+    resp isa PrivateContentEscaped &&
+        return lock(() -> push!(crawl.failed, e.address => sprint(showerror, resp)), crawl.lock)
     if _private_page_response(resp)
         return lock(() -> (crawl.private[i] = length(crawl.private) + 1), crawl.lock)
     end
@@ -7707,7 +7956,7 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, controls
         reason = "has the same file ($name) as $(crawl.entries[written.owners[file]].address)"
     end
     isnothing(reason) || return lock(() -> push!(crawl.failed, e.address => reason), crawl.lock)
-    body = _response_bytes(resp)
+    body = _site_settle(crawl, _response_bytes(resp), entries)
     mkpath(dirname(file))
     write(file, body)
     written.owners[file] = i

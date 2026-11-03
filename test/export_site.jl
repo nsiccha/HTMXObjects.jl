@@ -9,7 +9,8 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
-        InlineSiteApp, QueriedSiteApp, StationSiteApp, TypedSiteApp, bundle_files, subdirectory_misses
+        InlineSiteApp, QueriedSiteApp, StationSiteApp, TypedSiteApp, ParallelSiteApp, MOST_RENDERING,
+        bundle_files, bundle_tree, subdirectory_misses
 
     const KS = (3.0, 4.0)
     # The mount prefix the apps' links start from (they are mounted at the root).
@@ -78,7 +79,8 @@ using TestItemRunner
         @direct @get inline_raster() = MIMEResponse("application/geo+json", "{\"type\":\"FeatureCollection\",\"features\":[]}")
     end
 
-    const PLACED_CALLS = Ref(0)
+    # Counted with an atomic: an export renders pages on several threads.
+    const PLACED_CALLS = Threads.Atomic{Int}(0)
     @htmx struct PlacedSiteApp
         __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
             pico_version=HTMXObjects._PICO_VERSION)
@@ -86,8 +88,9 @@ using TestItemRunner
             h.div(; hx_get=base * "/placed_probe?kenn=a&ort=karte", hx_trigger="load"),
             h.div(; hx_get=base * "/placed_probe?kenn=a&ort=liste", hx_trigger="load"),
             h.a("3"; href=base * "/placed_page"), h.a("4"; href=base * "/placed_page?k=4"))
-        @get placed_probe(; kenn::String="", ort::String="") = (PLACED_CALLS[] += 1; h.p("probe $kenn"))
-        @get placed_page(; k::Int=3) = (PLACED_CALLS[] += 10; h.p("k=$k"))
+        @get placed_probe(; kenn::String="", ort::String="") =
+            (Threads.atomic_add!(PLACED_CALLS, 1); h.p("probe $kenn"))
+        @get placed_page(; k::Int=3) = (Threads.atomic_add!(PLACED_CALLS, 10); h.p("k=$k"))
     end
 
     # A page that applies its address in the browser, as a region explorer's
@@ -185,10 +188,39 @@ using TestItemRunner
         @direct @get typed_foto() = MIMEResponse("image/jpeg", "jpeg")
     end
 
+    # Pages whose renders overlap when the export runs them concurrently: each
+    # waits a moment while it is counted, so the highest count is how many
+    # rendered at once (also on one thread, where the waits interleave them).
+    const RENDERING = Threads.Atomic{Int}(0)
+    const MOST_RENDERING = Threads.Atomic{Int}(0)
+    function rendering(f)
+        Threads.atomic_max!(MOST_RENDERING, Threads.atomic_add!(RENDERING, 1) + 1)
+        try
+            sleep(0.02)
+            f()
+        finally
+            Threads.atomic_sub!(RENDERING, 1)
+        end
+    end
+    const PARALLEL_PAGES = 1:12
+    @htmx struct ParallelSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div((h.a("Seite $k"; href=base * "/parallel_page/$k") for k in PARALLEL_PAGES)...)
+        @get parallel_page(k::Int) = rendering() do
+            h.div(h.p("Seite $k"),
+                  h.a("weiter"; href=base * "/parallel_page/$(mod1(k + 1, length(PARALLEL_PAGES)))"),
+                  h.div(; hx_get=base * "/parallel_part?k=$k", hx_trigger="load"))
+        end
+        @get parallel_part(; k::Int=0) = rendering(() -> h.p("Teil $k"))
+    end
+
     # Every file of the bundle, relative to its root, with `/` between
     # directories (as a static server addresses it, also on Windows).
     bundle_files(dir) = sort!([replace(relpath(joinpath(d, f), dir), '\\' => '/')
                                for (d, _, fs) in walkdir(dir) for f in fs])
+    # Every file of the bundle with its bytes.
+    bundle_tree(dir) = Dict(f => read(joinpath(dir, f)) for f in bundle_files(dir))
 
     # Each reference in the bundle's HTML (as export_site reads them) that a
     # browser, with the bundle served from `/repo/`, would not find: resolved
@@ -515,4 +547,93 @@ end
     err = failure(() -> export_site(mktempdir(); pages=["/"],
         file_name=(a; kw...) -> startswith(a, "/typed_eigen") ? "typed_eigen.htmxotest" : static_file_name(a; kw...)))
     @test occursin("named it \"typed_eigen.htmxotest\" without one (a `.` and up to 8", only(err.failed).second)
+end
+
+@testitem "export_site renders pages concurrently and writes what a one-page-at-a-time export writes" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    using Treebars
+    vendorfiles()
+    failure(f) = try
+        f(); nothing
+    catch e
+        e
+    end
+    # The bundle an export writes, and how it failed (each failed route's
+    # error is recorded under an id of its own).
+    function exported(; kw...)
+        dir = joinpath(mktempdir(), "site")
+        err = failure(() -> export_site(dir; kw...))
+        err isa Union{Nothing,StaticSiteIncomplete} || throw(err)
+        failed = isnothing(err) ? nothing :
+            ([a => replace(why, r"^error [0-9a-f]+ " => "error ") for (a, why) in err.failed], err.unresolved)
+        (; tree=bundle_tree(dir), failed)
+    end
+
+    # With parallel=true as many renders overlap as the process has CPUs (its
+    # default threads, or fewer under a CPU quota); never with parallel=false.
+    route!(ParallelSiteApp())
+    MOST_RENDERING[] = 0
+    sequential = exported(; pages=["/"], parallel=false)
+    @test MOST_RENDERING[] == 1
+    MOST_RENDERING[] = 0
+    parallel = exported(; pages=["/"], parallel=true)
+    @test MOST_RENDERING[] == min(HTMXObjects._usable_cpus(), 12)
+    @test count(f -> startswith(f, "parallel_page-"), keys(sequential.tree)) == 12
+    @test count(f -> startswith(f, "hx/parallel_part-"), keys(sequential.tree)) == 12
+    @test parallel == sequential
+
+    # Byte for byte the same bundle, and the same failures: links, fragments,
+    # files and url_params values; pages sharing a page's file; an app's own
+    # file_name; failed answers and unresolved references. Two exports one
+    # page at a time agree first, so the comparison can tell them apart.
+    named(a; fragment=false, ext=".html") =
+        static_file_name(a; fragment, ext=startswith(a, "/typed_eigen") ? ".htmxo" : ext)
+    for (app, kw) in ((ExportSiteApp(), (; pages=["/"])), (QueriedSiteApp(), (; pages=["/"])),
+                      (StationSiteApp(), (; pages=["/station?kenn=a&region=land&ebene=y", "/"])),
+                      (TypedSiteApp(), (; pages=["/"], file_name=named)), (BrokenSiteApp(), (; pages=["/"])))
+        route!(app)
+        one = exported(; kw..., parallel=false)
+        @test exported(; kw..., parallel=false) == one
+        @test exported(; kw..., parallel=true) == one
+        @test isnothing(one.failed) == !(app isa BrokenSiteApp)
+    end
+end
+
+@testitem "export_site renders at most as many pages at once as a cgroup's CPU quota allows" tags=[:unit] begin
+    import HTMXObjects: _cgroup_cpu_quota, _usable_cpus
+    root = mktempdir()
+    cgroup = joinpath(mktempdir(), "cgroup")
+    scope = joinpath(root, "user.slice", "app.slice", "run-1.scope")
+    mkpath(scope)
+    write(cgroup, "0::/user.slice/app.slice/run-1.scope\n")
+    if Sys.islinux()
+        # No cpu.max, or one without a limit: no quota.
+        @test isnothing(_cgroup_cpu_quota(; cgroup, root))
+        write(joinpath(root, "user.slice", "cpu.max"), "max 100000\n")
+        @test isnothing(_cgroup_cpu_quota(; cgroup, root))
+        # A systemd scope with CPUQuota=200%: two CPUs; a tighter one above it wins.
+        write(joinpath(scope, "cpu.max"), "200000 100000\n")
+        @test _cgroup_cpu_quota(; cgroup, root) == 2.0
+        write(joinpath(root, "user.slice", "cpu.max"), "150000 100000\n")
+        @test _cgroup_cpu_quota(; cgroup, root) == 1.5
+        # cgroup v1 names no unified hierarchy.
+        write(cgroup, "4:cpu,cpuacct:/user.slice\n")
+        @test isnothing(_cgroup_cpu_quota(; cgroup, root))
+    else
+        @test isnothing(_cgroup_cpu_quota(; cgroup, root))
+    end
+    @test 1 <= _usable_cpus() <= Threads.nthreads(:default)
+end
+
+@testitem "export_site renders concurrently by default only with no more threads than CPUs" tags=[:unit] begin
+    import HTMXObjects: _parallel_pays
+    # One thread has nothing to share; more threads than a quota's CPUs spend
+    # it spinning (measured: 8 threads on 2 CPUs 1,706 s, 2 threads 1,122 s,
+    # one page at a time 1,362 s).
+    @test !_parallel_pays(1, nothing)
+    @test _parallel_pays(2, 2.0) == (Sys.CPU_THREADS >= 2)
+    @test _parallel_pays(2, 1.5) == (Sys.CPU_THREADS >= 2)
+    @test !_parallel_pays(8, 2.0)
+    @test !_parallel_pays(3, 2.0)
+    @test _parallel_pays(2, nothing) == (Sys.CPU_THREADS >= 2)
+    @test !_parallel_pays(Sys.CPU_THREADS + 1, nothing)
 end

@@ -612,6 +612,24 @@ end
     @test_throws ArgumentError export_site(mktempdir(); pages=["/"], audience=:team)
 end
 
+@testitem "export_site rendering pages concurrently leaves out the same private pages" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
+    using Treebars
+    route!(AudienceApp())
+    vendorfiles()
+    # Pages render ahead of the crawl while it finds the private page, which
+    # `/` and `/aud_next` link: the files are the ones written one at a time.
+    function exported(; kw...)
+        dir = joinpath(mktempdir(), "site")
+        export_site(dir; pages=["/"], kw...)
+        Dict(relpath(joinpath(d, f), dir) => read(joinpath(d, f)) for (d, _, fs) in walkdir(dir) for f in fs)
+    end
+    for audience in (:public, :private)
+        one = exported(; audience, parallel=false)
+        @test exported(; audience, parallel=false) == one
+        @test exported(; audience, parallel=true) == one
+    end
+end
+
 @testitem "export_site fails on a private page a script names" setup=[HTMXOTestImports, AudienceFixture] tags=[:unit] begin
     using Treebars
     route!(AudienceScriptApp())
