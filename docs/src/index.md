@@ -1084,6 +1084,7 @@ on success, coral on error — included by default in `htmx()`).
 
 **Captions:** `CaptionSpec(; title, short, long)`, `render_caption(spec)`,
 `with_caption(spec, content)`; `texts=caption_texts(:de)` for a German toggle.
+A plain string in place of `spec` is a caption with only that title.
 
 See the docstrings for full signatures.
 
