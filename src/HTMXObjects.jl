@@ -2318,7 +2318,8 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     # per route entry. Keying on `Verb{V}` lets multiple routes share the
     # same property name (different verbs) without colliding.
     for ri in route_info
-        push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.verb, ri.pos_params, ri.kw_params))
+        push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.verb, ri.pos_params, ri.kw_params,
+                                                         ri.rest_kw, param_names))
     end
     # Emit the child-type methods for @include externals.
     # (Inline `@struct` children are emitted by DO's macro itself, on the same
@@ -2404,7 +2405,7 @@ _route_macros() = Set([Symbol("@get"), Symbol("@post"), Symbol("@put"), Symbol("
 function _extract_route_info(struct_expr)
     body = struct_expr.args[3]
     route_macros = _route_macros()
-    routes = @NamedTuple{prop_name::Symbol, verb::Symbol, pos_params::Vector, kw_params::Vector}[]
+    routes = @NamedTuple{prop_name::Symbol, verb::Symbol, pos_params::Vector, kw_params::Vector, rest_kw::Union{Nothing,Symbol}}[]
     lnn = nothing
     for arg in body.args
         arg isa LineNumberNode && (lnn = arg; continue)
@@ -2428,6 +2429,7 @@ function _extract_route_info(struct_expr)
         lhs = expr.args[1]
         pos_params = Tuple{Symbol, Any}[]
         kw_params = Tuple{Symbol, Any, Bool}[]
+        rest_kw = nothing
         call_lhs = _route_call_lhs(lhs)
         if call_lhs !== nothing
             prop_name = call_lhs.args[1]
@@ -2435,7 +2437,13 @@ function _extract_route_info(struct_expr)
             for idx in call_lhs.args[2:end]
                 if Meta.isexpr(idx, :parameters)
                     for kw_arg in idx.args
-                        if Meta.isexpr(kw_arg, :kw)
+                        if Meta.isexpr(kw_arg, :...)
+                            # `fields...`: the submitted fields no other
+                            # keyword or `@param` binds (`_collect_rest_params!`).
+                            # It is not itself a field, so it is neither
+                            # looked up nor required.
+                            rest_kw = first(DynamicObjects.extractnames(kw_arg.args[1]))
+                        elseif Meta.isexpr(kw_arg, :kw)
                             kw_name_expr = kw_arg.args[1]
                             kw_type = _macro_extract_type(kw_arg)
                             kw_name = first(DynamicObjects.extractnames(kw_name_expr))
@@ -2477,7 +2485,7 @@ function _extract_route_info(struct_expr)
                 The empty parentheses make `$(bare_name)` an indexable property; the route registrar then invokes it as `prop(Verb{:$(_verb_short(verb))}())` so multiple HTTP verbs and non-verb IPs can share the name `:$(bare_name)` without collision.
                 """)
         end
-        push!(routes, (prop_name=prop_name, verb=verb, pos_params=pos_params, kw_params=kw_params))
+        push!(routes, (prop_name=prop_name, verb=verb, pos_params=pos_params, kw_params=kw_params, rest_kw=rest_kw))
     end
     routes
 end
@@ -2495,7 +2503,8 @@ end
 #
 # `verb` is the route macro symbol (e.g. `Symbol("@get")`); we map it to the
 # verb short symbol (`:GET`) for the `::Verb{V}` annotation.
-function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_params)
+function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_params,
+                                rest_kw=nothing, param_names=())
     verb_short = _verb_short(verb)
 
     # Build positional param conversion statements (by URL segment position).
@@ -2531,6 +2540,14 @@ function _generate_extract_args(type_name, prop_name, verb, pos_params, kw_param
                 end
             end)
         end
+    end
+    # A keyword splat (`; template, fields...`) receives every remaining
+    # submitted field. The names this route already binds — its keywords and
+    # its struct's `@param`s — are fixed here, at definition time.
+    if rest_kw !== nothing
+        bound = Tuple(unique!(Symbol[first.(kw_params)..., param_names...]))
+        push!(kw_stmts, :($(_collect_rest_params!)(__kw__, __src__, __fallback__,
+                                                   $(QuoteNode(bound)))))
     end
 
     # Source selection is fixed at codegen time: GET/DELETE/WEBSOCKET/SSE pull
@@ -9323,6 +9340,49 @@ function _submitted_raw(src, fallback, name)
         v = get(fallback, key, nothing)
     end
     (v === nothing || v == "") ? _NO_DEFAULT : v
+end
+
+# Query and form names the framework itself reads on every route — the
+# Markdown and error projections (`?plain`, `?markdown`, `?error`), the vendor
+# asset version (`?v`) — plus every `__`-prefixed protocol marker
+# (`__htmxo_poll`, `__htmxo_form`, `__chrome__`, …). A route's keyword splat
+# never receives them: they say how to answer, not what was submitted.
+const _RESERVED_PARAM_NAMES = ("plain", "markdown", "error", "v")
+_reserved_param_name(key::AbstractString) =
+    startswith(key, "__") || key in _RESERVED_PARAM_NAMES
+
+"""
+    _collect_rest_params!(kw, src, fallback, bound) -> kw
+
+Bind a route's keyword splat (`@post create(; template, fields...)`): append
+`Symbol(name) => value` to `kw` for every submitted field that no declared
+keyword or `@param` reads (`bound`, fixed when the route is defined) and that
+is not framework-reserved (`_reserved_param_name`). `src` is the verb's source
+(query string for GET/DELETE/WS/SSE, body for POST/PUT/PATCH) and `fallback`
+the query string behind a body, as for a declared keyword; a name in both is
+taken from `src`. An empty value is not submitted, as for a declared keyword,
+so an unchecked checkbox and a blank text field are both absent. Values stay
+as parsed — `String`, `Vector{String}` for a repeated field, an `Upload` for a
+multipart file — and are appended sorted by name, so the splat's order does
+not depend on `Dict` iteration.
+"""
+function _collect_rest_params!(kw, src, fallback, bound)
+    rest = Dict{String,Any}()
+    for source in (src, fallback)
+        source === nothing && continue
+        for (key, value) in source
+            key = String(key)
+            haskey(rest, key) && continue
+            _reserved_param_name(key) && continue
+            Symbol(key) in bound && continue
+            value == "" && continue
+            rest[key] = value
+        end
+    end
+    for key in sort!(collect(keys(rest)))
+        push!(kw, Symbol(key) => rest[key])
+    end
+    kw
 end
 
 # A submitted option carries only its stable wire value. Recover the
@@ -16483,13 +16543,18 @@ _reflect_kw_source(method) = method in ("GET", "DELETE", "WEBSOCKET", "SSE") ? :
 # `__verb__::Verb{V}` via `internal_input`, since DO's contract is
 # verb-agnostic and hands back every positional); kwargs read from query/body
 # by method. `type` is a resolved `Type` (or `nothing`); `default` is
-# meaningful only when `!required`.
+# meaningful only when `!required`. A keyword splat (`fields...`) is no
+# parameter of its own — it receives whatever else was submitted
+# (`_collect_rest_params!`) — so it is left out of the keywords, and its name
+# is the third element (`nothing` when the route has none): generated forms
+# render no control for it, and `route_url` accepts other keywords for it.
 function _reflect_call_params(OwnerT, info, method, arg_docs=Dict{Symbol,String}())
     sig = Base.invokelatest(DynamicObjects.property_signature, info, parentmodule(OwnerT))
     kwsrc = _reflect_kw_source(method)
     path_params = NamedTuple[]
     kwargs = NamedTuple[]
-    sig === nothing && return (path_params, kwargs)
+    rest = nothing
+    sig === nothing && return (path_params, kwargs, rest)
     mk = (p, source) -> (name=p.name, source=source, type=p.type, required=p.required,
                          default=(p.required ? nothing : _unquote(p.default)),
                          doc=get(arg_docs, p.name, nothing), inherited=false)
@@ -16498,9 +16563,10 @@ function _reflect_call_params(OwnerT, info, method, arg_docs=Dict{Symbol,String}
         push!(path_params, mk(p, :path))
     end
     for p in sig.kwargs
+        get(p, :vararg, false) === true && (rest = p.name; continue)
         push!(kwargs, mk(p, kwsrc))
     end
-    (path_params, kwargs)
+    (path_params, kwargs, rest)
 end
 
 # Parse a LOCAL `@param` on `T` into (type, required, default), or `nothing`
@@ -26430,7 +26496,8 @@ arguments, a keyword the route does not read, a required keyword left out, or a
 value that would not parse back as its declared type throws an `ArgumentError`
 naming the struct and the route. A page that links to one of its own fragments
 therefore fails when it renders, instead of when the browser asks for the
-fragment.
+fragment. A route with a keyword splat (`@get rows(; sort="", filters...)`)
+reads every keyword, so one it does not declare goes into the query unchecked.
 
 ```julia
 @htmx struct App
@@ -26460,6 +26527,8 @@ function route_url(self, name::Symbol, args...; kwargs...)
     given = Dict{Symbol,Any}(k => v for (k, v) in pairs(kwargs))
     for (key, value) in given
         param = get(route.query, key, nothing)
+        # A route with a keyword splat (`; fields...`) reads every other field.
+        param === nothing && route.rest && continue
         param === nothing && throw(ArgumentError(string("route_url: ", nameof(T), ".",
             name, " has no parameter `", key, "`; it reads ",
             isempty(route.query) ? "none" : join(sort!(collect(keys(route.query))), ", "))))
@@ -26490,12 +26559,12 @@ function _route_link(T, name::Symbol, parents)
             end)
             found === nothing && return nothing
             info, method = found
-            path, keywords = _reflect_call_params(T, info, method)
+            path, keywords, rest_kw = _reflect_call_params(T, info, method)
             query = Dict{Symbol,Any}(p.name => p for p in keywords)
             for p in _reflect_param_props(T, method, collect(Any, parents))
                 haskey(query, p.name) || (query[p.name] = p)
             end
-            (; path, query)
+            (; path, query, rest=rest_kw !== nothing)
         end
     end
 end
