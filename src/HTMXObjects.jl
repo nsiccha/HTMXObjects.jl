@@ -3955,8 +3955,9 @@ A run of prose, authored as Markdown. The Markdown and plain-text projections
 are the source itself; the HTML projection renders it through
 [`render_markdown`](@ref) (CommonMark plus bare-URL linking and TeX math),
 which escapes inline markup, so prose cannot smuggle HTML through. Its
-`\$…\$` / `\$\$…\$\$` math is typeset in the browser; `math=false` shows every
-`\$` as text.
+`\$…\$` / `\$\$…\$\$` math, and any other delimiter `render_markdown` takes, is
+typeset in the browser and in a [`pdf_report`](@ref); `math=false` shows every
+`\$` as text in the browser.
 """
 struct SemanticProse <: SemanticNode
     markdown::String
@@ -19025,9 +19026,16 @@ const _PDF_REPORT_DATE_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", 
 # address and a code span that is an address. `pdf_report` reads the Markdown
 # with `autolink_bare_uris`, which links an address with a scheme and a mail
 # address.
+#
+# The reader also holds what is math to what `render_markdown` calls math. Pandoc's
+# Markdown has no `\(…\)` or `\[…\]` by default: it reads `\[` as an escaped bracket
+# and each TeX command as raw TeX, and its Typst writer drops raw TeX without a word,
+# so `\[ q_{\mathrm{cut}}(\phi,\theta) \]` printed `[ q_{}(,) ]` and veraPDF passed
+# it. Without `raw_tex`, a command outside any delimiters (`\alpha`, `C:\Users`) stays
+# the text the browser shows.
 const _PDF_REPORT_LINKS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-links.lua")
 const _PDF_REPORT_BASE_URL_KEY = "htmxobjects-base-url"
-const _PDF_REPORT_READER = "markdown+autolink_bare_uris"
+const _PDF_REPORT_READER = "markdown+autolink_bare_uris+tex_math_single_backslash-raw_tex"
 
 # A Lua filter cannot call a Julia `url_map`, so `pdf_report` first lists the
 # document's link targets with this Pandoc writer, asks `url_map` about each and
@@ -19118,7 +19126,10 @@ _pdf_report_date_text(v) = false
 
 # Pandoc reads a metadata string as Markdown; escaping every ASCII punctuation
 # character keeps it the text it was (`1. Oktober` no list, `*` no emphasis).
-_markdown_literal(s) = replace(s, r"([!-/:-@\[-`{-~])" => s"\\\1")
+# `\(` and `\[` would open math (`_PDF_REPORT_READER`), so those two are written as
+# character references.
+_markdown_literal(s) = replace(s, r"[!-/:-@\[-`{-~]" =>
+    c -> c == "(" ? "&#40;" : c == "[" ? "&#91;" : "\\" * c)
 
 function _pdf_report_front_matter(metadata, lang)
     entries = _metadata_pairs(metadata)
@@ -19388,6 +19399,9 @@ pdf.js (Firefox) and pdfminer. pypdf reads `R ̂`, with a space. It warns, namin
 the letter, when the font draws one with more glyphs than it has code points, and
 leaves that letter as Typst wrote it. Right-to-left text reads once only in
 Poppler; other readers can still repeat letters.
+
+Math is what [`render_markdown`](@ref) takes for math: `\$…\$`, `\\(…\\)`,
+`\$\$…\$\$`, `\\[…\\]` and a `math` fence. A TeX command outside them stays text.
 
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.

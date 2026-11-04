@@ -13,7 +13,7 @@ using TestItemRunner
         papersize: "a4"
         format:
           typst:
-            from: markdown+autolink_bare_uris
+            from: markdown+autolink_bare_uris+tex_math_single_backslash-raw_tex
             pdf-standard: [ua-1]
             include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST))]
         filters:
@@ -813,6 +813,111 @@ end
                 @test !occursin("27.26825.501", text)
                 lines = strip.(split(text, '\n'))
                 @test any(l -> endswith(l, "27.268"), lines) && any(==("25.501–28.966"), lines)
+            end
+        end
+    end
+end
+
+@testitem "pdf_report writes metadata text so that it opens no math" tags=[:unit] begin
+    using HTMXObjects
+
+    # `\(` and `\[` open math in the report's reader.
+    @test HTMXObjects._markdown_literal("(a) [b] 1.") == raw"&#40;a\) &#91;b\] 1\."
+end
+
+@testitem "pdf_report sets math wherever the browser does" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        reader = HTMXObjects._PDF_REPORT_READER
+        typst(md, filters...) = mktempdir() do dir
+            file = joinpath(dir, "m.md")
+            write(file, md)
+            read(`$quarto pandoc -f $reader -t typst --wrap=none $(["--lua-filter=$f" for f in filters]) $file`, String)
+        end
+        equations(md) = typst(md, HTMXObjects._PDFUA_MATH_ALT_FILTER)
+        browser(md) = count("data-htmxo-math=", repr("text/html", render_markdown(md)))
+
+        # Pandoc reads `\[` as an escaped bracket by default and each TeX command as
+        # raw TeX, which its Typst writer drops: `\[ q_{\mathrm{cut}}(\phi,\theta) \]`
+        # printed `[ q_{}(,) ]` and veraPDF passed it (snag pdf-report-brack-a0716710).
+        @testset "$(repr(md))" for (md, formulas) in [
+                raw"\[q\]" => 1, raw"Im \(x_1\) und \[y\] Text." => 2, "\\[\nx\n\\]" => 1,
+                raw"$x$ und $$y$$" => 2, "\$\$\nx\n\$\$" => 1, "```math\nx\n```" => 1,
+                raw"\( x \)" => 1, raw"Offen \[ bleibt Text." => 0, "Über \\[ einen\n\nAbsatz \\] nicht." => 0,
+                raw"Code `\[x\]` und `\(y\)`." => 0, "```\n\\[x\\]\n```" => 0,
+                raw"costs $5 and $10" => 0, raw"Preis \$5." => 0]
+            @test browser(md) == formulas
+            @test count("math.equation(alt:", equations(md)) == formulas
+        end
+
+        cut = equations("\\[\nq_{\\mathrm{cut}}(\\phi,\\theta)\n= p(\\phi\\mid D_A)\\,p(\\theta\\mid\\phi,D_B).\n\\]")
+        @test occursin("phi.alt", cut) && occursin("theta", cut) && occursin("divides", cut)
+        @test occursin(raw"q_{\\mathrm{cut}}(\\phi,\\theta)", cut)    # the alt text is the TeX source
+        @test !occursin("q\\_{}", cut)
+
+        # A TeX command outside any delimiters stays the text the browser shows.
+        text = typst(raw"Pfad C:\Users\foo und \alpha hier.")
+        @test occursin(raw"C:\\Users\\foo", text) && occursin(raw"\\alpha", text)
+        @test occursin(raw"C:\Users\foo und \alpha hier", repr("text/html", render_markdown(raw"Pfad C:\Users\foo und \alpha hier.")))
+
+        # The writer rounds `\!` to `#h(-1em)`, which overprinted a bracket on the
+        # subscript before it, and `\;` to nothing. When this control fails, Pandoc has
+        # fixed that and the filter's marks can go.
+        @test occursin("#h(-1em)", typst(raw"$a\!b$")) && occursin("#h(0em)", typst(raw"$a\;b$"))
+        spaces = equations(raw"$\mathbb E_q\!\left[x\right]\;y$")
+        @test occursin("#h(-1em/6)", spaces) && occursin("thick", spaces) && !occursin("HTMXOPDF", spaces)
+        @test occursin(raw"\\!", spaces)    # the alt text keeps the source
+        # A pair of backslashes is a line break, not the command.
+        @test occursin(raw"\\\\!", equations(raw"$\begin{aligned}a\\!b\end{aligned}$"))
+        # A formula the writer cannot convert prints its source, without the marks.
+        unconverted = equations(raw"$a\!\negthinspace b$")
+        @test occursin(raw"\\negthinspace", unconverted) && !occursin("HTMXOPDF", unconverted)
+
+        # Metadata text with brackets stays text, also where it is an address.
+        mktempdir() do dir
+            template = joinpath(dir, "date.template")
+            write(template, "\$date\$\n")
+            date = joinpath(dir, "date.md")
+            write(date, "---\n$(HTMXObjects._PDF_REPORT_DATE_TEXT_KEY): " *
+                        "$(HTMXObjects._yaml_string(HTMXObjects._markdown_literal("(Entwurf) [1] 23.10.")))\n---\n")
+            @test strip(read(`$quarto pandoc -s -f $reader -t typst --template=$template
+                               --lua-filter=$(HTMXObjects._PDF_REPORT_DATE_FILTER) $date`, String)) ==
+                  "#\"(Entwurf) [1] 23.10.\""
+        end
+        linked = typst("---\n$(HTMXObjects._PDF_REPORT_BASE_URL_KEY): " *
+                       "$(HTMXObjects._yaml_string(HTMXObjects._markdown_literal("https://example.org/a_(b)")))\n---\n\n[x](/p)\n",
+                       HTMXObjects._PDF_REPORT_LINKS_FILTER)
+        @test occursin("https://example.org/a_(b)/p", linked)
+
+        # The whole way, from a `SemanticProse`, whose Markdown is its source.
+        pdfua(path) = let bytes = read(path, String)
+            startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+        end
+        mktempdir() do dir
+            out = joinpath(dir, "formeln.pdf")
+            prose = SemanticProse("""
+                Inline \\(x_1\\) und \$y\$.
+
+                \\[
+                q_{\\mathrm{cut}}(\\phi,\\theta) = \\mathbb E_q\\!\\left[\\log p(\\theta\\mid\\phi)\\right]
+                \\]
+
+                ```math
+                \\sum_f z_f
+                ```
+                """)
+            @test pdf_report(prose, out; title="Formeln", lang="de-DE") == out
+            @test pdfua(out)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text layer"
+            else
+                pages = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+                @test occursin("𝜙", pages) && occursin("𝜃", pages) && occursin("cut", pages) && occursin("∑", pages)
+                @test !occursin("q_{", pages) && !occursin("\\", pages)
             end
         end
     end

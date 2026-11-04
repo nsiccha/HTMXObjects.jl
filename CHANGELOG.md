@@ -14,6 +14,19 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.58
+
+- `pdf_report` sets math wherever the browser does. `\(…\)` and `\[…\]` lost their
+  commands (`\[ q_{\mathrm{cut}}(\phi,\theta) \]` printed `[ q_{}(,) ]`, and veraPDF
+  passed it), and a ```` ```math ```` fence printed as code.
+  **Breaking:** Markdown that writes `\[1\]` to mean a bracket now gets a formula, as
+  `render_markdown` already read it; write `[1]`.
+- `pdf_report` keeps a TeX command outside any delimiters as text (`\alpha`, `C:\Users`),
+  as the browser shows it. It disappeared without a word.
+  **Breaking:** a `\newpage` that did nothing now prints; remove it.
+- `pdf_report` sets `\!` and `\;` at their width, in every kind of math: Pandoc rounded
+  `\!` to -1 em, which overprinted what stood before it, and `\;` to nothing.
+
 ## 0.1.57
 
 - `pdf_report`: a web or mail address in `metadata=` (a subtitle, an author) becomes

@@ -937,7 +937,8 @@ SemanticProse(BRM.brm_description_markdown(BRM.brm_description(d)))
   itself (`window.katex`), or leaves the source showing.
 - **Markdown reads it back as `$…$` / `$$…$$`**, whichever delimiters the
   source used, so `?plain`, Quarto and [`pdf_report`](#pdf-report) see
-  ordinary dollar math. A `SemanticProse` projects its source unchanged.
+  ordinary dollar math. A `SemanticProse` projects its source unchanged, and
+  `pdf_report` reads every one of these delimiters in it as math.
 - **`math=false` opts out** (`render_markdown(text; math=false)`,
   `SemanticProse(markdown; math=false)`, `markdown_parser(; math=false)`):
   every `$` and `\(` is then text, as before.
@@ -1040,6 +1041,13 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   Typst supports PDF/UA-1 (verified with Quarto 1.10.18 and its Typst 0.15.1),
   found on `PATH` or passed as `quarto=`. A PDF that does not declare PDF/UA-1
   is an error, not a result.
+- **Math** is what the browser takes for math ([Markdown math](#markdown-math)):
+  `$…$`, `\(…\)`, `$$…$$`, `\[…\]` and a ```` ```math ```` fence, wherever the
+  Markdown came from. So `\[1\]` written to mean a bracket is a formula here too:
+  write `[1]`. A TeX command outside any delimiters stays text, as in the browser,
+  so `\newpage` prints as written. A formula Pandoc cannot convert prints its
+  source. `math=false` only changes the browser: a `SemanticProse`'s Markdown is
+  its source, which the report reads the same way.
 - **`title`** is the document title, which PDF/UA requires; Quarto also prints
   it as the title block above the content.
 - **`lang`** is a language tag with its region (`"de-DE"`, `"en-GB"`).
