@@ -805,3 +805,200 @@ end
         end
     end
 end
+
+@testitem "pdf_report's repair makes a letter with a combining mark read once" tags=[:unit] begin
+    using HTMXObjects
+    using HTMXObjects: _pdf_text_layer_repaired, _pdf_file, _pdf_stream_data, _pdf_to_unicode,
+        _pdf_scan_content, _pdf_utf16be_hex
+    zlib = HTMXObjects.CodecZlib
+
+    # A PDF laid out as Typst lays it out: the page's content is object 5, the
+    # font's ToUnicode table object 7.
+    function tiny_pdf(entries, content)
+        cmap = "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n$(length(entries)) beginbfchar\n" *
+               join(("<$(uppercase(string(code; base=16, pad=4)))> <$(_pdf_utf16be_hex(text))>"
+                     for (code, text) in entries), "\n") * "\nendbfchar\n"
+        stream(s) = let z = transcode(zlib.ZlibCompressor, Vector{UInt8}(codeunits(s)))
+            vcat(Vector{UInt8}(codeunits("<</Filter/FlateDecode/Length $(length(z))>>\nstream\n")), z,
+                 Vector{UInt8}(codeunits("\nendstream\n")))
+        end
+        plain(s) = Vector{UInt8}(codeunits(s * "\n"))
+        objects = [plain("<</Type/Catalog/Pages 2 0 R>>"), plain("<</Type/Pages/Kids[3 0 R]/Count 1>>"),
+                   plain("<</Type/Page/Resources 4 0 R/Contents 5 0 R/Parent 2 0 R>>"),
+                   plain("<</Font<</f0 6 0 R>>>>"), stream(content),
+                   plain("<</Type/Font/Subtype/Type0/BaseFont/X/Encoding/Identity-H/ToUnicode 7 0 R>>"), stream(cmap)]
+        out = IOBuffer()
+        write(out, "%PDF-1.7\n")
+        offsets = Int[]
+        for (n, object) in enumerate(objects)
+            push!(offsets, position(out))
+            write(out, "$n 0 obj\n", object, "endobj\n")
+        end
+        xref = position(out)
+        write(out, "xref\n0 $(length(objects) + 1)\n0000000000 65535 f \n")
+        foreach(offset -> write(out, lpad(offset, 10, '0'), " 00000 n \n"), offsets)
+        write(out, "trailer\n<</Size $(length(objects) + 1)/Root 1 0 R>>\nstartxref\n$xref\n%%EOF")
+        return take!(out)
+    end
+
+    table(pdf) = _pdf_to_unicode(String(_pdf_stream_data(_pdf_file(pdf), 7)))
+    content(pdf) = _pdf_stream_data(_pdf_file(pdf), 5)
+    scan(pdf) = _pdf_scan_content(content(pdf), Dict("f0" => 6))
+    # What a reader that honours ActualText gets, and one that ignores it.
+    function honouring(pdf)
+        s, t = scan(pdf), table(pdf)
+        out = IOBuffer()
+        seen = 0
+        for g in s.glyphs
+            if g.span == 0
+                write(out, t[g.code])
+            elseif g.span != seen
+                write(out, s.spans[g.span].text)
+            end
+            seen = g.span
+        end
+        return String(take!(out))
+    end
+    ignoring(pdf) = let t = table(pdf)
+        join(t[g.code] for g in scan(pdf).glyphs)
+    end
+    # Every glyph and pen movement, in order: what a page draws from these streams.
+    drawn(pdf) = let c = content(pdf)
+        [e isa UnitRange ? String(c[e]) : e for show in scan(pdf).shows for e in show.elements for e in
+         (e isa UnitRange ? [e] : [e[k:k+1] for k in 1:2:length(e)-1])]
+    end
+    objects_where_the_table_says(pdf) = let file = _pdf_file(pdf)
+        all(startswith(String(pdf[range]), "$number 0 obj") for (number, range) in file.ranges)
+    end
+
+    rhat, xhat, qhat = "R̂", "x̂", "q̂"
+    text(codes...; adjust="") = "BT 0 Tr/f0 11 Tf 1 0 0 -1 0 0 Tm[$adjust" *
+        join("(\\000\\$(string(c; base=8, pad=3)))" for c in codes) * "]TJ\nET\n"
+    tagged(n, body) = "/Span<</MCID $n>>BDC\nq 1 0 0 -1 20 $(30 + n) cm\n$(body)Q\nEMC"
+
+    # The letter ends a longer run and the mark is a run of its own, each tagged,
+    # both mapped to the whole cluster: what Typst writes for "aR̂b".
+    typst = tiny_pdf([1 => rhat, 2 => rhat, 3 => "a", 4 => "b"],
+                     tagged(0, text(3, 1)) * tagged(1, text(2; adjust="185")) * tagged(2, text(4)))
+    @test honouring(typst) == ignoring(typst) == "a$(rhat)$(rhat)b"
+    fixed = _pdf_text_layer_repaired(typst)
+    @test honouring(fixed) == "a$(rhat)b"
+    @test ignoring(fixed) == "a$(rhat)b"
+    @test table(fixed)[1] == "R" && table(fixed)[2] == "̂" && table(fixed)[3] == "a"
+    @test drawn(fixed) == drawn(typst)
+    @test objects_where_the_table_says(fixed)
+    @test occursin("<</MCID 1>>BDC", String(content(fixed)))
+    @test startswith(String(copy(fixed)), "%PDF-1.7\n") && endswith(String(copy(fixed)), "%%EOF\n")
+    @test _pdf_text_layer_repaired(fixed) === nothing  # nothing is left to repair
+
+    # The same cluster twice in a row is two clusters.
+    twice = tiny_pdf([1 => rhat, 2 => rhat], tagged(0, text(1)) * tagged(1, text(2)) * tagged(2, text(1)) * tagged(3, text(2)))
+    @test honouring(_pdf_text_layer_repaired(twice)) == ignoring(_pdf_text_layer_repaired(twice)) == rhat * rhat
+
+    # The table already says "R" for the letter, so the letter carries a span.
+    plain_first = tiny_pdf([1 => "R", 2 => rhat],
+        tagged(0, text(1)) * tagged(1, "BT/Span<</ActualText<FEFF00520302>>>BDC 0 Tr/f0 11 Tf[(\\000\\001)]TJ\nEMC\nET\n") *
+        tagged(2, text(2)))
+    fixed = _pdf_text_layer_repaired(plain_first)
+    @test honouring(plain_first) == "R$(rhat)$(rhat)"
+    @test honouring(fixed) == ignoring(fixed) == "R$(rhat)"
+    @test table(fixed)[1] == "R"
+
+    # One mark's glyph serves two letters, and the table holds the first letter.
+    shared = tiny_pdf([8 => xhat, 9 => xhat, 20 => qhat],
+        tagged(0, text(8)) * tagged(1, text(9)) * tagged(2, text(20)) *
+        tagged(3, "BT/Span<</ActualText<FEFF00710302>>>BDC 0 Tr/f0 11 Tf[(\\000\\011)]TJ\nEMC\nET\n"))
+    fixed = _pdf_text_layer_repaired(shared)
+    @test honouring(shared) == "$(xhat)$(xhat)$(qhat)$(qhat)"
+    @test honouring(fixed) == ignoring(fixed) == "$(xhat)$(qhat)"
+    @test occursin("/ActualText()", String(content(fixed)))
+    @test drawn(fixed) == drawn(shared)
+
+    # Two marks, and a code that needs escaping in a literal string.
+    two_marks = "R̂̄"
+    marks = tiny_pdf([0x28 => two_marks, 0x29 => two_marks, 0x5c => two_marks],
+        tagged(0, "BT 0 Tr/f0 11 Tf[(\\000\\()]TJ\nET\n") * tagged(1, "BT 0 Tr/f0 11 Tf[(\\000\\))]TJ\nET\n") *
+        tagged(2, "BT 0 Tr/f0 11 Tf(\\000\\\\)Tj\nET\n"))
+    fixed = _pdf_text_layer_repaired(marks)
+    @test honouring(fixed) == ignoring(fixed) == two_marks
+    @test table(fixed)[0x28] == "R" && table(fixed)[0x29] == "̂" && table(fixed)[0x5c] == "̄"
+
+    # The letter's glyph reads something else elsewhere: its cluster still reads
+    # once where ActualText counts, and the table keeps what it says.
+    dotted = "i̇"
+    other = tiny_pdf([5 => "ı", 6 => dotted],
+        tagged(0, text(5)) * tagged(1, "BT/Span<</ActualText<FEFF00690307>>>BDC 0 Tr/f0 11 Tf[(\\000\\005)]TJ\nEMC\nET\n") *
+        tagged(2, text(6)))
+    fixed = _pdf_text_layer_repaired(other)
+    @test honouring(fixed) == "ı$(dotted)"
+    @test table(fixed)[5] == "ı"
+
+    # Right to left the glyphs do not follow the code points: spans only.
+    hebrew = "שָ"
+    rtl = tiny_pdf([1 => hebrew, 2 => hebrew], tagged(0, text(1)) * tagged(1, text(2)))
+    fixed = _pdf_text_layer_repaired(rtl)
+    @test honouring(fixed) == hebrew
+    @test table(fixed)[1] == hebrew && table(fixed)[2] == hebrew
+
+    # Nothing to repair leaves the file as it is: `nothing` means no rewrite.
+    @test _pdf_text_layer_repaired(tiny_pdf([1 => "a", 2 => "b"], tagged(0, text(1, 2)))) === nothing
+    # A glyph that draws the whole cluster reads once already.
+    @test _pdf_text_layer_repaired(tiny_pdf([1 => "ê"], tagged(0, text(1)) * tagged(1, text(1)))) === nothing
+    # A ligature is not a letter with a mark: "ffff" is two ligatures.
+    @test _pdf_text_layer_repaired(tiny_pdf([1 => "ff", 2 => "ff"], tagged(0, text(1, 2)))) === nothing
+    # One span around both glyphs reads once already (krilla's own way).
+    @test _pdf_text_layer_repaired(tiny_pdf([1 => rhat, 2 => rhat],
+        "BT/Span<</ActualText<FEFF00520302>>>BDC 0 Tr/f0 11 Tf[(\\000\\001\\000\\002)]TJ\nEMC\nET\n")) === nothing
+
+    # What it cannot tell apart or read, it leaves and says so.
+    three = tiny_pdf([1 => rhat, 2 => rhat, 3 => rhat], tagged(0, text(1)) * tagged(1, text(2)) * tagged(2, text(3)))
+    @test (@test_logs (:warn, r"still read twice.*R̂") _pdf_text_layer_repaired(three)) === nothing
+    inline_image = tiny_pdf([1 => rhat], "BI /W 1 /H 1 ID x EI\n" * tagged(0, text(1)))
+    @test (@test_logs (:warn, r"could not read") _pdf_text_layer_repaired(inline_image)) === nothing
+    @test (@test_logs (:warn, r"could not read") _pdf_text_layer_repaired(Vector{UInt8}(codeunits("not a pdf")))) === nothing
+end
+
+@testitem "pdf_report reads a letter with a combining mark once in the text layer" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1" || isnothing(Sys.which("pdftotext"))
+        @test_skip "Quarto and pdftotext (poppler-utils) write and read the text layer"
+    else
+        using HTMXObjects
+
+        rhat, xhat, qhat = "R̂", "x̂", "q̂"
+        extract(path, mode...) = read(`pdftotext -enc UTF-8 $mode $path -`, String)
+        mktempdir() do dir
+            # Typst alone repeats the letter (typst/typst#8767). If this control
+            # fails, Typst has fixed that and `src/pdf_text_layer.jl` can go.
+            typ = joinpath(dir, "plain.typ")
+            write(typ, "#set document(title: [T])\n$rhat ≤ 1,011\n")
+            run(`$(Sys.which("quarto")) typst compile --pdf-standard ua-1 $typ`)
+            @test occursin(rhat * rhat, extract(joinpath(dir, "plain.pdf"), "-raw"))
+
+            md = """
+                # Konvergenz $rhat
+
+                Ein R, dann $rhat ≤ 1,011 und $xhat und $qhat, zweimal $rhat$rhat, im Wort a$(xhat)b,
+                **fett $rhat** und `code $rhat`. Mit eigenem Glyph: ê und ê.
+
+                | Größe | Wert |
+                |---|---|
+                | $rhat | 1,011 |
+                """
+            out = joinpath(dir, "bericht.pdf")
+            @test pdf_report(md, out; title="Bericht", lang="de-DE") == out
+            bytes = read(out, String)
+            @test startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+            for mode in (("-raw",), (), ("-layout",))
+                text = extract(out, mode...)
+                @test occursin("Konvergenz $rhat", text)
+                @test occursin("$rhat ≤ 1,011", text)
+                @test occursin("$xhat und $qhat", text)
+                @test occursin("zweimal $rhat$rhat,", text)
+                @test occursin("a$(xhat)b", text)
+                @test occursin("fett $rhat", text)
+                @test occursin("code $rhat", text)
+                @test count(rhat, text) == 7
+            end
+        end
+    end
+end
