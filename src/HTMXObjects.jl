@@ -4716,8 +4716,10 @@ _md_plain_text(n::CommonMark.Node) =
 # GFM pipe tables — node types come from the `TableRule` extension the parser
 # enables. `TableCell.header` distinguishes `<th>` from `<td>`; a set column
 # alignment renders as an inline `text-align`, so it holds with no app CSS.
+# In the scroll container every other table has: a table wider than its column
+# scrolls there instead of running over what holds it.
 markdown_node(r::MarkdownRenderer, ::CommonMark.Table, n, rules, context) =
-    h.table(markdown_children(r, n, rules, context)...)
+    h.div(; class="table-wrap")(h.table(markdown_children(r, n, rules, context)...))
 markdown_node(r::MarkdownRenderer, ::CommonMark.TableHeader, n, rules, context) =
     h.thead(markdown_children(r, n, rules, context)...)
 markdown_node(r::MarkdownRenderer, ::CommonMark.TableBody, n, rules, context) =

@@ -308,6 +308,14 @@ end
     @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; offer="o", short=:offer, deep=:short))]; layers=LAYERS)
 end
 
+@testitem "a Markdown table sits in the scroll container every table has" tags=[:unit] begin
+    using HTMXObjects
+    s = repr("text/html", SemanticProse("| a |\n| --- |\n| 1 |"))
+    @test occursin("<div class=\"table-wrap\"><table>", s) && occursin("</table></div>", s)
+    # Its Markdown is the Markdown it was.
+    @test repr("text/markdown", SemanticProse("| a |\n| --- |\n| 1 |")) == "| a |\n| --- |\n| 1 |"
+end
+
 @testitem "a title with Markdown's marks is its text, and keeps its anchor" setup=[UnitFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
@@ -513,6 +521,8 @@ end
             "/frag" => rendered(shell(h.div(; id="spaet", hx_get="/fragment", hx_trigger="load")), :private),
             "/shared" => rendered(shell(unit_tree(SemanticUnits([SemanticUnit("geteilt"; title="Geteilt", layers=(; offer="ROH", short=:offer, deep=:offer),
                 children=[SemanticUnit("kind"; title="Kind", layers=(; short="k", deep="t"))])]; layers=LAYERS))), :private),
+            "/wide" => rendered(shell(h.div(; style="width: 400px")(unit_tree(SemanticUnits([SemanticUnit("breit"; title="Breit",
+                layers=(; offer="o", short="| " * join(("Spalte$i" for i in 1:30), " | ") * " |\n|" * " --- |"^30 * "\n| " * join(("x$i" for i in 1:30), " | ") * " |"))]; layers=LAYERS)))), :private),
             "/scopes" => rendered(shell(h.div(
                 h.div(; data_htmxo_unit_scope="")(unit_view_control(side("a"); param="erste"), unit_tree(side("a"); control=false)),
                 h.div(; data_htmxo_unit_scope="")(unit_view_control(side("b"); param="zweite"), unit_tree(side("b"); control=false)))), :private))
@@ -680,6 +690,14 @@ end
                     @test closed_around("geteilt--offer") == "0" && closed_around("kind") == "1"
                     @test load("$base/shared#kind--deep")
                     @test wait_for(b, "document.getElementById('kind--deep').open")
+
+                    # A wide Markdown table scrolls in its own box, inside a closed-off
+                    # layer's border and the page; its text is all still there.
+                    @test load("$base/wide#breit--short")
+                    @test wait_for(b, "document.getElementById('breit--short').open")
+                    @test evaluate(b, "(d => String(d.scrollWidth <= d.clientWidth))(document.getElementById('breit--short'))") == "true"
+                    @test evaluate(b, "String(document.documentElement.scrollWidth <= innerWidth)") == "true"
+                    @test evaluate(b, "(w => String(w.classList.contains('table-wrap') && w.scrollWidth > w.clientWidth))(document.querySelector('#breit--short table').parentElement)") == "true"
 
                     # The events a page uses to make way: before the lookup on the
                     # document, then on the target before anything opens.
