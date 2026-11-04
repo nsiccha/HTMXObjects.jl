@@ -14,6 +14,27 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.51
+
+- `export_site` can render pages concurrently (keyword `parallel`), as many
+  at once as the process can keep busy: its default threads, or fewer under a
+  CPU quota (a container, a systemd scope with `CPUQuota=`). Pages render
+  ahead of the crawl, each on a task of its own, and their files are written
+  one at a time in the order a one-thread export writes them, so the bundle
+  has the files, links and failures of one page at a time, byte for byte
+  where a page draws no value anew for each render (a random id, a
+  process-wide counter such as a `choice_list`'s element ids). It is the
+  default when the process has more than one default thread and no more than
+  it has CPUs, so start Julia with `-t` set to its CPUs: more threads than
+  CPUs made an export slower (ODLPlaus, Julia 1.10, two CPUs: one page at a
+  time 1,362 s, eight threads rendering concurrently 1,706 s). Two threads
+  took 1,122 s on a quieter host and gained nothing on a saturated one
+  (2,346 s against 2,069-2,638 s one page at a time, with up to 1.5 times the
+  CPU), so pass `parallel=false` where other work needs the CPUs. The routes
+  run as they run under `serve`, several at once, so state a route keeps between
+  requests needs a lock, and a `file_name` function is called from several
+  threads. Before, an export used one CPU however many it had.
+
 ## 0.1.50
 
 - A plain string works wherever a caption is taken:

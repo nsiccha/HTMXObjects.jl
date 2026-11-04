@@ -63,7 +63,7 @@ HTMXObjects declares `HTMX = "1.1"`. It renders through `HTMX.Raw` and relies on
 | `static_transform(...)` | Convert dynamic responses to static-friendly form (`static_transform(val; record_base)` for recording, `static_transform(val, spec::StaticExport)` for a request-scoped export) |
 | `StaticExport(; url_map, controls, record_base, runtime, audience)` | Request-scoped static-export spec for `dispatch(...; static=)` — see [Request-scoped static export](#request-scoped-static-export) |
 | `static_export(req)` | The `StaticExport` a static `dispatch` attached to this request, or `nothing` |
-| `export_site(dir; pages, file_name, controls, aliases, parent, audience)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
+| `export_site(dir; pages, file_name, controls, aliases, parent, audience, parallel)` | The whole app as a static site: every page, fragment, data file and asset the pages reference, written into `dir` with links that work from a subdirectory — see [Whole-site export](#whole-site-export) |
 | `private(content; public=nothing, mark=true)`, `Private` | Content a public reader must not see: the live app and a private export show `content`, outlined and labelled "not public", a public export shows `public` (nothing by default); `content` can be a function (`private() do … end`) that builds it for a private reader only — see [Public and private content](#private-content) |
 | `export_audience(req)` | Who the answer to this request is for: `:private` for the live app, the audience of an export or `dispatch` otherwise |
 | `with_audience(f, audience)` | Call `f()` rendering everything for `audience` (`:public` / `:private`): HTML a library builds itself, or work in a task it starts — see [Public and private content](#private-content) |
@@ -4316,6 +4316,22 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   that needs a server to another one. `parent` is the progress node the routes'
   work hangs under. A route that wants to say it is a snapshot tests
   `static_export(__req__) !== nothing`.
+- **Threads.** With `parallel=true` pages render concurrently, as many at
+  once as the process can keep busy (its default threads, or fewer under a
+  CPU quota such as a container's), and their files are written one at a
+  time in the order a one-thread export writes them, so they are the files,
+  links and failures of `parallel=false`, which renders one page after
+  another; only a value a page draws anew for each render (a random id, a
+  process-wide counter) differs, as between any two exports. It is the
+  default when the process has more than one default thread and no more than
+  it has CPUs: start Julia with `-t` set to its CPUs (`julia -t 2` under a
+  two-CPU quota), since more threads than CPUs make an export slower. Julia
+  compiles one method at a time, so an export that spends much of its time
+  compiling gains less, and on a host busy with other work it can gain nothing
+  and still spend more CPU (`parallel=false` then). The routes run as they
+  run under `serve`, several at once: state a route keeps between requests
+  needs a lock (a counter an atomic), and a `file_name` of yours is called
+  from several threads.
 - **Private content.** The site is public unless `audience=:private`: content
   marked `private` shows its stand-in or nothing, links inside it are not
   followed, and a page whose whole answer is private gets no file, while every
