@@ -18,9 +18,11 @@
 -- Markdown with Pandoc's `autolink_bare_uris`, which links an address with a
 -- scheme (`https://…`, `mailto:…`) and a mail address; the second pass links
 -- the rest PAC reports: an address starting with `www.`, linked with
--- `https://`, and a code span that is an address and nothing else. It runs
--- after the first, so the text of a link the first pass removed is linked the
--- same way.
+-- `https://`, and a code span that is an address and nothing else. Quarto reads
+-- the front matter without those reader extensions, so an address in `metadata=`
+-- (a subtitle, an author) is still text here, and the second pass links every
+-- kind of address; it reaches the metadata as well as the blocks. It runs after
+-- the first, so the text of a link the first pass removed is linked the same way.
 if not FORMAT:match('typst') then return {} end
 
 local BASE = 'htmxobjects-base-url'
@@ -56,12 +58,9 @@ end
 -- rule for its `www.` autolinks).
 local TRAILING = "[%.,:;!%?%*_~'\"]"
 
--- `text` split into what precedes a `www.` address, the address and what follows,
--- or nil.
-local function www_address(text)
-  local before, rest = text:match('^(.-)(www%.[%w_-]+%.[%w_.-]*[%w_-].*)$')
-  if not rest or before:match('[%w_.-]$') then return nil end
-  local address, after = rest, ''
+-- An address and what follows it, split where the address ends.
+local function without_ending(address)
+  local after = ''
   while true do
     local last = address:sub(-1)
     local _, opened = address:gsub('%(', '')
@@ -69,18 +68,42 @@ local function www_address(text)
     if last:match(TRAILING) or (last == ')' and closed > opened) then
       address, after = address:sub(1, -2), last .. after
     else
-      break
+      return address, after
     end
   end
-  return before, address, after
+end
+
+-- `text` split into what precedes a `www.` address, the address and what follows,
+-- or nil.
+local function www_address(text)
+  local before, rest = text:match('^(.-)(www%.[%w_-]+%.[%w_.-]*[%w_-].*)$')
+  if not rest or before:match('[%w_.-]$') then return nil end
+  return before, without_ending(rest)
+end
+
+-- `text` split into what precedes any address, the address, what follows and the
+-- target it opens, or nil.
+local function address_in(text)
+  local before, address, after = www_address(text)
+  if address then return before, address, after, 'https://' .. address end
+  local rest
+  before, rest = text:match('^(.-)(%a[%w+.-]+://%S+)$')
+  if not rest then before, rest = text:match('^(.-)(mailto:%S+)$') end
+  if rest then
+    address, after = without_ending(rest)
+    return before, address, after, address
+  end
+  before, address, after = text:match('^(.-)([%w._%%+-]+@[%w-]+%.[%w.-]*%a)(.*)$')
+  if address then return before, address, after, 'mailto:' .. address end
+  return nil
 end
 
 local function linked_str(el)
-  local before, address, after = www_address(el.text)
+  local before, address, after, target = address_in(el.text)
   if not address then return nil end
   local out = {}
   if before ~= '' then table.insert(out, pandoc.Str(before)) end
-  table.insert(out, pandoc.Link({ pandoc.Str(address) }, 'https://' .. address))
+  table.insert(out, pandoc.Link({ pandoc.Str(address) }, target))
   if after ~= '' then table.insert(out, pandoc.Str(after)) end
   return out, false
 end

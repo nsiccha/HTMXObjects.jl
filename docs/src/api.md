@@ -1129,7 +1129,8 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
 - **Addresses are links.** A web or mail address written as text becomes a
   link to itself: an address with a scheme (`https://…`, `mailto:…`), a mail
   address, an address starting with `www.` (linked with `https://`) and a code
-  span that is an address and nothing else. PAC (PDF Accessibility Checker)
+  span that is an address and nothing else, in the Markdown and in `metadata=`
+  (a subtitle, an author). PAC (PDF Accessibility Checker)
   fails a PDF that shows an address without a link ("Link in text does not
   have a 'Link' element"). An address inside a code block, or in a code span
   with other text (`curl https://…`), stays text, and PAC reports it (todo
@@ -1147,7 +1148,14 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   bottom of a page. A captioned table is a Typst figure, which does not break
   across pages, so a bundled Typst rule makes it breakable: before it, a
   captioned table taller than a page printed its last rows over each other and
-  the page number.
+  the page number. A repeated header row is rightly an artifact: the table's
+  first part carries the tagged header, and a screen reader would otherwise read
+  it again on each page. PAC's PDF/UA and WCAG reports do not count it, but its
+  Quality tab warns "Artifacted content on page body" when such a row reaches far
+  enough down the page. At the default A4 margins and 11 pt text that is a header's
+  third line, with one warning for each piece of its text (kerning can split a word
+  in two). A header of at most two lines, from wider columns or shorter labels, draws
+  no warning. Marking the row as a page header does not change PAC's result.
 - **Quotes:** typographic quotes read as written: `„Titel“`, `‚Wort‘` and
   `“title”` stay those characters in the PDF, as in the page. Straight quotes
   (`"Titel"`, `'Wort'`) become the quotes of `lang`, so `„Titel“` in a

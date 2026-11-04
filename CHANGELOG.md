@@ -14,6 +14,13 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.57
+
+- `pdf_report`: a web or mail address in `metadata=` (a subtitle, an author) becomes
+  a link to itself, like one in the Markdown. It stayed text, and PAC (PDF Accessibility
+  Checker) failed the report's Link completeness for it. The text of a link `pdf_report`
+  cannot open that shows an address with a scheme or a mail address is linked too.
+
 ## 0.1.56
 
 - Content units: `unit_tree(…; wrap=c -> SemanticSection("Im Projekt", c))` puts a
