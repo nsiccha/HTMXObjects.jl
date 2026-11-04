@@ -20560,8 +20560,9 @@ function htmxoTreeRow(row, event) {
 // detail and child rows. The group rows a browser regroup asks for
 // (`group_masters`) replace the browser's and leave the leaf rows alone. Any
 // htmx response holding such a body is applied this way, whatever the
-// requesting element's hx-target; `htmxoUpdateRows(html)` applies one
-// fetched by other means.
+// requesting element's hx-target, and a poller that answer ends leaves with
+// the target as it was; `htmxoUpdateRows(html)` applies one fetched by other
+// means.
 function htmxoUpdateRows(update, origin) {
     if (typeof update === 'string') {
         const template = document.createElement('template');
@@ -20952,8 +20953,13 @@ if (!window.htmxoRowUpdateBound) {
         const update = template.content.querySelector('tbody[data-htmxo-row-update]');
         if (!update) return;
         d.shouldSwap = false;
+        // Nothing replaces a poller this answer ends: it leaves here, with what
+        // it displaced back first, since that can be the row being updated.
+        // The element that asked is then the one that started the operation.
+        const ended = window.htmxoPollerAnswered ? window.htmxoPollerAnswered(d, update) : null;
+        const asked = ended && ended.elt && ended.elt.isConnected ? ended.elt : d.requestConfig && d.requestConfig.elt;
         try {
-            htmxoUpdateRows(update, d.requestConfig && d.requestConfig.elt);
+            htmxoUpdateRows(update, asked);
         } catch (err) {
             if (window.htmxoToast) window.htmxoToast(err.message, 'error');
             throw err;
@@ -24571,7 +24577,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   A row new to the page, or whose place among its siblings changed, goes where
   the full table puts it, and a sorted table re-applies its sort.
   A key no longer among `items` removes its rows. Use it from the route of a
-  per-row action: it renders the same call with `update_rows=key`.
+  per-row action: it renders the same call with `update_rows=key`. A route slow
+  enough to answer first with an `:auto` poller keeps that poller in the
+  element's `hx-target` until the rows land; it then leaves and the target has
+  what it held before.
 - `update_groups` (with `groupings`): one group key or several. Adds each group
   row of the active grouping and all its rows to the update: rows the group no
   longer has leave, new ones join it, and a group that no longer exists leaves
@@ -30597,6 +30606,18 @@ that content back before htmx resolves the headers. The bare answer then lands
 where the headers say, or in the original target with the original swap, and
 the spent poller is removed. An `HX-Retarget` that matches nothing raises
 htmx's `htmx:targetError` and leaves the page as it was before the request.
+A poller that a later request's poller replaced does not come back: what it
+displaced does.
+
+It also removes a poller whose final answer the page applied itself, so that no
+swap replaces it: a table's row update (`update_rows`, `update_groups`), which
+lands in the table whatever the request's target. What the poller displaced goes
+back before the rows are applied, since it can be one of those rows
+(`hx-target="closest tr"`), and the poller leaves once htmx has finished the
+response, so nothing runs a second time. The table runtime asks for this through
+`window.htmxoPollerAnswered`, for a poll's answer and a pushed one alike. A
+consumer's own `htmx:beforeSwap` that skips a final answer keeps what is shown,
+the poller included.
 
 It also ends a poll whose poller is gone. htmx keeps an `every` trigger on its
 element, and a morph swap (`hx-swap="morph:*"`, including the live refresh's
@@ -30811,6 +30832,14 @@ auto_terminal_script() = h.script(Raw(raw"""
     return !!(elt && elt.classList && elt.classList.contains('treebar-poller-inner') &&
               (elt.getAttribute('hx-get') || '').indexOf('__htmxo_poll') !== -1);
   }
+  // A poller the new one replaces does not come back when that one leaves, what
+  // it displaced does: put back, it would poll again and apply an older answer.
+  function withoutPollers(nodes) {
+    return nodes.reduce(function(kept, n) {
+      if (!(n.classList && n.classList.contains('treebar-poller'))) return kept.concat([n]);
+      return n.__htmxoOrigin ? kept.concat(n.__htmxoOrigin.displaced) : kept;
+    }, []);
+  }
   // Where the original request was going, and what its poller displaced.
   // Recorded on the answer that starts an operation poller and kept on the
   // poller wrapper. The direct-page load placeholder is never put back: it
@@ -30839,6 +30868,7 @@ auto_terminal_script() = h.script(Raw(raw"""
         displaced = [target];
       }
     }
+    displaced = withoutPollers(displaced);
     d.xhr.__htmxoOrigin = { elt: req, target: target, swap: swap, displaced: displaced,
                             url: inner.getAttribute('hx-get') };
   }
@@ -30857,12 +30887,8 @@ auto_terminal_script() = h.script(Raw(raw"""
       }
     }
   });
-  document.addEventListener('htmx:beforeOnLoad', function(evt) {
-    var d = (evt && evt.detail) || {}, xhr = d.xhr, poll = d.elt;
-    if (!xhr || xhr.status !== 286 || !pollRequest(poll)) return;
-    if (!/^(hx-retarget|hx-reswap|hx-reselect|hx-location):/im
-          .test(xhr.getAllResponseHeaders() || '')) return;
-    var wrapper = (poll.closest && poll.closest('.treebar-poller')) || poll;
+  // What a poller displaced goes back in front of it; returns its origin.
+  function putBack(wrapper) {
     var origin = wrapper.__htmxoOrigin || null;
     wrapper.__htmxoOrigin = null;
     if (origin && wrapper.parentNode) {
@@ -30872,6 +30898,22 @@ auto_terminal_script() = h.script(Raw(raw"""
         if (n.nodeType === 1 && window.htmx) htmx.process(n);
       });
     }
+    return origin;
+  }
+  function removePoller(w) {
+    var parent = w && w.parentNode;
+    if (!w || !w.isConnected || !parent) return;
+    parent.removeChild(w);
+    if (parent.classList && parent.classList.contains('htmxo-live-reporter') &&
+        !parent.firstElementChild) parent.hidden = true;
+  }
+  document.addEventListener('htmx:beforeOnLoad', function(evt) {
+    var d = (evt && evt.detail) || {}, xhr = d.xhr, poll = d.elt;
+    if (!xhr || xhr.status !== 286 || !pollRequest(poll)) return;
+    if (!/^(hx-retarget|hx-reswap|hx-reselect|hx-location):/im
+          .test(xhr.getAllResponseHeaders() || '')) return;
+    var wrapper = (poll.closest && poll.closest('.treebar-poller')) || poll;
+    var origin = putBack(wrapper);
     xhr.__htmxoRetire = { origin: origin, poll: poll, wrapper: wrapper,
       retarget: !!xhr.getResponseHeader('HX-Retarget'),
       reswap: !!xhr.getResponseHeader('HX-Reswap') };
@@ -30914,16 +30956,31 @@ auto_terminal_script() = h.script(Raw(raw"""
     // Once htmx has finished this response: a requester removed during
     // afterRequest makes htmx fire afterRequest again on an ancestor, which
     // would run every listener (success toasts included) twice.
-    Promise.resolve().then(function() {
-      var w = r.wrapper, parent = w && w.parentNode;
-      if (!w || !w.isConnected || !parent) return;
-      parent.removeChild(w);
-      if (parent.classList && parent.classList.contains('htmxo-live-reporter') &&
-          !parent.firstElementChild) parent.hidden = true;
-    });
+    Promise.resolve().then(function() { removePoller(r.wrapper); });
   }
   document.addEventListener('htmx:afterRequest', retire);
   document.addEventListener('htmx:onLoadError', retire);
+  // A poll's final answer the page applies itself, so that no swap replaces
+  // the poller: a table's row update (`_table_runtime_text`). `d` is the detail
+  // of the answer's `htmx:beforeSwap`, a pushed answer's too, and `content` the
+  // parsed element applied. What the poller displaced goes back now, for the
+  // answer to act on, and the poller goes once htmx has finished this response:
+  // a microtask runs only when the script stack empties, after htmx's
+  // `htmx:afterRequest`. A running answer leaves it, as does a poll that a morph
+  // reused and a poller a live refresh diverted, which that script clears.
+  // Returns where the operation started, when that is known.
+  window.htmxoPollerAnswered = function(d, content) {
+    var config = d.requestConfig || {}, poll = config.elt;
+    if (!content.closest('.treebar-terminal-content') || !pollRequest(poll) ||
+        stalePoll(poll, config.path) || poll.closest('.htmxo-live-reporter')) return null;
+    // Its headers already send this answer elsewhere: `retire` has the poller.
+    var r = d.xhr && d.xhr.__htmxoRetire;
+    if (r) return r.origin;
+    var wrapper = poll.closest('.treebar-poller') || poll;
+    var origin = putBack(wrapper);
+    Promise.resolve().then(function() { removePoller(wrapper); });
+    return origin;
+  };
 })();
 """))
 

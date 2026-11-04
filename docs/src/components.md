@@ -1477,10 +1477,14 @@ transactions_table(self, group_by, q=""; kw...) = master_detail_table(headers, t
   for another grouping is refused with an error toast, and the table is left
   as it was. In the flat view `update_groups` names no rows.
 - **Transport and toasts.** Like any route whose response is table rows,
-  declare the action `@direct` (see `OperationPolicy`): an interim poller
-  cannot stand in a table row. The response body is rows, so name a success
-  toast on the route (`hx_response(...; toast=...)`) rather than with
-  `data-htmxo-toast="body"`. Give the table an `id`.
+  declare an action that targets something in the table `@direct` (see
+  `OperationPolicy`): an interim poller would take the row's place while it
+  runs. An action slow enough to show its progress can stay polled with an
+  `hx-target` beside the table. The poller stands there, and when the rows land
+  it leaves and the target has what it held before, as after a direct answer.
+  The response body is rows, so name a success toast on the route
+  (`hx_response(...; toast=...)`) rather than with `data-htmxo-toast="body"`.
+  Give the table an `id`.
 
 Markdown keeps the group and leaf rows and drops the controls. The
 HTMXObjectsWeb gallery's *Regroupable table demo* (`web/src/regroup_demo.jl`)
