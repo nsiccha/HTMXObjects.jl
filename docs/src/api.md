@@ -4327,9 +4327,11 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   it has CPUs: start Julia with `-t` set to its CPUs (`julia -t 2` under a
   two-CPU quota), since more threads than CPUs make an export slower. Julia
   compiles one method at a time, so an export that spends much of its time
-  compiling gains less. The routes run as they run under `serve`, several at
-  once: state a route keeps between requests needs a lock (a counter an
-  atomic), and a `file_name` of yours is called from several threads.
+  compiling gains less, and on a host busy with other work it can gain nothing
+  and still spend more CPU (`parallel=false` then). The routes run as they
+  run under `serve`, several at once: state a route keeps between requests
+  needs a lock (a counter an atomic), and a `file_name` of yours is called
+  from several threads.
 - **Private content.** The site is public unless `audience=:private`: content
   marked `private` shows its stand-in or nothing, links inside it are not
   followed, and a page whose whole answer is private gets no file, while every

@@ -27,8 +27,11 @@ failing at render with a `MethodError`.
   default when the process has more than one default thread and no more than
   it has CPUs, so start Julia with `-t` set to its CPUs: more threads than
   CPUs made an export slower (ODLPlaus, Julia 1.10, two CPUs: one page at a
-  time 1,362 s, two threads 1,122 s, eight threads 1,706 s). The routes run
-  as they run under `serve`, several at once, so state a route keeps between
+  time 1,362 s, eight threads rendering concurrently 1,706 s). Two threads
+  took 1,122 s on a quieter host and gained nothing on a saturated one
+  (2,346 s against 2,069-2,638 s one page at a time, with up to 1.5 times the
+  CPU), so pass `parallel=false` where other work needs the CPUs. The routes
+  run as they run under `serve`, several at once, so state a route keeps between
   requests needs a lock, and a `file_name` function is called from several
   threads. Before, an export used one CPU however many it had.
 

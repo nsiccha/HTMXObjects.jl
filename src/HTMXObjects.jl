@@ -7647,9 +7647,11 @@ can run inside a serving app (it renders in process with
   (on Julia 1.10 idle threads spin), so start Julia with as many threads as
   it has CPUs (`julia -t 2` under a two-CPU quota). Julia compiles one method
   at a time, so an export that spends much of its time compiling the routes'
-  code gains less. The routes run as they run under `serve`, several
-  requests at once: state a route keeps between requests needs a lock, as it
-  does for a server, and `file_name` is called from several threads.
+  code gains less, and on a host busy with other work it can gain nothing and
+  still spend more CPU (`parallel=false` then). The routes run as they run
+  under `serve`, several requests at once: state a route keeps between
+  requests needs a lock, as it does for a server, and `file_name` is called
+  from several threads.
 - **Private content.** `audience` says who reads the site: `:public` (default)
   or `:private`. A public site shows the stand-in of each [`private`](@ref)
   part, or nothing, and never follows a link inside what it leaves out. A page
