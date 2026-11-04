@@ -2001,6 +2001,17 @@ SemanticSection
 SemanticGroup
 SemanticDisclosure
 SemanticAlternatives
+SemanticUnit
+SemanticUnitLayer
+SemanticUnits
+UnitTexts
+unit_texts
+unit_tree
+unit_ids
+unit_reference
+unit_view_control
+unit_script
+unit_styles
 MarkdownRule
 MARKDOWN_URL_RULE
 render_markdown
@@ -2140,6 +2151,8 @@ node or an AlgebraOfVega layer drop in with no registration at all.
 | `SemanticGroup(children...)` | An untitled run of siblings |
 | `SemanticDisclosure(summary, children...)` | Content the reader opens |
 | `SemanticAlternatives(default, ("label" => view)...)` | Several views of one content; the default renders, the rest collapse |
+
+A document whose pieces each have one identity, several layers and children at any depth is built from these with `SemanticUnit`, `SemanticUnits` and `unit_tree`: see [Content units](components.md#content-units).
 
 Six of these — `SemanticMetric`, `SemanticStatus`, `SemanticUnavailable`,
 `SemanticLink`, `SemanticAction`, `SemanticArtifact` — are the ones that pay,

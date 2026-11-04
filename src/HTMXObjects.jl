@@ -21,6 +21,8 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
+    SemanticUnit, SemanticUnitLayer, SemanticUnits, UnitTexts, unit_texts, unit_tree, unit_ids, unit_reference,
+    unit_view_control, unit_script, unit_styles,
     semantic_card, SemanticTexts, semantic_texts
 export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles, syntax_script, syntax_styles
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
@@ -3063,6 +3065,8 @@ _runtime_blocks() = (
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
     glossary = (:js, glossary_script),
+    unit_styles = (:css, unit_styles),
+    unit_script = (:js, unit_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
     syntax_styles = (:css, syntax_styles),
@@ -3408,6 +3412,9 @@ function htmx(args...;
         # A glossary term's definition opens beside it, kept on screen
         # and outside scrolling tables; inert on pages without terms.
         :glossary,
+        # A link to a content unit opens what holds it, and the layer
+        # switch reads the address; inert on pages without units.
+        :unit_styles, :unit_script,
         # Markdown math (`render_markdown`) is typeset by KaTeX, which
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
@@ -4287,6 +4294,14 @@ _markdown_anchor_attr(anchor::AbstractString) =
     occursin(r"^[\p{L}\p{N}_.:-]+$", anchor) ? "{#$anchor}" :
     "{id=\"" * replace(anchor, '\\' => "\\\\", '"' => "\\\"", r"\R" => " ") * "\"}"
 
+# A title or a label is text, and HTML shows it as written, so Markdown must too.
+# An unmatched `*`, or a `_` at the edge of a word, also opens Pandoc's emphasis,
+# which runs to the end of the line: a heading's `{#anchor}` then becomes text and
+# Typst refuses every link to it (`H*(10) {#x}`). A `_` inside a word stays as it
+# is, where it means nothing and reads better.
+_markdown_plain_text(text::AbstractString) =
+    replace(replace(text, '*' => "\\*"), r"(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])" => "\\_")
+
 # Appended to a heading line: the heading carries its element's anchor.
 _markdown_heading_anchor(anchor::AbstractString) =
     isempty(anchor) ? "" : " " * _markdown_anchor_attr(anchor)
@@ -4701,8 +4716,10 @@ _md_plain_text(n::CommonMark.Node) =
 # GFM pipe tables — node types come from the `TableRule` extension the parser
 # enables. `TableCell.header` distinguishes `<th>` from `<td>`; a set column
 # alignment renders as an inline `text-align`, so it holds with no app CSS.
+# In the scroll container every other table has: a table wider than its column
+# scrolls there instead of running over what holds it.
 markdown_node(r::MarkdownRenderer, ::CommonMark.Table, n, rules, context) =
-    h.table(markdown_children(r, n, rules, context)...)
+    h.div(; class="table-wrap")(h.table(markdown_children(r, n, rules, context)...))
 markdown_node(r::MarkdownRenderer, ::CommonMark.TableHeader, n, rules, context) =
     h.thead(markdown_children(r, n, rules, context)...)
 markdown_node(r::MarkdownRenderer, ::CommonMark.TableBody, n, rules, context) =
@@ -5246,7 +5263,7 @@ Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
 
 Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
     _semantic_heading(_semantic_card_level()) do level
-        print(io, _semantic_heading_sigil(level), " ", card.title,
+        print(io, _semantic_heading_sigil(level), " ", _markdown_plain_text(card.title),
             _markdown_heading_anchor(card.anchor))
         _shows_nothing(card.children, _ambient_audience()) || print(io, "\n\n")
         _semantic_show_children(io, mime, card.children, "\n\n")
@@ -5267,7 +5284,7 @@ Base.show(io::IO, ::MIME"text/markdown", metric::SemanticMetric) =
 # The exit glyph stays outside the code span: it marks the exit, not the
 # identifier — the same split the HTML peer draws with `<code>`.
 function Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink)
-    label = link.code ? _semantic_inline_code(link.label) : link.label
+    label = link.code ? _semantic_inline_code(link.label) : _markdown_plain_text(link.label)
     print(io, "[", label, link.external ? " ↗" : "", "](", string(link.target), ")")
 end
 
@@ -5307,7 +5324,7 @@ end
 
 Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_opening_level(section)) do level
-        print(io, _semantic_heading_sigil(level), " ", section.title,
+        print(io, _semantic_heading_sigil(level), " ", _markdown_plain_text(section.title),
             _markdown_heading_anchor(section.anchor))
         _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
         _semantic_show_children(io, mime, section.children, "\n\n")
@@ -5322,7 +5339,7 @@ Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
 function Base.show(io::IO, mime::MIME"text/markdown",
                    disclosure::SemanticDisclosure)
     _shows_nothing(disclosure, _ambient_audience()) && return
-    print(io, "**", disclosure.summary, "**\n\n")
+    print(io, "**", _markdown_plain_text(disclosure.summary), "**\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
@@ -20044,6 +20061,17 @@ sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
 # its `table_runtime` block (`htmx(...; tables=true)`).
 _table_runtime_js() = h.script(Raw(_table_runtime_text()))
 _table_runtime_text() = raw"""
+// The cell that starts at a column. A cell spanning columns counts under its
+// first, and a row has none at the others, so it is not ordered by them.
+function htmxoCellAt(row, col) {
+    let at = 0;
+    for (const cell of row.cells) {
+        if (at === col) return cell;
+        at += cell.colSpan;
+        if (at > col) return undefined;
+    }
+    return undefined;
+}
 function sortTable(col, th) {
     // Accept sortTable(th): with a single <th> element, use its leaf-column
     // marker in a grouped header, else its position in the header row. Lets a
@@ -20066,7 +20094,7 @@ function sortTable(col, th) {
     // detail row) from being treated as primaries.
     const all = Array.from(tbody.querySelectorAll(':scope > tr'));
     const isCompanion = r => r.id && r.id.startsWith('detail-');
-    const primaries = all.filter(r => !isCompanion(r) && r.cells.length > col);
+    const primaries = all.filter(r => !isCompanion(r) && htmxoCellAt(r, col));
     const companions = htmxoTableCompanions(all);
     const asc = th.dataset.sortDir !== 'asc';
     th.dataset.sortDir = asc ? 'asc' : 'desc';
@@ -20093,7 +20121,7 @@ function sortTable(col, th) {
     const key = keys ? Number(th.dataset.htmxoSortKey || 0) : 0;
     const keyed = new Map();
     const keyOf = row => {
-        if (!keyed.has(row)) keyed.set(row, htmxoSortValue(row.cells[col], key, keys.length, sortKey));
+        if (!keyed.has(row)) keyed.set(row, htmxoSortValue(htmxoCellAt(row, col), key, keys.length, sortKey));
         return keyed.get(row);
     };
     // Two texts that start with the same number compare as whole texts, each
@@ -20105,8 +20133,8 @@ function sortTable(col, th) {
         const c = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
         return asc ? c : -c;
     } : (a, b) => {
-        const av = sortKey(a.cells[col]);
-        const bv = sortKey(b.cells[col]);
+        const av = sortKey(htmxoCellAt(a, col));
+        const bv = sortKey(htmxoCellAt(b, col));
         const an = parseFloat(av), bn = parseFloat(bv);
         // `an - bn` is 0 for the same number and NaN for two infinities: both tie.
         const c = !isNaN(an) && !isNaN(bn) ? (an - bn) || natural(av, bv) : av.localeCompare(bv);
@@ -20132,7 +20160,7 @@ function sortTable(col, th) {
         });
         const visit = parent => {
             const rows = siblings.get(parent) || [];
-            rows.sort((a, b) => a.cells.length > col && b.cells.length > col ? compare(a, b) : 0);
+            rows.sort((a, b) => htmxoCellAt(a, col) && htmxoCellAt(b, col) ? compare(a, b) : 0);
             rows.forEach(r => { append(r); visit(r.id); });
         };
         visit('');
@@ -22507,8 +22535,16 @@ function downloadTableCsv(btn, filename) {
         td.dataset.htmxoInterval ? JSON.parse(td.dataset.htmxoInterval) : [text(td), '', ''];
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
-        .map(tr =>
-            Array.from(tr.cells).flatMap((td, i) => fields(td, i).map(esc)).join(','));
+        .map(tr => {
+            // A cell spanning columns keeps the others in theirs: what it covers is blank.
+            let col = 0;
+            return Array.from(tr.cells).flatMap(td => {
+                const out = fields(td, col).map(esc);
+                for (let i = 1; i < td.colSpan; i++) out.push(...(bounds[col + i] ? ['', '', ''] : ['']));
+                col += td.colSpan;
+                return out;
+            }).join(',');
+        });
     const csv = [headers.join(','), ...rows].join('\n');
     const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
     const url = URL.createObjectURL(blob);
@@ -24130,6 +24166,9 @@ the user came to see (a question + answer brief, for example).
   pattern is what [`sortable_table_styles`](@ref) and the
   `sortable_table_js` companion-pair lookup key off; classes are for
   app-side styling on top.
+- A master cell may span columns (`h.td(…; colspan="2")`): it sorts under its first
+  column (`data_sort_value` as for any cell), its row is not ordered by the columns
+  it only covers, and CSV leaves those blank, so later cells stay in their columns.
 - `master_attrs`: iterable of `name => value` pairs (or a NamedTuple)
   for extra attributes on the master `<tr>` (`data_status`, `data_aid`,
   `data_activity`, `data_sort_value`, …). Note: HTML attribute names
@@ -34777,6 +34816,7 @@ _tabset_default_id(tabs) = "tabset-" * string(_tabset_key(tabs, zero(UInt)); bas
 
 # After the value types its walk sees through (`_TabsetPart` above).
 include("glossary.jl")
+include("content_units.jl")
 
 include("comparison.jl")
 

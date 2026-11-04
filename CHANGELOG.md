@@ -14,6 +14,41 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.55
+
+- Content units, a document whose pieces of information each have one identity,
+  several layers written separately and children at any depth:
+  `SemanticUnit`, `SemanticUnitLayer` and `SemanticUnits` declare them;
+  `unit_tree(doc, ids...; layer=nothing, control=true)` places them;
+  `unit_reference(doc, target; label, layer, fallback)` links to one from elsewhere;
+  `unit_ids(doc, ids...)` names what a tree places; `unit_view_control(doc; param)`
+  switches a page to one layer; `unit_texts` holds their words. A layer takes any
+  content and a `String` is Markdown, and a `Symbol` names another layer saying the
+  same thing, which stands once among all layers. In a browser a unit shows its first layer and
+  opens the others in place. A link to `#<id>` or `#<id>--<layer>` opens what holds
+  it, on load, Back, Forward and after a swap, and a static export needs no server
+  for any of it. `layer=:short` reads one layer alone, complete and in order.
+  Layer and audience are separate: only layers declared `public=true` reach a
+  public reader, so the others, their labels and the ids and titles of units with
+  nothing public are absent from a public page, its Markdown, its PDF and its
+  static export, and a reference or a link in prose to what they cannot reach
+  goes. A page holding units in something else listens for the synchronous
+  `htmxo:unit-before-reveal` and `htmxo:unit-reveal` events
+  (`unit_script`). Every `htmx()` page carries `unit_script` and `unit_styles`,
+  inert without units.
+- The Markdown of a `SemanticSection` or `SemanticCard` title, a `SemanticLink`
+  label and a `SemanticDisclosure` summary escapes `*` and a `_` at a word's edge.
+  These are plain text and HTML shows them as written. An unmatched `*` also ran
+  Pandoc's emphasis over the heading's `{#anchor}`, so `pdf_report` refused every
+  link to `H*(10)`. A `?plain` reader now sees `H\*(10)` there.
+- A table cell spanning columns counts them: it sorts under its first column, its row
+  is not ordered by the columns it only covers, and a CSV leaves those blank, so
+  later cells stay in their columns. Before, a later cell sorted and exported one
+  column too far left. Tables without a `colspan` are unchanged.
+- A table in `render_markdown` or `SemanticProse` sits in a `.table-wrap` like every
+  other table: one wider than its column scrolls there instead of running over what
+  holds it (a card, a `<details>`, half a table row).
+
 ## 0.1.54
 
 - `pdf_report`: a letter with a combining mark also reads once in Chrome's

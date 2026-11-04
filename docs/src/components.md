@@ -1865,6 +1865,100 @@ each chooser document's address. The panel shows the file the export wrote,
 from the bundle's root or a subdirectory, and a document keeps its live title.
 PDF.js still comes from `pdfjs` (by default jsDelivr), which is not rewritten.
 
+### Content units — one identity, several layers, any depth {#content-units}
+
+For a document where each paragraph, equation or table has its own stable
+identity and is written more than once for different readers: an offer's approved
+wording, a short explanation, a deep one. The reader opens the next layer in
+place, a link goes straight to a layer of a unit however deep, and a public export
+holds the public wording alone.
+
+```julia
+const LAYERS = [SemanticUnitLayer(:offer, "Angebot"; public=true, standalone=true),
+                SemanticUnitLayer(:short, "Kurzfassung"),
+                SemanticUnitLayer(:deep, "Vertiefung")]
+const UNITS = [
+    SemanticUnit("ap1"; title="AP 1: Standortfaktoren", children=[    # no layers: a heading over its children
+        SemanticUnit("ap1-c2"; title="Prüfung der C2-Faktoren",
+            layers=(; offer="**Prüfung der C2-Faktoren:** Zusammengehörige Messungen prüfen …",   # a String is Markdown
+                      short="Die Prüfung unterscheidet die Aufnahme eines Merkmals von …",
+                      deep=[raw"$$\hat{R} = \frac{1}{n} \sum_i f_i$$", SemanticCode(:julia, "mittel(f) = sum(f) / length(f)")]),
+            references=["ap1-faktoren", "ap1-intern" => "ap1-faktoren", "ap1-faktoren--deep"],
+            meta=SemanticStatus(:warn; label="geplant"),     # beside the unit, for private readers only
+            children=[SemanticUnit("ap1-c2-formel"; …)]),
+        SemanticUnit("ap1-faktoren"; title="Faktoren je Quelle",
+            layers=(; offer=SemanticTable(faktoren), short="…", deep="…")),
+        SemanticUnit("ap1-intern"; title="Offene Frage", layers=(; short="…", deep="…"))])]    # nothing public
+const DOC = SemanticUnits(UNITS; layers=LAYERS, texts=unit_texts(:de))
+
+@get bericht() = h.article(h.h1("Bericht"), unit_tree(DOC))          # every layer the reader may read
+@get kurz() = h.article(h.h1("Kurzfassung"), unit_tree(DOC; layer=:short))   # that layer alone
+pdf_report(unit_tree(DOC), "angebot.pdf"; title="Angebot", lang="de-DE")        # public: the offer's wording
+pdf_report(unit_tree(DOC; layer=:deep), "vertiefung.pdf"; title="Vertiefung", lang="de-DE", audience=:private)
+```
+
+- **A layer is any content.** A table stays a table and a plot a plot, because
+  `unit_tree` lowers the units to the ordinary vocabulary ([`SemanticSection`](@ref),
+  [`private`](@ref), `<details>`), and every format, a static export and a PDF treat
+  them as they treat those.
+- **Content several layers share** names its layer: `layers=(; offer=tabelle, short=:offer,
+  deep=:offer)`. Read alone each layer has it, so a short-only export keeps a table it
+  explains. Among all layers it stands once, under the labels of the layers sharing it,
+  so nothing repeats and a link to `#id--short` lands there. Who may read it follows each
+  layer's own `public`: a citation in a public layer stays public, and the same words
+  named by a private layer add no second copy.
+- **Layer and audience are separate.** `layer=` chooses what is read; the page's
+  audience chooses who reads. A layer reaches a public reader only with `public=true`.
+  Everything else, its labels, the switch, and the ids and titles of units with
+  nothing public, is not in the public branch at all, so it is not in the public
+  bytes of a page, its `?plain`, its PDF or a bundle. A private reader sees what an
+  export would leave out marked "nicht öffentlich": inside a closed layer, or once
+  over a tree that is one private layer. `title` is what a public reader sees
+  wherever the unit reaches them; give `public_title` for other wording.
+- **`standalone=true`** says a layer's wording is all there is when it is read
+  alone: no title above it and no line of references below it. That is what an
+  approved offer text needs. A group's heading stays.
+- **In a browser** a unit shows its first layer and opens the others in place under
+  their labels; a content unit's children sit closed and a group's are shown
+  (`open=` changes either). A reader with one layer has nothing to open and sees
+  all of it. All of it runs in the browser, so a static export needs no server.
+- **Addresses.** A unit's element has the id `<id>`, a layer's `<id>--<layer>`. A link
+  to either opens every `<details>` holding it and lands there: on load, on a link's
+  click, on Back and Forward, and when a swap brings it later. Opening a layer writes
+  it into the address, so a reload keeps it. In Markdown they are Pandoc anchors, so
+  a link resolves in a [`pdf_report`](@ref).
+- **The layer switch** ([`unit_view_control`](@ref), one per page; `unit_tree` places
+  one unless `control=false`) reads the whole page at one layer in the browser, and
+  keeps the choice in the address (`?layer=short`). Radios, so the arrow keys choose.
+  An ancestor with `data-htmxo-unit-scope` narrows a switch to the units directly
+  inside it, so documents side by side each take a scope and a `param` of their own.
+- **References are links, never copies.** `references=` lists ids (or `"id--layer"`),
+  and `"a" => "b"` names `b` for a reader who cannot reach `a`. A reference a reader
+  or view cannot reach goes, so it can neither reveal a private unit nor leave a PDF
+  a link Typst refuses. The same holds for `[text](#id)` in a layer's Markdown: it
+  keeps its words. In another node, write [`unit_reference`](@ref), which is also what
+  a table's row or a summary uses for a unit living elsewhere.
+- **One scope, passed explicitly.** Each call takes the `SemanticUnits`, so parts of
+  a document rendered separately resolve each other's references. Place each unit
+  once: a second placement repeats its ids, and [`unit_ids`](@ref) tells a caller what
+  a placement holds. References resolve against the document, not against what a page
+  places, so build the document from the units that page or PDF places.
+- **A page holding units in something else** (a table's collapsed rows) listens for
+  two synchronous events, both with `detail = {id, layer}`. `htmxo:unit-before-reveal`
+  on `document` comes before the target is looked up and for any `#…`, so a handler
+  checks the id and can put the target back in the page. `htmxo:unit-reveal`, bubbling
+  from the target, comes before anything opens, so a handler can show the row around
+  it. The target must be in the page by then: content not loaded yet is revealed when
+  a swap brings it.
+
+Not provided: a reference to a unit on another page (write the link in the layer's
+content); keeping every open layer across a reload (the address holds the last one
+opened); a named destination for a unit without a heading. In a PDF every link to a
+unit lands, but Typst names headings only, so from outside the file
+`report.pdf#nameddest=<id>` works for a unit with a heading and not for an untitled
+`standalone` paragraph. A check that a layer's text is in fact what was approved is
+the author's.
+
 ### `card_deck` — a searchable deck of cards, as a grid or one at a time {#card-deck}
 
 A deck of cards the reader sees either as a grid or as a carousel (one card
