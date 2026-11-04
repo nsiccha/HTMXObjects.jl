@@ -14,6 +14,14 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.54
+
+- `pdf_report`: a letter with a combining mark also reads once in Chrome's
+  PDFium and in xpdf. 0.1.52 gave its mark an empty ActualText span, which those
+  two ignore, so they read the mark twice (`R̂̂`). One span now holds all the
+  letter's glyphs, and the pages stay pixel for pixel. Measured with Poppler,
+  xpdf, PDFium, MuPDF, pdf.js and pdfminer. pypdf reads `R ̂`, with a space.
+
 ## 0.1.53
 
 - A slow row update (`master_detail_table(...; update_rows)` or `update_groups`)

@@ -826,7 +826,8 @@ end
         objects = [plain("<</Type/Catalog/Pages 2 0 R>>"), plain("<</Type/Pages/Kids[3 0 R]/Count 1>>"),
                    plain("<</Type/Page/Resources 4 0 R/Contents 5 0 R/Parent 2 0 R>>"),
                    plain("<</Font<</f0 6 0 R>>>>"), stream(content),
-                   plain("<</Type/Font/Subtype/Type0/BaseFont/X/Encoding/Identity-H/ToUnicode 7 0 R>>"), stream(cmap)]
+                   plain("<</Type/Font/Subtype/Type0/BaseFont/X/Encoding/Identity-H/DescendantFonts[8 0 R]/ToUnicode 7 0 R>>"),
+                   stream(cmap), plain("<</Type/Font/Subtype/CIDFontType0/BaseFont/X/DW 500/W[1[600] 2[0] 8 9 0]>>")]
         out = IOBuffer()
         write(out, "%PDF-1.7\n")
         offsets = Int[]
@@ -890,6 +891,17 @@ end
     @test occursin("<</MCID 1>>BDC", String(content(fixed)))
     @test startswith(String(copy(fixed)), "%PDF-1.7\n") && endswith(String(copy(fixed)), "%%EOF\n")
     @test _pdf_text_layer_repaired(fixed) === nothing  # nothing is left to repair
+    # One span holds both glyphs: PDFium and xpdf ignore an empty span, so a span
+    # per glyph would read the mark's code point too (`R̂̂`). The mark moves into the
+    # letter's text object at the place it was, and its pen ends at the next glyph,
+    # or readers see a word gap there.
+    spans_of(pdf) = [s.text for s in scan(pdf).spans if !isnothing(s.text)]
+    @test spans_of(fixed) == [rhat]
+    @test occursin("1 0 0 -1 0 -1 Tm 2.035 Tc [185 <0002>]TJ 0 Tc", String(content(fixed)))
+    mark_place(pdf, code) = let s = only(s for s in scan(pdf).shows if any(e -> e isa Vector{UInt8} && e == [0x00, code], s.elements))
+        (s.matrix[5] + s.text_matrix[5], s.matrix[6] - s.text_matrix[6])
+    end
+    @test mark_place(fixed, 0x02) == mark_place(typst, 0x02) == (20.0, 31.0)
 
     # The same cluster twice in a row is two clusters.
     twice = tiny_pdf([1 => rhat, 2 => rhat], tagged(0, text(1)) * tagged(1, text(2)) * tagged(2, text(1)) * tagged(3, text(2)))
@@ -897,37 +909,71 @@ end
 
     # The table already says "R" for the letter, so the letter carries a span.
     plain_first = tiny_pdf([1 => "R", 2 => rhat],
-        tagged(0, text(1)) * tagged(1, "BT/Span<</ActualText<FEFF00520302>>>BDC 0 Tr/f0 11 Tf[(\\000\\001)]TJ\nEMC\nET\n") *
+        tagged(0, text(1)) * tagged(1, "BT/Span<</ActualText<FEFF00520302>>>BDC 0 Tr/f0 11 Tf 1 0 0 -1 7.5 0 Tm[(\\000\\001)]TJ\nEMC\nET\n") *
         tagged(2, text(2)))
     fixed = _pdf_text_layer_repaired(plain_first)
     @test honouring(plain_first) == "R$(rhat)$(rhat)"
     @test honouring(fixed) == ignoring(fixed) == "R$(rhat)"
     @test table(fixed)[1] == "R"
+    @test spans_of(fixed) == [rhat]
+    @test drawn(fixed) == drawn(plain_first)
 
     # One mark's glyph serves two letters, and the table holds the first letter.
     shared = tiny_pdf([8 => xhat, 9 => xhat, 20 => qhat],
         tagged(0, text(8)) * tagged(1, text(9)) * tagged(2, text(20)) *
-        tagged(3, "BT/Span<</ActualText<FEFF00710302>>>BDC 0 Tr/f0 11 Tf[(\\000\\011)]TJ\nEMC\nET\n"))
+        tagged(3, "BT/Span<</ActualText<FEFF00710302>>>BDC 0 Tr/f0 11 Tf 1 0 0 -1 0 0 Tm[(\\000\\011)]TJ\nEMC\nET\n"))
     fixed = _pdf_text_layer_repaired(shared)
     @test honouring(shared) == "$(xhat)$(xhat)$(qhat)$(qhat)"
     @test honouring(fixed) == ignoring(fixed) == "$(xhat)$(qhat)"
-    @test occursin("/ActualText()", String(content(fixed)))
+    @test !occursin("/ActualText()", String(content(fixed)))
+    @test spans_of(fixed) == [xhat, qhat]
     @test drawn(fixed) == drawn(shared)
 
     # Two marks, and a code that needs escaping in a literal string.
     two_marks = "R̂̄"
     marks = tiny_pdf([0x28 => two_marks, 0x29 => two_marks, 0x5c => two_marks],
-        tagged(0, "BT 0 Tr/f0 11 Tf[(\\000\\()]TJ\nET\n") * tagged(1, "BT 0 Tr/f0 11 Tf[(\\000\\))]TJ\nET\n") *
-        tagged(2, "BT 0 Tr/f0 11 Tf(\\000\\\\)Tj\nET\n"))
+        tagged(0, "BT 0 Tr/f0 11 Tf 1 0 0 -1 0 0 Tm[(\\000\\()]TJ\nET\n") * tagged(1, "BT 0 Tr/f0 11 Tf 1 0 0 -1 0 0 Tm[(\\000\\))]TJ\nET\n") *
+        tagged(2, "BT 0 Tr/f0 11 Tf 1 0 0 -1 0 0 Tm(\\000\\\\)Tj\nET\n"))
     fixed = _pdf_text_layer_repaired(marks)
     @test honouring(fixed) == ignoring(fixed) == two_marks
     @test table(fixed)[0x28] == "R" && table(fixed)[0x29] == "̂" && table(fixed)[0x5c] == "̄"
+    @test spans_of(fixed) == [two_marks]
+
+    # Marks that share a run with the letter stay in its span; the rest join it.
+    thai = "สิ่"
+    split_run = tiny_pdf([1 => thai, 2 => thai, 3 => thai],
+        tagged(0, "BT/Span<</ActualText<FEFF0E2A0E340E48>>>BDC 0 Tr/f0 11 Tf 1 0 0 -1 0 0 Tm[(\\000\\001\\000\\002)]TJ\nEMC\nET\n") *
+        tagged(1, text(3)))
+    fixed = _pdf_text_layer_repaired(split_run)
+    @test honouring(fixed) == ignoring(fixed) == thai
+    @test spans_of(fixed) == [thai]
+    @test drawn(fixed) == drawn(split_run)
+
+    # Runs that differ in more than their place cannot share a text object: the
+    # letter's span reads the cluster, the mark's reads nothing, and it stays put.
+    other_colour = tiny_pdf([1 => rhat, 2 => rhat],
+        tagged(0, "/c0 cs 0 scn\n" * text(1)) * tagged(1, "/c1 cs 0 scn\n" * text(2)))
+    fixed = _pdf_text_layer_repaired(other_colour)
+    @test honouring(fixed) == ignoring(fixed) == rhat
+    @test spans_of(fixed) == [rhat, ""]
+    @test mark_place(fixed, 0x02) == mark_place(other_colour, 0x02)
+    # So does a run whose place this repair cannot follow.
+    no_matrix = tiny_pdf([1 => rhat, 2 => rhat],
+        tagged(0, "BT 0 Tr/f0 11 Tf[(\\000\\001)]TJ\nET\n") * tagged(1, "BT 0 Tr/f0 11 Tf[(\\000\\002)]TJ\nET\n"))
+    @test spans_of(_pdf_text_layer_repaired(no_matrix)) == [rhat, ""]
+
+    # Both forms of a font's width array, and the default width.
+    widths = HTMXObjects._pdf_font_widths(_pdf_file(typst), String(typst[_pdf_file(typst).ranges[6]]))
+    @test widths.table[0x0001] == 600.0 && widths.table[0x0002] == 0.0 && widths.table[0x0009] == 0.0
+    @test widths.default == 500.0
+    @test HTMXObjects._pdf_number(1.045) == "1.045" && HTMXObjects._pdf_number(-0.5) == "-0.5"
+    @test HTMXObjects._pdf_number(0.0000001) == "0" && HTMXObjects._pdf_number(3.0) == "3"
 
     # The letter's glyph reads something else elsewhere: its cluster still reads
     # once where ActualText counts, and the table keeps what it says.
     dotted = "i̇"
     other = tiny_pdf([5 => "ı", 6 => dotted],
-        tagged(0, text(5)) * tagged(1, "BT/Span<</ActualText<FEFF00690307>>>BDC 0 Tr/f0 11 Tf[(\\000\\005)]TJ\nEMC\nET\n") *
+        tagged(0, text(5)) * tagged(1, "BT/Span<</ActualText<FEFF00690307>>>BDC 0 Tr/f0 11 Tf 1 0 0 -1 0 0 Tm[(\\000\\005)]TJ\nEMC\nET\n") *
         tagged(2, text(6)))
     fixed = _pdf_text_layer_repaired(other)
     @test honouring(fixed) == "ı$(dotted)"
