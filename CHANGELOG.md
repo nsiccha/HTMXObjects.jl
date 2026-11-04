@@ -14,6 +14,28 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.55
+
+- Content units, a document whose pieces of information each have one identity,
+  several layers written separately and children at any depth:
+  `SemanticUnit`, `SemanticUnitLayer` and `SemanticUnits` declare them;
+  `unit_tree(doc, ids...; layer=nothing, control=true)` places them;
+  `unit_reference(doc, target; label, layer, fallback)` links to one from elsewhere;
+  `unit_ids(doc, ids...)` names what a tree places; `unit_view_control(doc; param)`
+  switches a page to one layer; `unit_texts` holds their words. A layer takes any
+  content and a `String` is Markdown. In a browser a unit shows its first layer and
+  opens the others in place. A link to `#<id>` or `#<id>--<layer>` opens what holds
+  it, on load, Back, Forward and after a swap, and a static export needs no server
+  for any of it. `layer=:short` reads one layer alone, complete and in order.
+  Layer and audience are separate: only layers declared `public=true` reach a
+  public reader, so the others, their labels and the ids and titles of units with
+  nothing public are absent from a public page, its Markdown, its PDF and its
+  static export, and a reference or a link in prose to what they cannot reach
+  goes. A page holding units in something else listens for the synchronous
+  `htmxo:unit-before-reveal` and `htmxo:unit-reveal` events
+  (`unit_script`). Every `htmx()` page carries `unit_script` and `unit_styles`,
+  inert without units.
+
 ## 0.1.54
 
 - `pdf_report`: a letter with a combining mark also reads once in Chrome's

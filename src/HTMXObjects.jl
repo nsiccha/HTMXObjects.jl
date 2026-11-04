@@ -21,6 +21,8 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
+    SemanticUnit, SemanticUnitLayer, SemanticUnits, UnitTexts, unit_texts, unit_tree, unit_ids, unit_reference,
+    unit_view_control, unit_script, unit_styles,
     semantic_card, SemanticTexts, semantic_texts
 export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles, syntax_script, syntax_styles
 export MarkdownRenderer, DefaultMarkdownRenderer, markdown_node,
@@ -3063,6 +3065,8 @@ _runtime_blocks() = (
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
     glossary = (:js, glossary_script),
+    unit_styles = (:css, unit_styles),
+    unit_script = (:js, unit_script),
     math_styles = (:css, math_styles),
     math_script = (:js, math_script),
     syntax_styles = (:css, syntax_styles),
@@ -3408,6 +3412,9 @@ function htmx(args...;
         # A glossary term's definition opens beside it, kept on screen
         # and outside scrolling tables; inert on pages without terms.
         :glossary,
+        # A link to a content unit opens what holds it, and the layer
+        # switch reads the address; inert on pages without units.
+        :unit_styles, :unit_script,
         # Markdown math (`render_markdown`) is typeset by KaTeX, which
         # this runtime loads from the `katex_version` template the
         # first time the page shows math; inert on pages without any.
@@ -34777,6 +34784,7 @@ _tabset_default_id(tabs) = "tabset-" * string(_tabset_key(tabs, zero(UInt)); bas
 
 # After the value types its walk sees through (`_TabsetPart` above).
 include("glossary.jl")
+include("content_units.jl")
 
 include("comparison.jl")
 
