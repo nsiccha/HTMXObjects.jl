@@ -19308,7 +19308,7 @@ A web or mail address written as text becomes a link to itself, since PAC (PDF
 Accessibility Checker) fails a PDF that shows an address without a link: an
 address with a scheme (`https://…`, `mailto:…`), a mail address, an address
 starting with `www.` (linked with `https://`) and a code span that is an address
-and nothing else. An image alone in its paragraph, or in a figure, is tagged as a
+and nothing else, in the Markdown and in `metadata=`. An image alone in its paragraph, or in a figure, is tagged as a
 figure of its own rather than one inside a paragraph, which PAC warns about. An
 image within a line of text stays in its paragraph, and PAC still warns about it.
 

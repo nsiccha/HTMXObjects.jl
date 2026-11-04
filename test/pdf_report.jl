@@ -488,6 +488,16 @@ end
             # figure are figures of their own; the image within the line of text
             # stays in its paragraph, as before.
             @test figure_parents(bytes) == ["Div", "Document", "Document", "P"]
+
+            # Quarto reads the front matter without the reader's autolinks, so an
+            # address in a subtitle stayed text, and PAC failed it (snag
+            # offer-pac-qualit-7471af7a). A one-letter "scheme" is a drive, not an address.
+            titled = joinpath(dir, "titel.pdf")
+            pdf_report("# Quellen\n", titled; title="Quellen", lang="de-DE",
+                       metadata=(subtitle="Stand: https://example.org/odl/, (www.example.org/karte). info@example.de C://x",
+                                 author="Autorin https://example.org/autorin/"))
+            @test uris(read(titled, String)) == sort(["https://example.org/odl/", "https://www.example.org/karte",
+                                                      "mailto:info@example.de", "https://example.org/autorin/"])
         end
     end
 end
@@ -606,6 +616,8 @@ end
         # any other address in the text.
         @test occursin("Seite: #link(\"https://www.example.org\")[www.example.org]",
                        typst("Seite: [www.example.org](www.example.org)\n"))
+        @test occursin("Seite: #link(\"https://example.org/t\")",
+                       typst("Seite: [https://example.org/t](?r=1)\n"))
 
         pdfua(path) = let bytes = read(path, String)
             startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
