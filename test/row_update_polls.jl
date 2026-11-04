@@ -43,7 +43,7 @@ using TestItemRunner
     # longer than a poll interval and Treebars' five seconds without news.
     const DRIVER = h.script(Raw(raw"""
     (function () {
-    const seen = { errors: [], offers: { pushed: 0, polled: 0 }, toasts: 0 };
+    const seen = { errors: [], offers: { pushed: 0, polled: 0 }, toasts: 0, replaced: null, replacedOffers: 0 };
     new MutationObserver(records => records.forEach(record => record.addedNodes.forEach(node => {
       if (node.nodeType === 1 && (node.matches('.htmxo-toast') || node.querySelector('.htmxo-toast'))) seen.toasts++;
     }))).observe(document.documentElement, { childList: true, subtree: true });
@@ -56,6 +56,8 @@ using TestItemRunner
     document.addEventListener('htmx:beforeSwap', function (e) {
       if (String(e.detail.serverResponse).indexOf('data-htmxo-row-update') < 0) return;
       seen.offers[e.detail.treebarPushed ? 'pushed' : 'polled']++;
+      const path = String((e.detail.requestConfig || {}).path);
+      if (seen.replaced && path.indexOf(seen.replaced) !== -1) seen.replacedOffers++;
     }, true);
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const beacon = text => fetch('/row_poll_beacon?text=' + encodeURIComponent(text));
@@ -75,7 +77,10 @@ using TestItemRunner
       document.getElementById('ask-c').click();
       document.getElementById('ask-d1').click();
       const four = await until(() => standing() === 4, 1600);
-      // The second request of `d` replaces the poller of the first.
+      // The second request of `d` replaces the poller of the first, whose
+      // answer must then never be applied.
+      seen.replaced = /__htmxo_operation=([^&#]+)/.exec(
+        document.querySelector('#status-d .treebar-poller-inner').getAttribute('hx-get'))[1];
       document.getElementById('ask-d2').click();
       const replaced = await until(() =>
         (document.querySelector('#status-d .treebar-poller-inner') || { getAttribute() { return ''; } })
@@ -96,7 +101,7 @@ using TestItemRunner
         answered,
         pollers: document.querySelectorAll('.treebar-poller, .treebar-terminal').length,
         toasts: seen.toasts,
-        errors: seen.errors, offers: seen.offers }));
+        errors: seen.errors, offers: seen.offers, replacedOffers: seen.replacedOffers }));
     });
     })();
     """))
@@ -143,7 +148,7 @@ using TestItemRunner
              hx_response(rows_table(__self__; update_rows=key); toast="Saved $key"))
         "A slow row update whose poller a later request replaces"
         @get row_slow_version(; version::Int) =
-            (wait(gate("rows")); set_cell!("d", "new-d-$version"); rows_table(__self__; update_rows="d"))
+            (wait(gate("rows")); version == 2 && set_cell!("d", "new-d-2"); rows_table(__self__; update_rows="d"))
         "What the content a poller displaced still asks for"
         @get row_poll_control() = h.span("still live")
         "Where the driver reports"
@@ -191,7 +196,7 @@ end
                 @test r["errors"] == []
                 # Every row took its answer: the row asked for from inside
                 # itself too, replaced once and not added beside the one its
-                # poller displaced, and the last request's answer on `d`.
+                # poller displaced, and the second request's answer on `d`.
                 @test r["cells"] == ["new-a", "new-b", "new-c", "new-d-2"]
                 @test r["rows"] == ["row-a", "row-b", "row-c", "row-d"]
                 @test r["rowsOutside"] == 4
@@ -201,6 +206,7 @@ end
                 @test r["pollers"] == 0
                 @test r["statuses"][1] == """<em>idle-a</em><button id="status-a-control" hx-get="/row_poll_control" hx-target="#status-a-answer" hx-swap="innerHTML">control</button>"""
                 @test r["statuses"][2:3] == ["idle-c", "idle-d"]
+                @test r["replacedOffers"] == 0
                 @test r["answered"] === true
                 # The route's toast shows once: leaving does not make htmx run
                 # the response's listeners a second time.
