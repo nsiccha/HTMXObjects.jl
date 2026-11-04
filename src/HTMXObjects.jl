@@ -19366,10 +19366,11 @@ pdf_report(md, "konzept.pdf"; title="Konzept", lang="de-DE", base_url=snapshot,
 A letter with a combining mark and no precomposed form (`"R̂"`, written `R` and
 U+0302) reads once in the PDF's text layer, as on the page. Typst alone writes
 such a letter twice (typst/typst#8767), so `pdf_report` corrects the finished PDF;
-the pages stay as they are. It warns, naming the letter, when the font draws one
-with more glyphs than it has code points, and leaves that letter as Typst wrote
-it. A reader that ignores ActualText still reads a letter of a right-to-left
-script twice.
+the pages stay as they are. Measured with Poppler, xpdf, PDFium (Chrome), MuPDF,
+pdf.js (Firefox) and pdfminer. pypdf reads `R ̂`, with a space. It warns, naming
+the letter, when the font draws one with more glyphs than it has code points, and
+leaves that letter as Typst wrote it. Right-to-left text reads once only in
+Poppler; other readers can still repeat letters.
 
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.

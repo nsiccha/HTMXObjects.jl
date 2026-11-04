@@ -1173,10 +1173,13 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `R̂R̂ ≤ 1,011`, and veraPDF and PAC do not flag it
   ([typst/typst#8767](https://github.com/typst/typst/issues/8767)). `pdf_report`
   corrects the finished PDF: the pages stay as they are, and a report without
-  such a letter stays byte for byte. It warns, naming the letter, when the font
-  draws one with more glyphs than it has code points, and leaves that letter as
-  Typst wrote it. A reader that ignores ActualText still reads a letter of a
-  right-to-left script twice.
+  such a letter stays byte for byte. Measured with Poppler's `pdftotext`, xpdf,
+  PDFium (Chrome), MuPDF, pdf.js (Firefox) and pdfminer; not with Acrobat or a
+  screen reader. pypdf reads `R ̂`, with a space, and pdfminer can move the second
+  mark of a letter with two marks onto another line. `pdf_report` warns, naming
+  the letter, when the font draws one with more glyphs than it has code points,
+  and leaves that letter as Typst wrote it. Right-to-left text reads once only in
+  Poppler; other readers read it better than before but can still repeat letters.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense

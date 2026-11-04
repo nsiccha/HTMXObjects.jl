@@ -11,16 +11,24 @@
 # that shows "R̂". veraPDF and PAC pass such a file. Upstream: typst/typst#8767,
 # measured on Typst 0.15.1 with every font tried, with and without `ua-1`.
 #
-# The repair changes what such a cluster reads and nothing it draws:
+# The repair changes what such a cluster reads and where the file says it, and
+# draws the same glyphs at the same places:
 #
-# - The cluster's first glyph is wrapped in an ActualText span with the cluster's
-#   text, and every other glyph in an empty one. A reader that honours ActualText
-#   (Poppler, Acrobat, Chrome) gets the text once. A code point of the mark's own
-#   would not do for it: Poppler orders a lone mark by where it is drawn, and in
-#   some fonts that is before the letter (`̂R`) or after a gap (`R ̂`).
+# - One ActualText span holds the cluster's text and all its glyphs, the shape the
+#   PDF writer gives a cluster that stays on one offset. To get there, the marks
+#   move into the letter's text object, each with a text matrix that puts it where
+#   it was. A reader that honours ActualText gets the text once, measured with
+#   Poppler, xpdf, PDFium (Chrome) and MuPDF.
 # - Each glyph gets its own code point in ToUnicode (the letter `R`, the mark
-#   U+0302), for a reader that ignores ActualText (Firefox, Preview). Only in a
-#   script written left to right, where the glyphs follow the code points.
+#   U+0302), for a reader that ignores ActualText (measured with pdf.js, which
+#   Firefox uses, pypdf and pdfminer). Only in a script written left to right,
+#   where the glyphs follow the code points.
+# - Where the glyphs cannot share a span (other fonts or colours, a rotated run),
+#   the first glyph gets a span with the cluster and every other glyph an empty
+#   one. Poppler and MuPDF read that once; PDFium and xpdf ignore an empty span
+#   and read the mark's code point too (`R̂̂`). A code point of the mark's own
+#   alone would not do: Poppler and xpdf order a lone mark by where it is drawn,
+#   and in some fonts that is before the letter (`̂R`) or after a gap (`R ̂`).
 #
 # A report without such a cluster is left byte for byte as Typst wrote it. When
 # Typst fixes this upstream, no cluster matches any more and the repair does
@@ -176,18 +184,57 @@ end
 
 # --- The content streams ---
 
-struct _PdfSpan
+mutable struct _PdfSpan
     start::Int   # the span's opening operator, operands first
     stop::Int
+    close_start::Int  # its EMC
+    close_stop::Int
     text::Union{Nothing,String}  # its ActualText
 end
 
 # One Tj or TJ operator: its bytes, and its strings and numbers in order. A number
-# is the range of its bytes in the stream.
+# is the range of its bytes in the stream. The rest says where and how it draws:
+# its text object, the `cm` of its q level, its text matrix, and the graphics state
+# otherwise (`nothing` for a matrix this repair cannot follow).
 struct _PdfShow
     start::Int
     stop::Int
     elements::Vector{Union{UnitRange{Int},Vector{UInt8}}}
+    text_object::Int
+    matrix::Union{Nothing,NTuple{6,Float64}}
+    text_matrix::Union{Nothing,NTuple{6,Float64}}
+    state::String
+    font::Int
+    size::Float64
+end
+
+mutable struct _PdfLevel  # what one q level has set
+    matrix::Union{Nothing,NTuple{6,Float64}}
+    matrices::Int
+    operators::Dict{String,String}
+end
+_PdfLevel() = _PdfLevel(nothing, 0, Dict{String,String}())
+
+_pdf_operators_text(level::_PdfLevel) =
+    join((string(key, '=', level.operators[key]) for key in sort!(collect(keys(level.operators)))), ';')
+
+# A level's state, with the matrix only for the levels around the current one: two
+# runs that differ in nothing else can share a text object.
+function _pdf_state_text(levels::Vector{_PdfLevel})
+    outer = join((string(level.matrix, level.matrices, _pdf_operators_text(level)) for level in @view levels[1:end-1]), '|')
+    return string(outer, '|', levels[end].matrices, _pdf_operators_text(levels[end]))
+end
+
+# The six numbers of a matrix operator, or `nothing`.
+function _pdf_matrix(b::Vector{UInt8}, elements)
+    numbers = Float64[]
+    for element in elements
+        element isa UnitRange || return nothing
+        number = tryparse(Float64, String(b[element]))
+        isnothing(number) && return nothing
+        push!(numbers, number)
+    end
+    return length(numbers) == 6 ? NTuple{6,Float64}(numbers) : nothing
 end
 
 struct _PdfGlyph
@@ -274,6 +321,10 @@ function _pdf_scan_content(b::Vector{UInt8}, fonts::Dict{String,Int})
     operands_start = 0
     pending_text = nothing   # the ActualText of the dictionary being read
     expect_text = false
+    levels = [_PdfLevel()]
+    text_object = 0
+    text_matrix = nothing
+    size = 0.0
     i = 1
     n = length(b)
     begin_operand!(at) = operands_start == 0 && (operands_start = at)
@@ -327,8 +378,30 @@ function _pdf_scan_content(b::Vector{UInt8}, fonts::Dict{String,Int})
                 j += 1
             end
             operator = String(b[i:j-1])
+            if operator == "q"
+                push!(levels, _PdfLevel())
+            elseif operator == "Q"
+                length(levels) > 1 && pop!(levels)
+            elseif operator == "cm"
+                levels[end].matrix = _pdf_matrix(b, elements)
+                levels[end].matrices += 1
+            elseif operator == "BT"
+                text_object += 1
+                text_matrix = nothing
+            elseif operator == "ET"
+                text_matrix = nothing
+            elseif operator == "Tm"
+                text_matrix = _pdf_matrix(b, elements)
+            elseif operator in ("Td", "TD", "T*")
+                text_matrix = nothing
+            elseif !(operator in ("Tj", "TJ", "BDC", "BMC", "EMC", "'", "\"", "BI"))
+                levels[end].operators[operator] = String(b[(operands_start == 0 ? i : operands_start):j-1])
+            end
             if operator == "Tf"
                 font = get(fonts, name, 0)
+                number = isempty(elements) || !(elements[end] isa UnitRange) ? nothing :
+                         tryparse(Float64, String(b[elements[end]]))
+                size = something(number, 0.0)
             elseif operator == "Tj" || operator == "TJ"
                 span = 0
                 for s in Iterators.reverse(open_spans)
@@ -336,7 +409,9 @@ function _pdf_scan_content(b::Vector{UInt8}, fonts::Dict{String,Int})
                     span = s
                     break
                 end
-                push!(shows, _PdfShow(operands_start, j - 1, copy(elements)))
+                push!(shows, _PdfShow(operands_start, j - 1, copy(elements), text_object,
+                                      levels[end].matrices == 1 ? levels[end].matrix : nothing,
+                                      text_matrix, _pdf_state_text(levels), font, size))
                 for (e, element) in enumerate(elements)
                     element isa UnitRange && continue
                     if font == 0 || isodd(length(element))
@@ -351,11 +426,13 @@ function _pdf_scan_content(b::Vector{UInt8}, fonts::Dict{String,Int})
             elseif operator == "'" || operator == "\"" || operator == "BI"
                 return nothing  # Typst writes none of these; its layout here is not known
             elseif operator == "BDC" || operator == "BMC"
-                push!(spans, _PdfSpan(operands_start == 0 ? i : operands_start, j - 1, pending_text))
+                push!(spans, _PdfSpan(operands_start == 0 ? i : operands_start, j - 1, 0, 0, pending_text))
                 push!(open_spans, length(spans))
             elseif operator == "EMC"
                 isempty(open_spans) && return nothing
-                pop!(open_spans)
+                span = spans[pop!(open_spans)]
+                span.close_start = i
+                span.close_stop = j - 1
             end
             empty!(elements)
             operands_start = 0
@@ -400,6 +477,125 @@ function _pdf_show_split(data::Vector{UInt8}, show::_PdfShow, texts::Dict{Tuple{
     return take!(out)
 end
 
+# A number as a PDF writes it: never in exponent form, to the micropoint Typst uses.
+function _pdf_number(value::Real)
+    micro = round(Int64, abs(value) * 1_000_000)
+    whole, fraction = divrem(micro, 1_000_000)
+    text = fraction == 0 ? string(whole) : string(whole, '.', rstrip(lpad(fraction, 6, '0'), '0'))
+    return value < 0 && micro != 0 ? "-" * text : text
+end
+
+_pdf_is_upright_flipped(matrix) = !isnothing(matrix) && matrix[1:4] == (1.0, 0.0, 0.0, -1.0)
+
+# The cluster's other shows, if its glyphs can share one span in the first glyph's
+# text object, else `nothing`. They can when the first glyph ends its text object,
+# each other show draws this cluster's glyphs alone, and every run differs only in
+# its position. `glyphs_of` lists each show's glyphs.
+function _pdf_mergeable_shows(scan, cluster, glyphs_of)
+    members = Set(cluster.glyphs)
+    first_glyph = first(cluster.glyphs)
+    base_at = scan.glyphs[first_glyph].show
+    base = scan.shows[base_at]
+    # After the first glyph its show holds only this cluster's glyphs.
+    all(in(members), (g for g in glyphs_of[base_at] if g >= first_glyph)) || return nothing
+    others = unique(scan.glyphs[g].show for g in cluster.glyphs if scan.glyphs[g].show != base_at)
+    isempty(others) && return nothing
+    _pdf_is_upright_flipped(base.matrix) || return nothing
+    for at in others
+        show = scan.shows[at]
+        all(in(members), glyphs_of[at]) || return nothing
+        show.text_object == base.text_object && return nothing
+        show.state == base.state || return nothing
+        _pdf_is_upright_flipped(show.matrix) && _pdf_is_upright_flipped(show.text_matrix) || return nothing
+    end
+    # Nothing else may be drawn after the first glyph in its text object.
+    base_at < length(scan.shows) && scan.shows[base_at+1].text_object == base.text_object && return nothing
+    # A span around a glyph here holds this cluster's glyphs alone.
+    for g in cluster.glyphs
+        s = scan.glyphs[g].span
+        s == 0 && continue
+        all(in(members), (h for h in eachindex(scan.glyphs) if scan.glyphs[h].span == s)) || return nothing
+        # The first glyph's span stays, so it may not reach into a show that moves.
+        g == first_glyph && any(h -> scan.glyphs[h].span == s && scan.glyphs[h].show != base_at, cluster.glyphs) &&
+            return nothing
+    end
+    return others
+end
+
+# The character spacing that ends a show's pen where its origin was, or `nothing`.
+# A mark has no advance of its own in Typst's layout, so the next glyph starts at
+# the mark's origin; a reader ends the cluster's text where the last glyph's pen
+# stops, and without this it sees a word gap before the next letter. Spacing applies
+# after each glyph and nothing follows, so it moves nothing on the page.
+function _pdf_closing_spacing(data::Vector{UInt8}, show, widths)
+    (isnothing(widths) || occursin("Tc=", show.state) || occursin("Tz=", show.state)) && return nothing
+    glyphs = 0
+    travel = 0.0  # in thousandths of the font size
+    for element in show.elements
+        if element isa UnitRange
+            number = tryparse(Float64, String(data[element]))
+            isnothing(number) && return nothing
+            travel -= number
+        else
+            for k in 1:length(element)÷2
+                glyphs += 1
+                travel += get(widths.table, UInt16(element[2k-1]) << 8 | element[2k], widths.default)
+            end
+        end
+    end
+    glyphs == 1 || return nothing
+    return -travel / 1000 * show.size
+end
+
+# The first glyph's show, ending in one span around the cluster: that glyph, then
+# each other show after a text matrix that puts it where it was. Under the matrices
+# `1 0 0 -1 x y cm` and `1 0 0 -1 e f Tm`, a glyph draws at (x + e, y - f).
+function _pdf_show_merged(data::Vector{UInt8}, scan, cluster, others, widths)
+    first_glyph = scan.glyphs[first(cluster.glyphs)]
+    base = scan.shows[first_glyph.show]
+    out = IOBuffer()
+    before = IOBuffer()
+    after = IOBuffer()
+    glyph_hex = ""
+    for (e, element) in enumerate(base.elements)
+        if element isa UnitRange
+            write(isempty(glyph_hex) ? before : after, @view(data[element]), ' ')
+        else
+            for k in 1:length(element)÷2
+                hex = bytes2hex(@view element[2k-1:2k])
+                if e == first_glyph.element && k == first_glyph.index
+                    glyph_hex = hex
+                else
+                    write(isempty(glyph_hex) ? before : after, '<', hex, '>')
+                end
+            end
+        end
+    end
+    position(before) == 0 || write(out, '[', take!(before), "]TJ ")
+    first_glyph.span == 0 && write(out, _pdf_actual_text_operator(cluster.text), ' ')
+    write(out, "[<", glyph_hex, '>', take!(after), "]TJ ")
+    for at in others
+        show = scan.shows[at]
+        e = show.text_matrix[5] + show.matrix[5] - base.matrix[5]
+        f = show.text_matrix[6] - show.matrix[6] + base.matrix[6]
+        write(out, "1 0 0 -1 ", _pdf_number(e), ' ', _pdf_number(f), " Tm ")
+        spacing = at == last(others) ? _pdf_closing_spacing(data, show, get(widths, show.font, nothing)) : nothing
+        isnothing(spacing) || write(out, _pdf_number(spacing), " Tc ")
+        write(out, '[')
+        for element in show.elements
+            if element isa UnitRange
+                write(out, @view(data[element]), ' ')
+            else
+                write(out, '<', bytes2hex(element), '>')
+            end
+        end
+        write(out, "]TJ ")
+        isnothing(spacing) || write(out, "0 Tc ")
+    end
+    first_glyph.span == 0 && write(out, "EMC ")
+    return take!(out)
+end
+
 # --- Which objects hold text ---
 
 function _pdf_font_names(file::_PdfFile, dictionary::AbstractString)
@@ -437,6 +633,63 @@ function _pdf_content_streams(file::_PdfFile)
         end
     end
     return found
+end
+
+# The glyph widths of a Type 0 font (its descendant's `/W` and `/DW`), or `nothing`.
+function _pdf_font_widths(file::_PdfFile, font_text::AbstractString)
+    descendant = match(r"/DescendantFonts\s*\[\s*(\d+)\s+0\s+R\s*\]", font_text)
+    isnothing(descendant) && return nothing
+    number = parse(Int, descendant[1])
+    haskey(file.ranges, number) || return nothing
+    text = _pdf_object_text(file, number)
+    default = match(r"/DW\s+(-?[\d.]+)", text)
+    table = Dict{UInt16,Float64}()
+    start = findfirst("/W", text)
+    while !isnothing(start) && !occursin(r"^/W\s*\[", SubString(text, first(start)))
+        start = findnext("/W", text, last(start) + 1)
+    end
+    if !isnothing(start)
+        open = findnext('[', text, first(start))
+        # The array closes at the first `]` at depth zero.
+        depth = 0
+        close = nothing
+        for i in open:ncodeunits(text)
+            c = codeunit(text, i)
+            c == UInt8('[') && (depth += 1)
+            c == UInt8(']') && (depth -= 1)
+            if depth == 0
+                close = i
+                break
+            end
+        end
+        isnothing(close) && return nothing
+        tokens = collect(eachmatch(r"\[|\]|-?[\d.]+", String(codeunits(text)[open+1:close-1])))
+        i = 1
+        while i <= length(tokens)
+            first_code = tryparse(Int, tokens[i].match)
+            (isnothing(first_code) || i == length(tokens)) && return nothing
+            if tokens[i+1].match == "["
+                i += 2
+                code = first_code
+                while i <= length(tokens) && tokens[i].match != "]"
+                    width = tryparse(Float64, tokens[i].match)
+                    isnothing(width) && return nothing
+                    table[UInt16(code)] = width
+                    code += 1
+                    i += 1
+                end
+                i += 1
+            else
+                i + 2 > length(tokens) && return nothing
+                last_code = tryparse(Int, tokens[i+1].match)
+                width = tryparse(Float64, tokens[i+2].match)
+                (isnothing(last_code) || isnothing(width)) && return nothing
+                foreach(code -> table[UInt16(code)] = width, first_code:last_code)
+                i += 3
+            end
+        end
+    end
+    return (; table, default=isnothing(default) ? 1000.0 : parse(Float64, default[1]))
 end
 
 # The ToUnicode table of each Type 0 font: font object => (table object, table).
@@ -574,10 +827,17 @@ function _pdf_text_layer_repaired(bytes::Vector{UInt8})
         replaced[object] = _pdf_object_with_stream(file, object, Vector{UInt8}(codeunits(_pdf_to_unicode_with(cmap, change))))
     end
 
-    # The spans: the first glyph reads the cluster, every other glyph nothing.
+    # Where a cluster's glyphs can share a span, they do. Otherwise the first glyph
+    # reads the cluster and every other glyph nothing, in spans of their own.
+    glyphs_of = map(scans) do (_, scan)
+        lists = [Int[] for _ in scan.shows]
+        foreach(g -> push!(lists[scan.glyphs[g].show], g), eachindex(scan.glyphs))
+        lists
+    end
+    plans = map(c -> _pdf_mergeable_shows(scans[c.stream].second, c, glyphs_of[c.stream]), separate)
     wrapped = Dict{Int,Dict{Int,Dict{Tuple{Int,Int},String}}}()  # stream => show => (element, index) => text
     emptied = Dict{Int,Set{Int}}()                               # stream => spans
-    for c in separate
+    function give_own_spans!(c)
         scan = scans[c.stream].second
         first_span = scan.glyphs[first(c.glyphs)].span
         for (position, g) in enumerate(c.glyphs)
@@ -591,9 +851,39 @@ function _pdf_text_layer_repaired(bytes::Vector{UInt8})
             end
         end
     end
-    for at in union(keys(wrapped), keys(emptied))
+    foreach(give_own_spans!, (c for (c, others) in zip(separate, plans) if isnothing(others)))
+    widths = Dict{Int,Any}(font => _pdf_font_widths(file, _pdf_object_text(file, font)) for font in keys(fonts))
+    # A show another cluster already splits cannot also be rewritten for this one.
+    edit_lists = Dict{Int,Vector{Pair{UnitRange{Int},Vector{UInt8}}}}()
+    merged_edits(at) = get!(Vector{Pair{UnitRange{Int},Vector{UInt8}}}, edit_lists, at)
+    for (c, others) in zip(separate, plans)
+        isnothing(others) && continue
+        scan = scans[c.stream].second
+        touched = (scan.glyphs[first(c.glyphs)].show, others...)
+        if any(show -> haskey(get(wrapped, c.stream, Dict{Int,Dict{Tuple{Int,Int},String}}()), show), touched)
+            give_own_spans!(c)
+            continue
+        end
+        base = scan.shows[scan.glyphs[first(c.glyphs)].show]
+        push!(merged_edits(c.stream), base.start:base.stop => _pdf_show_merged(scan.data, scan, c, others, widths))
+        for at in others
+            show = scan.shows[at]
+            push!(merged_edits(c.stream), show.start:show.stop => UInt8[])
+        end
+        first_span = scan.glyphs[first(c.glyphs)].span
+        for g in c.glyphs[2:end]
+            s = scan.glyphs[g].span
+            (s == 0 || s == first_span) && continue
+            span = scan.spans[s]
+            # A span around several of the glyphs goes once.
+            (span.start:span.stop => UInt8[]) in merged_edits(c.stream) && continue
+            push!(merged_edits(c.stream), span.start:span.stop => UInt8[])
+            push!(merged_edits(c.stream), span.close_start:span.close_stop => UInt8[])
+        end
+    end
+    for at in union(keys(wrapped), keys(emptied), keys(edit_lists))
         number, scan = scans[at]
-        edits = Pair{UnitRange{Int},Vector{UInt8}}[]
+        edits = copy(get(edit_lists, at, Pair{UnitRange{Int},Vector{UInt8}}[]))
         for (show, texts) in get(wrapped, at, Dict{Int,Dict{Tuple{Int,Int},String}}())
             operator = scan.shows[show]
             push!(edits, operator.start:operator.stop => _pdf_show_split(scan.data, operator, texts))
