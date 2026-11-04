@@ -21,7 +21,7 @@ export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
     SemanticUnavailable, SemanticProse, SemanticTable, SemanticPlot,
     SemanticMetric, SemanticLink, SemanticAction, SemanticArtifact,
     SemanticSection, SemanticGroup, SemanticDisclosure, SemanticAlternatives,
-    SemanticUnit, SemanticUnitLayer, SemanticUnits, UnitTexts, unit_texts, unit_tree, unit_ids, unit_reference,
+    SemanticUnit, SemanticUnitLayer, SemanticUnits, UnitTexts, unit_texts, unit_tree, unit_ids, unit_reference, unit_references,
     unit_view_control, unit_script, unit_styles,
     semantic_card, SemanticTexts, semantic_texts
 export MarkdownRule, MARKDOWN_URL_RULE, render_markdown, math_script, math_styles, syntax_script, syntax_styles
