@@ -14,6 +14,14 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.56
+
+- Content units: `unit_tree(…; wrap=c -> SemanticSection("Im Projekt", c))` puts a
+  heading or anything else around a tree, only for a reader and a layer with something
+  to show, and the browser's layer switch hides it with its content.
+  `unit_references(doc, targets; layer, separator, wrap)` links several units at once,
+  with the same rule: a line's prefix goes with its last link.
+
 ## 0.1.55
 
 - Content units, a document whose pieces of information each have one identity,

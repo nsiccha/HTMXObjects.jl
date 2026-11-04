@@ -411,21 +411,27 @@ function _unit_link_label(doc::SemanticUnits, anchor::AbstractString, audience)
     string(title, " (", doc.layers[at].label, ")")
 end
 
-function _unit_references(v::_UnitView, unit::SemanticUnit)
+# The links a list of references comes to for one reader and view: those with no
+# target go, and an address only once.
+function _unit_links(doc::SemanticUnits, targets, audience, view, seen, separator)
     links = Any[]
-    seen = Set{String}([unit.id])  # a reference that came down to the unit itself says nothing
-    for (target, fallback) in unit.references
-        anchor = _unit_anchor_for(v.doc, target, v.audience, v.layer)
-        isnothing(anchor) && !isempty(fallback) &&
-            (anchor = _unit_anchor_for(v.doc, fallback, v.audience, v.layer))
+    for (target, fallback) in targets
+        anchor = _unit_anchor_for(doc, target, audience, view)
+        isnothing(anchor) && !isempty(fallback) && (anchor = _unit_anchor_for(doc, fallback, audience, view))
         isnothing(anchor) && continue
         anchor in seen && continue
         push!(seen, anchor)
-        label = _unit_link_label(v.doc, anchor, v.audience)
+        label = _unit_link_label(doc, anchor, audience)
         isempty(label) && continue
-        isempty(links) || push!(links, ", ")
-        push!(links, _unit_link_node(v.doc, anchor, label))
+        isempty(links) || push!(links, separator)
+        push!(links, _unit_link_node(doc, anchor, label))
     end
+    links
+end
+
+function _unit_references(v::_UnitView, unit::SemanticUnit)
+    # A reference that came down to the unit itself says nothing.
+    links = _unit_links(v.doc, unit.references, v.audience, v.layer, Set{String}([unit.id]), ", ")
     isempty(links) && return nothing
     _UnitPart(Any[h.p(h.strong(v.doc.texts.references, ":"), " ", links...)]; class="htmxo-unit-refs")
 end
@@ -501,7 +507,7 @@ function _unit_layer_arg(doc::SemanticUnits, layer, who)
 end
 
 """
-    unit_tree(doc, ids...; layer=nothing, control=true)
+    unit_tree(doc, ids...; layer=nothing, control=true, wrap=identity)
 
 The units `ids` of a [`SemanticUnits`](@ref) document with everything below them,
 or the whole document without `ids`, as ordinary content to place in a page,
@@ -529,8 +535,22 @@ Each unit's element has the id `<id>`, each layer's `<id>--<layer>`, in HTML and
 in Markdown. A link to either opens the `<details>` holding it
 ([`unit_script`](@ref)). `control=false` leaves out the layer switch
 ([`unit_view_control`](@ref)), for a page that places it once itself.
+
+`wrap` puts something around what a reader gets, only if they get anything: it is
+called once for each reader's branch with one node, and what it returns takes that
+node's place. So a heading that exists only for these units goes with them, for a
+public reader and for a layer they lack, and in a browser when the layer switch
+leaves nothing of them:
+
+```julia
+unit_tree(doc, "quellen"; control=false, wrap=c -> SemanticSection("Im Projekt", c))
+```
+
+A heading with other content does not need it: an empty tree renders nothing, so
+`SemanticSection(title, demo, unit_tree(doc, ids; control=false))` keeps its heading
+for the demo.
 """
-function unit_tree(doc::SemanticUnits, ids...; layer=nothing, control::Bool=true)
+function unit_tree(doc::SemanticUnits, ids...; layer=nothing, control::Bool=true, wrap=identity)
     view = _unit_layer_arg(doc, layer, "unit_tree")
     roots = _unit_roots(doc, ids)
     tree(audience) = begin
@@ -543,7 +563,10 @@ function unit_tree(doc::SemanticUnits, ids...; layer=nothing, control::Bool=true
     # one mark at most. Among several layers the marks are the parts' own.
     declared = isnothing(view) ? nothing : doc.layers[findfirst(l -> l.name === view, doc.layers)]
     mark = !isnothing(declared) && !declared.public
-    content = Private(tree(:private), tree(:public), mark)
+    # Marked so that the layer switch can hide it with what it wraps.
+    wrapped(t) = isnothing(t) || wrap === identity ? t :
+        _UnitPart(Any[wrap(t)]; class="htmxo-unit-wrap", attrs=(; data_htmxo_unit_wrap=""))
+    content = Private(wrapped(tree(:private)), wrapped(tree(:public)), mark)
     _UnitPart(control && isnothing(view) ? Any[unit_view_control(doc), content] : Any[content]; class="htmxo-units")
 end
 
@@ -573,6 +596,33 @@ function unit_reference(doc::SemanticUnits, target::AbstractString; label=nothin
         isempty(text) ? nothing : _unit_link_node(doc, anchor, text)
     end
     Private(link(:private), link(:public), false)
+end
+
+"""
+    unit_references(doc, targets; layer=nothing, separator=", ", wrap=identity)
+
+The links to several units, for a place naming them together: `targets` takes the
+entries of `references=` on a [`SemanticUnit`](@ref) (`"id"`, `"id--deep"`,
+`"id" => "fallback"`). Each reader gets those that show for them and for `layer`,
+under the rule of [`unit_reference`](@ref), each address once, joined by `separator`.
+`wrap` receives one node holding them, only if any remain, so a line's prefix goes
+with its links: `wrap=c -> h.p("Siehe: ", c)`.
+
+Among all layers the links stay when the layer switch hides a target: a click leaves
+that layer and goes there. An id the document lacks is an `ArgumentError`.
+"""
+function unit_references(doc::SemanticUnits, targets; layer=nothing, separator::AbstractString=", ", wrap=identity)
+    who = "unit_references"
+    entries = Pair{String,String}[_unit_reference_pair(t) for t in targets]
+    for (target, fallback) in entries, name in (target, fallback)
+        isempty(name) || _unit_check_target(who, name, doc.index)
+    end
+    view = _unit_layer_arg(doc, layer, who)
+    links(audience) = begin
+        found = _unit_links(doc, entries, audience, view, Set{String}(), separator)
+        isempty(found) ? nothing : wrap(h.span(found...; class="htmxo-unit-references"))
+    end
+    Private(links(:private), links(:public), false)
 end
 
 """
@@ -712,9 +762,10 @@ unit_script() = h.script(Raw(raw"""
     own('[data-htmxo-unit-view] input[type="radio"]', scope).forEach(function (r) {
       r.checked = r.value === (next || 'all');
     });
-    var units = own('[data-htmxo-unit]', scope), layers = own('[data-htmxo-unit-layer]', scope);
+    var units = own('[data-htmxo-unit]', scope), layers = own('[data-htmxo-unit-layer]', scope),
+        wraps = own('[data-htmxo-unit-wrap]', scope);
     if (!next) {
-      units.concat(layers).forEach(function (el) { el.hidden = false; });
+      units.concat(layers, wraps).forEach(function (el) { el.hidden = false; });
       own('details[data-htmxo-unit-auto]', scope).forEach(function (d) {
         d.open = false;
         d.removeAttribute('data-htmxo-unit-auto');
@@ -733,6 +784,8 @@ unit_script() = h.script(Raw(raw"""
       }
     });
     own('details.htmxo-unit-children', scope).forEach(autoOpen);
+    // What `wrap` put around units goes when none of them shows.
+    wraps.forEach(function (w) { w.hidden = !w.querySelector('[data-htmxo-unit]:not([hidden])'); });
   }
   // Every scope as its address says. A scope with nothing in its address that
   // shows nothing chosen is left as it is, so a swap costs a page without a

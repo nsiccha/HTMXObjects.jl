@@ -1938,6 +1938,12 @@ pdf_report(unit_tree(DOC; layer=:deep), "vertiefung.pdf"; title="Vertiefung", la
   a link Typst refuses. The same holds for `[text](#id)` in a layer's Markdown: it
   keeps its words. In another node, write [`unit_reference`](@ref), which is also what
   a table's row or a summary uses for a unit living elsewhere.
+- **A heading only for these units** goes with them: `unit_tree(doc, "quellen"; control=false,
+  wrap=c -> SemanticSection("Im Projekt", c))` calls `wrap` per reader only if they have
+  anything, and the layer switch hides it with its content. `unit_references(doc, targets;
+  layer, separator, wrap)` does the same for a line of links and its prefix. A heading
+  with other content needs no `wrap`: an empty tree renders nothing, and
+  `SemanticSection(title, demo, unit_tree(doc, ids; control=false))` keeps it for the demo.
 - **One scope, passed explicitly.** Each call takes the `SemanticUnits`, so parts of
   a document rendered separately resolve each other's references. Place each unit
   once: a second placement repeats its ids, and [`unit_ids`](@ref) tells a caller what

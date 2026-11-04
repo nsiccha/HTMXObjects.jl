@@ -316,6 +316,63 @@ end
     @test repr("text/markdown", SemanticProse("| a |\n| --- |\n| 1 |")) == "| a |\n| --- |\n| 1 |"
 end
 
+@testitem "a heading or a prefix goes with what it is for" setup=[UnitFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    # A bibliography cited only by private layers, and a unit with a public layer.
+    d = SemanticUnits([
+        SemanticUnit("text"; title="Text", layers=(; offer="OFFENER-TEXT", short="k")),
+        SemanticUnit("quelle"; title="Quelle", layers=(; short="ZITAT-KURZ", deep="ZITAT-TIEF")),
+        SemanticUnit("nur-tief"; title="Nur tief", layers=(; deep="T"))]; layers=LAYERS)
+    calls = Ref(0)
+    heading(c) = (calls[] += 1; SemanticSection("Im Projekt", c))
+    # A reader with something gets it, and `wrap` sees one node.
+    seen = Ref{Any}(nothing)
+    unit_tree(d, "quelle"; control=false, wrap=c -> (seen[] = c; c))
+    @test !(seen[] isa AbstractVector)
+    private_md = md(unit_tree(d, "quelle"; control=false, wrap=heading); audience=:private)
+    @test occursin("## Im Projekt", private_md) && occursin("ZITAT-KURZ", private_md)
+    # A public reader has nothing: no heading in any format.
+    t = unit_tree(d, "quelle"; control=false, wrap=heading)
+    @test md(t; audience=:public) == "" && html(t, :public) == "" && plain(t, :public) == ""
+    # Called for the one branch that has anything.
+    calls[] = 0
+    unit_tree(d, "quelle"; control=false, wrap=heading)
+    @test calls[] == 1
+    calls[] = 0
+    unit_tree(d, "text"; control=false, wrap=heading)
+    @test calls[] == 2
+    # One layer: the unit that has it keeps the heading, the one that lacks it does not.
+    @test occursin("Im Projekt", md(unit_tree(d, "quelle"; control=false, layer=:deep, wrap=heading); audience=:private))
+    @test md(unit_tree(d, "nur-tief"; control=false, layer=:short, wrap=heading); audience=:private) == ""
+    # A public reader of a public unit gets it, marked for the layer switch.
+    pub = html(unit_tree(d, "text"; control=false, wrap=heading), :public)
+    @test occursin("Im Projekt", pub) && occursin("OFFENER-TEXT", pub) && occursin("data-htmxo-unit-wrap", pub)
+    # Without `wrap` nothing changes.
+    @test !occursin("data-htmxo-unit-wrap", html(unit_tree(d, "text"; control=false), :public))
+    # A heading with other content keeps it, by being a section with that content.
+    demo = SemanticSection("Mit Demo", SemanticProse("DEMO"), unit_tree(d, "quelle"; control=false))
+    @test occursin("## Mit Demo", md(demo; audience=:public)) && occursin("DEMO", md(demo; audience=:public)) && !occursin("ZITAT", md(demo; audience=:public))
+
+    # A line of references: the prefix goes with the last link.
+    prefix(c) = h.p("Siehe: ", c)
+    all_public = unit_references(d, ["text", "quelle", "text"]; wrap=prefix)
+    pub_md = md(all_public; audience=:public)
+    @test occursin("Siehe:", pub_md) && occursin("[Text](#text)", pub_md) && !occursin("Quelle", pub_md)
+    # An address once, and every link for a private reader, by the separator.
+    @test occursin("[Text](#text) · [Quelle](#quelle)", md(unit_references(d, ["text", "quelle", "text"]; separator=" · "); audience=:private))
+    # None left: no links and no prefix, for the reader or the layer.
+    none = unit_references(d, ["quelle", "nur-tief"]; wrap=prefix)
+    @test md(none; audience=:public) == "" && html(none, :public) == "" && occursin("Siehe:", md(none; audience=:private))
+    @test md(unit_references(d, ["nur-tief"]; layer=:short, wrap=prefix); audience=:private) == ""
+    # A fallback for who cannot reach the target.
+    fb = md(unit_references(d, ["quelle" => "text"]; wrap=prefix); audience=:public)
+    @test occursin("[Text](#text)", fb) && !occursin("#quelle", fb)
+    @test_throws ArgumentError unit_references(d, ["fehlt"])
+    @test_throws ArgumentError unit_references(d, ["text" => "fehlt"])
+    @test_throws ArgumentError unit_references(d, ["text"]; layer=:fehlt)
+end
+
 @testitem "a title with Markdown's marks is its text, and keeps its anchor" setup=[UnitFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
@@ -523,6 +580,10 @@ end
                 children=[SemanticUnit("kind"; title="Kind", layers=(; short="k", deep="t"))])]; layers=LAYERS))), :private),
             "/wide" => rendered(shell(h.div(; style="width: 400px")(unit_tree(SemanticUnits([SemanticUnit("breit"; title="Breit",
                 layers=(; offer="o", short="| " * join(("Spalte$i" for i in 1:30), " | ") * " |\n|" * " --- |"^30 * "\n| " * join(("x$i" for i in 1:30), " | ") * " |"))]; layers=LAYERS)))), :private),
+            "/wrapped" => (w = SemanticUnits([SemanticUnit("anderes"; title="Anderes", layers=(; offer="o", short="k")),
+                                              SemanticUnit("nur-tief"; title="Nur tief", layers=(; deep="t"))]; layers=LAYERS);
+                rendered(shell(h.div(unit_view_control(w), unit_tree(w, "anderes"; control=false),
+                    unit_tree(w, "nur-tief"; control=false, wrap=c -> SemanticSection("Im Projekt", c)))), :private)),
             "/scopes" => rendered(shell(h.div(
                 h.div(; data_htmxo_unit_scope="")(unit_view_control(side("a"); param="erste"), unit_tree(side("a"); control=false)),
                 h.div(; data_htmxo_unit_scope="")(unit_view_control(side("b"); param="zweite"), unit_tree(side("b"); control=false)))), :private))
@@ -698,6 +759,27 @@ end
                     @test evaluate(b, "(d => String(d.scrollWidth <= d.clientWidth))(document.getElementById('breit--short'))") == "true"
                     @test evaluate(b, "String(document.documentElement.scrollWidth <= innerWidth)") == "true"
                     @test evaluate(b, "(w => String(w.classList.contains('table-wrap') && w.scrollWidth > w.clientWidth))(document.querySelector('#breit--short table').parentElement)") == "true"
+
+                    # A heading only for units with the deep layer: there among all
+                    # layers, gone under a layer they lack, through a reload, and back.
+                    @test load("$base/wrapped")
+                    @test evaluate(b, "String(!!document.querySelector('[data-htmxo-unit-wrap] h2'))") == "true"
+                    @test seen("nur-tief") == "true"
+                    wrap_shown() = evaluate(b, "(w => String(w.getClientRects().length > 0))(document.querySelector('[data-htmxo-unit-wrap]'))")
+                    @test wrap_shown() == "true"
+                    evaluate(b, "document.querySelector('[data-htmxo-unit-view] input[value=short]').click(); ''")
+                    @test wait_for(b, "window.htmxoUnits.view() === 'short'")
+                    @test wrap_shown() == "false" && seen("anderes--short") == "true"
+                    TabsetBrowser.call(b, "Page.reload")
+                    sleep(0.2)
+                    @test wait_for(b, "document.readyState === 'complete' && window.htmxoUnits && window.htmxoUnits.view() === 'short'")
+                    @test wrap_shown() == "false"
+                    evaluate(b, "document.querySelector('[data-htmxo-unit-view] input[value=deep]').click(); ''")
+                    @test wait_for(b, "window.htmxoUnits.view() === 'deep'")
+                    @test wrap_shown() == "true"
+                    evaluate(b, "document.querySelector('[data-htmxo-unit-view] input[value=all]').click(); ''")
+                    @test wait_for(b, "window.htmxoUnits.view() === null")
+                    @test wrap_shown() == "true"
 
                     # The events a page uses to make way: before the lookup on the
                     # document, then on the target before anything opens.
