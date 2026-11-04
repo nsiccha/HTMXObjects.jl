@@ -23,7 +23,8 @@ failing at render with a `MethodError`.
   `unit_reference(doc, target; label, layer, fallback)` links to one from elsewhere;
   `unit_ids(doc, ids...)` names what a tree places; `unit_view_control(doc; param)`
   switches a page to one layer; `unit_texts` holds their words. A layer takes any
-  content and a `String` is Markdown. In a browser a unit shows its first layer and
+  content and a `String` is Markdown, and a `Symbol` names another layer saying the
+  same thing, which stands once among all layers. In a browser a unit shows its first layer and
   opens the others in place. A link to `#<id>` or `#<id>--<layer>` opens what holds
   it, on load, Back, Forward and after a swap, and a static export needs no server
   for any of it. `layer=:short` reads one layer alone, complete and in order.

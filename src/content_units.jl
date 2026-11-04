@@ -53,7 +53,10 @@ paragraph, equation, table or code block, or a heading over other units.
 - `layers`: what each layer says, by layer name (`(; offer=…, short=…, deep=…)`).
   Each is any content: a `String` is Markdown ([`SemanticProse`](@ref), so math
   and tables work), any other value renders as it does elsewhere. A unit without
-  layers is a group: a heading over its children.
+  layers is a group: a heading over its children. A `Symbol` names another layer
+  of the unit that says the same thing (`(; offer=tabelle, short=:offer, deep=:offer)`):
+  read alone each layer has it, among all layers it stands once. Who may read it
+  still follows each layer's own `public`.
 - `children`: the units below it, in order, to any depth.
 - `references`: other units it refers to, by id. `"x--deep"` names layer `deep`
   of unit `x`. `"x" => "y"` names `y` for a reader who cannot reach `x`.
@@ -207,9 +210,13 @@ end
 
 function _unit_check(unit::SemanticUnit, index, doc_layers, base::Symbol)
     who = "SemanticUnit $(repr(unit.id))"
-    for name in keys(unit.layers)
+    for (name, content) in unit.layers
         name in doc_layers || throw(ArgumentError(
             "$who: layer $(repr(name)) is not declared; the document declares $(join(repr.(sort!(collect(doc_layers))), ", "))"))
+        content isa Symbol || continue
+        source = get(unit.layers, content, nothing)
+        (isnothing(source) || source isa Symbol) && throw(ArgumentError(
+            "$who: layer $(repr(name)) says the same as $(repr(content)), which is not a layer of this unit with content of its own"))
     end
     isempty(unit.layers) && isempty(unit.children) && throw(ArgumentError(
         "$who has no layers and no children, so it says nothing"))
@@ -242,6 +249,20 @@ _unit_visible(layer::SemanticUnitLayer, audience, view) =
 
 _unit_visible_layers(unit::SemanticUnit, layers, audience, view) =
     SemanticUnitLayer[l for l in layers if haskey(unit.layers, l.name) && _unit_visible(l, audience, view)]
+
+# The layer whose content a layer shows: itself, or the one it names.
+_unit_source(unit::SemanticUnit, name::Symbol) = (c = unit.layers[name]; c isa Symbol ? c : name)
+
+# Layers saying the same thing share one panel, in the order they are declared.
+function _unit_panels(unit::SemanticUnit, layers)
+    panels = Pair{Symbol,Vector{SemanticUnitLayer}}[]
+    for layer in layers
+        source = _unit_source(unit, layer.name)
+        at = findfirst(p -> first(p) === source, panels)
+        isnothing(at) ? push!(panels, source => [layer]) : push!(last(panels[at]), layer)
+    end
+    panels
+end
 
 # A bare unit in a page would print its layers to every reader.
 for T in (SemanticUnit, SemanticUnits)
@@ -345,8 +366,15 @@ function _unit_anchor_for(doc::SemanticUnits, target::AbstractString, audience, 
     id in doc.shows[(audience, view)] || return nothing
     isnothing(layer) && return id
     declared = findfirst(l -> l.name === layer, doc.layers)
-    !isnothing(declared) && haskey(unit.layers, layer) && _unit_visible(doc.layers[declared], audience, view) ?
-        _unit_layer_anchor(id, layer) : id
+    !isnothing(declared) && haskey(unit.layers, layer) && _unit_visible(doc.layers[declared], audience, view) || return id
+    isnothing(view) || return _unit_layer_anchor(id, layer)
+    # Among all layers, a panel several layers share has the first one's address.
+    source = _unit_source(unit, layer)
+    for panel in doc.layers
+        haskey(unit.layers, panel.name) && _unit_visible(panel, audience, view) &&
+            _unit_source(unit, panel.name) === source && return _unit_layer_anchor(id, panel.name)
+    end
+    id
 end
 
 # A Markdown link inside a layer to a unit this reader cannot reach keeps its
@@ -410,16 +438,18 @@ end
 # One layer of a unit. Read alone it is just its content. Among other layers the
 # first is shown under its label and the others open under theirs; what a public
 # export leaves out says so inside, where a closed control does not repeat it.
-function _unit_panel(v::_UnitView, unit::SemanticUnit, layer::SemanticUnitLayer, count)
-    content = _unit_as_children(_unit_content(v, unit.layers[layer.name]))
-    anchor = _unit_layer_anchor(unit.id, layer.name)
-    attrs = (; data_htmxo_unit_layer=String(layer.name))
+function _unit_panel(v::_UnitView, unit::SemanticUnit, source::Symbol, layers, count)
+    content = _unit_as_children(_unit_content(v, unit.layers[source]))
+    first_layer = first(layers)
+    anchor = _unit_layer_anchor(unit.id, first_layer.name)
+    # Only the layers this reader may read: a public reader's file names no others.
+    attrs = (; data_htmxo_unit_layer=join((String(l.name) for l in layers), " "))
     class = "htmxo-unit-layer"
     isnothing(v.layer) || return _UnitPart(content; anchor, class, attrs)
-    marked = v.audience !== :public && !layer.public
+    marked = v.audience !== :public && !any(l -> l.public, layers)
     body = marked ? Any[private(content)] : content
-    label = count > 1 || layer.name !== v.base ? layer.label : ""
-    collapsed = layer.name === v.base ? nothing : true
+    label = count > 1 || first_layer.name !== v.base ? join((l.label for l in layers), " · ") : ""
+    collapsed = first_layer.name === v.base ? nothing : true
     _UnitPart(body; anchor, class, attrs, label, collapsed, link=_unit_permalink(v, anchor))
 end
 
@@ -432,7 +462,8 @@ function _unit_node(v::_UnitView, unit::SemanticUnit)
     body = Any[]
     !isnothing(unit.meta) && v.audience !== :public && isnothing(v.layer) &&
         push!(body, _UnitPart(Any[private(unit.meta)]; class="htmxo-unit-meta"))
-    foreach(l -> push!(body, _unit_panel(v, unit, l, length(layers))), layers)
+    panels = _unit_panels(unit, layers)
+    foreach(p -> push!(body, _unit_panel(v, unit, first(p), last(p), length(panels))), panels)
     # A layer that stands alone (an offer's approved wording) gets nothing added.
     annotated = isempty(layers) || any(l -> !l.standalone, layers)
     annotated && push!(body, _unit_references(v, unit))
@@ -635,9 +666,15 @@ unit_script() = h.script(Raw(raw"""
   function beforeReveal(anchor) {
     document.dispatchEvent(new CustomEvent('htmxo:unit-before-reveal', { detail: parsed(anchor) }));
   }
+  // A layer sharing another's panel has that panel as its place.
   function unitElement(anchor) {
     var el = document.getElementById(anchor);
-    return el && el.closest('[data-htmxo-unit]') ? el : null;
+    if (el) return el.closest('[data-htmxo-unit]') ? el : null;
+    var p = parsed(anchor);
+    if (!p.layer) return null;
+    return all('[data-htmxo-unit-layer~="' + p.layer.replace(/["\\\\]/g, '') + '"]').filter(function (l) {
+      return l.closest('[data-htmxo-unit]').getAttribute('data-htmxo-unit') === p.id;
+    })[0] || null;
   }
   // A view belongs to a scope: the nearest `data-htmxo-unit-scope`, else the
   // page. Only what is directly in a scope follows its control.
@@ -686,7 +723,7 @@ unit_script() = h.script(Raw(raw"""
     }
     units.forEach(function (u) { u.hidden = true; });
     layers.forEach(function (l) {
-      var match = l.getAttribute('data-htmxo-unit-layer') === next;
+      var match = l.getAttribute('data-htmxo-unit-layer').split(' ').indexOf(next) >= 0;
       l.hidden = !match;
       if (!match) return;
       if (l.tagName === 'DETAILS') autoOpen(l);
@@ -716,7 +753,7 @@ unit_script() = h.script(Raw(raw"""
   function detailOf(el) {
     var unit = el.closest('[data-htmxo-unit]'), panel = el.closest('[data-htmxo-unit-layer]');
     return { id: unit ? unit.getAttribute('data-htmxo-unit') : null,
-             layer: panel ? panel.getAttribute('data-htmxo-unit-layer') : null };
+             layer: panel ? panel.getAttribute('data-htmxo-unit-layer').split(' ')[0] : null };
   }
   function reveal(x) {
     var el = x;

@@ -1901,6 +1901,12 @@ pdf_report(unit_tree(DOC; layer=:deep), "vertiefung.pdf"; title="Vertiefung", la
   `unit_tree` lowers the units to the ordinary vocabulary ([`SemanticSection`](@ref),
   [`private`](@ref), `<details>`), and every format, a static export and a PDF treat
   them as they treat those.
+- **Content several layers share** names its layer: `layers=(; offer=tabelle, short=:offer,
+  deep=:offer)`. Read alone each layer has it, so a short-only export keeps a table it
+  explains. Among all layers it stands once, under the labels of the layers sharing it,
+  so nothing repeats and a link to `#id--short` lands there. Who may read it follows each
+  layer's own `public`: a citation in a public layer stays public, and the same words
+  named by a private layer add no second copy.
 - **Layer and audience are separate.** `layer=` chooses what is read; the page's
   audience chooses who reads. A layer reaches a public reader only with `public=true`.
   Everything else, its labels, the switch, and the ids and titles of units with

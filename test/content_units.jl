@@ -263,6 +263,51 @@ end
     @test occursin("AP 1: Faktoren", s) && !occursin("AP 1: Faktoren", html(tree, :public))
 end
 
+@testitem "a layer can say what another says: once together, whole alone" setup=[UnitFixtures] tags=[:unit] begin
+    using HTMXObjects
+    # A generated table that short and deep explanations hang under, and a citation
+    # the short layer repeats while the deep layer adds a note (ODLPlaus K5, 77 units).
+    d = SemanticUnits([
+        SemanticUnit("tabelle"; title="Tabelle K5", layers=(; offer=SemanticTable((Posten=["ROHZEILE"],)), short=:offer, deep=:offer),
+            open=true, children=[SemanticUnit("erkl"; title="Erklärung", layers=(; short="KURZ-ERKL", deep="TIEF-ERKL"))]),
+        SemanticUnit("quelle"; title="Quelle A", layers=(; offer="ZITAT", short=:offer, deep=["ZITAT", "NOTIZ"])),
+        SemanticUnit("zeiger"; title="Zeiger", layers=(; short="[Tabelle](#tabelle--short)", deep="[Quelle](#quelle--deep)"), references=["tabelle--short"])]; layers=LAYERS)
+    count_of(s, w) = length(collect(eachmatch(Regex(w), s)))
+    # Together: once, and for a reader with one layer no label at all.
+    m = md(unit_tree(d); audience=:private)
+    @test count_of(m, "ROHZEILE") == 1 && count_of(m, "ZITAT") == 2
+    @test occursin("**Angebot · Kurzfassung**", m) && occursin("**Vertiefung**", m)
+    # All three share the table: one panel, one place, nothing to label.
+    @test !occursin("Angebot · Kurzfassung · Vertiefung", m)
+    h = html(unit_tree(d), :private)
+    @test count_of(h, "ROHZEILE") == 1 && !occursin("id=\"tabelle--short\"", h)
+    @test occursin("id=\"tabelle--offer\" data-htmxo-unit-layer=\"offer short deep\"", h)
+    @test occursin("id=\"quelle--offer\" data-htmxo-unit-layer=\"offer short\"", h)
+    # A panel shared with a public layer is not marked as private; the deep layer is.
+    @test !occursin("id=\"tabelle--offer\" data-htmxo-unit-layer=\"offer short deep\"><div class=\"htmxo-private", h)
+    # Alone: complete in each layer, with no mark on a table a public layer has too
+    # beyond the one a private read carries.
+    for (layer, words) in ((:offer, ["ROHZEILE", "ZITAT"]), (:short, ["ROHZEILE", "KURZ-ERKL", "ZITAT"]), (:deep, ["ROHZEILE", "TIEF-ERKL", "ZITAT", "NOTIZ"]))
+        alone = md(unit_tree(d; layer); audience=:private)
+        @test all(w -> occursin(w, alone), words)
+        @test count_of(alone, "ROHZEILE") == 1
+        layer === :offer || @test occursin("::: {#tabelle--$layer}", alone)
+    end
+    # A public reader: the public layer, and no other layer's name in the file.
+    p = html(unit_tree(d), :public)
+    @test occursin("data-htmxo-unit-layer=\"offer\"", p) && !occursin("short", p) && !occursin("deep", p)
+    @test count_of(p, "ROHZEILE") == 1 && !occursin("NOTIZ", p) && !occursin("KURZ-ERKL", p)
+    # A link to a sharing layer lands on the panel among all layers, on its own in one.
+    @test occursin("[Tabelle](#tabelle--offer)", m) && occursin("#tabelle--short", md(unit_tree(d; layer=:short); audience=:private))
+    @test occursin("Tabelle K5 (Angebot)", m)
+    @test occursin("#tabelle--offer", html(unit_reference(d, "tabelle--short"), :private))
+    @test occursin("#tabelle--short", html(unit_reference(d, "tabelle--short"; layer=:short), :private))
+    # Naming nothing, or a layer that itself only names another, cannot hide.
+    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; short=:offer))]; layers=LAYERS)
+    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; offer=:short, short=:offer))]; layers=LAYERS)
+    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; offer="o", short=:offer, deep=:short))]; layers=LAYERS)
+end
+
 @testitem "a title with Markdown's marks is its text, and keeps its anchor" setup=[UnitFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
@@ -466,6 +511,8 @@ end
             "/export" => repr("text/html", static_transform(htmx(h.main(unit_tree(DOC)); assets=:vendor, runtime=:linked,
                 pico_version=HTMXObjects._PICO_VERSION), StaticExport(; audience=:private))),
             "/frag" => rendered(shell(h.div(; id="spaet", hx_get="/fragment", hx_trigger="load")), :private),
+            "/shared" => rendered(shell(unit_tree(SemanticUnits([SemanticUnit("geteilt"; title="Geteilt", layers=(; offer="ROH", short=:offer, deep=:offer),
+                children=[SemanticUnit("kind"; title="Kind", layers=(; short="k", deep="t"))])]; layers=LAYERS))), :private),
             "/scopes" => rendered(shell(h.div(
                 h.div(; data_htmxo_unit_scope="")(unit_view_control(side("a"); param="erste"), unit_tree(side("a"); control=false)),
                 h.div(; data_htmxo_unit_scope="")(unit_view_control(side("b"); param="zweite"), unit_tree(side("b"); control=false)))), :private))
@@ -622,6 +669,17 @@ end
                     @test wait_for(b, "window.htmxoUnits.view(document.getElementById('a-eins')) === null")
                     @test address() == "/scopes?zweite=short#a-eins--offer"
                     @test evaluate(b, "window.htmxoUnits.view(document.getElementById('b-eins'))") == "short"
+
+                    # A panel several layers share: the layer view keeps it, and a link
+                    # to a layer sharing it, which has no element of its own, lands there.
+                    @test load("$base/shared?layer=short")
+                    @test wait_for(b, "window.htmxoUnits.view() === 'short'")
+                    @test seen("geteilt--offer") == "true"
+                    @test load("$base/shared#geteilt--deep")
+                    @test wait_for(b, "document.getElementById('geteilt--offer').getClientRects().length > 0")
+                    @test closed_around("geteilt--offer") == "0" && closed_around("kind") == "1"
+                    @test load("$base/shared#kind--deep")
+                    @test wait_for(b, "document.getElementById('kind--deep').open")
 
                     # The events a page uses to make way: before the lookup on the
                     # document, then on the target before anything opens.
