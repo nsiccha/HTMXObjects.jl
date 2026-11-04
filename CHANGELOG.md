@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.52
+
+- `pdf_report`: a letter with a combining mark and no precomposed form (`R̂`,
+  written `R` and U+0302) reads once in the PDF's text layer, as on the page.
+  Typst writes such a letter twice, `R̂R̂` in `pdftotext` and to anything else
+  that reads the text layer, while veraPDF and PAC pass the file
+  (typst/typst#8767). `pdf_report` now corrects the finished PDF. The pages
+  stay pixel for pixel, and a report without such a letter stays byte for
+  byte. It warns, naming the letter, when the font draws one with more glyphs
+  than it has code points, and leaves that letter as Typst wrote it.
+
 ## 0.1.51
 
 - `export_site` can render pages concurrently (keyword `parallel`), as many

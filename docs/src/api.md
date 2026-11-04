@@ -1167,6 +1167,16 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   cell and `SemanticTable` for a line break in a value. Pandoc's Typst writer
   drops raw HTML, so the two lines ran together (`27.26825.501–28.966`); a
   bundled filter reads every `<br>` as a line break.
+- **Letters with combining marks** read once in the text layer, as on the page:
+  `R̂` (`R` and U+0302), `x̄`, or a Vietnamese or DIN 91379 letter written with
+  separate marks. Typst writes such a letter twice, so `pdftotext` read
+  `R̂R̂ ≤ 1,011`, and veraPDF and PAC do not flag it
+  ([typst/typst#8767](https://github.com/typst/typst/issues/8767)). `pdf_report`
+  corrects the finished PDF: the pages stay as they are, and a report without
+  such a letter stays byte for byte. It warns, naming the letter, when the font
+  draws one with more glyphs than it has code points, and leaves that letter as
+  Typst wrote it. A reader that ignores ActualText still reads a letter of a
+  right-to-left script twice.
 
 Validate the result with veraPDF (`verapdf --flavour ua1 bericht.pdf`) or PAC.
 Whether the alt texts describe the figures and the reading order makes sense

@@ -19363,6 +19363,14 @@ pdf_report(md, "konzept.pdf"; title="Konzept", lang="de-DE", base_url=snapshot,
            url_map = a -> startswith(a, "/api/") ? "\$snapshot/\$(snapshot_file(a))" : nothing)
 ```
 
+A letter with a combining mark and no precomposed form (`"R̂"`, written `R` and
+U+0302) reads once in the PDF's text layer, as on the page. Typst alone writes
+such a letter twice (typst/typst#8767), so `pdf_report` corrects the finished PDF;
+the pages stay as they are. It warns, naming the letter, when the font draws one
+with more glyphs than it has code points, and leaves that letter as Typst wrote
+it. A reader that ignores ActualText still reads a letter of a right-to-left
+script twice.
+
 Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
 alt texts and the reading order are still yours to check by hand.
 
@@ -19409,6 +19417,7 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
             occursin(_PDFUA1_MARKER, read(pdf, String)) || error(
                 "pdf_report: Quarto wrote a PDF that does not declare PDF/UA-1, so its Typst does not apply " *
                 "`pdf-standard: ua-1`; use a newer Quarto (verified: 1.10.18). Quarto's output:\n$log")
+            _pdf_repair_text_layer!(pdf)
             mkpath(dirname(abspath(pdf_path)))
             mv(pdf, pdf_path; force=true)
         finally
@@ -34318,6 +34327,7 @@ function compose_box(name; value="", placeholder="", draft_key=nothing, rows=1, 
 end
 
 include("live_thread.jl")
+include("pdf_text_layer.jl")
 include("pdf_panel.jl")
 include("card_deck.jl")
 
