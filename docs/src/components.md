@@ -1947,7 +1947,11 @@ pdf_report(unit_tree(DOC; layer=:deep), "vertiefung.pdf"; title="Vertiefung", la
 
 Not provided: a reference to a unit on another page (write the link in the layer's
 content); keeping every open layer across a reload (the address holds the last one
-opened). A check that a layer's text is in fact what was approved is the author's.
+opened); a named destination for a unit without a heading. In a PDF every link to a
+unit lands, but Typst names headings only, so from outside the file
+`report.pdf#nameddest=<id>` works for a unit with a heading and not for an untitled
+`standalone` paragraph. A check that a layer's text is in fact what was approved is
+the author's.
 
 ### `card_deck` — a searchable deck of cards, as a grid or one at a time {#card-deck}
 

@@ -35,6 +35,11 @@ failing at render with a `MethodError`.
   `htmxo:unit-before-reveal` and `htmxo:unit-reveal` events
   (`unit_script`). Every `htmx()` page carries `unit_script` and `unit_styles`,
   inert without units.
+- The Markdown of a `SemanticSection` or `SemanticCard` title, a `SemanticLink`
+  label and a `SemanticDisclosure` summary escapes `*` and a `_` at a word's edge.
+  These are plain text and HTML shows them as written. An unmatched `*` also ran
+  Pandoc's emphasis over the heading's `{#anchor}`, so `pdf_report` refused every
+  link to `H*(10)`. A `?plain` reader now sees `H\*(10)` there.
 
 ## 0.1.54
 

@@ -263,6 +263,27 @@ end
     @test occursin("AP 1: Faktoren", s) && !occursin("AP 1: Faktoren", html(tree, :public))
 end
 
+@testitem "a title with Markdown's marks is its text, and keeps its anchor" setup=[UnitFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    # As HTML shows them. An unmatched `*` runs Pandoc's emphasis over the line's
+    # `{#id}`, which became text, and Typst refused every link to it (ODLPlaus,
+    # `Luftkerma, H*(10) und Geräteanzeige`, 77 units on 42bb0b7).
+    m(x) = repr("text/markdown", x)
+    @test m(SemanticSection("H*(10) a"; anchor="x")) == "## H\\*(10) a {#x}"
+    @test m(SemanticCard("H*(10)"; anchor="y")) == "### H\\*(10) {#y}"
+    @test m(SemanticLink("H*(10)", "#x")) == "[H\\*(10)](#x)"
+    @test startswith(m(SemanticDisclosure("H*(10)", "z")), "**H\\*(10)**")
+    # A `_` at a word's edge opens emphasis too; inside a word it means nothing.
+    @test m(SemanticSection("_rand und snake_case_"; anchor="x")) == "## \\_rand und snake_case\\_ {#x}"
+    # What is written as code stays code.
+    @test m(SemanticLink("a*b", "#x"; code=true)) == "[`a*b`](#x)"
+    # Without either mark the bytes are what they were.
+    @test m(SemanticSection("Titel – mit [Klammern] & Zeichen"; anchor="x")) == "## Titel – mit [Klammern] & Zeichen {#x}"
+    # HTML writes the text as it is.
+    @test occursin("<h2>H*(10) a</h2>", repr("text/html", SemanticSection("H*(10) a")))
+end
+
 @testitem "a reference is a link, and only to what its reader can reach" setup=[UnitFixtures] tags=[:unit] begin
     using HTMXObjects
     link(r, a) = html(r, a)
@@ -410,6 +431,13 @@ end
             @test occursin("TIEF-C2", deep) && occursin("tief_kern_code", deep) && !occursin("KURZ-", deep)
             both = text(build(unit_tree(DOC), "all.pdf"; audience=:private))
             @test occursin("Kurzfassung", both) && occursin("KURZ-INTERN", both) && occursin("nicht öffentlich", both)
+            # A title Pandoc would read as emphasis keeps its anchor: a link to it
+            # resolves, in a view and in the document as a whole.
+            marks = SemanticUnits([
+                SemanticUnit("ziel"; title="Luftkerma, H*(10) und Anzeige", layers=(; deep="TIEF-ZIEL")),
+                SemanticUnit("leser"; title="Leser", layers=(; deep="Siehe [dort](#ziel)."), references=["ziel"])]; layers=LAYERS)
+            read_marks = text(build(unit_tree(marks; layer=:deep), "marks.pdf"; audience=:private))
+            @test occursin("H*(10)", read_marks) && occursin("TIEF-ZIEL", read_marks) && !occursin("{#", read_marks)
             # An offer of its own, for a private reader too, has no mark.
             offer = text(build(unit_tree(DOC; layer=:offer), "offer.pdf"; audience=:private))
             @test !occursin("nicht öffentlich", offer) && occursin("Rechenkern ist", offer)

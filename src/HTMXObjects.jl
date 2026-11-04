@@ -4294,6 +4294,14 @@ _markdown_anchor_attr(anchor::AbstractString) =
     occursin(r"^[\p{L}\p{N}_.:-]+$", anchor) ? "{#$anchor}" :
     "{id=\"" * replace(anchor, '\\' => "\\\\", '"' => "\\\"", r"\R" => " ") * "\"}"
 
+# A title or a label is text, and HTML shows it as written, so Markdown must too.
+# An unmatched `*`, or a `_` at the edge of a word, also opens Pandoc's emphasis,
+# which runs to the end of the line: a heading's `{#anchor}` then becomes text and
+# Typst refuses every link to it (`H*(10) {#x}`). A `_` inside a word stays as it
+# is, where it means nothing and reads better.
+_markdown_plain_text(text::AbstractString) =
+    replace(replace(text, '*' => "\\*"), r"(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])" => "\\_")
+
 # Appended to a heading line: the heading carries its element's anchor.
 _markdown_heading_anchor(anchor::AbstractString) =
     isempty(anchor) ? "" : " " * _markdown_anchor_attr(anchor)
@@ -5253,7 +5261,7 @@ Base.show(io::IO, ::MIME"text/markdown", status::SemanticStatus) = print(
 
 Base.show(io::IO, mime::MIME"text/markdown", card::SemanticCard) =
     _semantic_heading(_semantic_card_level()) do level
-        print(io, _semantic_heading_sigil(level), " ", card.title,
+        print(io, _semantic_heading_sigil(level), " ", _markdown_plain_text(card.title),
             _markdown_heading_anchor(card.anchor))
         _shows_nothing(card.children, _ambient_audience()) || print(io, "\n\n")
         _semantic_show_children(io, mime, card.children, "\n\n")
@@ -5274,7 +5282,7 @@ Base.show(io::IO, ::MIME"text/markdown", metric::SemanticMetric) =
 # The exit glyph stays outside the code span: it marks the exit, not the
 # identifier — the same split the HTML peer draws with `<code>`.
 function Base.show(io::IO, ::MIME"text/markdown", link::SemanticLink)
-    label = link.code ? _semantic_inline_code(link.label) : link.label
+    label = link.code ? _semantic_inline_code(link.label) : _markdown_plain_text(link.label)
     print(io, "[", label, link.external ? " ↗" : "", "](", string(link.target), ")")
 end
 
@@ -5314,7 +5322,7 @@ end
 
 Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_opening_level(section)) do level
-        print(io, _semantic_heading_sigil(level), " ", section.title,
+        print(io, _semantic_heading_sigil(level), " ", _markdown_plain_text(section.title),
             _markdown_heading_anchor(section.anchor))
         _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
         _semantic_show_children(io, mime, section.children, "\n\n")
@@ -5329,7 +5337,7 @@ Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
 function Base.show(io::IO, mime::MIME"text/markdown",
                    disclosure::SemanticDisclosure)
     _shows_nothing(disclosure, _ambient_audience()) && return
-    print(io, "**", disclosure.summary, "**\n\n")
+    print(io, "**", _markdown_plain_text(disclosure.summary), "**\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 

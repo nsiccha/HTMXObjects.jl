@@ -291,7 +291,7 @@ end
 function Base.show(io::IO, mime::MIME"text/markdown", p::_UnitPart)
     _shows_nothing(p.children, _ambient_audience()) && return
     isempty(p.anchor) || print(io, "::: ", _markdown_anchor_attr(p.anchor), "\n\n")
-    p.label_text && !isempty(p.label) && print(io, "**", p.label, "**\n\n")
+    p.label_text && !isempty(p.label) && print(io, "**", _markdown_plain_text(p.label), "**\n\n")
     _semantic_show_children(io, mime, p.children, "\n\n")
     isempty(p.anchor) || print(io, "\n\n:::")
 end
