@@ -41,6 +41,10 @@ failing at render with a `MethodError`.
   These are plain text and HTML shows them as written. An unmatched `*` also ran
   Pandoc's emphasis over the heading's `{#anchor}`, so `pdf_report` refused every
   link to `H*(10)`. A `?plain` reader now sees `H\*(10)` there.
+- A table cell spanning columns counts them: it sorts under its first column, its row
+  is not ordered by the columns it only covers, and a CSV leaves those blank, so
+  later cells stay in their columns. Before, a later cell sorted and exported one
+  column too far left. Tables without a `colspan` are unchanged.
 - A table in `render_markdown` or `SemanticProse` sits in a `.table-wrap` like every
   other table: one wider than its column scrolls there instead of running over what
   holds it (a card, a `<details>`, half a table row).

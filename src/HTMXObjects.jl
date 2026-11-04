@@ -20061,6 +20061,17 @@ sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
 # its `table_runtime` block (`htmx(...; tables=true)`).
 _table_runtime_js() = h.script(Raw(_table_runtime_text()))
 _table_runtime_text() = raw"""
+// The cell that starts at a column. A cell spanning columns counts under its
+// first, and a row has none at the others, so it is not ordered by them.
+function htmxoCellAt(row, col) {
+    let at = 0;
+    for (const cell of row.cells) {
+        if (at === col) return cell;
+        at += cell.colSpan;
+        if (at > col) return undefined;
+    }
+    return undefined;
+}
 function sortTable(col, th) {
     // Accept sortTable(th): with a single <th> element, use its leaf-column
     // marker in a grouped header, else its position in the header row. Lets a
@@ -20083,7 +20094,7 @@ function sortTable(col, th) {
     // detail row) from being treated as primaries.
     const all = Array.from(tbody.querySelectorAll(':scope > tr'));
     const isCompanion = r => r.id && r.id.startsWith('detail-');
-    const primaries = all.filter(r => !isCompanion(r) && r.cells.length > col);
+    const primaries = all.filter(r => !isCompanion(r) && htmxoCellAt(r, col));
     const companions = htmxoTableCompanions(all);
     const asc = th.dataset.sortDir !== 'asc';
     th.dataset.sortDir = asc ? 'asc' : 'desc';
@@ -20110,7 +20121,7 @@ function sortTable(col, th) {
     const key = keys ? Number(th.dataset.htmxoSortKey || 0) : 0;
     const keyed = new Map();
     const keyOf = row => {
-        if (!keyed.has(row)) keyed.set(row, htmxoSortValue(row.cells[col], key, keys.length, sortKey));
+        if (!keyed.has(row)) keyed.set(row, htmxoSortValue(htmxoCellAt(row, col), key, keys.length, sortKey));
         return keyed.get(row);
     };
     // Two texts that start with the same number compare as whole texts, each
@@ -20122,8 +20133,8 @@ function sortTable(col, th) {
         const c = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
         return asc ? c : -c;
     } : (a, b) => {
-        const av = sortKey(a.cells[col]);
-        const bv = sortKey(b.cells[col]);
+        const av = sortKey(htmxoCellAt(a, col));
+        const bv = sortKey(htmxoCellAt(b, col));
         const an = parseFloat(av), bn = parseFloat(bv);
         // `an - bn` is 0 for the same number and NaN for two infinities: both tie.
         const c = !isNaN(an) && !isNaN(bn) ? (an - bn) || natural(av, bv) : av.localeCompare(bv);
@@ -20149,7 +20160,7 @@ function sortTable(col, th) {
         });
         const visit = parent => {
             const rows = siblings.get(parent) || [];
-            rows.sort((a, b) => a.cells.length > col && b.cells.length > col ? compare(a, b) : 0);
+            rows.sort((a, b) => htmxoCellAt(a, col) && htmxoCellAt(b, col) ? compare(a, b) : 0);
             rows.forEach(r => { append(r); visit(r.id); });
         };
         visit('');
@@ -22524,8 +22535,16 @@ function downloadTableCsv(btn, filename) {
         td.dataset.htmxoInterval ? JSON.parse(td.dataset.htmxoInterval) : [text(td), '', ''];
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
-        .map(tr =>
-            Array.from(tr.cells).flatMap((td, i) => fields(td, i).map(esc)).join(','));
+        .map(tr => {
+            // A cell spanning columns keeps the others in theirs: what it covers is blank.
+            let col = 0;
+            return Array.from(tr.cells).flatMap(td => {
+                const out = fields(td, col).map(esc);
+                for (let i = 1; i < td.colSpan; i++) out.push(...(bounds[col + i] ? ['', '', ''] : ['']));
+                col += td.colSpan;
+                return out;
+            }).join(',');
+        });
     const csv = [headers.join(','), ...rows].join('\n');
     const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
     const url = URL.createObjectURL(blob);
@@ -24147,6 +24166,9 @@ the user came to see (a question + answer brief, for example).
   pattern is what [`sortable_table_styles`](@ref) and the
   `sortable_table_js` companion-pair lookup key off; classes are for
   app-side styling on top.
+- A master cell may span columns (`h.td(…; colspan="2")`): it sorts under its first
+  column (`data_sort_value` as for any cell), its row is not ordered by the columns
+  it only covers, and CSV leaves those blank, so later cells stay in their columns.
 - `master_attrs`: iterable of `name => value` pairs (or a NamedTuple)
   for extra attributes on the master `<tr>` (`data_status`, `data_aid`,
   `data_activity`, `data_sort_value`, …). Note: HTML attribute names
