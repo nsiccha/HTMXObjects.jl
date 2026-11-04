@@ -14,6 +14,19 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.53
+
+- A slow row update (`master_detail_table(...; update_rows)` or `update_groups`)
+  no longer leaves its interim poller on the page. The rows landed in the table
+  and no swap replaced the poller, so it stayed in the request's `hx-target` for
+  good, its running tree showing and its badge going stale. It now leaves when
+  the rows land, and the target has what it held before, as after a direct
+  answer. A row the poller stood in for (`hx-target="closest tr"`) goes back
+  before it is updated. Under `serve`'s default operation stream the pushed
+  answer has to reach the table first, which takes Treebars 0.1.5.
+- A poller that a later request's poller replaced no longer comes back when that
+  one leaves. What it displaced does.
+
 ## 0.1.52
 
 - `pdf_report`: a letter with a combining mark and no precomposed form (`R̂`,
