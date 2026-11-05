@@ -22,6 +22,8 @@ using TestItemRunner
             at: post-render
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_FIGURES_FILTER))
             at: post-render
+          - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_LABELS_FILTER))
+            at: post-render
           - $(HTMXObjects._yaml_string(filter))
           - $(HTMXObjects._yaml_string(images))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
@@ -32,7 +34,7 @@ using TestItemRunner
         # Ergebnisse
         """
     @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
-          isfile(HTMXObjects._PDF_REPORT_CODE_TYPST) &&
+          isfile(HTMXObjects._PDF_REPORT_CODE_TYPST) && isfile(HTMXObjects._PDF_REPORT_LABELS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER)
 end
@@ -504,6 +506,79 @@ end
                                  author="Autorin https://example.org/autorin/"))
             @test uris(read(titled, String)) == sort(["https://example.org/odl/", "https://www.example.org/karte",
                                                       "mailto:info@example.de", "https://example.org/autorin/"])
+        end
+    end
+end
+
+@testitem "pdf_report keeps semantic labels with their body across pages" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        marker(name) = "`#context [#metadata(here().page()) <$name>]`{=typst}"
+        label(text, name) = "::: {.htmxo-label}\n**$text** $(marker(name))\n:::\n\n"
+        body = "### Definition $(marker("heading"))\n\nFirst paragraph $(marker("body"))\n"
+        function placement(md, lead; filtered=true, paragraph_spacing="1.2em")
+            mktempdir() do dir
+                filters = filtered ? ["--lua-filter", HTMXObjects._PDF_REPORT_LABELS_FILTER] : String[]
+                typst = read(pipeline(`$quarto pandoc --from markdown --to typst $filters`;
+                                     stdin=IOBuffer(md)), String)
+                doc = joinpath(dir, "labels.typ")
+                write(doc, "#set page(width: 300pt, height: 200pt, margin: 20pt)\n",
+                      "#set par(spacing: $paragraph_spacing)\n#v($(lead)pt)\n", typst)
+                out = IOBuffer()
+                run(pipeline(`$quarto typst eval "query(metadata).map(it => it.value)" --in $doc`;
+                             stdout=out, stderr=out))
+                parse.(Float64, split(match(r"\[([\d.,\s]*)\]", String(take!(out))).captures[1], ','))
+            end
+        end
+        short = label("Short label", "label") * body
+        @test placement(short, 95) == [1, 1, 1]
+        # Room for the label alone: without the rule it is stranded; with the
+        # rule the label, heading and first paragraph move together.
+        @test placement(short, 120; filtered=false) == [1, 2, 2]
+        @test placement(short, 120) == [2, 2, 2]
+        # Bold-only prose is not a semantic label and keeps its own pagination.
+        prose = "**Short label** $(marker("label"))\n\n" * body
+        @test placement(prose, 120) == placement(prose, 120; filtered=false)
+        wrapped = label("A longer label that wraps across several lines with enough words to fill the line", "label") * body
+        @test placement(wrapped, 105) == [2, 2, 2]
+        nested = label("Outer label", "outer") * short
+        @test placement(nested, 120) == [2, 2, 2, 2]
+        long = short * join("\nParagraph $i $(marker("row"))\n" for i in 1:40)
+        pages = placement(long, 120)
+        @test pages[1:3] == [2, 2, 2]
+        @test issorted(pages) && last(pages) > 3
+
+        # Keep the label's paragraph spacing, including a document's smaller
+        # spacing. The block default otherwise adds gaps and even extra pages.
+        pos = "`#context [#metadata(here().position().y / 1pt)]`{=typst}"
+        plain_label = "**Label** $pos\n\n"
+        marked_label = "::: {.htmxo-label}\n**Label** $pos\n:::\n\n"
+        @test last(placement("Before\n\n" * marked_label * "After $pos", 0; paragraph_spacing="0.55em")) ≈
+              last(placement("Before\n\n" * plain_label * "After $pos", 0; paragraph_spacing="0.55em"))
+
+        # Exercise the actual Markdown producer and Quarto's post-render
+        # filter stage, including the PDF structure and all of a long body.
+        mktempdir() do dir
+            content = tabset("Outer tab" => SemanticDisclosure("Nested label",
+                SemanticSection("Definition", (SemanticProse("Paragraph $i.") for i in 1:70)...)))
+            out = joinpath(dir, "labels.pdf")
+            @test pdf_report(content, out; title="Labels", lang="en-GB") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) && occursin("/StructTreeRoot", bytes)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text of each page"
+            else
+                texts = split(read(`pdftotext -enc UTF-8 -layout $out -`, String), '\f'; keepempty=false)
+                onpage(pattern) = findall(t -> occursin(pattern, t), texts)
+                @test onpage("Outer tab") == onpage("Nested label") == onpage("Definition") == onpage("Paragraph 1.")
+                @test all(i -> length(onpage("Paragraph $i.")) == 1, 1:70)
+                @test only(onpage("Paragraph 70.")) > only(onpage("Paragraph 1."))
+                @test !occursin("htmxo-label", join(texts))
+            end
         end
     end
 end

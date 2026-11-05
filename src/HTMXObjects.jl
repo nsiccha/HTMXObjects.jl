@@ -4274,6 +4274,9 @@ body. Wrapping semantic children in markup instead would force the entire
 subtree down the HTML→Markdown translation path and lose every peer projection
 underneath it.
 
+The Markdown label is bold text in a `::: {.htmxo-label}` block. `pdf_report`
+keeps it with the start of its body; the body can continue across pages.
+
 A disclosure with nothing to open renders nothing in any format, its label
 included. That covers a disclosure with no children, one holding only `nothing`,
 and one whose [`private`](@ref) content has no stand-in for a public reader.
@@ -5427,7 +5430,7 @@ Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
 function Base.show(io::IO, mime::MIME"text/markdown",
                    disclosure::SemanticDisclosure)
     _shows_nothing(disclosure, _ambient_audience()) && return
-    print(io, "**", _markdown_plain_text(disclosure.summary), "**\n\n")
+    print(io, "::: {.htmxo-label}\n**", _markdown_plain_text(disclosure.summary), "**\n:::\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
@@ -19146,6 +19149,10 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 # to Typst as written.
 const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
 
+# A semantic disclosure's label must travel with the start of its body, not
+# stand alone at a page bottom. Only the label is sticky; the body can break.
+const _PDF_REPORT_LABELS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-labels.lua")
+
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
 # this Quarto filter gives each one its TeX source.
 const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
@@ -19406,6 +19413,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
         at: post-render
       - path: $(_yaml_string(_PDF_REPORT_FIGURES_FILTER))
         at: post-render
+      - path: $(_yaml_string(_PDF_REPORT_LABELS_FILTER))
+        at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
       - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
@@ -19432,7 +19441,11 @@ is one tagged Code element with a paragraph per line, in the colours of
 Quarto's `arrow` theme; a blank line in it is kept on the page and left out of
 the tags. Quarto's own highlighting tagged each token as a Code element of its
 own, and PAC (PDF Accessibility Checker) warned about the empty and
-whitespace-only ones.
+whitespace-only ones. Semantic disclosure labels (including eager tabs and
+master-detail labels) stay with the start of their body. Their Markdown marks
+the label alone with `::: {.htmxo-label}`; the body can continue across pages.
+Regenerate saved Markdown to get these markers. Ordinary bold prose keeps its
+own pagination.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region
