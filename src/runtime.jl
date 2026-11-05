@@ -897,8 +897,10 @@ _dynamicobjects_queue(name::Symbol) = getproperty(DynamicObjects, name)
 # layer's page-language and audience scopes into that process
 # (`carry_to_worker!`, 0.5.8), without which a worker-bound body would render
 # private content and the page's words as for an anonymous reader. Both are
-# probed, so no version is pinned here: `workers=1` is offered only when it is
-# correct.
+# probed, so `workers=1` is offered only when it is correct. Since 0.1.71 the
+# `[compat]` floor, DynamicObjects 0.5.10, provides both, and also the worker
+# behaviour fresh request roots rely on: it builds each one there from that
+# root's own construction inputs, so a request's `@param` values reach it.
 _has_queue_workers() = _has_job_queue() &&
     isdefined(DynamicObjects, :carry_to_worker!) &&
     any(m -> :workers in Base.kwarg_decl(m),
@@ -937,15 +939,16 @@ With `workers=1`, every `@queued` computation runs in a worker process instead
 of on a `:default` thread of this one, so a heavy first-call compile, a GC pause
 or a deadlock in heavy work never stalls the pages, pollers and exports this
 process serves (the frontend/backend process split; design in brief
-HTMXObjects:process-split `wworuo`). DynamicObjects 0.5.8 runs one worker per
+HTMXObjects:process-split `wworuo`). DynamicObjects 0.5.10 runs one worker per
 process (`workers` is `0` or `1`): it addresses the request root by its
-construction inputs, keeps a body that reads `__req__` in this process with one
-warning (pass what such a body needs as arguments), rebuilds the worker's
-progress tree under the computation's node so the operation's poller shows it
-unchanged, brings `send_ahead` parts and log records back, and binds the
-answer's page language and audience around the computation, so `page_lang()`
-and `private` read in the worker as they do here. The default `0` keeps every
-computation in this process.
+construction inputs, the request's `@param` values among them, keeps a body
+that reads `__req__` in this process with one warning (pass what such a body
+needs as arguments), rebuilds the worker's progress tree under the
+computation's node so the operation's poller shows it unchanged, brings
+`send_ahead` parts and log records back, and binds the answer's page language
+and audience around the computation, so `page_lang()` and `private` read in the
+worker as they do here. The default `0` keeps every computation in this
+process.
 
 `worker_stall=s` (default `Inf`, off) has a watchdog restart the worker when a
 computation has been in flight for `s` seconds with no progress frame, no
