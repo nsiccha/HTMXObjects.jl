@@ -14,6 +14,20 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.60
+
+- `pdf_report` tags a code block as one Code element, with a paragraph per line.
+  Quarto's highlighting tagged each token as a Code element of its own, an empty
+  one for every line and a whitespace-only one for every space between two
+  coloured tokens, and PAC's Quality tab warned "Tagged text consists of only
+  whitespace" for each (103 in BRM's six-page model view). The colours stay those
+  of Quarto's `arrow` theme; which words are coloured now follows Typst's grammar
+  for the language, and code lines are set slightly closer. A blank line in a
+  code block is kept on the page and left out of the tags.
+  **Breaking:** `metadata=` can no longer set `syntax-highlighting` or
+  `highlight-style` (an `ArgumentError`): each of Quarto's themes brings the
+  warnings back. Remove the key.
+
 ## 0.1.59
 
 - `staticfiles(folder, mountdir; bundle=true)` serves a finished site, such as an

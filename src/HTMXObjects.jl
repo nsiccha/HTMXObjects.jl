@@ -19162,6 +19162,14 @@ const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto"
 # than its column, and let a captioned table break across pages.
 const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
 
+# Quarto's Skylighting writes each token of a code block as an inline `raw` and
+# each line end as `raw("\n")`, which Typst tags as a Code element each: an empty
+# one per line and a whitespace-only one per space between tokens, which PAC
+# reports (snag review-the-brm-m-68c151e1). `pdf_report` asks for Typst's own
+# code blocks instead, one Code element with a paragraph per line; these rules
+# keep Skylighting's colours and leave a blank line out of the tags.
+const _PDF_REPORT_CODE_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-code.typ")
+
 # Typst reads the date Pandoc writes as markup, so `22. Oktober 2026` became a
 # numbered list; this filter writes the date as text, the date text of
 # `_PDF_REPORT_DATE_TEXT_KEY` when there is one.
@@ -19240,6 +19248,10 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "from" => "pdf_report reads the Markdown with web and mail addresses linked, as PAC requires",
     "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "filters" => "pdf_report runs the filter that gives equations alt text",
+    "syntax-highlighting" => "pdf_report sets code with Typst, which tags a code block as one Code element; " *
+        "Quarto's themes tag each token as its own, and PAC reports the empty and whitespace-only ones",
+    "highlight-style" => "pdf_report sets code with Typst, which tags a code block as one Code element; " *
+        "Quarto's themes tag each token as its own, and PAC reports the empty and whitespace-only ones",
     _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
     _PDF_REPORT_BASE_URL_KEY => "pass the address as `base_url=`",
     _PDF_REPORT_URL_MAP_KEY => "pass the function as `url_map=`",
@@ -19387,7 +19399,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
       typst:
         from: $(_PDF_REPORT_READER)
         pdf-standard: [ua-1]
-        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST))]
+        syntax-highlighting: idiomatic
+        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST)), $(_yaml_string(_PDF_REPORT_CODE_TYPST))]
     filters:
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
@@ -19414,7 +19427,12 @@ input is Markdown, typically a page's own projection: a `value` such as an
 it is. Tables, figures and captions keep their structure: header rows become
 table header cells, captions stay attached to their table or figure. A table
 longer than the rest of its page continues on the next, its header row
-repeated, and a caption above it moves along with its first rows.
+repeated, and a caption above it moves along with its first rows. A code block
+is one tagged Code element with a paragraph per line, in the colours of
+Quarto's `arrow` theme; a blank line in it is kept on the page and left out of
+the tags. Quarto's own highlighting tagged each token as a Code element of its
+own, and PAC (PDF Accessibility Checker) warned about the empty and
+whitespace-only ones.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region
@@ -19437,8 +19455,8 @@ dates, vectors, and NamedTuples or dictionaries for nested options
 (`margin=(x="2cm", y="2cm")`). The paper is the one `lang`'s region uses: US
 Letter for the regions Unicode CLDR lists for it (US, CA, MX and others in the
 Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
-`format`, `from`, `pdf-standard` and `filters` belong to `pdf_report` and cannot
-be set through `metadata`. The Markdown itself must not carry a YAML metadata
+`format`, `from`, `pdf-standard`, `filters`, `syntax-highlighting` and
+`highlight-style` belong to `pdf_report` and cannot be set through `metadata`. The Markdown itself must not carry a YAML metadata
 block: Quarto would let it override `title`, `lang` and the equation filter.
 
 `date` is printed in the title block. A `Date` or `DateTime`, an ISO date
