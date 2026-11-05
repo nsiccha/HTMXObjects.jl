@@ -1205,7 +1205,9 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `Kontaminationswahrscheinlichkeit` in a narrow column; a word that fits on
   the next line moves there whole. Quarto's template justified table cells
   too, which stretched narrow cells with wide gaps and split words such as
-  `Me-dian`. Code is never hyphenated, so a code span wider than its column
+  `Me-dian`. Identifiers can break after underscore runs, including in inline
+  code, without inserting a character into the PDF's text. Code is never
+  hyphenated, so a code span with no break opportunity wider than its column
   runs into the next one.
 - **Code blocks** are one tagged Code element each, with a paragraph per line,
   in the colours of Quarto's `arrow` theme, each of which keeps WCAG's contrast

@@ -21,6 +21,10 @@
     if text.hyphenate != false and measure(word).width > room.to-absolute() { text(hyphenate: true, word) } else { word }
   }
   show raw: set text(hyphenate: false)
+  // Identifiers have no language hyphenation points. An empty inline box
+  // permits a break after an underscore run without adding a character to
+  // the PDF's text (a zero-width space would survive copy/paste).
+  show regex("_+"): it => it + box(width: 0pt)
   cell
 })
 
