@@ -10,6 +10,7 @@ using TestItemRunner
     import HTMXObjects: h, Raw
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
         InlineSiteApp, QueriedSiteApp, StationSiteApp, TypedSiteApp, ParallelSiteApp, MOST_RENDERING,
+        BundleSiteApp, finished_bundle, plain_folder,
         bundle_files, bundle_tree, subdirectory_misses
 
     const KS = (3.0, 4.0)
@@ -215,6 +216,40 @@ using TestItemRunner
         @get parallel_part(; k::Int=0) = rendering(() -> h.p("Teil $k"))
     end
 
+    # A finished bundle another process wrote (snag `private-prebuilt-1136df2c`:
+    # ODLPlaus serves BRM's exported model view from /modelldefinition): its
+    # pages link their styles and scripts relatively, a stylesheet loads a font,
+    # and a script loads a file no markup names.
+    function finished_bundle()
+        dir = mktempdir()
+        mkpath(joinpath(dir, "assets")); mkpath(joinpath(dir, "teil"))
+        write(joinpath(dir, "model.html"), "<!doctype html><html><head>" *
+              "<link rel=\"stylesheet\" href=\"assets/style.css\"><script src=\"assets/tabs.js\"></script>" *
+              "</head><body><a href=\"teil/index.html\">Teil</a></body></html>")
+        write(joinpath(dir, "assets", "style.css"), "@font-face { src: url(font.woff2); }")
+        write(joinpath(dir, "assets", "font.woff2"), "wOF2")
+        write(joinpath(dir, "assets", "tabs.js"), "fetch('assets/tabs.json');")
+        write(joinpath(dir, "assets", "tabs.json"), "{}")
+        write(joinpath(dir, "teil", "index.html"), "<!doctype html><html><head>" *
+              "<link rel=\"stylesheet\" href=\"../assets/style.css\"></head><body>Teil</body></html>")
+        dir
+    end
+    # An ordinary folder whose page names a file the folder lacks, by a name
+    # the export's root happens to hold (the app's own vendor mount).
+    function plain_folder()
+        dir = mktempdir()
+        write(joinpath(dir, "seite.html"), "<!doctype html><html><head>" *
+              "<script src=\"vendor/htmx.min.js\"></script></head><body>Seite</body></html>")
+        dir
+    end
+    @htmx struct BundleSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div(h.h1("Start"),
+            h.a("Modell"; href=base * "/bundle_ansicht/model.html"),
+            h.a("Teil"; href=base * "/bundle_ansicht/teil"))
+    end
+
     # Every file of the bundle, relative to its root, with `/` between
     # directories (as a static server addresses it, also on Windows).
     bundle_files(dir) = sort!([replace(relpath(joinpath(d, f), dir), '\\' => '/')
@@ -333,6 +368,70 @@ end
     kept = joinpath(mktempdir(), "kept")
     export_site(kept; pages=["/"], controls=:disable)
     @test occursin(r"<button[^>]*id=\"neu\"[^>]*disabled", read(joinpath(kept, "index.html"), String))
+end
+
+@testitem "a bundle mount is exported whole, and a private mount only for private readers" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    # Snag `private-prebuilt-1136df2c`: a finished offline bundle served from
+    # a mount used to be exported as the one page a link named, without its
+    # styles and scripts, and the reference check passed it because it looked
+    # its relative links up in the root.
+    using Treebars
+    bundle = finished_bundle()
+    staticfiles(bundle, "bundle_ansicht"; bundle=true, private=true)
+    dynamicfiles(bundle, "bundle_dynamisch"; bundle=true, private=true)
+    staticfiles(plain_folder(), "bundle_einfach")
+    route!(BundleSiteApp())
+    vendorfiles()
+
+    # Live, a private reader gets the files; a public answer is a private page's.
+    r = dispatch(:GET, "/bundle_ansicht/model.html"; audience=:private)
+    @test r.status == 200 && r.body == read(joinpath(bundle, "model.html"))
+    for mount in ("bundle_ansicht", "bundle_dynamisch")
+        r = dispatch(:GET, "/$mount/model.html")
+        @test r.status == 404 && HTTP.header(r, "X-HTMXO-Private") == "true" && isempty(r.body)
+    end
+    # A folder's address without its slash redirects, relative to itself, so
+    # its page's relative links resolve in the folder; a public reader is not
+    # told the folder exists.
+    r = dispatch(:GET, "/bundle_ansicht/teil?x=1"; audience=:private)
+    @test r.status == 308 && HTTP.header(r, "Location") == "teil/?x=1"
+    r = dispatch(:GET, "/bundle_ansicht/teil/"; audience=:private)
+    @test r.status == 200 && r.body == read(joinpath(bundle, "teil", "index.html"))
+    @test dispatch(:GET, "/bundle_ansicht/teil").status == 404
+
+    # A private export writes every file of the bundle at its path, byte for
+    # byte, the one only its script loads included, and links the folder's
+    # index.html; every reference resolves where a browser looks it up.
+    dir = joinpath(mktempdir(), "site")
+    export_site(dir; pages=["/"], audience=:private)
+    files = bundle_files(dir)
+    for f in bundle_files(bundle)
+        @test "bundle_ansicht/" * f in files
+        @test read(joinpath(dir, "bundle_ansicht", f)) == read(joinpath(bundle, f))
+    end
+    index = read(joinpath(dir, "index.html"), String)
+    @test occursin("href=\"bundle_ansicht/model.html\"", index)
+    @test occursin("href=\"bundle_ansicht/teil/index.html\"", index)
+    @test isempty(subdirectory_misses(dir))
+
+    # A public export writes none of it and leaves out the links to it.
+    pub = joinpath(mktempdir(), "site")
+    export_site(pub; pages=["/"])
+    @test !any(startswith("bundle_ansicht/"), bundle_files(pub))
+    @test !occursin("bundle_ansicht", read(joinpath(pub, "index.html"), String))
+
+    # An ordinary mount's page is written as it answers, at its path, without
+    # following its links, and the check looks them up where they point: the
+    # root's vendor/htmx.min.js is not the bundle_einfach/vendor/htmx.min.js
+    # the page loads.
+    err = try
+        export_site(joinpath(mktempdir(), "site"); pages=["/", "/bundle_einfach/seite.html"]); nothing
+    catch e
+        e
+    end
+    @test err isa StaticSiteIncomplete
+    @test isempty(err.failed)
+    @test err.unresolved == ["bundle_einfach/seite.html" => "vendor/htmx.min.js"]
 end
 
 @testitem "export_site fails listing every failed answer and every unresolved reference" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin

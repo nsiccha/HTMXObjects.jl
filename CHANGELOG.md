@@ -14,6 +14,30 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.59
+
+- `staticfiles(folder, mountdir; bundle=true)` serves a finished site, such as an
+  `export_site` bundle another process wrote, and `export_site` writes all of it: once
+  the crawl reaches any of its files, every file of the folder is written at its own path,
+  byte for byte, including the files only its scripts load. Before, an app that served
+  such a bundle and exported itself got the one page its link named, without the
+  page's styles and scripts (snag `private-prebuilt-1136df2c`).
+- `staticfiles(...; private=true)` (and `dynamicfiles`) serves the folder to private
+  readers only: a public answer is a private page's empty `404` (`X-HTMXO-Private:
+  true`), so a public `export_site` writes none of it and leaves out the elements that
+  link it.
+- The reference check of `export_site` looks a relative address up where a browser
+  resolves it: in the folder of the HTML file that names it (for a fragment below
+  `hx/`, the folder of the page that shows it). It used to look it up in the root, so a
+  page written below the root passed while its links pointed at nothing.
+  **Breaking:** an export that passed that way now fails, naming each such reference.
+- A mounted folder's `index.html` answers at the folder's address with a trailing
+  slash; the address without one redirects (`308`) there, relative to itself, so the
+  page's relative links resolve inside the folder. An export writes it as
+  `<mount>/index.html`, and links to the folder name that file.
+  **Breaking:** a client that does not follow redirects gets the `308` for the
+  address without the slash; request the address with it.
+
 ## 0.1.58
 
 - `pdf_report` sets math wherever the browser does. `\(…\)` and `\[…\]` lost their
