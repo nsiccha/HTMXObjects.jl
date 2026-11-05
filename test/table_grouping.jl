@@ -2177,7 +2177,7 @@ end
     # names its group row, its leaf row and, after the table, that leaf's detail.
     md = to_markdown_string(grouped(group_by="party", group_summary=["Amount" => ColumnSummary(:sum, t -> t.amount)]))
     @test contains(md, "-100") && !contains(md, "template") && count("Acme Prime", md) == 3
-    @test contains(md, "\n\n**Acme Prime**\n\nmemo 3\n\n")
+    @test contains(md, "\n\n::: {.htmxo-label}\n**Acme Prime**\n:::\n\nmemo 3\n\n")
     # Refused: an unknown reduce, digits or sigdigits (outside 1 to 15, the
     # digits the browser rounds exactly), digits and sigdigits together, the
     # wrong number of functions, a column that is not a header, every column
