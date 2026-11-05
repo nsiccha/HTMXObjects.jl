@@ -805,7 +805,8 @@ end
         # page: without the rule each is a paragraph of its own, and with it every
         # word stays where it was.
         rules = read(HTMXObjects._PDF_REPORT_CODE_TYPST, String)
-        without = replace(rules, r"(?s)#show raw\.where\(block: true\): it => \{.*?\n\}\n" => "")
+        # `\R`: a Windows checkout writes the file with CRLF line ends
+        without = replace(rules, r"(?s)#show raw\.where\(block: true\): it => \{.*?\R\}\R" => "")
         @test without != rules
         compiled(rules) = mktempdir() do dir
             doc = joinpath(dir, "c.typ")
