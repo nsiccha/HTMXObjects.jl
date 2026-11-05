@@ -2196,6 +2196,17 @@ derived from another by translation. Elements nest, and a child that is not an
 element is shown through its OWN `show`, which is what lets a DynamicObjects
 node or an AlgebraOfVega layer drop in with no registration at all.
 
+An HTML node among them (a [`tabset`](components.md#tabset), a layout
+`h.div`, a `render_table`) has no plain-text `show` of its own, so plain text
+writes its text, laid out in the blocks its Markdown has and with no markup:
+a tabset is each tab's label over its content (a lazy tab `Label (/address)`),
+a link `label (target)` as `SemanticLink` writes it, a table one tab-separated
+line per row as `SemanticTable` writes it, a list item `- item`, an image its
+`alt`. Scripts, styles and buttons write nothing, as in Markdown, and the
+semantic elements inside write their own plain peers. Earlier versions
+printed such a node in `repr("text/plain", section)` as Julia's
+`Node(:div, OrderedDict(…))` (see the CHANGELOG for the version that changed it).
+
 | Element | Holds |
 |---------|-------|
 | `SemanticProse(markdown; math=true)` | A run of prose, authored as Markdown; its TeX math is typeset |

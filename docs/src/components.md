@@ -1637,6 +1637,11 @@ has it. A label that is not text reads as its words. This holds for `?plain`,
 `to_markdown_string` and a direct `repr("text/markdown", …)` alike. The HTML
 does not change.
 
+The plain-text peer of semantic content that holds a tabset
+(`repr("text/plain", SemanticSection(…, tabset(…)))`) reads the same way
+without the markup: each label on its own line over its content, and a lazy
+tab as `Ergebnisse (/ergebnisse)`.
+
 ### `comparison_view` — tabs and selectable comparison columns {#comparison-view}
 
 ```julia
