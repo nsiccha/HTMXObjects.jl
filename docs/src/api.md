@@ -898,6 +898,30 @@ recursion helpers for override authors; `parser_rules=` registers extra
 CommonMark parser rules, and `render_markdown(::CommonMark.Node)` renders an
 already-parsed tree.
 
+### Julia documentation {#julia-documentation}
+
+Pass a Julia doc object directly to `SemanticProse`:
+
+```julia
+SemanticProse(@doc(sum); references=Dict("reduce" => "/api/reduce"))
+```
+
+For `Markdown.MD` input, documentation references such as ``[`reduce`](@ref)``
+use the supplied `references` dictionary. Its string keys name the reference:
+the label for bare `@ref`, or the explicit target in `@ref target`,
+``@ref `Base.sum` ``, or `@ref "A heading"`. Values are ordinary destination
+URLs. An unresolved reference retains its formatted label without a link;
+HTMXObjects does not evaluate names or guess a documentation site's URLs.
+The copied document becomes ordinary Markdown shared by HTML, text, Markdown
+and report projections. The original doc object is unchanged; Julia's Markdown
+writer may normalize whitespace. Doctest blocks retain their complete contents
+and use Julia syntax highlighting.
+
+String input still means authored CommonMark: `SemanticProse(string(doc))`
+preserves that source, including any `@ref` links. Use the doc-object overload
+when displaying Julia documentation. Authored `jldoctest` fences also use Julia
+highlighting in HTML, while their Markdown source stays unchanged.
+
 ### Math in Markdown {#markdown-math}
 
 `render_markdown`, and with it every `SemanticProse`, typesets TeX math: `$…$`
