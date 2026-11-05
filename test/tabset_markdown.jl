@@ -23,7 +23,7 @@ end
 
     ts = tabset("A" => h.p("a"), "B" => h.p("b"))
     md = to_markdown_string(ts)
-    @test md == "**A**\n\na\n\n**B**\n\nb\n\n"
+    @test md == "::: {.htmxo-label}\n**A**\n:::\n\na\n\n::: {.htmxo-label}\n**B**\n:::\n\nb\n\n"
     # No tab bar: neither a list of the labels nor the restore script.
     @test !contains(md, "- A") && !contains(md, "htmxoTabset")
     # A direct `repr` (a consumer's own `show`) reads the same.
@@ -31,21 +31,21 @@ end
 
     # A lazy tab has no content on the page: its label links its address.
     lazy_md = to_markdown_string(tabset("Eager" => h.p("here"), "Lazy" => "/api/lazy"; id="ts"))
-    @test lazy_md == "**Eager**\n\nhere\n\n**[Lazy](/api/lazy)**"
+    @test lazy_md == "::: {.htmxo-label}\n**Eager**\n:::\n\nhere\n\n**[Lazy](/api/lazy)**"
 
     # A label that is not text reads as its words; one with none leaves its
     # content without a label.
     @test startswith(to_markdown_string(tabset(h.span(h.strong("Güte"), " (K-40)") => h.p("g"))),
-        "**Güte (K-40)**\n\ng")
+        "::: {.htmxo-label}\n**Güte (K-40)**\n:::\n\ng")
     @test to_markdown_string(tabset(h.span() => h.p("bare"), "B" => h.p("b"))) ==
-        "bare\n\n**B**\n\nb\n\n"
+        "bare\n\n::: {.htmxo-label}\n**B**\n:::\n\nb\n\n"
 
     # Several values in one tab are its content, in order.
-    @test to_markdown_string(tabset("V" => [h.p("one"), h.p("two")])) == "**V**\n\none\n\ntwo\n\n"
+    @test to_markdown_string(tabset("V" => [h.p("one"), h.p("two")])) == "::: {.htmxo-label}\n**V**\n:::\n\none\n\ntwo\n\n"
 
     # A tab whose content strips to nothing (only a form) goes with its label.
     form_md = to_markdown_string(tabset("Edit" => h.form(h.textarea("raw source")), "View" => h.p("v")))
-    @test form_md == "**View**\n\nv\n\n"
+    @test form_md == "::: {.htmxo-label}\n**View**\n:::\n\nv\n\n"
 end
 
 @testitem "a tabset's Markdown follows its reader's audience" setup=[TabsetMarkdown] tags=[:unit] begin
@@ -57,11 +57,11 @@ end
                 "Kurz" => private(h.p("lang"); public=h.p("kurz")))
     public = to_markdown_string(ts; audience=:public)
     @test !contains(public, "Modelldefinition") && !contains(public, "wohnflaeche")
-    @test public == "**Überblick**\n\nBayes-Regression der Nettokaltmiete.\n\n**Kurz**\n\nkurz\n\n"
+    @test public == "::: {.htmxo-label}\n**Überblick**\n:::\n\nBayes-Regression der Nettokaltmiete.\n\n::: {.htmxo-label}\n**Kurz**\n:::\n\nkurz\n\n"
     own = to_markdown_string(ts; audience=:private)
-    @test contains(own, "**Modelldefinition**\n\n")
+    @test contains(own, "::: {.htmxo-label}\n**Modelldefinition**\n:::\n\n")
     @test contains(own, "```julia\nmu ~ 1 + wohnflaeche\n```")
-    @test contains(own, "**Kurz**\n\n") && contains(own, "lang")
+    @test contains(own, "::: {.htmxo-label}\n**Kurz**\n:::\n\n") && contains(own, "lang")
 end
 
 @testitem "a tabset's labels sit inside its section's level" setup=[TabsetMarkdown] tags=[:unit] begin
@@ -80,19 +80,25 @@ end
     @test md == """
         ## Mietspiegelmodell {#tender-model-mietmodell}
 
+        ::: {.htmxo-label}
         **Überblick**
+        :::
 
         Bayes-Regression.
 
         - **Konvergenz:** R̂ 1,004
 
+        ::: {.htmxo-label}
         **Verwendet in**
+        :::
 
         | LB | Anforderung |
         | --- | --- |
         | 1 | Mietspiegel |
 
+        ::: {.htmxo-label}
         **Details**
+        :::
 
         ### Priors
 

@@ -457,10 +457,10 @@ end
     # `SemanticDisclosure` writes its summary and body.
     eager = md_table(; detail=r -> SemanticProse("detail for $(r.id)"))
     @test markdown(eager) == rows *
-        "\n**LB § 3.2**\n\ndetail for lb-3-2\n\n**LB § 5.1**\n\ndetail for lb-5-1"
+        "\n::: {.htmxo-label}\n**LB § 3.2**\n:::\n\ndetail for lb-3-2\n\n::: {.htmxo-label}\n**LB § 5.1**\n:::\n\ndetail for lb-5-1"
     section = markdown(md_table(; detail=r -> SemanticSection("AP 2: Modell",
         Any[SemanticProse("**LB § 3.2**"), SemanticProse("> quote")])))
-    @test startswith(section, rows * "\n**LB § 3.2**\n\n## AP 2: Modell\n\n**LB § 3.2**\n\n> quote\n\n**LB § 5.1**\n\n")
+    @test startswith(section, rows * "\n::: {.htmxo-label}\n**LB § 3.2**\n:::\n\n## AP 2: Modell\n\n**LB § 3.2**\n\n> quote\n\n::: {.htmxo-label}\n**LB § 5.1**\n:::\n\n")
     # The HTML keeps every companion row; the details are not repeated.
     html = repr("text/html", eager)
     @test count("<tr id=\"detail-", html) == 2
@@ -468,21 +468,21 @@ end
     @test !contains(html, "**")
     # What follows the table starts its own paragraph.
     @test markdown(h.div(eager, h.p("after"))) ==
-        rows * "\n**LB § 3.2**\n\ndetail for lb-3-2\n\n**LB § 5.1**\n\ndetail for lb-5-1\n\nafter\n\n"
+        rows * "\n::: {.htmxo-label}\n**LB § 3.2**\n:::\n\ndetail for lb-3-2\n\n::: {.htmxo-label}\n**LB § 5.1**\n:::\n\ndetail for lb-5-1\n\nafter\n\n"
     # A label is its words: no link target or emphasis, html_only left out.
     linked = md_table(; master=r -> (h.td(h.a(h.strong(r.lb); href="/x/$(r.id)"), h.small(" (1)"),
                                           html_only(h.span(" badge"))), h.td(r.ap)),
                       detail=r -> h.p("linked $(r.id)"))
-    @test contains(markdown(linked), "\n\n**LB § 3.2 (1)**\n\nlinked lb-3-2\n\n**LB § 5.1 (1)**\n\nlinked lb-5-1")
+    @test contains(markdown(linked), "\n\n::: {.htmxo-label}\n**LB § 3.2 (1)**\n:::\n\nlinked lb-3-2\n\n::: {.htmxo-label}\n**LB § 5.1 (1)**\n:::\n\nlinked lb-5-1")
     # A captioned table's details follow its figure.
     captioned = markdown(md_table(; detail=r -> h.p("cap $(r.id)"), caption=CaptionSpec(; title="Completeness"), id="req"))
-    @test endswith(captioned, "**Completeness**\n:::\n\n**LB § 3.2**\n\ncap lb-3-2\n\n**LB § 5.1**\n\ncap lb-5-1")
+    @test endswith(captioned, "**Completeness**\n:::\n\n::: {.htmxo-label}\n**LB § 3.2**\n:::\n\ncap lb-3-2\n\n::: {.htmxo-label}\n**LB § 5.1**\n:::\n\ncap lb-5-1")
     @test !contains(captioned, "| cap ")
     # Grouped header columns, the label button, search and selection.
     for kw in ((; header_groups=["Both" => 1:2]), (; detail_toggle=:label),
                (; searchable=true, selectable="sel", id="ss"))
         md = markdown(md_table(; detail=r -> h.p("d $(r.id)"), kw...))
-        @test endswith(md, "\n\n**LB § 3.2**\n\nd lb-3-2\n\n**LB § 5.1**\n\nd lb-5-1")
+        @test endswith(md, "\n\n::: {.htmxo-label}\n**LB § 3.2**\n:::\n\nd lb-3-2\n\n::: {.htmxo-label}\n**LB § 5.1**\n:::\n\nd lb-5-1")
         @test count("\n|", md) == 3
     end
     # A hierarchy: every row's detail, branches included, in row order.
@@ -491,7 +491,7 @@ end
     @test markdown(master_detail_table(["Name", "Val"], tree; key=r -> r.id, master,
             children=r -> r.kids, detail=r -> h.p("tree $(r.id)"))) ==
         "| Name | Val |\n| --- | --- |\n| Root |  |\n| Leaf 1 | x |\n| Leaf 2 | y |\n\n" *
-        "**Root**\n\ntree root\n\n**Leaf 1**\n\ntree leaf1\n\n**Leaf 2**\n\ntree leaf2"
+        "::: {.htmxo-label}\n**Root**\n:::\n\ntree root\n\n::: {.htmxo-label}\n**Leaf 1**\n:::\n\ntree leaf1\n\n::: {.htmxo-label}\n**Leaf 2**\n:::\n\ntree leaf2"
     @test markdown(master_detail_table(["Name", "Val"], tree; key=r -> r.id, master,
             children=r -> r.kids, detail_url=r -> isempty(r.kids) ? "/t/$(r.id)" : nothing)) ==
         "| Name | Val |\n| --- | --- |\n| Root |  |\n| Leaf 1 | x |\n| Leaf 2 | y |\n\n"
@@ -499,7 +499,7 @@ end
     @test markdown(md_table(; detail=r -> h.p("grp $(r.id)"),
             groupings=["Group" => r -> r.grp, "None" => nothing])) ==
         "| LB | Abschnitt |\n| --- | --- |\n| **A** (2) |  |\n| LB § 3.2 | AP 2 |\n| LB § 5.1 |  |\n" *
-        "| **B** (1) |  |\n| LB § 3.2 | AP 2 |\n\n**LB § 3.2**\n\ngrp lb-3-2\n\n**LB § 5.1**\n\ngrp lb-5-1"
+        "| **B** (1) |  |\n| LB § 3.2 | AP 2 |\n\n::: {.htmxo-label}\n**LB § 3.2**\n:::\n\ngrp lb-3-2\n\n::: {.htmxo-label}\n**LB § 5.1**\n:::\n\ngrp lb-5-1"
     # Hand-built pairs in a `sortable_table`: no one-cell rows either.
     pairs = Any[]
     for r in items

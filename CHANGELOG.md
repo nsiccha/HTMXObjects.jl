@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.61
+
+- `pdf_report` keeps a `SemanticDisclosure` label with the start of its body,
+  including eager tab labels and master-detail labels. A label could previously
+  stand alone at the bottom of a page while its first heading and content moved
+  to the next. Labels remain bold text, without adding a heading level, and long
+  bodies continue across pages. Their Markdown now encloses the label alone in
+  `::: {.htmxo-label}`; ordinary bold paragraphs keep their pagination. Lazy-tab
+  links and empty disclosures keep their existing projection.
+  **Breaking:** Markdown bytes include this fence. Regenerate saved Markdown to
+  get the repair, and account for the fence if comparing or parsing the old form.
+
 ## 0.1.60
 
 - `pdf_report` tags a code block as one Code element, with a paragraph per line.

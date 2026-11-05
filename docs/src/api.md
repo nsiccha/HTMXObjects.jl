@@ -1150,6 +1150,12 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   inappropriate use of a 'Figure' structure element"). An image within a line
   of text, such as an icon, stays in its paragraph, and PAC still warns about
   it: Typst tags every image as a block figure (todo `14awnkw`).
+- **Disclosure and tab labels** stay with the start of their body, including
+  a heading followed by its first paragraph. The Markdown marks the bold label
+  alone with `::: {.htmxo-label}`; the body remains free to continue across pages.
+  This also covers eager master-detail labels. Ordinary bold paragraphs have
+  no such rule. Regenerate saved Markdown to get these markers and pagination;
+  previously exported Markdown has no way to distinguish labels from bold prose.
 - **Long tables:** a table longer than the rest of its page continues on the
   next page, with its header row repeated on each page. A caption above a table
   moves to the next page with its first rows rather than stay alone at the
@@ -2259,6 +2265,8 @@ Four points where a projection is deliberately not a translation of the HTML:
   viewport to collapse into, so their correct projection is the label followed
   by the whole body. Wrapping the children in markup instead would force the
   subtree down the HTML→Markdown path and lose every peer projection under it.
+  Markdown encloses the bold label alone in `::: {.htmxo-label}`, so `pdf_report`
+  keeps it with the start of its body without adding a document heading level.
   A disclosure with nothing to open renders nothing in any format, label
   included. That covers a disclosure with no children, one holding only
   `nothing`, and one whose [`private`](#private-content) content has no
