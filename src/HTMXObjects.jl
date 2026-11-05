@@ -14304,51 +14304,19 @@ end
 
 # --- Worker-bound computations: the HTMXObjects half of the process split ----
 #
-# With `configure_job_queue!(; workers=n)`, DynamicObjects runs `@queued`
-# computations in worker processes (its worker executor; design in brief
-# HTMXObjects:process-split `wworuo`). A worker never saw the request, so a
-# route body there cannot read `__req__`; what the page is for travels as plain
-# values instead: the mount prefix (a construction input of the worker's view),
-# the page language and the audience (the scopes `page_lang()` and `private`
-# read). `_worker_context` and `_with_worker_context` are the two ends of that
-# contract, and DynamicObjects carries the values between them.
-
-# The context of the answer being produced, as plain values. `__prefix__` is
-# applied as a construction input of the worker's view; `lang` and `audience`
-# are re-established around the computation by `_with_worker_context`.
-_worker_context(prefix::AbstractString) =
-    (; __prefix__=String(prefix), lang=page_lang(), audience=_AUDIENCE[])
-_worker_context(context::OperationContext) = _worker_context(context.prefix)
-
-# Run `f` in a worker as the requesting answer would: its language, prefix and
-# audience are the request's. `context` is what `_worker_context` produced.
-function _with_worker_context(f, context::NamedTuple)
-    meta = _page_meta()
-    meta = merge(meta, (; lang=get(context, :lang, meta.lang),
-                        prefix=get(context, :__prefix__, meta.prefix)))
-    ScopedValues.with(f, _PAGE_META => meta,
-                      _AUDIENCE => get(context, :audience, _AUDIENCE[]))
-end
-
-# Whether a route's body reads the request, itself or through a property it
-# reads. The reads are visible statically: the route's `__req__` and
-# `__route__` are injected properties, so a bare read of either is a dependency
-# in DynamicObjects' graph.
-_reads_request(T::Type, name::Symbol) =
-    name in DynamicObjects.dependents(T, :__req__) ||
-    name in DynamicObjects.dependents(T, :__route__)
-
-# Whether a route's computation may run in a worker: it is `@queued`, and it
-# does not read the request. A `@queued` route that reads it computes in this
-# process, and says so once.
-function _worker_eligible(T::Type, name::Symbol, queued::Bool)
-    queued || return false
-    _reads_request(T, name) || return true
-    @warn("`@queued` $(T).$(name) reads the request (`__req__` or `__route__`), " *
-          "so it computes in this process, not in a worker; pass what it needs " *
-          "from the request as arguments.", maxlog=1, _id=Symbol(T, :., name))
-    false
-end
+# With `configure_job_queue!(; workers=1)`, DynamicObjects 0.5.7 runs `@queued`
+# computations in a worker process (its worker executor; design in brief
+# HTMXObjects:process-split `wworuo`). DynamicObjects owns what crosses: it
+# addresses the request root by its construction inputs minus `__req__` (so a
+# body that reads the request computes here, with one warning of its own),
+# rebuilds the worker's progress tree under the computation's node (a Treebars
+# replica, so the operation's poller shows it unchanged), and carries requester
+# messages (`send_ahead` parts) and log records back. HTMXObjects' part is
+# `configure_job_queue!`, the `send_ahead` message, the runtime panel's worker
+# line and the stall watchdog (`src/runtime.jl`). The page language and
+# audience a worker-bound body renders under are DynamicObjects snag
+# `worker-scoped-va-a98632cc` (carried scoped values); until it lands, a body
+# in the worker renders as outside a request does.
 
 # Every background start goes through here: a memoized compute (through
 # `_PoolExecutor`), a fresh invocation, and a preload. The task inherits the
@@ -14400,29 +14368,20 @@ end
 # from the count the page's script sends with each poll). `sent_ahead_script()`
 # lands each part once, in order, whichever way it came.
 
-# The parts a worker-bound body sends (DynamicObjects' worker executor behind
-# `@queued`, `configure_job_queue!(; workers)`) have no page in that process:
-# its list hands each part to a function, the worker's channel back to the
-# requester, where `_receive_sent_ahead!` puts it on the operation's own list.
-struct _SentAheadForwarder
-    send::Any
-end
-
 mutable struct _SentAhead
     const lock::ReentrantLock
     const parts::Vector{String}
     bytes::Int
     # The list this one hands its parts to: the computation's own, when this
-    # one was bound for a start that joined it (`_sent_ahead_register!`); or
-    # the function a worker's parts leave through.
-    forward::Union{Nothing,_SentAhead,_SentAheadForwarder}
+    # one was bound for a start that joined it (`_sent_ahead_register!`).
+    forward::Union{Nothing,_SentAhead}
     # The operation streams that follow it: each is told its key when a part
     # is added.
     const watchers::Vector{Pair{Channel{String},String}}
     refused::Int
 end
-_SentAhead(; forward=nothing) = _SentAhead(ReentrantLock(), String[], 0, forward,
-                                           Pair{Channel{String},String}[], 0)
+_SentAhead() = _SentAhead(ReentrantLock(), String[], 0, nothing,
+                          Pair{Channel{String},String}[], 0)
 
 const _SENT_AHEAD = ScopedValues.ScopedValue{Union{Nothing,_SentAhead}}(nothing)
 
@@ -14495,10 +14454,26 @@ finished answer still lands. The page applies parts with the `htmx()` shell's
 """
 function send_ahead(content)
     sink = _SENT_AHEAD[]
-    sink === nothing && return nothing
+    if sink === nothing
+        # In a worker process (DynamicObjects' worker executor behind
+        # `@queued`, `configure_job_queue!(; workers=1)`) the operation's list
+        # lives in the requesting process: the part travels back as a
+        # requester message, and `_receive_sent_ahead!` puts it on that list
+        # there, in order with the computation's log records and before its
+        # result. Anywhere else without an operation, DynamicObjects calls the
+        # handler at once in this scope, which has no list either, so the part
+        # is dropped as before.
+        _has_requester_messages() || return nothing
+        DynamicObjects.send_to_requester(:htmxo_sent_ahead,
+            String(_message_body_bytes(to_response(content))))
+        return nothing
+    end
     _add_part!(sink, String(_message_body_bytes(to_response(content))))
     nothing
 end
+
+_has_requester_messages() = isdefined(DynamicObjects, :send_to_requester) &&
+    isdefined(DynamicObjects, :on_requester_message!)
 
 struct _SentAheadRefused <: Exception
     parts::Int
@@ -14562,23 +14537,12 @@ end
 
 _unwatch_sent_ahead!(sink::_SentAhead, events::Channel{String}) =
     lock(() -> (filter!(w -> first(w) !== events, sink.watchers); nothing), sink.lock)
-_unwatch_sent_ahead!(::Nothing, ::Channel{String}) = nothing
 
-# A forwarding list's parts leave this process at once: nothing here reads
-# them, and no operation stream can follow them.
-_add_part!(forwarder::_SentAheadForwarder, html::String) = (forwarder.send(html); nothing)
-_sent_ahead_parts(::_SentAheadForwarder, ::Integer) = Tuple{Int,String}[]
-_watch_sent_ahead!(::_SentAheadForwarder, ::Channel{String}, ::String) = nothing
-
-# Run `f` as a worker-bound computation's body: what it sends ahead goes to
-# `send(html::String)`, the channel back to the requesting process.
-_with_sent_ahead_forwarding(f, send) =
-    ScopedValues.with(f, _SENT_AHEAD => _SentAhead(; forward=_SentAheadForwarder(send)))
-
-# Receive a part a worker sent, inside the requesting operation's scope (the
-# one its computation was started in): it lands on that operation's list
-# exactly as `send_ahead` would have put it there. Outside one it is dropped,
-# as `send_ahead` outside an operation does nothing.
+# The handler for `:htmxo_sent_ahead` requester messages (registered in
+# `__init__`): a part a worker-bound body sent lands on the list of the
+# operation that started the computation, since DynamicObjects runs the
+# handler in that requester's scope. Outside an operation it is dropped, as
+# `send_ahead` outside an operation does nothing.
 function _receive_sent_ahead!(html::AbstractString)
     sink = _SENT_AHEAD[]
     sink === nothing || _add_part!(sink, String(html))
@@ -36650,6 +36614,9 @@ function __init__()
         (_managed_root_release_handler[] = nothing)
     # Record DynamicObjects' queued computations in the runtime ledger.
     _has_job_queue() && _dynamicobjects_queue(:observe_queue!)(_observe_queued!)
+    # A part a worker-bound body sends ahead comes back as a requester message.
+    _has_requester_messages() &&
+        DynamicObjects.on_requester_message!(_receive_sent_ahead!, :htmxo_sent_ahead)
 end
 
 end # module HTMXObjects

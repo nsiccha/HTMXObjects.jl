@@ -14,6 +14,21 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.66
+
+- `configure_job_queue!(; workers=1)` meets DynamicObjects 0.5.7's worker executor: a
+  `@queued` route or property computes in the worker process, its progress tree is rebuilt
+  live under the computation's node (the operation's poller shows it unchanged), and a part
+  it `send_ahead`s reaches the requesting operation's list as a DynamicObjects requester
+  message. `configure_job_queue!(; worker_stall=s)` adds a watchdog that restarts a worker
+  whose in-flight computations have been quiet (no progress frame, message or CPU time) for
+  `s` seconds, failing them with `ComputeAbandoned` and recording the event;
+  `job_queue_settings()` reports it. `runtime_snapshot().process.worker` and
+  `system_load_panel` show the worker's pid, in-flight count and last message. The
+  0.1.59 request-read guard and send-ahead forwarder, internal and unwired, are gone:
+  DynamicObjects keeps `__req__`-reading bodies local and carries the parts itself.
+  `[sources.Treebars]` is Treebars 0.1.6 (`e03f2c7`), which DynamicObjects 0.5.7 requires.
+
 ## 0.1.65
 
 - Semantic content that holds HTML nodes reads as text in plain text. A `tabset`,
