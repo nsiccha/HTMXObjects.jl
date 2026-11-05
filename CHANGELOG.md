@@ -14,6 +14,20 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.70
+
+- `--htmxo-disclosure-padding` is the inner spacing of the `<details>` it is set
+  on only. `pico_bridge` registers it as not inheriting (`@property`, universal
+  syntax, `inherits: false`), and the summary bar takes its spacing from its own
+  box. Before, a component that set the variable to 0 (as it must when it sets
+  its own `padding`) passed that 0 to every ordinary disclosure nested inside
+  it, whose bar and content then sat flush against its border. An unset
+  variable still means `1rem`, and every disclosure that sets it on itself
+  renders as before.
+- **Breaking** for a value set on a wrapper that is not a `<details>` (`.app {
+  --htmxo-disclosure-padding: … }`): it no longer reaches the disclosures inside.
+  Select the disclosures instead: `.app details { --htmxo-disclosure-padding: … }`.
+
 ## 0.1.69
 
 - A worker-bound body renders under the answer's page language and audience:

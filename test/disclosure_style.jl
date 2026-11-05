@@ -23,6 +23,13 @@ using TestItemRunner
     @test count(":has(> summary[role])", css) == 1
     @test contains(css, ":last-child:where(details:not(.dropdown) > *):where(:not(summary[role], summary[role] ~ *))")
     @test !contains(css, "margin-inline: calc(-1 * var(--htmxo-disclosure-padding")
+    # Snag followed-htmxo-s-6bd66da4: the spacing variable belongs to the box it
+    # is set on. It is registered as not inheriting, only the box's own rule
+    # reads it, and the bar takes the box's spacing from the inset it hands down.
+    @test contains(css, "@property --htmxo-disclosure-padding { syntax: \"*\"; inherits: false; }")
+    @test count("var(--htmxo-disclosure-padding", css) == 1
+    @test contains(css, "    padding: 0.6rem var(--htmxo-disclosure-inset);\n")
+    @test contains(css, "    margin-bottom: var(--htmxo-disclosure-inset);\n")
     # The caption's toggle is no longer faded.
     @test !contains(repr("text/html", caption_style()), "opacity")
     # Pages that load Pico carry it; pages without Pico do not.
@@ -83,6 +90,18 @@ end
                 out.flush = String(near(box(det('flush').querySelector('p')).left, box(det('flush')).left) &&
                     near(box(sum('flush')).left, box(det('flush')).left));
                 out.nestedInside = String(box(det('nested')).left - box(det('outer')).left >= 15);
+                // The variable is the spacing of the box it is set on: an ordinary
+                // disclosure inside the flush one keeps the default 16 px on its bar
+                // and content, a wrapper that is not a <details> reaches no
+                // disclosure, and a rule that selects the disclosures sets theirs
+                // (snag followed-htmxo-s-6bd66da4).
+                const spacing = id => [css(sum(id)).paddingLeft, css(sum(id)).paddingRight,
+                    css(det(id), '::details-content').paddingLeft, css(det(id), '::details-content').paddingBottom,
+                    css(sum(id)).marginBottom].join(' ');
+                out.nestedKeepsSpacing = String(spacing('flushnested') === '16px 16px 16px 16px 16px' &&
+                    spacing('flush') === '0px 0px 0px 0px 0px');
+                out.wrapperNotInherited = String(spacing('inwrapper') === '16px 16px 16px 16px 16px');
+                out.regionRule = String(spacing('inregion') === '8px 8px 8px 8px 8px');
                 // The label keeps the body text colour open, closed and focused (Pico mutes an
                 // open label and colours a clicked one like a link), in both themes.
                 const colours = () => boxes.every(id => css(sum(id)).color === bodyColor()) &&
@@ -109,7 +128,10 @@ end
                 h.details(; id="innerbutton", open=true)(h.summary(; role="button")("Inner button"), h.p("x"))),
             h.details(; id="app", class="htmxo-test-menu")(h.summary("Menu badge"), h.p("x")),
             h.details(; id="padded", class="htmxo-test-padded", open=true)(h.summary("Own padding"), h.p("x")),
-            h.details(; id="flush", class="htmxo-test-flush", open=true)(h.summary("No inner spacing"), h.p("x")),
+            h.details(; id="flush", class="htmxo-test-flush", open=true)(h.summary("No inner spacing"), h.p("x"),
+                h.details(; id="flushnested", open=true)(h.summary("Ordinary, inside the flush one"), h.p("y"))),
+            h.div(; class="htmxo-test-wrapper")(h.details(; id="inwrapper", open=true)(h.summary("Inside a wrapper"), h.p("x"))),
+            h.div(; class="htmxo-test-region")(h.details(; id="inregion", open=true)(h.summary("Inside a region"), h.p("x"))),
             h.details(; id="bare", open=true)(h.summary("Bare text"), "Text with no element around it"),
             h.details(; id="outer", open=true)(h.summary("Outer"), h.details(; id="nested", open=true)(h.summary("Nested"), h.p("x"))),
             driver)
@@ -119,6 +141,8 @@ end
         app = h.style(Raw(".htmxo-test-menu { border: 0; padding: 0; } .htmxo-test-menu > summary { padding: 0; } " *
                           ".htmxo-test-padded { padding: 0.05rem 0 0.05rem 0.5rem; border: 0; border-left: 2px solid; } " *
                           ".htmxo-test-flush { --htmxo-disclosure-padding: 0; padding: 0; border: 0; } " *
+                          ".htmxo-test-wrapper { --htmxo-disclosure-padding: 0; } " *
+                          ".htmxo-test-region details { --htmxo-disclosure-padding: 0.5rem; } " *
                           "*, *::before, *::after { transition: none !important; }"))
         dom = mktempdir() do directory
             copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
@@ -132,7 +156,8 @@ end
         @test contains(dom, "data-done=\"1\"")
         for marker in ("pico-loaded", "boxed", "bar", "chevron-before", "open-inside", "caption-opaque",
                        "dropdown-kept", "button-kept", "app-wins", "bar-to-edges", "bare-inside", "no-overhang",
-                       "padding-insets", "flush", "nested-inside", "light-colours", "dark-colours", "button-flush")
+                       "padding-insets", "flush", "nested-inside", "light-colours", "dark-colours", "button-flush",
+                       "nested-keeps-spacing", "wrapper-not-inherited", "region-rule")
             @test contains(dom, "data-$marker=\"true\"")
         end
     end

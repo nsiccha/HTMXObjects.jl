@@ -398,7 +398,12 @@ something else, such as a menu badge, keeps whatever its own class rules set
 (`border: 0`, its own summary padding). `--htmxo-disclosure-padding` (default
 `1rem`) sets the inner spacing of the bar and the content. Padding a component
 sets on its `<details>` insets both, inside its box; set
-`--htmxo-disclosure-padding: 0` as well to drop the inner spacing.
+`--htmxo-disclosure-padding: 0` as well to drop the inner spacing. The variable
+applies to the `<details>` it is set on and does not inherit: a disclosure
+nested inside that one keeps its own spacing, and a value set on a wrapper that
+is not a `<details>` reaches no disclosure. To set it for every disclosure in a
+region, select the disclosures (`.region details { --htmxo-disclosure-padding:
+0.5rem; }`).
 
 ### Success toasts {#success-toasts}
 
