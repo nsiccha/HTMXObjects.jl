@@ -14,6 +14,20 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.72
+
+- One fragment can be open in several places of a page at once
+  (`instance_scope_script`, carried by the `htmx()` shell). Mark each place with
+  `data-htmxo-instance="<key>"`. Every id an answer swapped into the place defines
+  gets `--<key>` appended, and so does every reference to it in that answer: the
+  attributes that name ids (`for`, `popovertarget`, `aria-*`, …), `#id` in links,
+  `style`, SVG paint and htmx selectors, `data-*` values, and the string literals of
+  inline scripts and handlers. The fragment keeps one address, so `export_site`
+  writes it once, and the renaming happens in the browser, live and in an export.
+  `master_detail_table` rows, lazy details, row updates and browser regrouping work
+  inside a place. Snag `shared-fragment-e919a4d2` (ODLPlaus wrote one station view
+  per place, 22,798 files, to keep its plot ids apart).
+
 ## 0.1.71
 
 - A fresh request root (`RootProvider()`, or a custom `:request` factory) is a fresh

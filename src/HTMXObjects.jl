@@ -14,7 +14,7 @@ export terminate, serve, staticfiles, dynamicfiles, vendorfiles, copy_vendorfile
 export auto, htmx, h, Node, HTMLDocument, @__str, HyperscriptString, Raw
 export route!, record!, to_response, generic_html, save_response, static_transform, MIMEResponse, JSONResponse,
     RecordingState, RecordingRoutes, RECORDING_STATE, StaticExport, StaticExportRefused,
-    static_export, static_url, url_params, url_params_script, url_anchor_script,
+    static_export, static_url, url_params, url_params_script, url_anchor_script, instance_scope_script,
     export_site, static_file_name, StaticSiteIncomplete,
     private, Private, export_audience, with_audience, PrivateContentEscaped
 export SemanticNode, SemanticCard, SemanticFields, SemanticCode, SemanticStatus,
@@ -3197,6 +3197,7 @@ _runtime_blocks() = (
     choice_list = (:js, choice_list_script),
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
+    instance_scope = (:js, instance_scope_script),
     glossary = (:js, glossary_script),
     unit_styles = (:css, unit_styles),
     unit_script = (:js, unit_script),
@@ -3542,6 +3543,10 @@ function htmx(args...;
         # The address's `#id` reaches an element an htmx swap inserts
         # after the page loaded; inert on an address without one.
         :url_anchor,
+        # One fragment open in several places: what is swapped into a
+        # `data-htmxo-instance` place gets ids of its own there; inert on
+        # pages without one.
+        :instance_scope,
         # A glossary term's definition opens beside it, kept on screen
         # and outside scrolling tables; inert on pages without terms.
         :glossary,
@@ -11869,6 +11874,211 @@ url_anchor_script() = h.script(Raw(raw"""
     // short bring it to the top.
     if (!queued) { queued = true; requestAnimationFrame(land); }
   });
+})();
+"""))
+
+"""
+    instance_scope_script()
+
+Client runtime that lets one fragment be open in several places of a page at
+once. Mark each place with `data-htmxo-instance="<key>"` (letters, digits,
+`-` and `_`), on the element the fragment loads into or on any element around
+it:
+
+```julia
+h.div(; data_htmxo_instance="karte")(
+    h.div(; hx_get="/messstelle_inhalt?kenn=010010001", hx_trigger="load"))
+h.div(; data_htmxo_instance="liste")(
+    master_detail_table(headers, probes; key=p -> p.kenn,
+        detail_url=p -> "/messstelle_inhalt?kenn=" * p.kenn))
+```
+
+When htmx swaps an answer into such a place, every id the answer defines gets
+`--<key>` appended (`odl-tage-010010001` → `odl-tage-010010001--karte`), with
+one `--<key>` per enclosing place, outermost first. Every reference to such
+an id in the answer is renamed with it:
+
+- the attributes that name ids: `for`, `form`, `list`, `headers`,
+  `popovertarget`, `commandfor`, `anchor`, `itemref` and the `aria-*`
+  references (`aria-labelledby`, `aria-describedby`, `aria-controls`, …);
+- `#id` in `href` and `xlink:href` (in-page links, SVG `<use>`), in `style`
+  and SVG paint attributes (`fill="url(#id)"`, `clip-path`, `mask`, …), in
+  `<style>` text and in htmx's selector attributes (`hx-target`,
+  `hx-select`, `hx-include`, `hx-indicator`, `hx-trigger`'s `from:`, …);
+- a `data-*` value, or a word or JSON string in it, that is the id;
+- string literals in inline `<script>` text and in `on…` / `hx-on` handlers
+  that are the id, or end in it after a `-` or `#` (`'plot-1'`, `'#plot-1'`,
+  `'-plot-1'`), and names that end in it after a `-` (`aov-pin-plot-1`).
+
+So a script that finds an element by its id, or builds an id by putting
+something in front of one (`'detail-slot-' + key`, `'aov-remap-' + ch + '-' + id`)
+finds the copy in its own place. Ids that content swapped into the same place
+earlier carries count too, so a later answer there (a nested `hx-get`, a row
+update, an out-of-band element) reaches them by the names it was rendered
+with. Within a text, only ids containing a letter are matched: a bare number
+is more often data than an id.
+
+Nothing else changes. The fragment keeps one address, so
+[`export_site`](@ref) writes it once, and the renaming happens in the browser,
+live and in an export alike. Answers swapped anywhere outside a place are
+untouched, and so is an out-of-band element whose target is not in the place
+(a page-level status line) together with what it holds. A slot that reloads
+gets the same ids again. Put the attribute on an element the swap keeps: an
+`outerHTML` swap that replaces the marked element itself drops the place.
+
+Not covered: content that does not arrive through `htmx:beforeSwap` (markup
+in the page as served, or content a script inserts itself; such a script can
+call `window.htmxoInstanceScope.rewrite(target, html)`), an id a script
+assembles only from parts that never contain it whole, and `name` values that
+are the id itself (form fields keep the parameter names they send).
+[`master_detail_table`](@ref) rows, their lazy details, row updates and
+browser regrouping work inside a place.
+
+Safe to include more than once. Auto-included by [`htmx`](@ref); include it
+yourself only on pages built without the shell.
+"""
+instance_scope_script() = h.script(Raw(raw"""
+(function () {
+  'use strict';
+  if (window.htmxoInstanceScope) return;
+  var KEY = /^[A-Za-z0-9_-]+$/;
+  // Attributes whose value is an id, or ids separated by spaces.
+  var IDREFS = {'for': 1, 'form': 1, 'list': 1, 'headers': 1, 'popovertarget': 1, 'commandfor': 1,
+    'anchor': 1, 'itemref': 1, 'aria-labelledby': 1, 'aria-describedby': 1, 'aria-controls': 1,
+    'aria-owns': 1, 'aria-activedescendant': 1, 'aria-details': 1, 'aria-errormessage': 1,
+    'aria-flowto': 1};
+  // Attributes that name elements as `#id`: htmx's selectors, SVG paint
+  // (`url(#id)`) and `style`.
+  var HASHES = {'hx-target': 1, 'hx-select': 1, 'hx-select-oob': 1, 'hx-include': 1,
+    'hx-indicator': 1, 'hx-disabled-elt': 1, 'hx-sync': 1, 'hx-trigger': 1, 'hx-swap-oob': 1,
+    'style': 1, 'fill': 1, 'stroke': 1, 'clip-path': 1, 'mask': 1, 'filter': 1,
+    'marker-start': 1, 'marker-mid': 1, 'marker-end': 1, 'cursor': 1};
+  // Data attributes that hold keys, values or text the server or the tables
+  // read, not ids.
+  var KEYS = {'data-key': 1, 'data-htmxo-instance': 1, 'data-htmxo-group-scope': 1,
+    'data-htmxo-leaf': 1, 'data-htmxo-leaf-keys': 1, 'data-htmxo-leaf-values': 1,
+    'data-htmxo-select-key': 1, 'data-htmxo-select-value': 1, 'data-htmxo-search': 1,
+    'data-htmxo-sort-keys': 1, 'data-htmxo-number': 1, 'data-htmxo-texts': 1,
+    'data-htmxo-group-by': 1, 'data-htmxo-grouped': 1, 'data-htmxo-regroup': 1,
+    'data-htmxo-url-params': 1, 'data-htmxo-address': 1};
+  var reEscape = function (s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+
+  // `--<key>` for each `data-htmxo-instance` around `el`, outermost first;
+  // '' outside any; null (reported) for a key that is not a plain word.
+  function suffix(el) {
+    var keys = [];
+    var s = el && el.closest ? el.closest('[data-htmxo-instance]') : null;
+    for (; s; s = s.parentElement ? s.parentElement.closest('[data-htmxo-instance]') : null) {
+      var key = s.getAttribute('data-htmxo-instance');
+      if (!KEY.test(key)) {
+        console.error('data-htmxo-instance="' + key + '": a place is named with letters, ' +
+          'digits, - and _; what is swapped into it keeps its ids.');
+        return null;
+      }
+      keys.unshift(key);
+    }
+    return keys.map(function (k) { return '--' + k; }).join('');
+  }
+  // Every element under `root`, with what its <template> elements hold.
+  function elements(root, out) {
+    root.querySelectorAll('*').forEach(function (e) {
+      out.push(e);
+      if (e.localName === 'template' && e.content) elements(e.content, out);
+    });
+    return out;
+  }
+  // The id an out-of-band element replaces: the `#id` its value names after
+  // the swap style, else its own.
+  function oobTarget(e) {
+    var v = e.getAttribute('hx-swap-oob') || e.getAttribute('data-hx-swap-oob') || '';
+    var at = v.indexOf(':'), m = at < 0 ? null : /#([^\s,]+)/.exec(v.slice(at + 1));
+    return m ? m[1] : e.id;
+  }
+
+  // `html`, about to be swapped into `target`, with its ids renamed for the
+  // place around `target`, and `select` (a selector the request names the
+  // part to take by) renamed with them.
+  function rewrite(target, html, select) {
+    var same = {html: html, select: select};
+    if (typeof html !== 'string' || !target || !target.closest) return same;
+    var scope = target.closest('[data-htmxo-instance]');
+    if (!scope) return same;
+    var sfx = suffix(target);
+    if (!sfx || /^\s*<(!doctype|html[\s>])/i.test(html)) return same;
+    var own = function (id) { return id.length > sfx.length && id.slice(-sfx.length) === sfx; };
+    var template = document.createElement('template');
+    template.innerHTML = html;
+    var all = elements(template.content, []);
+    // The ids earlier answers gave this place, by the names answers use.
+    var names = {};
+    scope.querySelectorAll('[id]').forEach(function (e) {
+      if (own(e.id)) names[e.id.slice(0, -sfx.length)] = true;
+    });
+    // An out-of-band element for something outside the place stays as it
+    // is, with what it holds.
+    var skip = new Set();
+    all.forEach(function (e) {
+      if (skip.has(e) || !(e.hasAttribute('hx-swap-oob') || e.hasAttribute('data-hx-swap-oob'))) return;
+      if (names[oobTarget(e)]) return;
+      skip.add(e);
+      elements(e, []).forEach(function (x) { skip.add(x); });
+    });
+    all.forEach(function (e) { if (!skip.has(e) && e.id && !own(e.id)) names[e.id] = true; });
+    var list = Object.keys(names).sort(function (a, b) { return b.length - a.length; });
+    if (!list.length) return same;
+    var alt = list.map(reEscape).join('|');
+    var worded = list.filter(function (n) { return /[A-Za-z]/.test(n); }).map(reEscape).join('|');
+    var hashRe = new RegExp('#(' + alt + ')(?![\\w-])', 'g');
+    var dataRe = new RegExp('(^|[\\s"\',\\[\\]{}#])(' + alt + ')(?=$|[\\s"\',\\[\\]{}])', 'g');
+    var textRe = worded ? new RegExp('([\'"`#-])(' + worded + ')(?![\\w-])', 'g') : null;
+    var nameRe = worded ? new RegExp('(-)(' + worded + ')(?![\\w-])', 'g') : null;
+    var add = function (m, pre, id) { return pre + id + sfx; };
+    var hash = function (m, id) { return '#' + id + sfx; };
+    var text = function (v) { return textRe ? v.replace(textRe, add) : v; };
+    // A master/detail row's toggle names its row by key, not by id.
+    var handler = function (v) {
+      return text(v).replace(/(htmxoMdToggle\(this,event,')([^']*)'/g, function (m, call, key) {
+        return names['row-' + key] && !own(key) ? call + key + sfx + "'" : m;
+      });
+    };
+    var changed = false;
+    all.forEach(function (e) {
+      if (skip.has(e)) return;
+      Array.prototype.slice.call(e.attributes).forEach(function (a) {
+        var n = a.name, v = a.value, w = v;
+        if (n === 'id') w = names[v] && !own(v) ? v + sfx : v;
+        else if (IDREFS[n]) w = v.replace(/\S+/g, function (t) { return names[t] ? t + sfx : t; });
+        else if (/^(on|hx-on|data-hx-on)/.test(n)) w = handler(v);
+        else if (n === 'name') w = nameRe ? v.replace(nameRe, add) : v;
+        else if (HASHES[n.replace(/^data-(?=hx-)/, '')] ||
+                 ((n === 'href' || n === 'xlink:href') && v.charAt(0) === '#')) w = v.replace(hashRe, hash);
+        else if (n.slice(0, 5) === 'data-' && n.slice(5, 8) !== 'hx-' && !KEYS[n]) w = v.replace(dataRe, add);
+        if (w !== v) { e.setAttribute(n, w); changed = true; }
+      });
+      var body = e.localName === 'script' && !e.hasAttribute('src') ? text(e.textContent) :
+                 e.localName === 'style' ? e.textContent.replace(hashRe, hash) : null;
+      if (body !== null && body !== e.textContent) { e.textContent = body; changed = true; }
+    });
+    return {html: changed ? template.innerHTML : html,
+            select: typeof select === 'string' && select !== 'unset' ? select.replace(hashRe, hash) : select};
+  }
+
+  document.addEventListener('htmx:beforeSwap', function (e) {
+    var d = e.detail;
+    if (!d || !d.shouldSwap || typeof d.serverResponse !== 'string') return;
+    var elt = d.requestConfig && d.requestConfig.elt;
+    var holder = !d.selectOverride && elt && elt.closest ? elt.closest('[hx-select],[data-hx-select]') : null;
+    var select = d.selectOverride || (holder && (holder.getAttribute('hx-select') || holder.getAttribute('data-hx-select')));
+    var out = rewrite(d.target || e.target, d.serverResponse, select);
+    d.serverResponse = out.html;
+    if (out.select !== select) d.selectOverride = out.select;
+  }, true);
+
+  window.htmxoInstanceSuffix = function (el) { return suffix(el) || ''; };
+  window.htmxoInstanceScope = {
+    rewrite: function (target, html) { return rewrite(target, html).html; },
+    suffix: window.htmxoInstanceSuffix
+  };
 })();
 """))
 
@@ -22356,6 +22566,9 @@ function htmxoRegroup(wrapper, levels) {
     });
     const members = Array.from(leaves.values()).sort((a, b) => a.order - b.order);
     const template = wrapper.querySelector('template[data-htmxo-group-template]');
+    // The rows' ids carry the place the table was swapped into
+    // (`instance_scope_script`); the ids built here carry it too.
+    const place = window.htmxoInstanceSuffix ? window.htmxoInstanceSuffix(wrapper) : '';
     const out = [];
     const keysAt = (m, depth) => depth < levels.length ? m.keys[levels[depth]] || [] : [];
     // The groups of `list` at a level, in first-appearance order, or in the
@@ -22383,7 +22596,7 @@ function htmxoRegroup(wrapper, levels) {
             if (detail) { fresh.add(detail); htmxoMdShow(row, detail, false); }
         }
         m.placed = true;
-        htmxoRekeyLeaf(row, detail, htmxoSafeKey(path.length ? 'group:' + path.join('/') + '/' + m.key : m.key));
+        htmxoRekeyLeaf(row, detail, htmxoSafeKey(path.length ? 'group:' + path.join('/') + '/' + m.key : m.key) + place);
         row.dataset.htmxoParent = parent;
         row.setAttribute('aria-level', String(level));
         out.push(row);
@@ -22392,7 +22605,7 @@ function htmxoRegroup(wrapper, levels) {
     };
     const group = (path, list, parent, level) => {
         const row = template.content.querySelector('tr').cloneNode(true), name = path[path.length - 1];
-        const gid = 'group:' + path.join('/'), id = 'row-' + htmxoSafeKey(wrapper.dataset.htmxoGroupScope + gid), children = [];
+        const gid = 'group:' + path.join('/'), id = 'row-' + htmxoSafeKey(wrapper.dataset.htmxoGroupScope + gid) + place, children = [];
         out.push(row);
         if (path.length < levels.length) {
             groupsAt(list, path.length).forEach(([k, ms]) => children.push(group([...path, k], ms, id, level + 1)));
