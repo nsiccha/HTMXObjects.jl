@@ -578,7 +578,7 @@ _link_terms(d::_MDDetailsMarkdown, w::_TermWalk) = _MDDetailsMarkdown(Pair{Vecto
 
 # A tab's panel is read on its own, as a disclosure is: its HTML and its
 # Markdown (the label and the content it opens) each link as a run of their own.
-# A lazy tab's Markdown is a link already written as Markdown text, left as is.
+# A lazy tab's link (`_TabsetLink`) is left as is.
 _link_terms(p::_TabsetPart, w::_TermWalk) = _TabsetPart(
     _term_scope(() -> _link_terms(p.node, w), w, true), _term_scope(() -> _link_terms(p.markdown, w), w, true))
 

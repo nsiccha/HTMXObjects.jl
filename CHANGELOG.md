@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.63
+
+- Semantic content that holds HTML nodes reads as text in plain text. A `tabset`,
+  a layout `h.div` or a `render_table` inside a `SemanticSection`
+  (`repr("text/plain", section)`) printed Julia's `Node(:div, OrderedDict(…))`
+  dump, tab-bar internals included. It now writes its text in the blocks its
+  Markdown has, without the markup: each tab's label over its content (a lazy tab
+  `Label (/address)`), a link `label (target)`, a table one tab-separated line per
+  row, a list item `- item`. Scripts, styles and buttons write nothing, and a
+  master/detail table's eager details follow it, as in Markdown.
+
 ## 0.1.62
 
 - `SemanticProse(doc::Markdown.MD; references=Dict(), math=true)` displays Julia

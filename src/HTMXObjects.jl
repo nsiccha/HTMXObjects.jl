@@ -2749,6 +2749,7 @@ Base.show(io::IO, m::MIME"text/html", doc::HTMLDocument) =
 # root's. Without these, HTMX's catch-all Markdown `show` prints the struct's
 # repr, and `filter_errors` passes the whole page through as its errors.
 Base.show(io::IO, m::MIME"text/markdown", doc::HTMLDocument) = show(io, m, doc.root)
+_semantic_show_leaf(io::IO, m::MIME"text/plain", doc::HTMLDocument) = _semantic_show_leaf(io, m, doc.root)
 filter_errors(doc::HTMLDocument) = let root = filter_errors(doc.root)
     isnothing(root) ? nothing : HTMLDocument(root)
 end
@@ -5543,6 +5544,145 @@ end
 Base.show(io::IO, mime::MIME"text/plain", alt::SemanticAlternatives) =
     _semantic_show_leaf(io, mime, first(alt.views))
 
+# The plain-text peer of an HTML node among semantic content: its text, laid out
+# in the blocks its Markdown peer (HTMX.jl's) lays out, with no markup. A node
+# has no plain-text `show` of its own, so Julia's default wrote the struct: a
+# `tabset` or a layout `h.div` inside a `SemanticSection` read as
+# `Node(:div, OrderedDict(…))` in `repr("text/plain", section)`. Text and
+# semantic children write their own plain peers, so a section inside a tab reads
+# as it does anywhere else. A link writes `label (target)`, as `SemanticLink`
+# does; a table writes one tab-separated line per row, as `SemanticTable` does;
+# a list item writes `- item` (`1. item` in an `<ol>`); an image its `alt`.
+# Scripts, styles and buttons write nothing, and a `<details>` its body without
+# the toggle label, as in Markdown.
+mutable struct _PlainText
+    io::IO
+    wrote::Bool   # whether any text is out yet
+    breaks::Int   # line breaks owed before the next text: 1 a new line, 2 a blank line
+end
+_plain_string(x) = sprint(io -> _plain!(_PlainText(io, false, 0), x))
+
+_semantic_show_leaf(io::IO, ::MIME"text/plain", node::Node) =
+    (_plain!(_PlainText(io, false, 0), node); nothing)
+# Trusted markup has no text but itself, which is what Markdown writes too.
+_semantic_show_leaf(io::IO, ::MIME"text/plain", raw::Raw) = print(io, String(raw))
+
+# Whitespace between blocks is layout, not text.
+function _plain_text!(w::_PlainText, text::AbstractString)
+    (isempty(text) || (w.breaks > 0 || !w.wrote) && all(isspace, text)) && return
+    w.wrote && w.breaks > 0 && print(w.io, "\n"^w.breaks)
+    w.breaks = 0
+    print(w.io, text)
+    w.wrote = true
+    nothing
+end
+_plain_break!(w::_PlainText, n::Int) = (w.breaks = max(w.breaks, n); nothing)
+_plain_block!(f, w::_PlainText, n::Int=2) = (_plain_break!(w, n); f(); _plain_break!(w, n))
+
+_plain!(w::_PlainText, ::Nothing) = nothing
+_plain!(w::_PlainText, text::AbstractString) = _plain_text!(w, text)
+_plain!(w::_PlainText, xs::Union{AbstractVector,Tuple}) = foreach(x -> _plain!(w, x), xs)
+_plain!(w::_PlainText, node::Node) = _plain_node!(w, node, Val(HTMX.tag(node)))
+_plain!(w::_PlainText, doc::HTMLDocument) = _plain!(w, doc.root)
+# Any other value writes its own plain peer, as a block where its Markdown is one.
+function _plain!(w::_PlainText, x)
+    _shows_nothing(x, _ambient_audience()) && return
+    text = sprint((io, x) -> _semantic_show_leaf(io, MIME"text/plain"(), x), x)
+    HTMX.markdown_block(x) ?
+        _plain_block!(() -> _plain_text!(w, rstrip(==('\n'), text)), w) : _plain_text!(w, text)
+end
+
+_plain_children!(w::_PlainText, node::Node) = foreach(c -> _plain!(w, c), HTMX.children(node))
+# Inline elements (span, strong, code, label, …) are their text.
+_plain_node!(w::_PlainText, node::Node, ::Val) = _plain_children!(w, node)
+for t in (:script, :style, :meta, :link, :button, :template)
+    @eval _plain_node!(::_PlainText, ::Node, ::Val{$(QuoteNode(t))}) = nothing
+end
+for t in (:div, :main, :body, :html, :head, :form, :nav, :footer, :aside, :address,
+          :fieldset, :hgroup, :dialog, :dl, :header, :p, :title, :pre, :blockquote,
+          :figure, :figcaption, :caption, :article, :section,
+          :h1, :h2, :h3, :h4, :h5, :h6)
+    @eval _plain_node!(w::_PlainText, node::Node, ::Val{$(QuoteNode(t))}) =
+        _plain_block!(() -> _plain_children!(w, node), w)
+end
+for t in (:dt, :dd)
+    @eval _plain_node!(w::_PlainText, node::Node, ::Val{$(QuoteNode(t))}) =
+        _plain_block!(() -> _plain_children!(w, node), w, 1)
+end
+_plain_node!(w::_PlainText, node::Node, ::Val{:br}) = _plain_break!(w, 1)
+_plain_node!(w::_PlainText, node::Node, ::Val{:hr}) = _plain_break!(w, 2)
+_plain_node!(w::_PlainText, node::Node, ::Val{:details}) = _plain_block!(w) do
+    for c in HTMX.children(node)
+        c isa Node && HTMX.tag(c) === :summary && continue
+        _plain!(w, c)
+    end
+end
+function _plain_node!(w::_PlainText, node::Node, ::Val{:img})
+    alt = get(HTMX.attrs(node), :alt, nothing)
+    alt isa AbstractString && _plain_text!(w, alt)
+    nothing
+end
+# An `<a>` that names no target (no `href`, an empty one or a bare `#`) is its
+# text, as in Markdown; a link whose text is its address writes it once.
+function _plain_node!(w::_PlainText, node::Node, ::Val{:a})
+    href = get(HTMX.attrs(node), :href, nothing)
+    label = _plain_string(HTMX.children(node))
+    if !(href isa AbstractString) || href in ("", "#")
+        _plain_text!(w, label)
+    elseif isempty(strip(label)) || strip(label) == href
+        _plain_text!(w, href)
+    else
+        _plain_text!(w, string(label, " (", href, ")"))
+    end
+end
+
+# A list writes one item per line, its continuation lines indented under the
+# marker.
+_plain_node!(w::_PlainText, node::Node, ::Val{:ul}) = _plain_list!(w, node, nothing)
+_plain_node!(w::_PlainText, node::Node, ::Val{:ol}) = _plain_list!(w, node,
+    something(tryparse(Int, string(get(HTMX.attrs(node), :start, "1"))), 1))
+_plain_node!(w::_PlainText, node::Node, ::Val{:li}) = _plain_item!(w, node, "- ")
+function _plain_list!(w::_PlainText, node::Node, number)
+    _plain_block!(w) do
+        for c in HTMX.children(node)
+            if c isa Node && HTMX.tag(c) === :li
+                _plain_item!(w, c, isnothing(number) ? "- " : string(number, ". "))
+                isnothing(number) || (number += 1)
+            else
+                _plain!(w, c)
+            end
+        end
+    end
+end
+function _plain_item!(w::_PlainText, node::Node, marker)
+    # One item is one run of lines: a nested list or paragraph keeps no blank
+    # line inside it.
+    text = replace(_plain_string(HTMX.children(node)), r"\n{2,}" => "\n")
+    indent = " "^length(marker)
+    _plain_block!(() -> _plain_text!(w, marker * replace(text, r"\n(?=[^\n])" => "\n" * indent)), w, 1)
+end
+
+# A table is its rows, one line each with tab-separated cells, as a
+# `SemanticTable` writes. A cell spanning columns takes their places, so the
+# columns stay aligned; its line breaks fold into spaces.
+_plain_node!(w::_PlainText, node::Node, ::Val{:table}) =
+    _plain_block!(() -> foreach(c -> _plain_table!(w, c), HTMX.children(node)), w)
+_plain_table!(w::_PlainText, x) = _plain!(w, x)
+function _plain_table!(w::_PlainText, node::Node)
+    t = HTMX.tag(node)
+    t in (:thead, :tbody, :tfoot) && return foreach(c -> _plain_table!(w, c), HTMX.children(node))
+    t === :colgroup && return nothing
+    t === :tr || return _plain!(w, node)
+    cells = String[]
+    for c in HTMX.children(node)
+        c isa Node && HTMX.tag(c) in (:th, :td) || continue
+        push!(cells, replace(strip(_plain_string(HTMX.children(c))), r"\s*\n\s*" => " "))
+        span = something(tryparse(Int, string(get(HTMX.attrs(c), :colspan, "1"))), 1)
+        append!(cells, fill("", max(span, 1) - 1))
+    end
+    _plain_block!(() -> _plain_text!(w, join(cells, '\t')), w, 1)
+end
+
 # Normalize a route return value into something `auto` can render, leaving
 # every value that already has an HTML representation untouched. Arrays stay
 # element-wise (an array of Nodes is still a fragment) and OOB-swap Pairs keep
@@ -5699,6 +5839,9 @@ Base.show(io::IO, ::MIME"text/html", ::MarkdownOnly) = nothing
 # Markdown rendering via show dispatch — HtmlOnly skipped, MarkdownOnly prints text
 Base.show(io::IO, ::MIME"text/markdown", ::HtmlOnly) = nothing
 Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text)
+# Plain text among semantic content is a text reader's too, so it reads the text
+# (a `SemanticProse`'s plain peer is its Markdown source as well).
+_semantic_show_leaf(io::IO, ::MIME"text/plain", val::MarkdownOnly) = print(io, val.text)
 
 # --- Audience: content that public views leave out ---
 
@@ -6161,6 +6304,8 @@ Base.show(io::IO, ::MIME"text/markdown", s::HTMLSnapshot) =
     print(io, to_markdown_string(s.value))
 Base.show(io::IO, s::HTMLSnapshot) =
     print(io, "HTMLSnapshot(", ncodeunits(s.html), " bytes)")
+_semantic_show_leaf(io::IO, m::MIME"text/plain", s::HTMLSnapshot) = _semantic_show_leaf(io, m, s.value)
+_plain!(w::_PlainText, s::HTMLSnapshot) = _plain!(w, s.value)
 # Every projection other than HTML reads the retained value. The walker
 # methods for static export sit beside `_static_walk_child`.
 filter_errors(s::HTMLSnapshot) = filter_errors(s.value)
@@ -6189,6 +6334,10 @@ Base.show(io::IO, m::MIME"text/markdown", c::_LabelledControl) =
     let label = _strip_md_chrome(c.control)
         isnothing(label) || show(io, m, label)
     end
+Base.show(io::IO, m::MIME"text/plain", c::_LabelledControl) =
+    let label = _strip_md_chrome(c.control)
+        isnothing(label) || _semantic_show_leaf(io, m, label)
+    end
 filter_errors(c::_LabelledControl) = filter_errors(c.control)
 _filter_errors_child(c::_LabelledControl) = _filter_errors_child(c.control)
 _strip_md_chrome(c::_LabelledControl) = _strip_md_chrome(c.control)
@@ -6209,6 +6358,7 @@ Base.show(io::IO, m::MIME"text/html", c::_MDCompanionRow) = show(io, m, c.row)
 Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", c::_MDCompanionRow) =
     show(io, m, c.row)
 Base.show(::IO, ::MIME"text/markdown", ::_MDCompanionRow) = nothing
+Base.show(::IO, ::MIME"text/plain", ::_MDCompanionRow) = nothing
 filter_errors(c::_MDCompanionRow) = filter_errors(c.row)
 _filter_errors_child(c::_MDCompanionRow) = _filter_errors_child(c.row)
 
@@ -24523,6 +24673,18 @@ function Base.show(io::IO, m::MIME"text/markdown", d::_MDDetailsMarkdown)
     end
     show(io, m, SemanticGroup(blocks))
 end
+# Plain text writes the same details in its own peer.
+function Base.show(io::IO, m::MIME"text/plain", d::_MDDetailsMarkdown)
+    blocks = Any[]
+    for (label, body) in d.details
+        stripped = _strip_md_chrome(body)
+        text = isnothing(stripped) ? "" : strip(_plain_string(stripped))
+        isempty(text) && continue
+        name = _md_label_text(label)
+        push!(blocks, isempty(name) ? text : SemanticDisclosure(name, Any[text]))
+    end
+    show(io, m, SemanticGroup(blocks))
+end
 
 # The words of a row label, without its markup: `**` around a link or a
 # `<strong>` would not read as one bold label.
@@ -34964,6 +35126,12 @@ function Base.show(io::IO, m::MIME"text/markdown", p::_TabsetPart)
     _shows_nothing(p.markdown, _ambient_audience()) || show(io, m, p.markdown)
     nothing
 end
+# Plain text reads a tabset as Markdown does, in its own peer: each tab its
+# label over its content, as a `SemanticDisclosure`'s plain peer writes them.
+function Base.show(io::IO, m::MIME"text/plain", p::_TabsetPart)
+    _shows_nothing(p.markdown, _ambient_audience()) || _semantic_show_leaf(io, m, p.markdown)
+    nothing
+end
 HTMX.markdown_block(p::_TabsetPart) = !_shows_nothing(p.markdown, _ambient_audience())
 filter_errors(p::_TabsetPart) = filter_errors(p.node)
 _filter_errors_child(p::_TabsetPart) = _filter_errors_child(p.node)
@@ -34990,8 +35158,16 @@ function _tabset_markdown(label, content)
 end
 function _tabset_markdown(label, url::AbstractString)
     name = _tabset_label_text(label)
-    string("**[", isempty(name) ? url : name, "](", url, ")**")
+    _TabsetLink(isempty(name) ? url : name, url)
 end
+# A lazy tab's label, linking the address that has its content.
+struct _TabsetLink
+    label::String
+    url::String
+end
+Base.show(io::IO, ::MIME"text/markdown", l::_TabsetLink) = print(io, "**[", l.label, "](", l.url, ")**")
+Base.show(io::IO, ::MIME"text/plain", l::_TabsetLink) =
+    print(io, l.label == l.url ? l.url : string(l.label, " (", l.url, ")"))
 
 # What a tabset's default id is made of: its labels and what its panels say, so
 # tabsets with the same labels have ids of their own and a page renders to the
@@ -35100,6 +35276,9 @@ bold and then its content, as a [`SemanticDisclosure`](@ref) writes its label
 and body. A tab whose content its reader does not see ([`private`](@ref)
 content read publicly, with no stand-in) is left out with its label, and a lazy
 tab is its label as a link to its address (`**[Details](/api/details)**`).
+Plain text (`repr("text/plain", …)` of the semantic content holding the tabset)
+writes the same without the markup: each label on its own line over its
+content, a lazy tab as `Details (/api/details)`.
 """
 function tabset(tabs::Pair...; active=1, id=_tabset_default_id(tabs), preload=nothing,
                 url_param="tab", names=nothing, label::Union{Nothing,AbstractString}=nothing)
