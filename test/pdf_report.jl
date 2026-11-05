@@ -1,5 +1,15 @@
 using TestItemRunner
 
+@testmodule PDFTextGeometry begin
+    # Windows CI uses xpdf, which reads text but has no Poppler -bbox option.
+    function has_bbox()
+        isnothing(Sys.which("pdftotext")) && return false
+        help = IOBuffer()
+        run(pipeline(ignorestatus(`pdftotext -h`); stdout=help, stderr=help))
+        occursin("-bbox", String(take!(help)))
+    end
+end
+
 @testitem "pdf_report front matter asks Quarto's Typst for PDF/UA-1" tags=[:unit] begin
     using HTMXObjects
 
@@ -443,6 +453,75 @@ end
     end
 end
 
+@testitem "pdf_report wraps underscore identifiers inside table cells without adding text" tags=[:quarto] setup=[PDFTextGeometry] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        # A generated parameter name: every alphabetic part fits, but the
+        # complete identifier overprinted all three neighbouring columns.
+        identifier = "__parameter__group__laboratory_instrument_calibration__laboratory_instrument_log_scale"
+        code = "__parameter__group__site_sampling__site_log_density_shift"
+        unicode = "__größe__messgerät_2__kalibrierung__referenzwert"
+        page = SemanticTable([
+            (quantity=identifier, role="Prior specification", rank="Unknown", shape="Not inferred"),
+            (quantity=code, role="Prior specification", rank="Unknown", shape="Not inferred"),
+            (quantity=unicode, role="Prior specification", rank="Unknown", shape="Not inferred"),
+            (quantity="short_name", role="Prior specification", rank="Unknown", shape="Not inferred"),
+        ])
+        # Exercise the public semantic projection and a code cell in the same
+        # report; neither producer needs to insert discretionary characters.
+        md = replace(repr(MIME"text/markdown"(), page), code => "`$code`")
+        @test occursin(identifier, md) && occursin("`$code`", md)
+        mktempdir() do dir
+            out = joinpath(dir, "identifiers.pdf")
+            @test pdf_report(md, out; title="Quantities", lang="de-DE") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+            tags = [m[1] for m in eachmatch(r"/Type/StructElem/S/(\w+)/", bytes)]
+            @test count(==("Table"), tags) == 1
+            @test count(==("TH"), tags) == 4
+            @test count(==("TD"), tags) == 16
+            @test count(==("Code"), tags) == 1
+            @test !occursin("/K[]", bytes)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext reads the text and cell geometry"
+            else
+                text = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+                @test !occursin('\u200b', text) && !occursin('\u00ad', text)
+                @test occursin("short_name", text)
+                lines = split(text, '\n')
+                header_line = findfirst(l -> occursin("quantity", l) && occursin("role", l), lines)
+                role_column = findfirst("role", lines[header_line]).start
+                # Both Poppler and xpdf support -layout. Read the quantity
+                # column in isolation, so an overflowing word cannot pass.
+                quantities = join(strip(join(first(collect(l), min(length(l), role_column - 1))))
+                                  for l in lines[header_line+1:end])
+                @test quantities == identifier * code * unicode * "short_name"
+                if PDFTextGeometry.has_bbox()
+                    # Use actual glyph bounds, not just substring presence: all
+                    # source strings also existed in the overlapping old output.
+                    boxes = [(; left=parse(Float64, m[1]), top=parse(Float64, m[2]),
+                                right=parse(Float64, m[3]), word=m[4]) for m in eachmatch(
+                        r"<word xMin=\"([\d.]+)\" yMin=\"([\d.]+)\" xMax=\"([\d.]+)\"[^>]*>([^<]*)</word>",
+                        read(`pdftotext -enc UTF-8 -bbox $out -`, String))]
+                    header = only(filter(b -> b.word == "quantity", boxes))
+                    role = only(filter(b -> b.word == "role", boxes))
+                    quantities = filter(b -> b.top > header.top + 1 && b.left < role.left - 1, boxes)
+                    @test !isempty(quantities)
+                    @test all(b -> b.right < role.left, quantities)
+                    @test join(b.word for b in quantities) == identifier * code * unicode * "short_name"
+                    @test count(b -> b.word == "Unknown", boxes) == 4
+                    @test count(b -> b.word == "inferred", boxes) == 4
+                else
+                    @test_skip "Poppler -bbox checks glyph bounds; xpdf checks the text column above"
+                end
+            end
+        end
+    end
+end
+
 @testitem "pdf_report links addresses and tags a lone image as a figure of its own" tags=[:quarto] begin
     if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
         @test_skip true
@@ -584,7 +663,7 @@ end
     end
 end
 
-@testitem "pdf_report tags a code block as one Code element with a paragraph per line" tags=[:quarto] begin
+@testitem "pdf_report tags a code block as one Code element with a paragraph per line" tags=[:quarto] setup=[PDFTextGeometry] begin
     if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
         @test_skip true
     else
@@ -624,12 +703,16 @@ end
             else
                 text = read(`pdftotext -enc UTF-8 -layout $out -`, String)
                 @test all(l -> occursin(l, text), ["f(x)", "\"Docstring.\"", "y = x + 1", "return y", "plain text"])
-                # the indented lines start where they did, right of `function` and `end`
-                # (where each word starts: `-layout` columns are not exact for code)
-                boxes = [(; word=m[2], x=parse(Float64, m[1])) for m in
-                         eachmatch(r"<word xMin=\"([\d.]+)\"[^>]*>([^<]*)</word>", read(`pdftotext -bbox $out -`, String))]
-                x(word) = first(b.x for b in boxes if b.word == word)
-                @test x("y") == x("return") > x("function") == x("end")
+                if PDFTextGeometry.has_bbox()
+                    # the indented lines start where they did, right of `function` and `end`
+                    # (where each word starts: `-layout` columns are not exact for code)
+                    boxes = [(; word=m[2], x=parse(Float64, m[1])) for m in
+                             eachmatch(r"<word xMin=\"([\d.]+)\"[^>]*>([^<]*)</word>", read(`pdftotext -bbox $out -`, String))]
+                    x(word) = first(b.x for b in boxes if b.word == word)
+                    @test x("y") == x("return") > x("function") == x("end")
+                else
+                    @test_skip "Poppler -bbox reads code indentation"
+                end
             end
 
             # The control: Quarto's default highlighting on the same Markdown tags
@@ -655,7 +738,7 @@ end
                   "\n```julia\nf(x)\n\n    \n  y\n```\n")
             run(pipeline(`$quarto typst compile --pdf-standard ua-1 $doc`; stdout=devnull, stderr=devnull))
             pdf = joinpath(dir, "c.pdf")
-            words = isnothing(Sys.which("pdftotext")) ? nothing :
+            words = !PDFTextGeometry.has_bbox() ? nothing :
                 [m.match for m in eachmatch(r"<word [^>]*>[^<]*</word>", read(`pdftotext -bbox $pdf -`, String))]
             (; bytes=read(pdf, String), words)
         end

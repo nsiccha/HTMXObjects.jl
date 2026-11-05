@@ -14,6 +14,13 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.61
+
+- `pdf_report` lets table cells break after underscore runs in identifiers,
+  including inline code. Long model parameter names now wrap inside their
+  cells instead of painting over adjacent columns. The identifier's characters
+  and the table's accessibility structure are preserved.
+
 ## 0.1.60
 
 - `pdf_report` tags a code block as one Code element, with a paragraph per line.
