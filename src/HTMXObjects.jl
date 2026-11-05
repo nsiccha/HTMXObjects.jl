@@ -32319,6 +32319,10 @@ The box's rules are as weak as Pico's own, so a component that draws its own
 rules. `--htmxo-disclosure-padding` (default `1rem`) is the inner spacing of
 the bar and the content. Padding a component sets on its `<details>` insets
 both, inside its box; `--htmxo-disclosure-padding: 0` drops the inner spacing.
+The variable applies to the `<details>` it is set on and does not inherit, so
+a disclosure nested inside that one keeps its own spacing, and a value set on a
+wrapper that is not a `<details>` reaches no disclosure. To set it for every
+disclosure in a region, select the disclosures (`.region details { … }`).
 
 A [`SemanticArtifact`](@ref) download takes the same slate outline, in place
 of Pico's underlined azure link; a later stylesheet restyles it with a
@@ -32409,8 +32413,15 @@ details summary[role=button]:not(.secondary, .contrast)::after,
    (`::details-content`, which also holds bare text). Padding a component sets
    on its `<details>` so insets both, and nothing sticks out of its box; a
    component drops the inner spacing with `--htmxo-disclosure-padding: 0`.
-   Only the box's own rule asks `:has()` whether its summary is a button, and
-   hands the content's spacing to `::details-content` as
+   That variable is registered as not inheriting, so it is the spacing of the
+   `<details>` it is set on only: a custom property inherits by default, and a
+   component's 0 reached every ordinary disclosure nested inside it, whose bar
+   and content then sat flush against its border (snag
+   `followed-htmxo-s-6bd66da4`). Its universal syntax needs no initial value,
+   so an unset variable still falls back to `1rem`; a `<length>` syntax would
+   need a computationally independent initial value, which `1rem` is not.
+   Only the box's own rule reads it and asks `:has()` whether its summary is a
+   button, and hands the spacing to the bar and to `::details-content` as
    `--htmxo-disclosure-inset` (0 in any other disclosure, a nested one
    included); the rules for what is in the box ask the summary itself
    (`summary:not([role])`, `summary[role] ~`). A `:has()` on a rule for the
@@ -32419,6 +32430,7 @@ details summary[role=button]:not(.secondary, .contrast)::after,
    table inside a disclosure restyled the whole table, twice. The last child's
    rule checks its parent before its siblings: written as `summary ~
    :last-child`, every class change on the page restyled later siblings. */
+@property --htmxo-disclosure-padding { syntax: "*"; inherits: false; }
 :where(details) { --htmxo-disclosure-inset: 0px; }
 :where(details:not(.dropdown, :has(> summary[role]))) {
     --htmxo-disclosure-inset: var(--htmxo-disclosure-padding, 1rem);
@@ -32430,7 +32442,7 @@ details summary[role=button]:not(.secondary, .contrast)::after,
 :where(details)::details-content { padding-inline: var(--htmxo-disclosure-inset); }
 :where(details[open])::details-content { padding-bottom: var(--htmxo-disclosure-inset); }
 :where(details:not(.dropdown) > summary:not([role])) {
-    padding: 0.6rem var(--htmxo-disclosure-padding, 1rem);
+    padding: 0.6rem var(--htmxo-disclosure-inset);
     border-radius: calc(var(--pico-border-radius) - var(--pico-border-width));
     background: var(--pico-card-sectioning-background-color);
     font-weight: 600;
@@ -32464,7 +32476,7 @@ details summary[role=button]:not(.secondary, .contrast)::after,
 details:where(:not(.dropdown)) > summary:where(:not([role])) { line-height: var(--pico-line-height); }
 details:where(:not(.dropdown)) > summary:where(:not([role]))::after { content: none; }
 details:where(:not(.dropdown))[open] > summary:where(:not([role])) {
-    margin-bottom: var(--htmxo-disclosure-padding, 1rem);
+    margin-bottom: var(--htmxo-disclosure-inset);
 }
 details:where(:not(.dropdown)) > summary:focus-visible:not([role]) {
     outline-offset: calc(-1 * var(--pico-outline-width));
