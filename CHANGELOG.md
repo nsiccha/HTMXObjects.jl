@@ -14,6 +14,15 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.69
+
+- A worker-bound body renders under the answer's page language and audience:
+  `__init__` registers `_PAGE_META` and `_AUDIENCE` with DynamicObjects 0.5.8's
+  `carry_to_worker!`, so `page_lang()` and `private` read in the worker as they do in
+  the serving process (the glossary stays with the page shell). `configure_job_queue!(;
+  workers=1)` is therefore offered only on a DynamicObjects that carries scoped values
+  (0.5.8); on an older one a positive count is refused, as before on one without the
+  executor.
 ## 0.1.68
 
 - Worker-bound `@queued` routes preserve request-derived `@param` values,

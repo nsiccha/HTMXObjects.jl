@@ -891,14 +891,18 @@ const _ROUTE_QUEUE_SCOPE = :htmxo_route_queue_scope
 _has_job_queue() = isdefined(DynamicObjects, :job_queue)
 _dynamicobjects_queue(name::Symbol) = getproperty(DynamicObjects, name)
 
-# DynamicObjects runs `@queued` computations in worker processes once its
-# `configure_queue!` takes `workers` (its worker executor behind `@queued`;
-# design in brief HTMXObjects:process-split `wworuo`). The keyword is the
-# capability probe: forwarding it is this layer's only coupling to that
-# executor, so no version is pinned here.
-_has_queue_workers() = _has_job_queue() && any(
-    m -> :workers in Base.kwarg_decl(m),
-    methods(_dynamicobjects_queue(:configure_queue!)))
+# DynamicObjects runs `@queued` computations in a worker process once its
+# `configure_queue!` takes `workers` (its worker executor behind `@queued`,
+# 0.5.7; design in brief HTMXObjects:process-split `wworuo`) and carries this
+# layer's page-language and audience scopes into that process
+# (`carry_to_worker!`, 0.5.8), without which a worker-bound body would render
+# private content and the page's words as for an anonymous reader. Both are
+# probed, so no version is pinned here: `workers=1` is offered only when it is
+# correct.
+_has_queue_workers() = _has_job_queue() &&
+    isdefined(DynamicObjects, :carry_to_worker!) &&
+    any(m -> :workers in Base.kwarg_decl(m),
+        methods(_dynamicobjects_queue(:configure_queue!)))
 
 """
     configure_job_queue!(; max_running=nothing, abandon_after=nothing, workers=nothing) -> NamedTuple
@@ -933,13 +937,15 @@ With `workers=1`, every `@queued` computation runs in a worker process instead
 of on a `:default` thread of this one, so a heavy first-call compile, a GC pause
 or a deadlock in heavy work never stalls the pages, pollers and exports this
 process serves (the frontend/backend process split; design in brief
-HTMXObjects:process-split `wworuo`). DynamicObjects 0.5.7 runs one worker per
+HTMXObjects:process-split `wworuo`). DynamicObjects 0.5.8 runs one worker per
 process (`workers` is `0` or `1`): it addresses the request root by its
 construction inputs, keeps a body that reads `__req__` in this process with one
 warning (pass what such a body needs as arguments), rebuilds the worker's
 progress tree under the computation's node so the operation's poller shows it
-unchanged, and brings `send_ahead` parts and log records back. The default `0`
-keeps every computation in this process.
+unchanged, brings `send_ahead` parts and log records back, and binds the
+answer's page language and audience around the computation, so `page_lang()`
+and `private` read in the worker as they do here. The default `0` keeps every
+computation in this process.
 
 `worker_stall=s` (default `Inf`, off) has a watchdog restart the worker when a
 computation has been in flight for `s` seconds with no progress frame, no
@@ -951,9 +957,10 @@ for tens of minutes without a frame, so set `s` well above that.
 The queue is DynamicObjects' (`DynamicObjects.configure_queue!`, which this
 forwards `max_running` and `workers` to); `@queued` needs a DynamicObjects with
 it (`pre-inference` ≥ `64aba0c`), and `workers` one whose `configure_queue!`
-takes that keyword (0.5.7): on an older one `workers=0` is accepted and a
-positive count refused. Returns the current settings; omitted settings are
-unchanged. Setting `max_running=0` starts everything still queued.
+takes that keyword and that carries scoped values into the worker (0.5.8): on
+an older one `workers=0` is accepted and a positive count refused. Returns the
+current settings; omitted settings are unchanged. Setting `max_running=0`
+starts everything still queued.
 """
 function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
         workers=nothing, worker_stall=nothing)
@@ -966,9 +973,10 @@ function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
     if workers !== nothing
         workers >= 0 || throw(ArgumentError("workers must be non-negative"))
         workers > 0 && !_has_queue_workers() && throw(ArgumentError(
-            "configure_job_queue!(; workers=$(workers)) needs a DynamicObjects " *
-            "whose configure_queue! takes `workers` (its worker executor behind " *
-            "`@queued`, 0.5.7); this one has none, so `@queued` computations " *
+            "configure_job_queue!(; workers=$(workers)) needs DynamicObjects 0.5.8: " *
+            "a configure_queue! that takes `workers` (its worker executor behind " *
+            "`@queued`) and `carry_to_worker!` (the page language and audience " *
+            "reach the worker); this one lacks them, so `@queued` computations " *
             "stay in this process"))
     end
     if abandon_after !== nothing
