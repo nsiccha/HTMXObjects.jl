@@ -14,7 +14,7 @@
     # Markdown has no tab bar and no script: each tab is its label in bold
     # over its content (`test/tabset_markdown.jl`), never a link to `#`.
     md = repr("text/markdown", tabset("A" => h.p("a"), "B" => h.p("b")))
-    @test startswith(md, "**A**\n\na\n") && !contains(md, "](") && !contains(md, "htmxoTabset")
+    @test startswith(md, "::: {.htmxo-label}\n**A**\n:::\n\na\n") && !contains(md, "](") && !contains(md, "htmxoTabset")
 
     # A label that is not text, or keeps no letter or digit, is named by position.
     @test names(html(tabset(h.span("x") => h.p("a"), "∑" => h.p("b"), "Ärger ẞtraße" => h.p("c"), "Café" => h.p("d")))) ==
