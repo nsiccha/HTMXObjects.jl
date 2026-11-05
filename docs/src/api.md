@@ -3854,6 +3854,18 @@ needs a DynamicObjects with its job queue (`pre-inference` ≥ `64aba0c`).
 configure_job_queue!(; max_running=2, abandon_after=60)
 ```
 
+With `workers=n`, DynamicObjects runs every `@queued` computation in one of `n`
+worker processes instead of on a `:default` thread of this one, so a heavy
+first-call compile, a GC pause or a deadlock in heavy work never stalls the pages,
+pollers and exports this process serves. A worker never saw the request, so a
+worker-bound body cannot read `__req__`: pass what it needs as arguments. The
+executor is DynamicObjects' (its `configure_queue!` takes `workers`); on a
+DynamicObjects without it, `workers=0` is accepted and a positive count refused.
+
+```julia
+configure_job_queue!(; max_running=2, workers=1)
+```
+
 #### Queued properties
 
 `@queued` also marks a property that is not a route. Each computation of it is
