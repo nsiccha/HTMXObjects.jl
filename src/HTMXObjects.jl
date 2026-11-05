@@ -885,6 +885,10 @@ end
 const _FILE_MOUNTS = Dict{String,_FileMount}()
 const _FILE_MOUNTS_LOCK = ReentrantLock()
 
+# `path` relative to `base` with `/` between its parts on every platform: the
+# spelling of a URL path and of a file's place in an exported bundle.
+_slash_relpath(path::AbstractString, base::AbstractString) = join(splitpath(relpath(path, base)), "/")
+
 function _mount_files(handler_for, folder, mountdir; bundle::Bool=false, private::Bool=false)
     prefix = strip(mountdir, '/')
     base = isempty(prefix) ? "" : "/" * prefix
@@ -892,7 +896,7 @@ function _mount_files(handler_for, folder, mountdir; bundle::Bool=false, private
     files = String[]
     for (dir, _, names) in walkdir(folder), file in names
         path = joinpath(dir, file)
-        rel = join(splitpath(relpath(path, folder)), "/")
+        rel = _slash_relpath(path, folder)
         push!(files, rel)
         route = base * "/" * rel
         handler = handler_for(path)
@@ -7518,8 +7522,9 @@ is not complete: `failed` lists each address whose answer could not go into it
 (`address => reason`: a status other than 200, an `X-HTMXO-Error-Id` header,
 no file extension for its `Content-Type`, a file another address already
 took), `unresolved` each reference in a written HTML file that names no file
-of the bundle (`file => address`). `files` and `bytes` count what was written
-into `dir`.
+of the bundle (`file => address`, `file` the page's path in the bundle with `/`
+separators on every platform). `files` and `bytes` count what was written into
+`dir`.
 """
 struct StaticSiteIncomplete <: Exception
     dir::String
@@ -8084,7 +8089,7 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     end
     for k in sort!(collect(written.marked)), j in unique(_site_markers(crawl, read(written.paths[k], String)))
         haskey(crawl.private, j) && push!(crawl.failed, crawl.entries[j].address =>
-            "is private, but $(relpath(written.paths[k], root)) refers to it where the export " *
+            "is private, but $(_slash_relpath(written.paths[k], root)) refers to it where the export " *
             "cannot leave the reference out (a script or a JSON payload)")
     end
     # A failed address keeps its own path, which the reference check below
@@ -8476,7 +8481,7 @@ function _site_unresolved(root::AbstractString, failed::Set{String})
             target = normpath(joinpath(page, _static_unescape(path)))
             ok = startswith(path, '/') ? path in failed :
                  startswith(target, joinpath(root, "")) && isfile(target)
-            ok || push!(unresolved, relpath(file, root) => address)
+            ok || push!(unresolved, _slash_relpath(file, root) => address)
         end
     end
     unresolved
