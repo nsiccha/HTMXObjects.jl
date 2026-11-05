@@ -891,8 +891,17 @@ const _ROUTE_QUEUE_SCOPE = :htmxo_route_queue_scope
 _has_job_queue() = isdefined(DynamicObjects, :job_queue)
 _dynamicobjects_queue(name::Symbol) = getproperty(DynamicObjects, name)
 
+# DynamicObjects runs `@queued` computations in worker processes once its
+# `configure_queue!` takes `workers` (its worker executor behind `@queued`;
+# design in brief HTMXObjects:process-split `wworuo`). The keyword is the
+# capability probe: forwarding it is this layer's only coupling to that
+# executor, so no version is pinned here.
+_has_queue_workers() = _has_job_queue() && any(
+    m -> :workers in Base.kwarg_decl(m),
+    methods(_dynamicobjects_queue(:configure_queue!)))
+
 """
-    configure_job_queue!(; max_running=nothing, abandon_after=nothing) -> NamedTuple
+    configure_job_queue!(; max_running=nothing, abandon_after=nothing, workers=nothing) -> NamedTuple
 
 Bound how many `@queued` (heavy) computations run at once. Off by default
 (`max_running=0`): a `@queued` computation starts on `:default` immediately. With
@@ -920,32 +929,55 @@ request for it starts a fresh compute. `abandon_after=Inf` never abandons.
 Running computes are never interrupted, and a property's computation is never
 abandoned: its callers are waiting for it.
 
+With `workers=n`, every `@queued` computation runs in one of `n` worker processes
+instead of on a `:default` thread of this one, so a heavy first-call compile, a
+GC pause or a deadlock in heavy work never stalls the pages, pollers and exports
+this process serves (the frontend/backend process split; design in brief
+HTMXObjects:process-split `wworuo`). A worker never saw the request, so a
+worker-bound body cannot read `__req__`: pass what it needs as arguments. The
+default `0` keeps every computation in this process.
+
 The queue is DynamicObjects' (`DynamicObjects.configure_queue!`, which this
-forwards `max_running` to); `@queued` needs a DynamicObjects with it
-(`pre-inference` ≥ `64aba0c`). Returns the current settings; omitted settings
-are unchanged. Setting `max_running=0` starts everything still queued.
+forwards `max_running` and `workers` to); `@queued` needs a DynamicObjects with
+it (`pre-inference` ≥ `64aba0c`), and `workers` one whose `configure_queue!`
+takes that keyword (its worker executor): on an older one `workers=0` is
+accepted and a positive count refused. Returns the current settings; omitted
+settings are unchanged. Setting `max_running=0` starts everything still queued.
 """
-function configure_job_queue!(; max_running=nothing, abandon_after=nothing)
+function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
+        workers=nothing)
     if max_running !== nothing
         max_running >= 0 || throw(ArgumentError("max_running must be non-negative"))
         max_running > 0 && !_has_job_queue() && throw(ArgumentError(
             "configure_job_queue! needs a DynamicObjects with its job queue " *
             "(pre-inference ≥ 64aba0c)"))
     end
+    if workers !== nothing
+        workers >= 0 || throw(ArgumentError("workers must be non-negative"))
+        workers > 0 && !_has_queue_workers() && throw(ArgumentError(
+            "configure_job_queue!(; workers=$(workers)) needs a DynamicObjects " *
+            "whose configure_queue! takes `workers` (its worker executor behind " *
+            "`@queued`); this one has none, so `@queued` computations stay in " *
+            "this process"))
+    end
     if abandon_after !== nothing
         abandon_after > 0 || throw(ArgumentError("abandon_after must be positive"))
         _QUEUE_ABANDON_AFTER[] = Float64(abandon_after)
     end
-    max_running === nothing || !_has_job_queue() ||
-        _dynamicobjects_queue(:configure_queue!)(; max_running=Int(max_running))
+    queue_kw = (;
+        (max_running === nothing ? (;) : (; max_running=Int(max_running)))...,
+        # A zero on a DynamicObjects without the executor is the state it is in.
+        (workers === nothing || !_has_queue_workers() ? (;) : (; workers=Int(workers)))...)
+    isempty(queue_kw) || !_has_job_queue() ||
+        _dynamicobjects_queue(:configure_queue!)(; queue_kw...)
     job_queue_settings()
 end
 
 function job_queue_settings()
     queue = _has_job_queue() ? _dynamicobjects_queue(:queue_settings)() :
         (; max_running=0, queued=0, running=0)
-    (; queue.max_running, abandon_after=_QUEUE_ABANDON_AFTER[], queue.queued,
-       queue.running)
+    (; queue.max_running, workers=Int(get(queue, :workers, 0)),
+       abandon_after=_QUEUE_ABANDON_AFTER[], queue.queued, queue.running)
 end
 
 # Run `f` as the start of a route's queued computation for `tracker`'s ledger:

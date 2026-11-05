@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.63
+## 0.1.65
 
 - Semantic content that holds HTML nodes reads as text in plain text. A `tabset`,
   a layout `h.div` or a `render_table` inside a `SemanticSection`
@@ -24,6 +24,23 @@ failing at render with a `MethodError`.
   `Label (/address)`), a link `label (target)`, a table one tab-separated line per
   row, a list item `- item`. Scripts, styles and buttons write nothing, and a
   master/detail table's eager details follow it, as in Markdown.
+
+## 0.1.64
+
+- `configure_job_queue!(; workers=n)` forwards a worker count to DynamicObjects' worker
+  executor behind `@queued`, so heavy computations run in worker processes and a
+  first-call compile, a GC pause or a deadlock in them never stalls this process's
+  pages, pollers and exports (the frontend/backend process split; design in brief
+  HTMXObjects:process-split `wworuo`). `job_queue_settings()` reports `workers`. On a
+  DynamicObjects whose `configure_queue!` does not take `workers` yet, `workers=0` is
+  accepted and a positive count is refused with an `ArgumentError`.
+
+## 0.1.63
+
+- `pdf_report` lets table cells break after underscore runs in identifiers,
+  including inline code. Long model parameter names now wrap inside their
+  cells instead of painting over adjacent columns. The identifier's characters
+  and the table's accessibility structure are preserved.
 
 ## 0.1.62
 
