@@ -76,6 +76,7 @@ using LazyArtifacts
 import Dates
 import Random
 import CommonMark
+import Markdown
 import JSON
 # gzip for `serve`'s response compression. HTTP.jl depends on it already.
 import CodecZlib
@@ -4037,6 +4038,7 @@ end
 
 """
     SemanticProse(markdown; math=true)
+    SemanticProse(doc::Markdown.MD; references=Dict(), math=true)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
 are the source itself; the HTML projection renders it through
@@ -4045,12 +4047,27 @@ which escapes inline markup, so prose cannot smuggle HTML through. Its
 `\$…\$` / `\$\$…\$\$` math, and any other delimiter `render_markdown` takes, is
 typeset in the browser and in a [`pdf_report`](@ref); `math=false` shows every
 `\$` as text in the browser.
+
+Pass a Julia doc object directly (`SemanticProse(@doc sum)`) to display
+documentation outside Documenter. Its `@ref` links use `references`, a map
+from reference names to destination URLs; unresolved references keep their
+formatted label without a hyperlink. For example,
+`SemanticProse(@doc(sum); references=Dict("reduce" => "/api/reduce"))`.
+Named references use their explicit target; otherwise the label supplies
+the name, without code/emphasis delimiters. No destination is guessed and
+no documentation code is executed. `jldoctest` fences become Julia fences,
+keeping the example and its expected output. The doc object is not mutated.
+The resulting ordinary Markdown is shared by all projections; whitespace
+is normalized by Julia's Markdown writer. String input keeps the original
+source contract above, including any literal `@ref` links.
 """
 struct SemanticProse <: SemanticNode
     markdown::String
     math::Bool
     SemanticProse(markdown; math::Bool=true) = new(String(markdown), math)
 end
+
+include("documentation.jl")
 
 """
     SemanticTable(source)
@@ -4346,7 +4363,7 @@ function _semantic_fields_node(fields::SemanticFields)
 end
 
 _semantic_code_node(code::SemanticCode) = h.pre(
-    h.code(code.text; class="language-$(code.language)");
+    h.code(code.text; class="language-$(_is_jldoctest(code.language) ? "julia" : code.language)");
     _semantic_anchor_attrs(code.anchor)...)
 
 function _semantic_status_node(status::SemanticStatus)
@@ -4744,8 +4761,7 @@ markdown_node(r::MarkdownRenderer, t::CommonMark.Heading, n, rules, context) =
 # convention, so a client highlighter runs the declared language instead of
 # auto-detect. Untyped fences keep a bare `<pre><code>`.
 function markdown_node(::MarkdownRenderer, t::CommonMark.CodeBlock, n, rules, context)
-    info = strip(String(t.info))
-    lang = isempty(info) ? "" : lowercase(first(split(info)))
+    lang = _syntax_language(t.info)
     isempty(lang) ? h.pre(h.code(n.literal)) :
         h.pre(h.code(n.literal; class="language-$(lang)"))
 end
