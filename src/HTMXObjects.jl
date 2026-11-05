@@ -76,6 +76,7 @@ using LazyArtifacts
 import Dates
 import Random
 import CommonMark
+import Markdown
 import JSON
 # gzip for `serve`'s response compression. HTTP.jl depends on it already.
 import CodecZlib
@@ -825,45 +826,132 @@ end
 # --- Static files ----------------------------------------------------------
 
 """
-    staticfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
+    staticfiles(folder, mountdir="static"; headers=[], loadfile=nothing,
+                bundle=false, private=false)
 
-Serve every file under `folder` at `/<mountdir>/<relative path>`; an
-`index.html` also answers at its directory's path. Files are read once, when
+Serve every file under `folder` at `/<mountdir>/<relative path>`. An
+`index.html` also answers at its folder's address with a trailing slash; the
+address without one redirects (`308`) there, as on any static server, so the
+page's relative links resolve inside the folder. Files are read once, when
 mounted. `headers` are added to every response, and `loadfile(path)` replaces
 `read(path)`.
+
+- `bundle=true` says the folder is one finished site, such as an
+  [`export_site`](@ref) bundle another process wrote: once an `export_site`
+  crawl reaches any of its files, it writes every file of the folder at its own
+  path, byte for byte, including the files only its scripts load. Without it, an
+  export writes the files the app's pages name, and an HTML file of the folder
+  as it is, without following its links.
+- `private=true` serves the folder to a private reader only (the live app, an
+  `audience=:private` export): a public answer is the empty `404` of a private
+  page (`X-HTMXO-Private: true`), so a public export writes none of it and
+  leaves out every element that links it, as for [`private`](@ref) content.
+
+```julia
+staticfiles(bundle_dir, "modelldefinition/ansicht"; bundle=true, private=true)
+```
 """
 staticfiles(folder::AbstractString, mountdir::AbstractString="static";
-        headers::Vector=[], loadfile=nothing) =
-    _mount_files(folder, mountdir) do path
+        headers::Vector=[], loadfile=nothing, bundle::Bool=false, private::Bool=false) =
+    _mount_files(folder, mountdir; bundle, private) do path
         body = _load_file(path, loadfile)
         _ -> _file_response(path, body, headers)
     end
 
 """
-    dynamicfiles(folder, mountdir="static"; headers=[], loadfile=nothing)
+    dynamicfiles(folder, mountdir="static"; headers=[], loadfile=nothing,
+                 bundle=false, private=false)
 
 Like [`staticfiles`](@ref), but re-reads each file from disk on every request.
+The folder's file list is read once, when mounted.
 """
 dynamicfiles(folder::AbstractString, mountdir::AbstractString="static";
-        headers::Vector=[], loadfile=nothing) =
-    _mount_files(folder, mountdir) do path
+        headers::Vector=[], loadfile=nothing, bundle::Bool=false, private::Bool=false) =
+    _mount_files(folder, mountdir; bundle, private) do path
         _ -> _file_response(path, _load_file(path, loadfile), headers)
     end
 
-function _mount_files(handler_for, folder, mountdir)
+# A mounted folder as an export sees it: its address prefix ("/a/b", or "" at
+# the root), its files relative to the folder with `/` between directories, and
+# whether it is one finished bundle (`staticfiles(...; bundle=true)`).
+struct _FileMount
+    prefix::String
+    files::Vector{String}
+    fileset::Set{String}
+    bundle::Bool
+end
+# By prefix: mounting another folder at the same address replaces the entry,
+# as its routes replace the earlier ones.
+const _FILE_MOUNTS = Dict{String,_FileMount}()
+const _FILE_MOUNTS_LOCK = ReentrantLock()
+
+function _mount_files(handler_for, folder, mountdir; bundle::Bool=false, private::Bool=false)
     prefix = strip(mountdir, '/')
-    for (dir, _, files) in walkdir(folder), file in files
+    base = isempty(prefix) ? "" : "/" * prefix
+    guard(handler) = private ? _private_mount_handler(handler) : handler
+    files = String[]
+    for (dir, _, names) in walkdir(folder), file in names
         path = joinpath(dir, file)
         rel = join(splitpath(relpath(path, folder)), "/")
-        route = isempty(prefix) ? "/$rel" : "/$prefix/$rel"
+        push!(files, rel)
+        route = base * "/" * rel
         handler = handler_for(path)
-        _register_get_route!(route, handler)
+        _register_get_route!(route, guard(handler))
         if file == "index.html"
             dir_route = String(chopsuffix(route, "/index.html"))
-            _register_get_route!(isempty(dir_route) ? "/" : dir_route, handler)
+            _register_get_route!(isempty(dir_route) ? "/" : dir_route,
+                                 guard(isempty(dir_route) ? handler : _folder_handler(handler, dir_route)))
         end
     end
+    sort!(files)
+    lock(() -> _FILE_MOUNTS[base] = _FileMount(base, files, Set(files), bundle), _FILE_MOUNTS_LOCK)
     return nothing
+end
+
+# A public reader gets a private page's answer; the live app and a private
+# export get the file.
+_private_mount_handler(handler) =
+    req -> export_audience(req) === :public ? _private_page_response() : handler(req)
+
+# A folder's `index.html` answers at the folder's address with a trailing
+# slash. Without it, a browser would resolve the page's relative links against
+# the folder's parent, so that address redirects, relative to itself so it
+# holds behind a path-stripping proxy too.
+function _folder_handler(handler, dir_route::AbstractString)
+    folder = String(last(split(dir_route, '/')))
+    function (req)
+        path, query = _split_once(req.target, '?')
+        endswith(path, '/') && return handler(req)
+        HTTP.Response(308, ["Location" => folder * "/" * (isnothing(query) ? "" : "?" * query)]; body="")
+    end
+end
+
+# The mount that serves `path` (an address without its query) and the file's
+# name relative to the mount's folder, or `nothing`. Where mounts nest, the
+# one with the longest prefix serves it, as its routes were registered later
+# or more specifically.
+function _mounted_file(path::AbstractString)
+    lock(_FILE_MOUNTS_LOCK) do
+        found = nothing
+        for m in values(_FILE_MOUNTS)
+            startswith(path, m.prefix * "/") || continue
+            rel = path[ncodeunits(m.prefix) + 2:end]
+            rel in m.fileset || continue
+            (isnothing(found) || ncodeunits(m.prefix) > ncodeunits(first(found).prefix)) && (found = (m, rel))
+        end
+        found
+    end
+end
+
+# The address of the `index.html` a mounted folder's address (with or without
+# its trailing slash, and its query) stands for, or the address unchanged.
+function _mounted_index(address::AbstractString)
+    path, query = _split_once(address, '?')
+    folder = rstrip(path, '/')
+    isempty(folder) && return String(address)
+    index = folder * "/index.html"
+    isnothing(_mounted_file(index)) && return String(address)
+    isnothing(query) ? index : index * "?" * query
 end
 
 _load_file(path, loadfile) = loadfile === nothing ? read(path) : loadfile(path)
@@ -3950,6 +4038,7 @@ end
 
 """
     SemanticProse(markdown; math=true)
+    SemanticProse(doc::Markdown.MD; references=Dict(), math=true)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
 are the source itself; the HTML projection renders it through
@@ -3958,12 +4047,27 @@ which escapes inline markup, so prose cannot smuggle HTML through. Its
 `\$…\$` / `\$\$…\$\$` math, and any other delimiter `render_markdown` takes, is
 typeset in the browser and in a [`pdf_report`](@ref); `math=false` shows every
 `\$` as text in the browser.
+
+Pass a Julia doc object directly (`SemanticProse(@doc sum)`) to display
+documentation outside Documenter. Its `@ref` links use `references`, a map
+from reference names to destination URLs; unresolved references keep their
+formatted label without a hyperlink. For example,
+`SemanticProse(@doc(sum); references=Dict("reduce" => "/api/reduce"))`.
+Named references use their explicit target; otherwise the label supplies
+the name, without code/emphasis delimiters. No destination is guessed and
+no documentation code is executed. `jldoctest` fences become Julia fences,
+keeping the example and its expected output. The doc object is not mutated.
+The resulting ordinary Markdown is shared by all projections; whitespace
+is normalized by Julia's Markdown writer. String input keeps the original
+source contract above, including any literal `@ref` links.
 """
 struct SemanticProse <: SemanticNode
     markdown::String
     math::Bool
     SemanticProse(markdown; math::Bool=true) = new(String(markdown), math)
 end
+
+include("documentation.jl")
 
 """
     SemanticTable(source)
@@ -4187,6 +4291,9 @@ body. Wrapping semantic children in markup instead would force the entire
 subtree down the HTML→Markdown translation path and lose every peer projection
 underneath it.
 
+The Markdown label is bold text in a `::: {.htmxo-label}` block. `pdf_report`
+keeps it with the start of its body; the body can continue across pages.
+
 A disclosure with nothing to open renders nothing in any format, its label
 included. That covers a disclosure with no children, one holding only `nothing`,
 and one whose [`private`](@ref) content has no stand-in for a public reader.
@@ -4256,7 +4363,7 @@ function _semantic_fields_node(fields::SemanticFields)
 end
 
 _semantic_code_node(code::SemanticCode) = h.pre(
-    h.code(code.text; class="language-$(code.language)");
+    h.code(code.text; class="language-$(_is_jldoctest(code.language) ? "julia" : code.language)");
     _semantic_anchor_attrs(code.anchor)...)
 
 function _semantic_status_node(status::SemanticStatus)
@@ -4654,8 +4761,7 @@ markdown_node(r::MarkdownRenderer, t::CommonMark.Heading, n, rules, context) =
 # convention, so a client highlighter runs the declared language instead of
 # auto-detect. Untyped fences keep a bare `<pre><code>`.
 function markdown_node(::MarkdownRenderer, t::CommonMark.CodeBlock, n, rules, context)
-    info = strip(String(t.info))
-    lang = isempty(info) ? "" : lowercase(first(split(info)))
+    lang = _syntax_language(t.info)
     isempty(lang) ? h.pre(h.code(n.literal)) :
         h.pre(h.code(n.literal; class="language-$(lang)"))
 end
@@ -5340,7 +5446,7 @@ Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
 function Base.show(io::IO, mime::MIME"text/markdown",
                    disclosure::SemanticDisclosure)
     _shows_nothing(disclosure, _ambient_audience()) && return
-    print(io, "**", _markdown_plain_text(disclosure.summary), "**\n\n")
+    print(io, "::: {.htmxo-label}\n**", _markdown_plain_text(disclosure.summary), "**\n:::\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
@@ -7256,6 +7362,7 @@ struct _SiteCrawl
     keys::Dict{String,Int}
     failed::Vector{Pair{String,String}}
     private::Dict{Int,Int}  # entry answered as a private page → how many were found by then
+    bundles::Set{String}  # prefixes of the mounted bundles whose files are queued
     lock::ReentrantLock
 end
 
@@ -7315,10 +7422,24 @@ end
 function _site_address(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
     rest, id = _split_once(url, '#')
     address = _site_resolve(base, rest)
-    address = get(crawl.aliases, address, address)
+    address = _mounted_index(get(crawl.aliases, address, address))
     fragment = kind === :fragment
-    key, linked = _split_once(crawl.file_name(address; fragment, ext=".html"), '?')
+    key, linked = _split_once(_site_name(crawl, address; fragment, ext=".html"), '?')
     (; address, fragment, key, linked, id)
+end
+
+# The file an address is written to. A file of a mounted bundle keeps its
+# mount path, whatever `file_name` says: the bundle's own relative links name
+# it there.
+function _site_name(crawl::_SiteCrawl, address::AbstractString; fragment::Bool, ext::AbstractString)
+    bundled = _site_bundle_name(address)
+    isnothing(bundled) ? crawl.file_name(address; fragment, ext) : bundled
+end
+
+function _site_bundle_name(address::AbstractString)
+    path = first(_split_once(first(_split_once(address, '#')), '?'))
+    found = _mounted_file(path)
+    isnothing(found) || !first(found).bundle ? nothing : String(lstrip(path, '/'))
 end
 
 # Whether `url` names an entry that answered as a private page.
@@ -7445,7 +7566,9 @@ end
 function _site_fetch(crawl::_SiteCrawl, e::_SiteEntry, log::_SiteLog, controls::Symbol, parent, audience::Symbol)
     headers = e.fragment ? ["HX-Request" => "true"] : Pair{String,String}[]
     plain() = dispatch(:GET, e.address; headers, parent, operation_policy=:blocking, audience)
-    own = _static_own_extension(first(_split_once(e.address, '?')))
+    path = first(_split_once(e.address, '?'))
+    isnothing(_mounted_file(path)) || return plain()   # a file of a `staticfiles` mount
+    own = _static_own_extension(path)
     isnothing(own) || own == ".html" || own == ".htm" || return plain()
     try
         dispatch(:GET, e.address; headers, parent,
@@ -7600,6 +7723,14 @@ can run inside a serving app (it renders in process with
   PrismJS autoloader can fetch. A relative address resolves
   against the address being rendered. Addresses on other sites, `#id`s and
   `?query` links of the page itself stay as they are.
+- **Mounted folders.** A file a [`staticfiles`](@ref)/`dynamicfiles` mount
+  serves is written as it answers, at its path. A mounted folder's address
+  (`/docs` or `/docs/`) names its `index.html`, and links to it name that
+  file. A mount with `bundle=true` is one finished site, such as an
+  `export_site` bundle another process wrote: once the crawl reaches any of its
+  files, every file of it is written at its own path, byte for byte, the files
+  only its scripts load included. Without `bundle=true` only the files the
+  app's pages name are written, and an HTML file of the mount is not followed.
 - **Page or fragment.** An address in `pages`, or reached through a link,
   `hx-push-url`, `src` or `static_url`, is fetched as a full answer (a page in
   its page chrome); one reached through `hx-get` or as a `url_params` value is
@@ -7678,7 +7809,8 @@ can run inside a serving app (it renders in process with
   found is rendered again for that. An address a public answer names where
   the export cannot leave it out (a script, a JSON payload) is a failure, as
   is private markup rendered before the export ([`PrivateContentEscaped`](@ref)).
-  `audience=:private` writes everything, as the live app shows it.
+  Each file of a `staticfiles(...; private=true)` mount answers as a private
+  page. `audience=:private` writes everything, as the live app shows it.
 - A route can tell it is being exported with `static_export(__req__) !== nothing`
   (to show a snapshot notice, say), and for whom with
   [`export_audience`](@ref)`(__req__)`.
@@ -7688,7 +7820,10 @@ such as `_hyperscript.min.js`). Then every `href`, `src`, `hx-get`,
 `hx-push-url`/`hx-replace-url` and PDF document address
 (`data-htmxo-pdf-url`) of an element in the written HTML, and every Vega
 `"url"` in its scripts, is checked to name a file of the bundle, which
-also catches an address a route wrote into raw markup the walk never sees. The
+also catches an address a route wrote into raw markup the walk never sees. A
+relative address is looked up where a browser resolves it: in the file's own
+folder, or for a fragment below `hx/`, in the folder of the page that shows it
+(a mounted bundle's page below the root is checked in its own folder). The
 text of a `<style>` or `<script>` and an HTML comment are not markup, so an
 `href="…"` there (a CSS comment of the inline runtime) is not checked. An
 answer with a status other than 200 or an `X-HTMXO-Error-Id` header (a failed
@@ -7718,7 +7853,7 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     root = normpath(abspath(dir))
     crawl = _SiteCrawl(file_name, aliases, "htmxo" * Random.randstring('a':'z', 12) * "f",
         file_name === static_file_name, _SiteEntry[], Dict{String,Int}(), Pair{String,String}[],
-        Dict{Int,Int}(), ReentrantLock())
+        Dict{Int,Int}(), Set{String}(), ReentrantLock())
     foreach(p -> _site_target!(crawl, "/", p, :full), pages)
     written = _SiteWritten(root)
     cpus = parallel ? _usable_cpus() : 1
@@ -7844,7 +7979,7 @@ function _site_query_page(crawl::_SiteCrawl, i::Int)
     e = crawl.entries[i]
     path, query = _split_once(e.address, '?')
     !e.fragment && !isnothing(query) && !isempty(query) && isnothing(_static_own_extension(path)) &&
-        isnothing(last(_split_once(crawl.file_name(e.address; fragment=false, ext=".html"), '?'))) ||
+        isnothing(last(_split_once(_site_name(crawl, e.address; fragment=false, ext=".html"), '?'))) ||
         return nothing
     count(!isempty, split(query, '&'))
 end
@@ -7923,6 +8058,8 @@ _static_query_link(query::AbstractString) =
 # names the file with an extension of its choosing (`.fig` for an Xfig
 # download), which a name without one has not done.
 function _site_file_name(crawl::_SiteCrawl, e::_SiteEntry, ext::AbstractString, resp::HTTP.Response)
+    bundled = _site_bundle_name(e.address)
+    isnothing(bundled) || return bundled, nothing
     type = repr(HTTP.header(resp, "Content-Type"))
     isempty(ext) && crawl.strict && return "", "no file extension for its Content-Type $type; give the " *
         "address one, or pass export_site a file_name that names its file with one (it is asked with ext=\"\")"
@@ -7995,6 +8132,7 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, run::_Si
     _body_contains(body, crawl.marker) ? push!(written.marked, i) : delete!(written.marked, i)
     ext == ".css" && _site_follow_stylesheet!(crawl, e.address, body)
     endswith(path, "/" * _PRISM_AUTOLOADER) && _site_follow_autoloader!(crawl, e.address)
+    _site_follow_bundle!(crawl, path)
 end
 
 # The entries each marker in `text` names.
@@ -8025,6 +8163,21 @@ function _site_follow_stylesheet!(crawl::_SiteCrawl, address::AbstractString, bo
             _site_target!(crawl, address, url, :full)
         end
     end
+end
+
+# Once the crawl writes a file of a mounted bundle (`staticfiles(...;
+# bundle=true)`), every file of the bundle is queued at its own path: the
+# bundle is complete as it stands, including the files only its scripts load,
+# which no reference names.
+function _site_follow_bundle!(crawl::_SiteCrawl, path::AbstractString)
+    found = _mounted_file(path)
+    (isnothing(found) || !first(found).bundle) && return
+    m = first(found)
+    queued = lock(crawl.lock) do
+        m.prefix in crawl.bundles || (push!(crawl.bundles, m.prefix); false)
+    end
+    queued && return
+    foreach(rel -> _site_target!(crawl, "/", m.prefix * "/" * rel, :full), m.files)
 end
 
 # The PrismJS autoloader fetches each language's grammar by name from the
@@ -8116,20 +8269,35 @@ end
 # `file => address`: a rooted address (it escaped the export, and would point
 # outside a bundle served from a subdirectory) or a relative one whose file is
 # missing. Addresses whose export failed are already reported as failures.
+# A relative address resolves as a browser resolves it: against the folder of
+# the page that shows it, the file's own folder, except for a fragment (a file
+# in an `hx/` folder), which shows in the page of the folder above `hx/`. So a
+# page written below the root, such as a mounted bundle's, is checked where
+# its links point, not against same-named files in the root.
 function _site_unresolved(root::AbstractString, failed::Set{String})
     unresolved = Pair{String,String}[]
     for (dirpath, _, files) in walkdir(root), f in sort(files)
         endswith(f, ".html") || continue
         file = joinpath(dirpath, f)
+        page = _site_page_folder(root, dirpath)
         for address in _site_references(read(file, String))
             (_site_internal(address) && address != "true" && address != "false") || continue
             path = first(split(address, r"[?#]"; limit=2))
+            target = normpath(joinpath(page, _static_unescape(path)))
             ok = startswith(path, '/') ? path in failed :
-                 isfile(joinpath(root, _static_unescape(path)))
+                 startswith(target, joinpath(root, "")) && isfile(target)
             ok || push!(unresolved, relpath(file, root) => address)
         end
     end
     unresolved
+end
+
+# The folder a relative address in an HTML file of `dirpath` resolves against:
+# its own, or for a fragment the folder above its `hx/`.
+function _site_page_folder(root::AbstractString, dirpath::AbstractString)
+    parts = splitpath(relpath(dirpath, root))
+    k = findlast(==("hx"), parts)
+    isnothing(k) ? dirpath : joinpath(root, parts[1:k-1]...)
 end
 
 # --- Prestarted fragments ---
@@ -19076,6 +19244,10 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 # to Typst as written.
 const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
 
+# A semantic disclosure's label must travel with the start of its body, not
+# stand alone at a page bottom. Only the label is sticky; the body can break.
+const _PDF_REPORT_LABELS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-labels.lua")
+
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
 # this Quarto filter gives each one its TeX source.
 const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
@@ -19091,6 +19263,14 @@ const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto"
 # bottom. These rules set table cells ragged-right, hyphenate only a word wider
 # than its column, and let a captioned table break across pages.
 const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
+
+# Quarto's Skylighting writes each token of a code block as an inline `raw` and
+# each line end as `raw("\n")`, which Typst tags as a Code element each: an empty
+# one per line and a whitespace-only one per space between tokens, which PAC
+# reports (snag review-the-brm-m-68c151e1). `pdf_report` asks for Typst's own
+# code blocks instead, one Code element with a paragraph per line; these rules
+# keep Skylighting's colours and leave a blank line out of the tags.
+const _PDF_REPORT_CODE_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-code.typ")
 
 # Typst reads the date Pandoc writes as markup, so `22. Oktober 2026` became a
 # numbered list; this filter writes the date as text, the date text of
@@ -19170,6 +19350,10 @@ const _PDF_REPORT_OWN_KEYS = Dict(
     "from" => "pdf_report reads the Markdown with web and mail addresses linked, as PAC requires",
     "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
     "filters" => "pdf_report runs the filter that gives equations alt text",
+    "syntax-highlighting" => "pdf_report sets code with Typst, which tags a code block as one Code element; " *
+        "Quarto's themes tag each token as its own, and PAC reports the empty and whitespace-only ones",
+    "highlight-style" => "pdf_report sets code with Typst, which tags a code block as one Code element; " *
+        "Quarto's themes tag each token as its own, and PAC reports the empty and whitespace-only ones",
     _PDF_REPORT_DATE_TEXT_KEY => "pass the text as `date=`",
     _PDF_REPORT_BASE_URL_KEY => "pass the address as `base_url=`",
     _PDF_REPORT_URL_MAP_KEY => "pass the function as `url_map=`",
@@ -19317,11 +19501,14 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
       typst:
         from: $(_PDF_REPORT_READER)
         pdf-standard: [ua-1]
-        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST))]
+        syntax-highlighting: idiomatic
+        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST)), $(_yaml_string(_PDF_REPORT_CODE_TYPST))]
     filters:
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
       - path: $(_yaml_string(_PDF_REPORT_FIGURES_FILTER))
+        at: post-render
+      - path: $(_yaml_string(_PDF_REPORT_LABELS_FILTER))
         at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
@@ -19344,7 +19531,16 @@ input is Markdown, typically a page's own projection: a `value` such as an
 it is. Tables, figures and captions keep their structure: header rows become
 table header cells, captions stay attached to their table or figure. A table
 longer than the rest of its page continues on the next, its header row
-repeated, and a caption above it moves along with its first rows.
+repeated, and a caption above it moves along with its first rows. A code block
+is one tagged Code element with a paragraph per line, in the colours of
+Quarto's `arrow` theme; a blank line in it is kept on the page and left out of
+the tags. Quarto's own highlighting tagged each token as a Code element of its
+own, and PAC (PDF Accessibility Checker) warned about the empty and
+whitespace-only ones. Semantic disclosure labels (including eager tabs and
+master-detail labels) stay with the start of their body. Their Markdown marks
+the label alone with `::: {.htmxo-label}`; the body can continue across pages.
+Regenerate saved Markdown to get these markers. Ordinary bold prose keeps its
+own pagination.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region
@@ -19367,8 +19563,8 @@ dates, vectors, and NamedTuples or dictionaries for nested options
 (`margin=(x="2cm", y="2cm")`). The paper is the one `lang`'s region uses: US
 Letter for the regions Unicode CLDR lists for it (US, CA, MX and others in the
 Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
-`format`, `from`, `pdf-standard` and `filters` belong to `pdf_report` and cannot
-be set through `metadata`. The Markdown itself must not carry a YAML metadata
+`format`, `from`, `pdf-standard`, `filters`, `syntax-highlighting` and
+`highlight-style` belong to `pdf_report` and cannot be set through `metadata`. The Markdown itself must not carry a YAML metadata
 block: Quarto would let it override `title`, `lang` and the equation filter.
 
 `date` is printed in the title block. A `Date` or `DateTime`, an ISO date

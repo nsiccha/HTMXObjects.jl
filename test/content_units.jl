@@ -383,7 +383,7 @@ end
     @test m(SemanticSection("H*(10) a"; anchor="x")) == "## H\\*(10) a {#x}"
     @test m(SemanticCard("H*(10)"; anchor="y")) == "### H\\*(10) {#y}"
     @test m(SemanticLink("H*(10)", "#x")) == "[H\\*(10)](#x)"
-    @test startswith(m(SemanticDisclosure("H*(10)", "z")), "**H\\*(10)**")
+    @test startswith(m(SemanticDisclosure("H*(10)", "z")), "::: {.htmxo-label}\n**H\\*(10)**\n:::")
     # A `_` at a word's edge opens emphasis too; inside a word it means nothing.
     @test m(SemanticSection("_rand und snake_case_"; anchor="x")) == "## \\_rand und snake_case\\_ {#x}"
     # What is written as code stays code.

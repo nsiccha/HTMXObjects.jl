@@ -898,6 +898,30 @@ recursion helpers for override authors; `parser_rules=` registers extra
 CommonMark parser rules, and `render_markdown(::CommonMark.Node)` renders an
 already-parsed tree.
 
+### Julia documentation {#julia-documentation}
+
+Pass a Julia doc object directly to `SemanticProse`:
+
+```julia
+SemanticProse(@doc(sum); references=Dict("reduce" => "/api/reduce"))
+```
+
+For `Markdown.MD` input, documentation references such as ``[`reduce`](@ref)``
+use the supplied `references` dictionary. Its string keys name the reference:
+the label for bare `@ref`, or the explicit target in `@ref target`,
+``@ref `Base.sum` ``, or `@ref "A heading"`. Values are ordinary destination
+URLs. An unresolved reference retains its formatted label without a link;
+HTMXObjects does not evaluate names or guess a documentation site's URLs.
+The copied document becomes ordinary Markdown shared by HTML, text, Markdown
+and report projections. The original doc object is unchanged; Julia's Markdown
+writer may normalize whitespace. Doctest blocks retain their complete contents
+and use Julia syntax highlighting.
+
+String input still means authored CommonMark: `SemanticProse(string(doc))`
+preserves that source, including any `@ref` links. Use the doc-object overload
+when displaying Julia documentation. Authored `jldoctest` fences also use Julia
+highlighting in HTML, while their Markdown source stays unchanged.
+
 ### Math in Markdown {#markdown-math}
 
 `render_markdown`, and with it every `SemanticProse`, typesets TeX math: `$…$`
@@ -1062,8 +1086,8 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `toc-depth: 2`); dictionary keys are written as given. Values are strings,
   numbers, Bools, dates, vectors, and NamedTuples or dictionaries for nested
   options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`, `from`,
-  `pdf-standard` and `filters` belong to `pdf_report`; setting one through
-  `metadata` is an `ArgumentError`.
+  `pdf-standard`, `filters`, `syntax-highlighting` and `highlight-style` belong
+  to `pdf_report`; setting one through `metadata` is an `ArgumentError`.
 - **`date`** is printed in the title block. A `Date` or `DateTime`, an ISO date
   (`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
   `"last-modified"` is a date that `date_format` formats: in a `de-DE` report
@@ -1150,6 +1174,12 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   inappropriate use of a 'Figure' structure element"). An image within a line
   of text, such as an icon, stays in its paragraph, and PAC still warns about
   it: Typst tags every image as a block figure (todo `14awnkw`).
+- **Disclosure and tab labels** stay with the start of their body, including
+  a heading followed by its first paragraph. The Markdown marks the bold label
+  alone with `::: {.htmxo-label}`; the body remains free to continue across pages.
+  This also covers eager master-detail labels. Ordinary bold paragraphs have
+  no such rule. Regenerate saved Markdown to get these markers and pagination;
+  previously exported Markdown has no way to distinguish labels from bold prose.
 - **Long tables:** a table longer than the rest of its page continues on the
   next page, with its header row repeated on each page. A caption above a table
   moves to the next page with its first rows rather than stay alone at the
@@ -1175,8 +1205,24 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `Kontaminationswahrscheinlichkeit` in a narrow column; a word that fits on
   the next line moves there whole. Quarto's template justified table cells
   too, which stretched narrow cells with wide gaps and split words such as
-  `Me-dian`. Code is never hyphenated, so a code span wider than its column
+  `Me-dian`. Identifiers can break after underscore runs, including in inline
+  code, without inserting a character into the PDF's text. Code is never
+  hyphenated, so a code span with no break opportunity wider than its column
   runs into the next one.
+- **Code blocks** are one tagged Code element each, with a paragraph per line,
+  in the colours of Quarto's `arrow` theme, each of which keeps WCAG's contrast
+  of 4.5:1 on the block's background. Quarto's own highlighting tagged each
+  token of a block as a Code element of its own: an empty one for every line
+  and a whitespace-only one for every space between two coloured tokens. PAC's
+  Quality tab warned "Tagged text consists of only whitespace" for each, 103
+  times in a six-page model description, while its PDF/UA and WCAG reports
+  passed. `pdf_report` sets code with Typst's own highlighter, so which words
+  are coloured follows Typst's grammar for the language (in Julia a call such as
+  `f(x)` keeps the plain colour), and code lines are set slightly closer. A
+  blank line, or one of spaces only, is kept on the page and left out of the
+  tags. Bold keywords are tagged as strong text, as Typst tags a bold style.
+  Quarto's themes bring the warnings back, so `syntax-highlighting` and
+  `highlight-style` belong to `pdf_report`.
 - **Line breaks in table cells** stay line breaks. A pipe table row is one
   line, so the Markdown writes a cell's line break as an inline `<br>`
   (`| Goslar | 27.268<br>25.501–28.966 |`), as HTMX.jl does for `h.br()` in a
@@ -2245,6 +2291,8 @@ Four points where a projection is deliberately not a translation of the HTML:
   viewport to collapse into, so their correct projection is the label followed
   by the whole body. Wrapping the children in markup instead would force the
   subtree down the HTML→Markdown path and lose every peer projection under it.
+  Markdown encloses the bold label alone in `::: {.htmxo-label}`, so `pdf_report`
+  keeps it with the start of its body without adding a document heading level.
   A disclosure with nothing to open renders nothing in any format, label
   included. That covers a disclosure with no children, one holding only
   `nothing`, and one whose [`private`](#private-content) content has no

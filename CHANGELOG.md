@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.59
+## 0.1.64
 
 - `configure_job_queue!(; workers=n)` forwards a worker count to DynamicObjects' worker
   executor behind `@queued`, so heavy computations run in worker processes and a
@@ -23,6 +23,75 @@ failing at render with a `MethodError`.
   HTMXObjects:process-split `wworuo`). `job_queue_settings()` reports `workers`. On a
   DynamicObjects whose `configure_queue!` does not take `workers` yet, `workers=0` is
   accepted and a positive count is refused with an `ArgumentError`.
+
+## 0.1.63
+
+- `pdf_report` lets table cells break after underscore runs in identifiers,
+  including inline code. Long model parameter names now wrap inside their
+  cells instead of painting over adjacent columns. The identifier's characters
+  and the table's accessibility structure are preserved.
+
+## 0.1.62
+
+- `SemanticProse(doc::Markdown.MD; references=Dict(), math=true)` displays Julia
+  documentation without treating unresolved `@ref` references as URLs. Supplied
+  string-keyed destinations become ordinary links; other references keep their
+  formatted labels. The normalized Markdown is shared by all prose projections,
+  and the original doc object is unchanged. Pass `doc` instead of `string(doc)`
+  to opt in; authored strings keep their existing source contract.
+- `jldoctest` code blocks use Julia syntax highlighting, including named doctests
+  and options. Their contents stay intact, and the browser no longer requests
+  a nonexistent Prism `jldoctest` grammar.
+
+## 0.1.61
+
+- `pdf_report` keeps a `SemanticDisclosure` label with the start of its body,
+  including eager tab labels and master-detail labels. A label could previously
+  stand alone at the bottom of a page while its first heading and content moved
+  to the next. Labels remain bold text, without adding a heading level, and long
+  bodies continue across pages. Their Markdown now encloses the label alone in
+  `::: {.htmxo-label}`; ordinary bold paragraphs keep their pagination. Lazy-tab
+  links and empty disclosures keep their existing projection.
+  **Breaking:** Markdown bytes include this fence. Regenerate saved Markdown to
+  get the repair, and account for the fence if comparing or parsing the old form.
+
+## 0.1.60
+
+- `pdf_report` tags a code block as one Code element, with a paragraph per line.
+  Quarto's highlighting tagged each token as a Code element of its own, an empty
+  one for every line and a whitespace-only one for every space between two
+  coloured tokens, and PAC's Quality tab warned "Tagged text consists of only
+  whitespace" for each (103 in BRM's six-page model view). The colours stay those
+  of Quarto's `arrow` theme; which words are coloured now follows Typst's grammar
+  for the language, and code lines are set slightly closer. A blank line in a
+  code block is kept on the page and left out of the tags.
+  **Breaking:** `metadata=` can no longer set `syntax-highlighting` or
+  `highlight-style` (an `ArgumentError`): each of Quarto's themes brings the
+  warnings back. Remove the key.
+
+## 0.1.59
+
+- `staticfiles(folder, mountdir; bundle=true)` serves a finished site, such as an
+  `export_site` bundle another process wrote, and `export_site` writes all of it: once
+  the crawl reaches any of its files, every file of the folder is written at its own path,
+  byte for byte, including the files only its scripts load. Before, an app that served
+  such a bundle and exported itself got the one page its link named, without the
+  page's styles and scripts (snag `private-prebuilt-1136df2c`).
+- `staticfiles(...; private=true)` (and `dynamicfiles`) serves the folder to private
+  readers only: a public answer is a private page's empty `404` (`X-HTMXO-Private:
+  true`), so a public `export_site` writes none of it and leaves out the elements that
+  link it.
+- The reference check of `export_site` looks a relative address up where a browser
+  resolves it: in the folder of the HTML file that names it (for a fragment below
+  `hx/`, the folder of the page that shows it). It used to look it up in the root, so a
+  page written below the root passed while its links pointed at nothing.
+  **Breaking:** an export that passed that way now fails, naming each such reference.
+- A mounted folder's `index.html` answers at the folder's address with a trailing
+  slash; the address without one redirects (`308`) there, relative to itself, so the
+  page's relative links resolve inside the folder. An export writes it as
+  `<mount>/index.html`, and links to the folder name that file.
+  **Breaking:** a client that does not follow redirects gets the `308` for the
+  address without the slash; request the address with it.
 
 ## 0.1.58
 

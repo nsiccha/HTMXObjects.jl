@@ -180,11 +180,13 @@ end
           const check = (name, ok) => checks.push(name + ':' + Boolean(ok));
           const wait = (ok, then, n) => ok() || n <= 0 ? then() : setTimeout(() => wait(ok, then, n - 1), 50);
           const tokens = sel => document.querySelectorAll(sel + ' .token').length > 0;
-          wait(() => tokens('#julia') && tokens('#stan') && tokens('#fence'), function () {
+          wait(() => tokens('#julia') && tokens('#stan') && tokens('#fence') && tokens('#doctest') && tokens('#doc'), function () {
             const keyword = document.querySelector('#julia .token.keyword');
             check('julia', keyword && keyword.textContent === 'function');
             check('stan', document.querySelector('#stan .token'));
             check('fence', document.querySelector('#fence .token'));
+            check('doctest', tokens('#doctest') && document.querySelector('#doctest code').textContent === 'julia> 1 + 1\n2\n');
+            check('doc', tokens('#doc') && !document.querySelector('#doc a[href="@ref"]'));
             check('text-kept', document.querySelector('#julia code').textContent === 'function f(x)\n    x + 1 # one\nend');
             check('plain-untouched', document.querySelector('#plain code').children.length === 0);
             check('markup-kept', document.querySelector('#markup a') !== null);
@@ -209,6 +211,8 @@ end
                 h.div(SemanticCode(:julia, "function f(x)\n    x + 1 # one\nend"); id="julia"),
                 h.div(SemanticCode(:stan, "parameters { real mu; }"); id="stan"),
                 h.div(SemanticProse("```python\nprint(1)\n```"); id="fence"),
+                h.div(SemanticProse("```jldoctest named; output = false\njulia> 1 + 1\n2\n```"); id="doctest"),
+                h.div(SemanticProse(@doc(sum)); id="doc"),
                 h.div(h.pre(h.code("no language")); id="plain"),
                 h.div(h.pre(h.code(h.a("linked"; href="#x"); class="language-julia")); id="markup"),
                 button, h.div(; id="target"), driver),
@@ -240,13 +244,14 @@ end
             @test !isnothing(checks)
             if !isnothing(checks)
                 lines = split(checks[1], '\n')
-                @test length(lines) == 9
+                @test length(lines) == 11
                 for line in lines
                     @test endswith(line, ":true")
                 end
             end
             # The grammars of the languages shown, from the vendor mount.
             fetched = Base.@lock lock copy(requests)
+            @test !any(contains("prism-jldoctest"), fetched)
             for lang in ("julia", "stan", "python", "toml")
                 @test "/vendor/prism/components/prism-$lang.min.js" in fetched
             end

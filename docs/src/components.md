@@ -1610,11 +1610,15 @@ tabset("Überblick" => SemanticProse("Bayes-Regression der Nettokaltmiete …"),
 reads, for a private reader:
 
 ```markdown
+::: {.htmxo-label}
 **Überblick**
+:::
 
 Bayes-Regression der Nettokaltmiete …
 
+::: {.htmxo-label}
 **Modelldefinition**
+:::
 
 ::: {.htmxo-private}
 …
@@ -1622,6 +1626,9 @@ Bayes-Regression der Nettokaltmiete …
 
 **[Ergebnisse](/ergebnisse)**
 ```
+
+The label's fence lets `pdf_report` keep it with the start of its content.
+It remains bold text, not a heading, and a long body can continue across pages.
 
 A tab whose content its reader does not see is left out with its label:
 read publicly, the `private` tab above has no stand-in, so its label goes too.

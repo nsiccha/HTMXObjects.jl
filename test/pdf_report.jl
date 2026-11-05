@@ -1,5 +1,15 @@
 using TestItemRunner
 
+@testmodule PDFTextGeometry begin
+    # Windows CI uses xpdf, which reads text but has no Poppler -bbox option.
+    function has_bbox()
+        isnothing(Sys.which("pdftotext")) && return false
+        help = IOBuffer()
+        run(pipeline(ignorestatus(`pdftotext -h`); stdout=help, stderr=help))
+        occursin("-bbox", String(take!(help)))
+    end
+end
+
 @testitem "pdf_report front matter asks Quarto's Typst for PDF/UA-1" tags=[:unit] begin
     using HTMXObjects
 
@@ -15,11 +25,14 @@ using TestItemRunner
           typst:
             from: markdown+autolink_bare_uris+tex_math_single_backslash-raw_tex
             pdf-standard: [ua-1]
-            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST))]
+            syntax-highlighting: idiomatic
+            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST)), $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_CODE_TYPST))]
         filters:
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
             at: post-render
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_FIGURES_FILTER))
+            at: post-render
+          - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_LABELS_FILTER))
             at: post-render
           - $(HTMXObjects._yaml_string(filter))
           - $(HTMXObjects._yaml_string(images))
@@ -31,6 +44,7 @@ using TestItemRunner
         # Ergebnisse
         """
     @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
+          isfile(HTMXObjects._PDF_REPORT_CODE_TYPST) && isfile(HTMXObjects._PDF_REPORT_LABELS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER)
 end
@@ -198,7 +212,11 @@ end
     # ran-pac-2026-26-7da3df82)
     for (metadata, says) in [(title="X",) => "title=", (lang="en-US",) => "lang=",
                              (pdf_standard=String[],) => "ua-1", Dict("format" => "html") => "ua-1",
-                             (filters=["mine.lua"],) => "alt text", (from="markdown",) => "PAC"]
+                             (filters=["mine.lua"],) => "alt text", (from="markdown",) => "PAC",
+                             # a Quarto theme tags each token of a code block as its own Code
+                             # element (snag review-the-brm-m-68c151e1)
+                             (syntax_highlighting="github",) => "Code element",
+                             Dict("highlight-style" => "arrow") => "Code element"]
         err = refusal(; metadata)
         @test err isa ArgumentError && occursin(says, err.msg)
     end
@@ -437,6 +455,75 @@ end
     end
 end
 
+@testitem "pdf_report wraps underscore identifiers inside table cells without adding text" tags=[:quarto] setup=[PDFTextGeometry] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        # A generated parameter name: every alphabetic part fits, but the
+        # complete identifier overprinted all three neighbouring columns.
+        identifier = "__parameter__group__laboratory_instrument_calibration__laboratory_instrument_log_scale"
+        code = "__parameter__group__site_sampling__site_log_density_shift"
+        unicode = "__größe__messgerät_2__kalibrierung__referenzwert"
+        page = SemanticTable([
+            (quantity=identifier, role="Prior specification", rank="Unknown", shape="Not inferred"),
+            (quantity=code, role="Prior specification", rank="Unknown", shape="Not inferred"),
+            (quantity=unicode, role="Prior specification", rank="Unknown", shape="Not inferred"),
+            (quantity="short_name", role="Prior specification", rank="Unknown", shape="Not inferred"),
+        ])
+        # Exercise the public semantic projection and a code cell in the same
+        # report; neither producer needs to insert discretionary characters.
+        md = replace(repr(MIME"text/markdown"(), page), code => "`$code`")
+        @test occursin(identifier, md) && occursin("`$code`", md)
+        mktempdir() do dir
+            out = joinpath(dir, "identifiers.pdf")
+            @test pdf_report(md, out; title="Quantities", lang="de-DE") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+            tags = [m[1] for m in eachmatch(r"/Type/StructElem/S/(\w+)/", bytes)]
+            @test count(==("Table"), tags) == 1
+            @test count(==("TH"), tags) == 4
+            @test count(==("TD"), tags) == 16
+            @test count(==("Code"), tags) == 1
+            @test !occursin("/K[]", bytes)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext reads the text and cell geometry"
+            else
+                text = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+                @test !occursin('\u200b', text) && !occursin('\u00ad', text)
+                @test occursin("short_name", text)
+                lines = split(text, '\n')
+                header_line = findfirst(l -> occursin("quantity", l) && occursin("role", l), lines)
+                role_column = findfirst("role", lines[header_line]).start
+                # Both Poppler and xpdf support -layout. Read the quantity
+                # column in isolation, so an overflowing word cannot pass.
+                quantities = join(strip(join(first(collect(l), min(length(l), role_column - 1))))
+                                  for l in lines[header_line+1:end])
+                @test quantities == identifier * code * unicode * "short_name"
+                if PDFTextGeometry.has_bbox()
+                    # Use actual glyph bounds, not just substring presence: all
+                    # source strings also existed in the overlapping old output.
+                    boxes = [(; left=parse(Float64, m[1]), top=parse(Float64, m[2]),
+                                right=parse(Float64, m[3]), word=m[4]) for m in eachmatch(
+                        r"<word xMin=\"([\d.]+)\" yMin=\"([\d.]+)\" xMax=\"([\d.]+)\"[^>]*>([^<]*)</word>",
+                        read(`pdftotext -enc UTF-8 -bbox $out -`, String))]
+                    header = only(filter(b -> b.word == "quantity", boxes))
+                    role = only(filter(b -> b.word == "role", boxes))
+                    quantities = filter(b -> b.top > header.top + 1 && b.left < role.left - 1, boxes)
+                    @test !isempty(quantities)
+                    @test all(b -> b.right < role.left, quantities)
+                    @test join(b.word for b in quantities) == identifier * code * unicode * "short_name"
+                    @test count(b -> b.word == "Unknown", boxes) == 4
+                    @test count(b -> b.word == "inferred", boxes) == 4
+                else
+                    @test_skip "Poppler -bbox checks glyph bounds; xpdf checks the text column above"
+                end
+            end
+        end
+    end
+end
+
 @testitem "pdf_report links addresses and tags a lone image as a figure of its own" tags=[:quarto] begin
     if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
         @test_skip true
@@ -498,6 +585,79 @@ end
                                  author="Autorin https://example.org/autorin/"))
             @test uris(read(titled, String)) == sort(["https://example.org/odl/", "https://www.example.org/karte",
                                                       "mailto:info@example.de", "https://example.org/autorin/"])
+        end
+    end
+end
+
+@testitem "pdf_report keeps semantic labels with their body across pages" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        marker(name) = "`#context [#metadata(here().page()) <$name>]`{=typst}"
+        label(text, name) = "::: {.htmxo-label}\n**$text** $(marker(name))\n:::\n\n"
+        body = "### Definition $(marker("heading"))\n\nFirst paragraph $(marker("body"))\n"
+        function placement(md, lead; filtered=true, paragraph_spacing="1.2em")
+            mktempdir() do dir
+                filters = filtered ? ["--lua-filter", HTMXObjects._PDF_REPORT_LABELS_FILTER] : String[]
+                typst = read(pipeline(`$quarto pandoc --from markdown --to typst $filters`;
+                                     stdin=IOBuffer(md)), String)
+                doc = joinpath(dir, "labels.typ")
+                write(doc, "#set page(width: 300pt, height: 200pt, margin: 20pt)\n",
+                      "#set par(spacing: $paragraph_spacing)\n#v($(lead)pt)\n", typst)
+                out = IOBuffer()
+                run(pipeline(`$quarto typst eval "query(metadata).map(it => it.value)" --in $doc`;
+                             stdout=out, stderr=out))
+                parse.(Float64, split(match(r"\[([\d.,\s]*)\]", String(take!(out))).captures[1], ','))
+            end
+        end
+        short = label("Short label", "label") * body
+        @test placement(short, 95) == [1, 1, 1]
+        # Room for the label alone: without the rule it is stranded; with the
+        # rule the label, heading and first paragraph move together.
+        @test placement(short, 120; filtered=false) == [1, 2, 2]
+        @test placement(short, 120) == [2, 2, 2]
+        # Bold-only prose is not a semantic label and keeps its own pagination.
+        prose = "**Short label** $(marker("label"))\n\n" * body
+        @test placement(prose, 120) == placement(prose, 120; filtered=false)
+        wrapped = label("A longer label that wraps across several lines with enough words to fill the line", "label") * body
+        @test placement(wrapped, 105) == [2, 2, 2]
+        nested = label("Outer label", "outer") * short
+        @test placement(nested, 120) == [2, 2, 2, 2]
+        long = short * join("\nParagraph $i $(marker("row"))\n" for i in 1:40)
+        pages = placement(long, 120)
+        @test pages[1:3] == [2, 2, 2]
+        @test issorted(pages) && last(pages) > 3
+
+        # Keep the label's paragraph spacing, including a document's smaller
+        # spacing. The block default otherwise adds gaps and even extra pages.
+        pos = "`#context [#metadata(here().position().y / 1pt)]`{=typst}"
+        plain_label = "**Label** $pos\n\n"
+        marked_label = "::: {.htmxo-label}\n**Label** $pos\n:::\n\n"
+        @test last(placement("Before\n\n" * marked_label * "After $pos", 0; paragraph_spacing="0.55em")) ≈
+              last(placement("Before\n\n" * plain_label * "After $pos", 0; paragraph_spacing="0.55em"))
+
+        # Exercise the actual Markdown producer and Quarto's post-render
+        # filter stage, including the PDF structure and all of a long body.
+        mktempdir() do dir
+            content = tabset("Outer tab" => SemanticDisclosure("Nested label",
+                SemanticSection("Definition", (SemanticProse("Paragraph $i.") for i in 1:70)...)))
+            out = joinpath(dir, "labels.pdf")
+            @test pdf_report(content, out; title="Labels", lang="en-GB") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) && occursin("/StructTreeRoot", bytes)
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text of each page"
+            else
+                texts = split(read(`pdftotext -enc UTF-8 -layout $out -`, String), '\f'; keepempty=false)
+                onpage(pattern) = findall(t -> occursin(pattern, t), texts)
+                @test onpage("Outer tab") == onpage("Nested label") == onpage("Definition") == onpage("Paragraph 1.")
+                @test all(i -> length(onpage("Paragraph $i.")) == 1, 1:70)
+                @test only(onpage("Paragraph 70.")) > only(onpage("Paragraph 1."))
+                @test !occursin("htmxo-label", join(texts))
+            end
         end
     end
 end
@@ -574,6 +734,96 @@ end
                 @test length(table_pages) >= 2
                 @test onpage(r"Land\s+Wert") == table_pages
             end
+        end
+    end
+end
+
+@testitem "pdf_report tags a code block as one Code element with a paragraph per line" tags=[:quarto] setup=[PDFTextGeometry] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        # Quarto's Skylighting tagged each token of a code block as a Code element of
+        # its own: an empty one per line end and a whitespace-only one per space
+        # between two tokens. PAC's Quality tab warned "Tagged text consists of only
+        # whitespace" for each, 103 times in BRM's model view (snag
+        # review-the-brm-m-68c151e1). Typst writes the structure tree uncompressed,
+        # `N 0 obj <</Type/StructElem/S/<type>/P <parent> 0 R…/K[…]…>> endobj`.
+        elements(bytes) = [(; n=parse(Int, m[1]), type=m[2], parent=parse(Int, m[3]), body=m[4])
+                           for m in eachmatch(r"(?s)(\d+) 0 obj\s*<</Type/StructElem/S/(\w+)/P (\d+) 0 R(.*?)endobj", bytes)]
+        empty_tags(bytes) = count(e -> occursin("/K[]", e.body), elements(bytes))
+        # the paragraphs of each Code element, one per line it tags
+        code_lines(bytes) = let es = elements(bytes)
+            sort([count(p -> p.type == "P" && p.parent == c.n, es) for c in es if c.type == "Code"])
+        end
+
+        # a code span, a Julia block with an indented line, a line of spaces and a
+        # blank line, and a block without a language
+        md = "# Code\n\nCall `f(x)` once.\n\n" *
+             "```julia\n\"Docstring.\"\nfunction f(x)\n    y = x + 1\n    \n\n    return y\nend\n```\n\n" *
+             "```\nplain text\n```\n"
+        mktempdir() do dir
+            out = joinpath(dir, "code.pdf")
+            @test pdf_report(md, out; title="Code", lang="en-GB") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) && occursin("/StructTreeRoot", bytes)
+            # One Code element per code span and block, and one paragraph per line
+            # with text: no empty element, and none for the line of spaces.
+            @test empty_tags(bytes) == 0
+            @test code_lines(bytes) == [0, 1, 5]
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the code's text"
+            else
+                text = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+                @test all(l -> occursin(l, text), ["f(x)", "\"Docstring.\"", "y = x + 1", "return y", "plain text"])
+                if PDFTextGeometry.has_bbox()
+                    # the indented lines start where they did, right of `function` and `end`
+                    # (where each word starts: `-layout` columns are not exact for code)
+                    boxes = [(; word=m[2], x=parse(Float64, m[1])) for m in
+                             eachmatch(r"<word xMin=\"([\d.]+)\"[^>]*>([^<]*)</word>", read(`pdftotext -bbox $out -`, String))]
+                    x(word) = first(b.x for b in boxes if b.word == word)
+                    @test x("y") == x("return") > x("function") == x("end")
+                else
+                    @test_skip "Poppler -bbox reads code indentation"
+                end
+            end
+
+            # The control: Quarto's default highlighting on the same Markdown tags
+            # the tokens one by one, with empty elements, as before.
+            mkdir(joinpath(dir, "skylighting"))
+            qmd = joinpath(dir, "skylighting", "code.qmd")
+            write(qmd, replace(HTMXObjects._pdf_report_qmd(md; title="Code", lang="en-GB"),
+                               "    syntax-highlighting: idiomatic\n" => ""))
+            run(pipeline(Cmd(`$quarto render code.qmd --to typst`; dir=dirname(qmd)); stdout=devnull, stderr=devnull))
+            old = read(joinpath(dir, "skylighting", "code.pdf"), String)
+            @test empty_tags(old) > 0 && length(code_lines(old)) > 10
+        end
+
+        # A blank line, or a line of spaces, is left out of the tags and kept on the
+        # page: without the rule each is a paragraph of its own, and with it every
+        # word stays where it was.
+        rules = read(HTMXObjects._PDF_REPORT_CODE_TYPST, String)
+        without = replace(rules, r"(?s)#show raw\.where\(block: true\): it => \{.*?\n\}\n" => "")
+        @test without != rules
+        compiled(rules) = mktempdir() do dir
+            doc = joinpath(dir, "c.typ")
+            write(doc, "#set document(title: \"C\")\n#set text(lang: \"en\", region: \"GB\")\n", rules,
+                  "\n```julia\nf(x)\n\n    \n  y\n```\n")
+            run(pipeline(`$quarto typst compile --pdf-standard ua-1 $doc`; stdout=devnull, stderr=devnull))
+            pdf = joinpath(dir, "c.pdf")
+            words = !PDFTextGeometry.has_bbox() ? nothing :
+                [m.match for m in eachmatch(r"<word [^>]*>[^<]*</word>", read(`pdftotext -bbox $pdf -`, String))]
+            (; bytes=read(pdf, String), words)
+        end
+        with_rule, without_rule = compiled(rules), compiled(without)
+        @test code_lines(with_rule.bytes) == [2] && empty_tags(with_rule.bytes) == 0
+        @test code_lines(without_rule.bytes) == [4] && empty_tags(without_rule.bytes) > 0
+        if isnothing(with_rule.words)
+            @test_skip "pdftotext (poppler-utils) reads where each word is"
+        else
+            @test !isempty(with_rule.words) && with_rule.words == without_rule.words
         end
     end
 end
