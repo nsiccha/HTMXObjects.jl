@@ -1267,6 +1267,37 @@ function bodyparams(req::HTTP.Request)
     formparams(req)
 end
 
+# The serializable input of `@param`: no connection, response, request context
+# or already-computed property values. Parsing stays lazy and uses the same
+# query/form/multipart readers as a live request. A worker address carries this
+# ordinary remount context even though DynamicObjects omits `__req__`.
+struct _ParamRequest
+    method::String
+    query::String
+    content_type::String
+    body::Vector{UInt8}
+end
+
+_param_request(::Nothing) = nothing
+function _param_request(req::HTTP.Request)
+    ct = HTTP.header(req, "Content-Type", "")
+    has_form = !(req.method in _queryparams_verbs) &&
+        (isempty(ct) || occursin("application/x-www-form-urlencoded", lowercase(ct)) ||
+         occursin("multipart/form-data", lowercase(ct)))
+    _ParamRequest(req.method, HTTP.URI(req.target).query, ct,
+                  has_form ? _request_body_bytes(req) : UInt8[])
+end
+queryparams(req::_ParamRequest) = _parse_form_encoded(req.query)
+bodyparams(req::_ParamRequest) = bodyparams(HTTP.Request(req.method, "/",
+    ["Content-Type" => req.content_type], req.body))
+
+# A caller may remount a request view with just `__req__`, as before. Prefer
+# that live request here; the worker has only the explicitly bound snapshot.
+function _param_request_of(obj, snapshot)
+    req = _req_of(obj)
+    req === nothing ? snapshot : req
+end
+
 # Streaming route macros and the handle variable their bodies receive.
 const _STREAM_BODY_VARS = Dict(Symbol("@ws") => :__ws__, Symbol("@sse") => :__sse__)
 
@@ -1531,13 +1562,16 @@ end
     _inject_dunder_props!(struct_expr)
 
 Ensure that `@htmx` struct bodies always declare `__parent__`, `__mount_step__`,
-`__prefix__`, `__req__`, `__appdata__`, `__route__`, `__on_error__`, and
+`__prefix__`, `__req__`, `__param_request__`, `__appdata__`, `__route__`, `__on_error__`, and
 `__error_texts__` as properties so route bodies can reference them and so the
 `__parent__` chain threads request context, appdata, the mount prefix, the
 per-request route URL, the error hook, and the error answers' texts down through
 `@include`d sub-structs.
 
 Defaults:
+- `__param_request__ = nothing` at the root, inherited by mounted children —
+  request providers bind a serializable query/form snapshot for worker execution.
+  A live request remains authoritative when a caller explicitly remounts it.
 - `__parent__ = nothing` — set by `@include` desugar to point at the enclosing struct.
 - `__mount_step__ = nothing` — the PARENT-RELATIVE URL step this object is
   mounted at (`"/childname"`, `""` for an `:index` mount, or a step carrying
@@ -1579,6 +1613,7 @@ function _inject_dunder_props!(struct_expr)
     body = struct_expr.args[3]
     route_macros = _route_macros()
     has_req = false
+    has_param_request = false
     has_appdata = false
     has_parent = false
     has_prefix = false
@@ -1598,6 +1633,7 @@ function _inject_dunder_props!(struct_expr)
         Meta.isexpr(inner, :(=)) || continue
         name = _property_lhs_name(inner.args[1])
         name === :__req__      && (has_req = true)
+        name === :__param_request__ && (has_param_request = true)
         name === :__appdata__  && (has_appdata = true)
         name === :__parent__   && (has_parent = true)
         name === :__prefix__   && (has_prefix = true)
@@ -1612,6 +1648,8 @@ function _inject_dunder_props!(struct_expr)
     has_prefix   || push!(prepend, :(__prefix__ =
         $(GlobalRef(@__MODULE__, :_mounted_prefix))(__parent__, __mount_step__)))
     has_req      || push!(prepend, :(__req__      = isnothing(__parent__) ? nothing : __parent__.__req__))
+    has_param_request || push!(prepend, :(__param_request__ = isnothing(__parent__) ?
+        nothing : __parent__.__param_request__))
     has_appdata  || push!(prepend, :(__appdata__  = isnothing(__parent__) ? nothing : __parent__.__appdata__))
     has_route    || push!(prepend, :(__route__    = isnothing(__parent__) ? "" : __parent__.__route__))
     has_on_error || push!(prepend, :(__on_error__ = isnothing(__parent__) ? nothing : __parent__.__on_error__))
@@ -2033,7 +2071,9 @@ _param_names(::Type) = ()
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
 to plain derived-property assignments that call
-`_extract_param(_req_of(__self__), ...)` at property-access time. A parameter
+`_extract_param(_param_request_of(__self__, __param_request__), ...)` at
+property-access time. The request-bound snapshot supplies the same input in
+a worker, where the live request is absent. A parameter
 with a matching `@options` declaration instead calls `_extract_option_param`
 with the bound option evaluator, so serialized machine values can resolve
 against the live domain before scalar parsing. Supports:
@@ -2248,7 +2288,7 @@ function _rewrite_param_line(expr, option_names=Set{Symbol}(), relevant_names=Se
     name_sym, type_expr = _split_param_lhs(lhs)
     name_sym === nothing && return nothing
     t = type_expr === nothing ? :nothing : type_expr
-    req_expr = :($(_req_of)(__self__))
+    req_expr = :($(_param_request_of)(__self__, __param_request__))
     relevant = name_sym in relevant_names
     relevant && default_expr === nothing && throw(ArgumentError(string(
         "@htmx: `@param $name_sym` has a `@relevant` condition and no default; give it ",
@@ -9597,7 +9637,7 @@ _root_request_kw(context::OperationContext) =
 
 # Request and mount context, which a root takes from its own request and never
 # from the instance it was built from.
-const _REQUEST_CONTEXT_INPUTS = (:__req__, :__route__, :__prefix__, :__parent__, :__status__)
+const _REQUEST_CONTEXT_INPUTS = (:__req__, :__param_request__, :__route__, :__prefix__, :__parent__, :__status__)
 
 # A DynamicObject's construction inputs: its fixed fields (every field but the
 # trailing property cache, as `DynamicObjects.remake` copies them) and the
@@ -10029,7 +10069,7 @@ function _extract_param(req, name, T, default=_NO_DEFAULT)
     v = _lookup_param(src, fallback, name, T)
     _resolve_extracted(v, default, name)
 end
-function _extract_option_param(options, req::HTTP.Request, name, T,
+function _extract_option_param(options, req::Union{HTTP.Request,_ParamRequest}, name, T,
         default=_NO_DEFAULT)
     method = req.method
     src = _kwargs_source(req, method)
@@ -13232,14 +13272,17 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
     root = provider.factory(RootT, context)
     root isa RootT || throw(ArgumentError(
         "root provider for $(RootT) returned $(typeof(root)); expected an instance of $(RootT)"))
-    # Scoped providers may return a cached root. DynamicObjects' same-type
-    # mounted view refreshes request context and transitive dependents without
+    # Bind serializable parameter input for every provider, including custom
+    # request factories. Scoped providers may also return a cached root.
+    # DynamicObjects' same-type mounted view refreshes request context and
+    # transitive dependents without
     # copying settled/in-flight/mmap/indexed cache identity. This is also what
     # makes HTMXObjects-managed RootRetention safe for immutable @htmx roots.
-    if provider.scope in (:session, :job) && isdefined(DynamicObjects, :remount)
+    if isdefined(DynamicObjects, :remount)
         try
             root = Base.invokelatest(getproperty(DynamicObjects, :remount), root;
                 __req__=context.request, __route__=context.route,
+                __param_request__=_param_request(context.request),
                 __prefix__=context.prefix, __parent__=nothing)
         catch
             # Providers may already return a freshly bound root or use an older
@@ -13580,7 +13623,8 @@ function _remake_operation_source(source, overrides, parent, target)
     route = hasproperty(source, :__route__) ? getproperty(source, :__route__) :
             target.context.route
     Base.invokelatest(getproperty(DynamicObjects, :remount), remade;
-        __req__=req, __route__=route, __prefix__=prefix, __parent__=parent)
+        __req__=req, __param_request__=_param_request(req),
+        __route__=route, __prefix__=prefix, __parent__=parent)
 end
 
 function _bind_operation_context(target, descriptor, req::HTTP.Request)
@@ -28292,7 +28336,9 @@ function _operation_reads(T::Type, name::Symbol)
     (isnothing(closure) || isnothing(opaque)) && return (; names=Set{Symbol}(), complete=false)
     params = Set{Symbol}(Base.invokelatest(_param_names, T))
     complete = all(closure) do n
-        n in params && return true
+        # The parameter's wire input inherits through the mount chain, but
+        # reads no application properties beyond the parameter itself.
+        (n in params || n === :__param_request__) && return true
         n in opaque && return false
         descriptor = _property_descriptor(T, n)
         isnothing(descriptor) || !(:__parent__ in get(descriptor, :dependencies, ()))
@@ -29684,7 +29730,8 @@ function _semantic_input_default(obj, param, bare)
     source = _param_declaring_object(obj, param.name)
     if source !== nothing && isdefined(DynamicObjects, :remount)
         unbound = get!(bare, source) do
-            Base.invokelatest(getproperty(DynamicObjects, :remount), source; __req__=nothing)
+            Base.invokelatest(getproperty(DynamicObjects, :remount), source;
+                __req__=nothing, __param_request__=nothing)
         end
         return getproperty(unbound, param.name)
     end

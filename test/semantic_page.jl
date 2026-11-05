@@ -459,6 +459,12 @@ end
     # `@param`s and its arguments; the open tab's result starts with them.
     opened = page("/?basis=cohort&subjects=7&dose=30&scale=change&threshold=-30&tab=fraction")
     sidebar = sidebar_of(opened)
+    # Submitted values must not become defaults when a request view also
+    # carries the serializable input used by worker-bound parameters.
+    @test form_attrs(sidebar)["data-htmxo-address"] ==
+          form_attrs(sidebar_of(html))["data-htmxo-address"]
+    @test form_attrs(tab_of(opened, "timecourse"))["data-htmxo-address"] ==
+          form_attrs(tab_of(html, "timecourse"))["data-htmxo-address"]
     @test contains(sidebar, "<input type=\"radio\" name=\"basis\" value=\"cohort\" checked=\"true\">")
     @test contains(sidebar, r"<input[^>]* name=\"subjects\"[^>]* value=\"7\"")
     @test contains(tab_of(opened, "timecourse"), r"<input[^>]* name=\"dose\"[^>]* value=\"30\"")

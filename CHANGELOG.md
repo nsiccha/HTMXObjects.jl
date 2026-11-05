@@ -14,6 +14,15 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.68
+
+- Worker-bound `@queued` routes preserve request-derived `@param` values,
+  including parent forwarding and nested mounts. Request views carry serializable
+  query and form input alongside the live request, so the worker uses the submitted
+  values instead of silently using defaults. Typed conversion, required parameters,
+  option domains, relevance, multipart uploads and form/query precedence use the
+  same extractors in both processes; no application changes are needed.
+
 ## 0.1.66
 
 - `configure_job_queue!(; workers=1)` meets DynamicObjects 0.5.7's worker executor: a
