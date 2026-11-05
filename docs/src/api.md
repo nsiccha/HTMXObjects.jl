@@ -898,6 +898,30 @@ recursion helpers for override authors; `parser_rules=` registers extra
 CommonMark parser rules, and `render_markdown(::CommonMark.Node)` renders an
 already-parsed tree.
 
+### Julia documentation {#julia-documentation}
+
+Pass a Julia doc object directly to `SemanticProse`:
+
+```julia
+SemanticProse(@doc(sum); references=Dict("reduce" => "/api/reduce"))
+```
+
+For `Markdown.MD` input, documentation references such as ``[`reduce`](@ref)``
+use the supplied `references` dictionary. Its string keys name the reference:
+the label for bare `@ref`, or the explicit target in `@ref target`,
+``@ref `Base.sum` ``, or `@ref "A heading"`. Values are ordinary destination
+URLs. An unresolved reference retains its formatted label without a link;
+HTMXObjects does not evaluate names or guess a documentation site's URLs.
+The copied document becomes ordinary Markdown shared by HTML, text, Markdown
+and report projections. The original doc object is unchanged; Julia's Markdown
+writer may normalize whitespace. Doctest blocks retain their complete contents
+and use Julia syntax highlighting.
+
+String input still means authored CommonMark: `SemanticProse(string(doc))`
+preserves that source, including any `@ref` links. Use the doc-object overload
+when displaying Julia documentation. Authored `jldoctest` fences also use Julia
+highlighting in HTML, while their Markdown source stays unchanged.
+
 ### Math in Markdown {#markdown-math}
 
 `render_markdown`, and with it every `SemanticProse`, typesets TeX math: `$…$`
@@ -1181,7 +1205,9 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `Kontaminationswahrscheinlichkeit` in a narrow column; a word that fits on
   the next line moves there whole. Quarto's template justified table cells
   too, which stretched narrow cells with wide gaps and split words such as
-  `Me-dian`. Code is never hyphenated, so a code span wider than its column
+  `Me-dian`. Identifiers can break after underscore runs, including in inline
+  code, without inserting a character into the PDF's text. Code is never
+  hyphenated, so a code span with no break opportunity wider than its column
   runs into the next one.
 - **Code blocks** are one tagged Code element each, with a paragraph per line,
   in the colours of Quarto's `arrow` theme, each of which keeps WCAG's contrast
@@ -3874,6 +3900,18 @@ needs a DynamicObjects with its job queue (`pre-inference` ≥ `64aba0c`).
 
 ```julia
 configure_job_queue!(; max_running=2, abandon_after=60)
+```
+
+With `workers=n`, DynamicObjects runs every `@queued` computation in one of `n`
+worker processes instead of on a `:default` thread of this one, so a heavy
+first-call compile, a GC pause or a deadlock in heavy work never stalls the pages,
+pollers and exports this process serves. A worker never saw the request, so a
+worker-bound body cannot read `__req__`: pass what it needs as arguments. The
+executor is DynamicObjects' (its `configure_queue!` takes `workers`); on a
+DynamicObjects without it, `workers=0` is accepted and a positive count refused.
+
+```julia
+configure_job_queue!(; max_running=2, workers=1)
 ```
 
 #### Queued properties

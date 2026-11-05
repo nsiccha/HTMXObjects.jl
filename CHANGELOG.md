@@ -14,6 +14,35 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.64
+
+- `configure_job_queue!(; workers=n)` forwards a worker count to DynamicObjects' worker
+  executor behind `@queued`, so heavy computations run in worker processes and a
+  first-call compile, a GC pause or a deadlock in them never stalls this process's
+  pages, pollers and exports (the frontend/backend process split; design in brief
+  HTMXObjects:process-split `wworuo`). `job_queue_settings()` reports `workers`. On a
+  DynamicObjects whose `configure_queue!` does not take `workers` yet, `workers=0` is
+  accepted and a positive count is refused with an `ArgumentError`.
+
+## 0.1.63
+
+- `pdf_report` lets table cells break after underscore runs in identifiers,
+  including inline code. Long model parameter names now wrap inside their
+  cells instead of painting over adjacent columns. The identifier's characters
+  and the table's accessibility structure are preserved.
+
+## 0.1.62
+
+- `SemanticProse(doc::Markdown.MD; references=Dict(), math=true)` displays Julia
+  documentation without treating unresolved `@ref` references as URLs. Supplied
+  string-keyed destinations become ordinary links; other references keep their
+  formatted labels. The normalized Markdown is shared by all prose projections,
+  and the original doc object is unchanged. Pass `doc` instead of `string(doc)`
+  to opt in; authored strings keep their existing source contract.
+- `jldoctest` code blocks use Julia syntax highlighting, including named doctests
+  and options. Their contents stay intact, and the browser no longer requests
+  a nonexistent Prism `jldoctest` grammar.
+
 ## 0.1.61
 
 - `pdf_report` keeps a `SemanticDisclosure` label with the start of its body,
