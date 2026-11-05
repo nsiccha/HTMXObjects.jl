@@ -520,17 +520,18 @@ end
         marker(name) = "`#context [#metadata(here().page()) <$name>]`{=typst}"
         label(text, name) = "::: {.htmxo-label}\n**$text** $(marker(name))\n:::\n\n"
         body = "### Definition $(marker("heading"))\n\nFirst paragraph $(marker("body"))\n"
-        function placement(md, lead; filtered=true)
+        function placement(md, lead; filtered=true, paragraph_spacing="1.2em")
             mktempdir() do dir
                 filters = filtered ? ["--lua-filter", HTMXObjects._PDF_REPORT_LABELS_FILTER] : String[]
                 typst = read(pipeline(`$quarto pandoc --from markdown --to typst $filters`;
                                      stdin=IOBuffer(md)), String)
                 doc = joinpath(dir, "labels.typ")
-                write(doc, "#set page(width: 300pt, height: 200pt, margin: 20pt)\n#v($(lead)pt)\n", typst)
+                write(doc, "#set page(width: 300pt, height: 200pt, margin: 20pt)\n",
+                      "#set par(spacing: $paragraph_spacing)\n#v($(lead)pt)\n", typst)
                 out = IOBuffer()
                 run(pipeline(`$quarto typst eval "query(metadata).map(it => it.value)" --in $doc`;
                              stdout=out, stderr=out))
-                parse.(Int, split(match(r"\[([\d,\s]*)\]", String(take!(out))).captures[1], ','))
+                parse.(Float64, split(match(r"\[([\d.,\s]*)\]", String(take!(out))).captures[1], ','))
             end
         end
         short = label("Short label", "label") * body
@@ -550,6 +551,14 @@ end
         pages = placement(long, 120)
         @test pages[1:3] == [2, 2, 2]
         @test issorted(pages) && last(pages) > 3
+
+        # Keep the label's paragraph spacing, including a document's smaller
+        # spacing. The block default otherwise adds gaps and even extra pages.
+        pos = "`#context [#metadata(here().position().y / 1pt)]`{=typst}"
+        plain_label = "**Label** $pos\n\n"
+        marked_label = "::: {.htmxo-label}\n**Label** $pos\n:::\n\n"
+        @test last(placement("Before\n\n" * marked_label * "After $pos", 0; paragraph_spacing="0.55em")) ≈
+              last(placement("Before\n\n" * plain_label * "After $pos", 0; paragraph_spacing="0.55em"))
 
         # Exercise the actual Markdown producer and Quarto's post-render
         # filter stage, including the PDF structure and all of a long body.
