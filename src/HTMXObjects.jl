@@ -36664,6 +36664,20 @@ function __init__()
     # A part a worker-bound body sends ahead comes back as a requester message.
     _has_requester_messages() &&
         DynamicObjects.on_requester_message!(_receive_sent_ahead!, :htmxo_sent_ahead)
+    # The answer's page language and audience reach a worker-bound body: the
+    # worker binds these two scopes to the requester's values around its
+    # computation (DynamicObjects 0.5.8, `carry_to_worker!`). Both processes
+    # register, since the worker loads this package too. The page meta travels
+    # as its plain fields; the glossary stays with the page shell here.
+    if isdefined(DynamicObjects, :carry_to_worker!)
+        DynamicObjects.carry_to_worker!(@__MODULE__, :_PAGE_META;
+            wire=_wire_page_meta, unwire=_unwire_page_meta)
+        DynamicObjects.carry_to_worker!(@__MODULE__, :_AUDIENCE)
+    end
 end
+
+_wire_page_meta(meta) = (; lang=meta.lang, title=meta.title, progress_pause=meta.progress_pause,
+                          route=meta.route, prefix=meta.prefix)
+_unwire_page_meta(plain) = merge(_NO_PAGE_META, plain)
 
 end # module HTMXObjects

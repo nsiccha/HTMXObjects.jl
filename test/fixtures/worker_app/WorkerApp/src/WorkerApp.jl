@@ -39,9 +39,14 @@ end
     end
 end
 
+# What a body sees of the answer it serves: the page's language and the
+# reader's audience, which a worker must bind as the requesting process has them.
+seen() = "lang=$(something(HTMXObjects.page_lang(), "none")) audience=$(HTMXObjects._AUDIENCE[])"
+
 @htmx struct App
+    __lang__ = "de"
     "Heavy read, computed where the job queue places it"
-    @queued @get heavy(; n::Int=1) = h.p("heavy pid=$(getpid()) n=$(n)"; id="heavy")
+    @queued @get heavy(; n::Int=1) = h.p("heavy pid=$(getpid()) n=$(n) $(seen())"; id="heavy")
     "Heavy read that sends a part ahead, then waits for a gate file before it finishes"
     @queued @get ahead(; gate::String="") = begin
         send_ahead(h.p("ahead-part pid=$(getpid())"; id="part"))
@@ -51,7 +56,7 @@ end
         h.p("ahead-done pid=$(getpid())"; id="done")
     end
     "Light read, always here"
-    @get light() = h.p("light pid=$(getpid())"; id="light")
+    @get light() = h.p("light pid=$(getpid()) $(seen())"; id="light")
 end
 
 end

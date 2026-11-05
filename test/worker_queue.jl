@@ -180,16 +180,28 @@ end
         end
         try
             configure_job_queue!(; workers=1)
+            # A live request's reader is private; the fixtures' `dispatch` is
+            # public outside any request, so the private requests say so.
+            private_get(target) = dispatch(:GET, target;
+                headers=["HX-Request" => "true"], audience=:private)
             # The heavy route's value names the worker's pid, not this process's.
-            first = body_text(hx_get("/heavy?n=1"))
+            first = body_text(private_get("/heavy?n=1"))
             done = running(first) ? settle_slowly(poll_url(first)) : first
             pid = match(r"heavy pid=(\d+)", done)
             @test pid !== nothing
             @test parse(Int, pid.captures[1]) != getpid()
             status = HTMXObjects._worker_status()
             @test status.running && status.pid == parse(Int, pid.captures[1])
-            # A light route computes here.
-            @test contains(body_text(hx_get("/light")), "light pid=$(getpid())")
+            # The worker binds the answer's page language (the app declares
+            # `__lang__ = "de"`) and the reader's audience around the
+            # computation, as this process does for its light route: a private
+            # request's answer reads private, a public request's public.
+            light = body_text(private_get("/light"))
+            @test contains(light, "light pid=$(getpid()) lang=de audience=private")
+            @test contains(done, "n=1 lang=de audience=private")
+            public = body_text(hx_get("/heavy?n=2"))
+            public = running(public) ? settle_slowly(poll_url(public)) : public
+            @test contains(public, "heavy pid=$(status.pid) n=2 lang=de audience=public")
             # A part the worker sends ahead reaches the running poller's answer
             # before the route finishes, and the finished answer replaces it.
             gate = tempname()
