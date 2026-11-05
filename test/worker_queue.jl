@@ -55,6 +55,76 @@ using TestItemRunner
     @test haskey(HTMXObjects.runtime_snapshot().process, :worker)
 end
 
+@testitem "worker routes preserve request parameters through parent and nested mounts" setup=[FreshTransportFixtures, WorkerAppFixtures] tags=[:integration, :workers] begin
+    using HTMXObjects, Test
+    import HTMXObjects: _clear_operation_polls!
+
+    function completed(response)
+        body = body_text(response)
+        running(body) || return body
+        url = poll_url(body)
+        answer = Ref(body)
+        timedwait(240.0; pollint=0.25) do
+            answer[] = body_text(hx_get(url))
+            !running(answer[])
+        end === :ok || error("worker parameter request never settled: $url\n$(answer[])")
+        answer[]
+    end
+    try
+        for workers in (0, 1), kind in (:request, :retained, :custom)
+            configure_job_queue!(; workers)
+            _clear_operation_polls!()
+            provider = kind === :retained ? RootProvider(; scope=:job, key=_->:parameters,
+                retention=RootRetention()) : kind === :custom ?
+                RootProvider((T, ctx) -> T(; __req__=ctx.request)) : RootProvider()
+            route!(WorkerApp.ParamApp(); root_provider=provider)
+            for (dataset, version) in (("tiny", 1), ("another", 2))
+                query = "dataset=$dataset&data_version=$version&tags=a&tags=b&child=9&method=sample&level=2&optional=7&enabled=true"
+                body = completed(hx_get("/fit/results?$query"))
+                @test contains(body, "dataset=$dataset version=$version tags=a,b child=9 method=sample")
+                @test contains(body, "level=2 optional=7")
+                pid = match(r"pid=(\d+)", body)
+                @test pid !== nothing
+                @test (parse(Int, pid.captures[1]) == getpid()) == (workers == 0)
+                nested = completed(hx_get("/nested/deeper/results?$query"))
+                @test contains(nested, "dataset=$dataset version=$version tags=a,b")
+            end
+            # The form wins over the query; a blank form field falls back to it.
+            body = completed(hx_post("/fit/results?dataset=query&data_version=7&tags=q",
+                "dataset=form&data_version=&tags=x&tags=y&child=11&method=post"))
+            @test contains(body, "dataset=form version=7 tags=x,y child=11 method=post")
+            untyped = completed(dispatch(:POST, "/fit/results";
+                headers=["HX-Request" => "true"], body="dataset=no-content-type&data_version=8"))
+            @test contains(untyped, "dataset=no-content-type version=8")
+            defaults = completed(hx_get("/fit/results?optional=99"))
+            @test contains(defaults, "dataset=default version=0 tags=default child=3 method=pathfinder")
+            @test contains(defaults, "level=1 optional=4")
+        end
+        route!(WorkerApp.UploadApp())
+        form = "--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"tiny.txt\"\r\nContent-Type: text/plain\r\n\r\nrequested bytes\r\n--boundary--\r\n"
+        body = completed(dispatch(:POST, "/received"; headers=["HX-Request" => "true",
+            "Content-Type" => "multipart/form-data; boundary=boundary"], body=form))
+        @test contains(body, "name=tiny.txt data=requested bytes")
+        @test !contains(body, "pid=$(getpid()) ")
+    finally
+        configure_job_queue!(; workers=0, worker_stall=Inf)
+        _clear_operation_polls!()
+    end
+end
+
+@testitem "remounting a parameter snapshot with a live request uses the new request" setup=[WorkerAppFixtures] tags=[:unit] begin
+    using HTMXObjects, Test, HTTP
+    first = HTTP.Request("GET", "/?dataset=first&data_version=1")
+    second = HTTP.Request("GET", "/?dataset=second&data_version=2")
+    app = DynamicObjects.remount(WorkerApp.ParamApp(); __req__=first,
+        __param_request__=HTMXObjects._param_request(first))
+    @test app.fit.dataset == "first"
+    rebound = DynamicObjects.remount(app; __req__=second)
+    @test rebound.fit.dataset == "second"
+    @test rebound.nested.deeper.data_version == 2
+    @test app.fit.dataset == "first"
+end
+
 @testitem "a part sent ahead from a worker lands on the requesting operation's list through DynamicObjects' requester message" tags=[:unit] begin
     using HTMXObjects, Test
     import HTMXObjects: h, _SentAhead, _SENT_AHEAD, _sent_ahead_parts, _receive_sent_ahead!

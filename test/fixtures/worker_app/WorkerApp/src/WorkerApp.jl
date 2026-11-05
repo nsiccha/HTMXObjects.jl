@@ -6,6 +6,39 @@ module WorkerApp
 using HTMXObjects
 import HTMXObjects: h
 
+@htmx struct ParamChild
+    @param (; dataset, data_version, tags, level, optional) = __parent__
+    @param child::Int = 3
+    @queued @get results(; method::String="pathfinder") =
+        h.p("pid=$(getpid()) dataset=$dataset version=$data_version tags=$(join(tags, ',')) child=$child method=$method level=$level optional=$optional")
+    @queued @post results(; method::String="pathfinder") =
+        h.p("pid=$(getpid()) dataset=$dataset version=$data_version tags=$(join(tags, ',')) child=$child method=$method")
+end
+
+@htmx struct UploadApp
+    @param file::Upload
+    @queued @post received() =
+        h.p("pid=$(getpid()) name=$(file.filename) data=$(String(copy(file.data)))")
+end
+
+@htmx struct ParamApp
+    @param dataset::String = "default"
+    @param data_version::Int = 0
+    @param tags::Vector{String} = ["default"]
+    @param level::Int = 1
+    @options(level) = [1, 2]
+    @param enabled::Bool = false
+    @param optional::Int = 4
+    @relevant(optional) = enabled
+    @include fit = ParamChild()
+    @include nested = begin
+        @include deeper = begin
+            @queued @get results() =
+                h.p("pid=$(getpid()) dataset=$dataset version=$data_version tags=$(join(tags, ','))")
+        end
+    end
+end
+
 @htmx struct App
     "Heavy read, computed where the job queue places it"
     @queued @get heavy(; n::Int=1) = h.p("heavy pid=$(getpid()) n=$(n)"; id="heavy")
