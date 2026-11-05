@@ -1062,8 +1062,8 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   `toc-depth: 2`); dictionary keys are written as given. Values are strings,
   numbers, Bools, dates, vectors, and NamedTuples or dictionaries for nested
   options (`margin=(x="2cm", y="2cm")`). `title`, `lang`, `format`, `from`,
-  `pdf-standard` and `filters` belong to `pdf_report`; setting one through
-  `metadata` is an `ArgumentError`.
+  `pdf-standard`, `filters`, `syntax-highlighting` and `highlight-style` belong
+  to `pdf_report`; setting one through `metadata` is an `ArgumentError`.
 - **`date`** is printed in the title block. A `Date` or `DateTime`, an ISO date
   (`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
   `"last-modified"` is a date that `date_format` formats: in a `de-DE` report
@@ -1177,6 +1177,20 @@ pdf_report(md, "bericht.pdf"; title="Arbeitsplätze 2026", lang="de-DE", resourc
   too, which stretched narrow cells with wide gaps and split words such as
   `Me-dian`. Code is never hyphenated, so a code span wider than its column
   runs into the next one.
+- **Code blocks** are one tagged Code element each, with a paragraph per line,
+  in the colours of Quarto's `arrow` theme, each of which keeps WCAG's contrast
+  of 4.5:1 on the block's background. Quarto's own highlighting tagged each
+  token of a block as a Code element of its own: an empty one for every line
+  and a whitespace-only one for every space between two coloured tokens. PAC's
+  Quality tab warned "Tagged text consists of only whitespace" for each, 103
+  times in a six-page model description, while its PDF/UA and WCAG reports
+  passed. `pdf_report` sets code with Typst's own highlighter, so which words
+  are coloured follows Typst's grammar for the language (in Julia a call such as
+  `f(x)` keeps the plain colour), and code lines are set slightly closer. A
+  blank line, or one of spaces only, is kept on the page and left out of the
+  tags. Bold keywords are tagged as strong text, as Typst tags a bold style.
+  Quarto's themes bring the warnings back, so `syntax-highlighting` and
+  `highlight-style` belong to `pdf_report`.
 - **Line breaks in table cells** stay line breaks. A pipe table row is one
   line, so the Markdown writes a cell's line break as an inline `<br>`
   (`| Goslar | 27.268<br>25.501–28.966 |`), as HTMX.jl does for `h.br()` in a

@@ -15,7 +15,8 @@ using TestItemRunner
           typst:
             from: markdown+autolink_bare_uris+tex_math_single_backslash-raw_tex
             pdf-standard: [ua-1]
-            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST))]
+            syntax-highlighting: idiomatic
+            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST)), $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_CODE_TYPST))]
         filters:
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
             at: post-render
@@ -31,6 +32,7 @@ using TestItemRunner
         # Ergebnisse
         """
     @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
+          isfile(HTMXObjects._PDF_REPORT_CODE_TYPST) &&
           isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER)
 end
@@ -198,7 +200,11 @@ end
     # ran-pac-2026-26-7da3df82)
     for (metadata, says) in [(title="X",) => "title=", (lang="en-US",) => "lang=",
                              (pdf_standard=String[],) => "ua-1", Dict("format" => "html") => "ua-1",
-                             (filters=["mine.lua"],) => "alt text", (from="markdown",) => "PAC"]
+                             (filters=["mine.lua"],) => "alt text", (from="markdown",) => "PAC",
+                             # a Quarto theme tags each token of a code block as its own Code
+                             # element (snag review-the-brm-m-68c151e1)
+                             (syntax_highlighting="github",) => "Code element",
+                             Dict("highlight-style" => "arrow") => "Code element"]
         err = refusal(; metadata)
         @test err isa ArgumentError && occursin(says, err.msg)
     end
@@ -574,6 +580,92 @@ end
                 @test length(table_pages) >= 2
                 @test onpage(r"Land\s+Wert") == table_pages
             end
+        end
+    end
+end
+
+@testitem "pdf_report tags a code block as one Code element with a paragraph per line" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        # Quarto's Skylighting tagged each token of a code block as a Code element of
+        # its own: an empty one per line end and a whitespace-only one per space
+        # between two tokens. PAC's Quality tab warned "Tagged text consists of only
+        # whitespace" for each, 103 times in BRM's model view (snag
+        # review-the-brm-m-68c151e1). Typst writes the structure tree uncompressed,
+        # `N 0 obj <</Type/StructElem/S/<type>/P <parent> 0 R…/K[…]…>> endobj`.
+        elements(bytes) = [(; n=parse(Int, m[1]), type=m[2], parent=parse(Int, m[3]), body=m[4])
+                           for m in eachmatch(r"(?s)(\d+) 0 obj\s*<</Type/StructElem/S/(\w+)/P (\d+) 0 R(.*?)endobj", bytes)]
+        empty_tags(bytes) = count(e -> occursin("/K[]", e.body), elements(bytes))
+        # the paragraphs of each Code element, one per line it tags
+        code_lines(bytes) = let es = elements(bytes)
+            sort([count(p -> p.type == "P" && p.parent == c.n, es) for c in es if c.type == "Code"])
+        end
+
+        # a code span, a Julia block with an indented line, a line of spaces and a
+        # blank line, and a block without a language
+        md = "# Code\n\nCall `f(x)` once.\n\n" *
+             "```julia\n\"Docstring.\"\nfunction f(x)\n    y = x + 1\n    \n\n    return y\nend\n```\n\n" *
+             "```\nplain text\n```\n"
+        mktempdir() do dir
+            out = joinpath(dir, "code.pdf")
+            @test pdf_report(md, out; title="Code", lang="en-GB") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes) && occursin("/StructTreeRoot", bytes)
+            # One Code element per code span and block, and one paragraph per line
+            # with text: no empty element, and none for the line of spaces.
+            @test empty_tags(bytes) == 0
+            @test code_lines(bytes) == [0, 1, 5]
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the code's text"
+            else
+                text = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+                @test all(l -> occursin(l, text), ["f(x)", "\"Docstring.\"", "y = x + 1", "return y", "plain text"])
+                # the indented lines start where they did, right of `function` and `end`
+                # (where each word starts: `-layout` columns are not exact for code)
+                boxes = [(; word=m[2], x=parse(Float64, m[1])) for m in
+                         eachmatch(r"<word xMin=\"([\d.]+)\"[^>]*>([^<]*)</word>", read(`pdftotext -bbox $out -`, String))]
+                x(word) = first(b.x for b in boxes if b.word == word)
+                @test x("y") == x("return") > x("function") == x("end")
+            end
+
+            # The control: Quarto's default highlighting on the same Markdown tags
+            # the tokens one by one, with empty elements, as before.
+            mkdir(joinpath(dir, "skylighting"))
+            qmd = joinpath(dir, "skylighting", "code.qmd")
+            write(qmd, replace(HTMXObjects._pdf_report_qmd(md; title="Code", lang="en-GB"),
+                               "    syntax-highlighting: idiomatic\n" => ""))
+            run(pipeline(Cmd(`$quarto render code.qmd --to typst`; dir=dirname(qmd)); stdout=devnull, stderr=devnull))
+            old = read(joinpath(dir, "skylighting", "code.pdf"), String)
+            @test empty_tags(old) > 0 && length(code_lines(old)) > 10
+        end
+
+        # A blank line, or a line of spaces, is left out of the tags and kept on the
+        # page: without the rule each is a paragraph of its own, and with it every
+        # word stays where it was.
+        rules = read(HTMXObjects._PDF_REPORT_CODE_TYPST, String)
+        without = replace(rules, r"(?s)#show raw\.where\(block: true\): it => \{.*?\n\}\n" => "")
+        @test without != rules
+        compiled(rules) = mktempdir() do dir
+            doc = joinpath(dir, "c.typ")
+            write(doc, "#set document(title: \"C\")\n#set text(lang: \"en\", region: \"GB\")\n", rules,
+                  "\n```julia\nf(x)\n\n    \n  y\n```\n")
+            run(pipeline(`$quarto typst compile --pdf-standard ua-1 $doc`; stdout=devnull, stderr=devnull))
+            pdf = joinpath(dir, "c.pdf")
+            words = isnothing(Sys.which("pdftotext")) ? nothing :
+                [m.match for m in eachmatch(r"<word [^>]*>[^<]*</word>", read(`pdftotext -bbox $pdf -`, String))]
+            (; bytes=read(pdf, String), words)
+        end
+        with_rule, without_rule = compiled(rules), compiled(without)
+        @test code_lines(with_rule.bytes) == [2] && empty_tags(with_rule.bytes) == 0
+        @test code_lines(without_rule.bytes) == [4] && empty_tags(without_rule.bytes) > 0
+        if isnothing(with_rule.words)
+            @test_skip "pdftotext (poppler-utils) reads where each word is"
+        else
+            @test !isempty(with_rule.words) && with_rule.words == without_rule.words
         end
     end
 end
