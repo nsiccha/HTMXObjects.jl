@@ -76,6 +76,7 @@ using LazyArtifacts
 import Dates
 import Random
 import CommonMark
+import Markdown
 import JSON
 # gzip for `serve`'s response compression. HTTP.jl depends on it already.
 import CodecZlib
@@ -4037,6 +4038,7 @@ end
 
 """
     SemanticProse(markdown; math=true)
+    SemanticProse(doc::Markdown.MD; references=Dict(), math=true)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
 are the source itself; the HTML projection renders it through
@@ -4045,12 +4047,27 @@ which escapes inline markup, so prose cannot smuggle HTML through. Its
 `\$…\$` / `\$\$…\$\$` math, and any other delimiter `render_markdown` takes, is
 typeset in the browser and in a [`pdf_report`](@ref); `math=false` shows every
 `\$` as text in the browser.
+
+Pass a Julia doc object directly (`SemanticProse(@doc sum)`) to display
+documentation outside Documenter. Its `@ref` links use `references`, a map
+from reference names to destination URLs; unresolved references keep their
+formatted label without a hyperlink. For example,
+`SemanticProse(@doc(sum); references=Dict("reduce" => "/api/reduce"))`.
+Named references use their explicit target; otherwise the label supplies
+the name, without code/emphasis delimiters. No destination is guessed and
+no documentation code is executed. `jldoctest` fences become Julia fences,
+keeping the example and its expected output. The doc object is not mutated.
+The resulting ordinary Markdown is shared by all projections; whitespace
+is normalized by Julia's Markdown writer. String input keeps the original
+source contract above, including any literal `@ref` links.
 """
 struct SemanticProse <: SemanticNode
     markdown::String
     math::Bool
     SemanticProse(markdown; math::Bool=true) = new(String(markdown), math)
 end
+
+include("documentation.jl")
 
 """
     SemanticTable(source)
@@ -4274,6 +4291,9 @@ body. Wrapping semantic children in markup instead would force the entire
 subtree down the HTML→Markdown translation path and lose every peer projection
 underneath it.
 
+The Markdown label is bold text in a `::: {.htmxo-label}` block. `pdf_report`
+keeps it with the start of its body; the body can continue across pages.
+
 A disclosure with nothing to open renders nothing in any format, its label
 included. That covers a disclosure with no children, one holding only `nothing`,
 and one whose [`private`](@ref) content has no stand-in for a public reader.
@@ -4343,7 +4363,7 @@ function _semantic_fields_node(fields::SemanticFields)
 end
 
 _semantic_code_node(code::SemanticCode) = h.pre(
-    h.code(code.text; class="language-$(code.language)");
+    h.code(code.text; class="language-$(_is_jldoctest(code.language) ? "julia" : code.language)");
     _semantic_anchor_attrs(code.anchor)...)
 
 function _semantic_status_node(status::SemanticStatus)
@@ -4741,8 +4761,7 @@ markdown_node(r::MarkdownRenderer, t::CommonMark.Heading, n, rules, context) =
 # convention, so a client highlighter runs the declared language instead of
 # auto-detect. Untyped fences keep a bare `<pre><code>`.
 function markdown_node(::MarkdownRenderer, t::CommonMark.CodeBlock, n, rules, context)
-    info = strip(String(t.info))
-    lang = isempty(info) ? "" : lowercase(first(split(info)))
+    lang = _syntax_language(t.info)
     isempty(lang) ? h.pre(h.code(n.literal)) :
         h.pre(h.code(n.literal; class="language-$(lang)"))
 end
@@ -5427,7 +5446,7 @@ Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
 function Base.show(io::IO, mime::MIME"text/markdown",
                    disclosure::SemanticDisclosure)
     _shows_nothing(disclosure, _ambient_audience()) && return
-    print(io, "**", _markdown_plain_text(disclosure.summary), "**\n\n")
+    print(io, "::: {.htmxo-label}\n**", _markdown_plain_text(disclosure.summary), "**\n:::\n\n")
     _semantic_show_children(io, mime, disclosure.children, "\n\n")
 end
 
@@ -19146,6 +19165,10 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 # to Typst as written.
 const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
 
+# A semantic disclosure's label must travel with the start of its body, not
+# stand alone at a page bottom. Only the label is sticky; the body can break.
+const _PDF_REPORT_LABELS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-labels.lua")
+
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
 # this Quarto filter gives each one its TeX source.
 const _PDFUA_MATH_ALT_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdfua-math-alt.lua")
@@ -19406,6 +19429,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
         at: post-render
       - path: $(_yaml_string(_PDF_REPORT_FIGURES_FILTER))
         at: post-render
+      - path: $(_yaml_string(_PDF_REPORT_LABELS_FILTER))
+        at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
       - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
@@ -19432,7 +19457,11 @@ is one tagged Code element with a paragraph per line, in the colours of
 Quarto's `arrow` theme; a blank line in it is kept on the page and left out of
 the tags. Quarto's own highlighting tagged each token as a Code element of its
 own, and PAC (PDF Accessibility Checker) warned about the empty and
-whitespace-only ones.
+whitespace-only ones. Semantic disclosure labels (including eager tabs and
+master-detail labels) stay with the start of their body. Their Markdown marks
+the label alone with `::: {.htmxo-label}`; the body can continue across pages.
+Regenerate saved Markdown to get these markers. Ordinary bold prose keeps its
+own pagination.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region

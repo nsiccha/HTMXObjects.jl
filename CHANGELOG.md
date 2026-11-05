@@ -14,12 +14,36 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.61
+## 0.1.63
 
 - `pdf_report` lets table cells break after underscore runs in identifiers,
   including inline code. Long model parameter names now wrap inside their
   cells instead of painting over adjacent columns. The identifier's characters
   and the table's accessibility structure are preserved.
+
+## 0.1.62
+
+- `SemanticProse(doc::Markdown.MD; references=Dict(), math=true)` displays Julia
+  documentation without treating unresolved `@ref` references as URLs. Supplied
+  string-keyed destinations become ordinary links; other references keep their
+  formatted labels. The normalized Markdown is shared by all prose projections,
+  and the original doc object is unchanged. Pass `doc` instead of `string(doc)`
+  to opt in; authored strings keep their existing source contract.
+- `jldoctest` code blocks use Julia syntax highlighting, including named doctests
+  and options. Their contents stay intact, and the browser no longer requests
+  a nonexistent Prism `jldoctest` grammar.
+
+## 0.1.61
+
+- `pdf_report` keeps a `SemanticDisclosure` label with the start of its body,
+  including eager tab labels and master-detail labels. A label could previously
+  stand alone at the bottom of a page while its first heading and content moved
+  to the next. Labels remain bold text, without adding a heading level, and long
+  bodies continue across pages. Their Markdown now encloses the label alone in
+  `::: {.htmxo-label}`; ordinary bold paragraphs keep their pagination. Lazy-tab
+  links and empty disclosures keep their existing projection.
+  **Breaking:** Markdown bytes include this fence. Regenerate saved Markdown to
+  get the repair, and account for the fence if comparing or parsing the old form.
 
 ## 0.1.60
 
