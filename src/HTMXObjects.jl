@@ -9638,7 +9638,8 @@ function _root_from(template, RootT, context::OperationContext)
 end
 
 _root_request_kw(context::OperationContext) =
-    (; __req__=context.request, __route__=context.route, _prefix_kw(context.prefix)...)
+    (; __req__=context.request, __param_request__=_param_request(context.request),
+       __route__=context.route, _prefix_kw(context.prefix)...)
 
 # Request and mount context, which a root takes from its own request and never
 # from the instance it was built from.
@@ -13277,13 +13278,11 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
     root = provider.factory(RootT, context)
     root isa RootT || throw(ArgumentError(
         "root provider for $(RootT) returned $(typeof(root)); expected an instance of $(RootT)"))
-    # Bind serializable parameter input for every provider, including custom
-    # request factories. Scoped providers may also return a cached root.
-    # DynamicObjects' same-type mounted view refreshes request context and
-    # transitive dependents without
+    # Scoped providers may return a cached root. DynamicObjects' same-type
+    # mounted view refreshes request context and transitive dependents without
     # copying settled/in-flight/mmap/indexed cache identity. This is also what
     # makes HTMXObjects-managed RootRetention safe for immutable @htmx roots.
-    if isdefined(DynamicObjects, :remount)
+    if provider.scope in (:session, :job) && isdefined(DynamicObjects, :remount)
         try
             root = Base.invokelatest(getproperty(DynamicObjects, :remount), root;
                 __req__=context.request, __route__=context.route,
@@ -13307,8 +13306,24 @@ function _provide_root(provider::RootProvider, RootT, context::OperationContext)
         end
     end
     _check_root_request(root, RootT, context)
+    provider.scope === :request && (root = _bind_param_request(root, context.request))
     _sync_root!(root)
     root
+end
+
+# A fresh request root carries the request's serializable `@param` input as an
+# ordinary construction input, so a worker-bound computation of it reads the
+# submitted values: DynamicObjects 0.5.10 builds the worker's root from every
+# input `__hash__` leaves out. The default factory passes it at construction
+# (`_root_request_kw`); a custom factory's root, already checked to carry this
+# request, is remade with it. It is not remounted: a fresh root keeps fresh-root
+# semantics, so a closure a route returns can still read its context while the
+# answer renders.
+function _bind_param_request(root, req::HTTP.Request)
+    ismutabletype(typeof(root)) && return root  # not a DynamicObject: never worker-bound
+    hasproperty(root, :__param_request__) || return root
+    getproperty(root, :__param_request__) === nothing || return root
+    Base.invokelatest(DynamicObjects.remake, root; __param_request__=_param_request(req))
 end
 
 # The request/render boundary sync. DynamicObjects tracked values

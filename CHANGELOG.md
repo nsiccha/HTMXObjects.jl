@@ -14,6 +14,22 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.71
+
+- A fresh request root (`RootProvider()`, or a custom `:request` factory) is a fresh
+  root again, not a remount view. 0.1.68 remounted every root to carry the request's
+  `@param` input to the worker, and with that a custom request factory's root that
+  did not carry the current request was no longer refused, and a `private` part a
+  function builds failed when it read its context after the route returned. Now the
+  default factory passes that input when it builds the root, and a custom factory's
+  root, checked first, is remade with it. Session and job roots are remounted as
+  before.
+- `[compat] DynamicObjects = "0.5.10"`. Its worker builds each fresh request root
+  from that root's own construction inputs, which the fresh roots above rely on with
+  `configure_job_queue!(; workers=1)`: on 0.5.8 and 0.5.9 the worker reused the first
+  root it built, so a later request computed with the first request's parameters.
+  An environment that pins an older DynamicObjects is refused when it resolves.
+
 ## 0.1.70
 
 - `--htmxo-disclosure-padding` is the inner spacing of the `<details>` it is set

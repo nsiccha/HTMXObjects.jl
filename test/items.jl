@@ -3170,6 +3170,10 @@ end
     @test contains(err.msg, "does not carry the current request")
     @test contains(err.msg, "RootRetention")
 
+    stale = RootProvider((RootT, _context) ->
+        RootT(; __req__=HTTP.Request("GET", "/?fit_key=stale")))
+    @test_throws ArgumentError _provide_root(stale, JobScopedApp, unbound_context)
+
 end
 
 @testitem "a detached @include child refuses to render a form it cannot fill" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin

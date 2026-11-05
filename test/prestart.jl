@@ -202,18 +202,23 @@ end
 @testitem "a private part a function builds is built once and its fragments start" setup=[PrestartFixtures] tags=[:unit] begin
     using HTMXObjects, HTTP, Test
 
-    reset_prestart!()
-    route!(PrestartApp())
-    PRIVATE_BUILDS[] = 0
-    with_prestart() do
-        # The walk builds each part, and the page renders what it built.
-        page = body_text(served_get("/prestart_private_page", "Accept" => "text/html"))
-        @test PRIVATE_BUILDS[] == 2
-        @test occursin("private-plain", page) && !occursin("summary", page)
-        @test prestart_token(page, "private") !== nothing
-        @test timedwait(() -> runs("private") == 1, 10.0; pollint=0.01) === :ok
+    for provider in (RootProvider(), RootProvider((T, ctx) -> T(; __req__=ctx.request)))
+        reset_prestart!()
+        route!(PrestartApp(); root_provider=provider)
+        PRIVATE_BUILDS[] = 0
+        with_prestart() do
+            # Both fresh-root factories retain their rendering context when
+            # a private closure reads it after the route returned.
+            response = served_get("/prestart_private_page", "Accept" => "text/html")
+            @test response.status == 200
+            page = body_text(response)
+            @test PRIVATE_BUILDS[] == 2
+            @test occursin("private-plain", page) && !occursin("summary", page)
+            @test prestart_token(page, "private") !== nothing
+            @test timedwait(() -> runs("private") == 1, 10.0; pollint=0.01) === :ok
+        end
+        release!("private")
     end
-    release!("private")
 end
 
 @testitem "a fragment in a tab starts with the page" setup=[PrestartFixtures] tags=[:unit] begin
