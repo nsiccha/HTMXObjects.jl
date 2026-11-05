@@ -3913,16 +3913,22 @@ needs a DynamicObjects with its job queue (`pre-inference` ≥ `64aba0c`).
 configure_job_queue!(; max_running=2, abandon_after=60)
 ```
 
-With `workers=n`, DynamicObjects runs every `@queued` computation in one of `n`
-worker processes instead of on a `:default` thread of this one, so a heavy
-first-call compile, a GC pause or a deadlock in heavy work never stalls the pages,
-pollers and exports this process serves. A worker never saw the request, so a
-worker-bound body cannot read `__req__`: pass what it needs as arguments. The
-executor is DynamicObjects' (its `configure_queue!` takes `workers`); on a
-DynamicObjects without it, `workers=0` is accepted and a positive count refused.
+With `workers=1`, DynamicObjects 0.5.7 runs every `@queued` computation in a worker
+process instead of on a `:default` thread of this one, so a heavy first-call
+compile, a GC pause or a deadlock in heavy work never stalls the pages, pollers
+and exports this process serves. The worker's progress tree is rebuilt live under
+the computation's node, so the operation's poller shows it unchanged, and a part
+the body `send_ahead`s reaches the page as before. A body that reads `__req__`
+stays in this process (one warning names it); pass what it needs as arguments.
+`worker_stall=s` has a watchdog restart a worker whose in-flight computations have
+been quiet (no progress frame, message or CPU time) for `s` seconds, failing them
+with `ComputeAbandoned`; a heavy fit's first compile can run for tens of minutes
+without a frame, so set it well above that. The runtime panel shows the worker's
+pid, in-flight count and last message. On a DynamicObjects without the executor,
+`workers=0` is accepted and a positive count refused.
 
 ```julia
-configure_job_queue!(; max_running=2, workers=1)
+configure_job_queue!(; max_running=2, workers=1, worker_stall=3600)
 ```
 
 #### Queued properties

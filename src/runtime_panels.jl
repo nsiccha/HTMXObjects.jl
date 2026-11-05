@@ -40,9 +40,26 @@ function system_load_panel(load_url; interval="2s", attrs...)
             h.dt("Process RSS"), h.dd(fmt_bytes(p.rss_bytes)),
             h.dt("Julia heap"), h.dd(fmt_bytes(p.live_bytes)),
             h.dt("System memory"), h.dd(fmt_bytes(p.total_memory - p.free_memory),
-                " / ", fmt_bytes(p.total_memory)));
+                " / ", fmt_bytes(p.total_memory)),
+            _worker_dl_items()...);
         class="htmxo-system-load", hx_get=load_url, hx_trigger=poll_trigger(interval),
         hx_swap="outerHTML", attrs...)
+end
+
+# The job queue's worker process (`configure_job_queue!(; workers=1)`), when
+# one is configured: its pid, what it has in flight and how fresh its last
+# message is, so a stall shows here before the watchdog acts.
+function _worker_dl_items()
+    status = _worker_status()
+    (status === nothing || status.workers == 0) && return ()
+    text = if status.running
+        age = status.last_message_at isa Real ?
+            string(", last message ", round(Int, time() - status.last_message_at), " s ago") : ""
+        string("pid ", status.pid, ", ", status.in_flight, " in flight", age)
+    else
+        "configured, not running"
+    end
+    (h.dt("Worker"), h.dd(text))
 end
 
 const _MEMORY_COLLECTION_LOCK = ReentrantLock()

@@ -1,0 +1,6 @@
+name = "WorkerApp"
+uuid = "ddf6c641-8890-43bb-ada7-28ea1a89aa80"
+version = "0.1.0"
+
+[deps]
+HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"

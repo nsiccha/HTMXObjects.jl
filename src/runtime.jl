@@ -929,23 +929,34 @@ request for it starts a fresh compute. `abandon_after=Inf` never abandons.
 Running computes are never interrupted, and a property's computation is never
 abandoned: its callers are waiting for it.
 
-With `workers=n`, every `@queued` computation runs in one of `n` worker processes
-instead of on a `:default` thread of this one, so a heavy first-call compile, a
-GC pause or a deadlock in heavy work never stalls the pages, pollers and exports
-this process serves (the frontend/backend process split; design in brief
-HTMXObjects:process-split `wworuo`). A worker never saw the request, so a
-worker-bound body cannot read `__req__`: pass what it needs as arguments. The
-default `0` keeps every computation in this process.
+With `workers=1`, every `@queued` computation runs in a worker process instead
+of on a `:default` thread of this one, so a heavy first-call compile, a GC pause
+or a deadlock in heavy work never stalls the pages, pollers and exports this
+process serves (the frontend/backend process split; design in brief
+HTMXObjects:process-split `wworuo`). DynamicObjects 0.5.7 runs one worker per
+process (`workers` is `0` or `1`): it addresses the request root by its
+construction inputs, keeps a body that reads `__req__` in this process with one
+warning (pass what such a body needs as arguments), rebuilds the worker's
+progress tree under the computation's node so the operation's poller shows it
+unchanged, and brings `send_ahead` parts and log records back. The default `0`
+keeps every computation in this process.
+
+`worker_stall=s` (default `Inf`, off) has a watchdog restart the worker when a
+computation has been in flight for `s` seconds with no progress frame, no
+message and no CPU time moved meanwhile, failing those computations with
+`ComputeAbandoned` and recording the event in the error log; a stuck fit then
+costs a failed fit, not a frozen app. A heavy fit's first-call compile can run
+for tens of minutes without a frame, so set `s` well above that.
 
 The queue is DynamicObjects' (`DynamicObjects.configure_queue!`, which this
 forwards `max_running` and `workers` to); `@queued` needs a DynamicObjects with
 it (`pre-inference` ≥ `64aba0c`), and `workers` one whose `configure_queue!`
-takes that keyword (its worker executor): on an older one `workers=0` is
-accepted and a positive count refused. Returns the current settings; omitted
-settings are unchanged. Setting `max_running=0` starts everything still queued.
+takes that keyword (0.5.7): on an older one `workers=0` is accepted and a
+positive count refused. Returns the current settings; omitted settings are
+unchanged. Setting `max_running=0` starts everything still queued.
 """
 function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
-        workers=nothing)
+        workers=nothing, worker_stall=nothing)
     if max_running !== nothing
         max_running >= 0 || throw(ArgumentError("max_running must be non-negative"))
         max_running > 0 && !_has_job_queue() && throw(ArgumentError(
@@ -957,12 +968,16 @@ function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
         workers > 0 && !_has_queue_workers() && throw(ArgumentError(
             "configure_job_queue!(; workers=$(workers)) needs a DynamicObjects " *
             "whose configure_queue! takes `workers` (its worker executor behind " *
-            "`@queued`); this one has none, so `@queued` computations stay in " *
-            "this process"))
+            "`@queued`, 0.5.7); this one has none, so `@queued` computations " *
+            "stay in this process"))
     end
     if abandon_after !== nothing
         abandon_after > 0 || throw(ArgumentError("abandon_after must be positive"))
         _QUEUE_ABANDON_AFTER[] = Float64(abandon_after)
+    end
+    if worker_stall !== nothing
+        worker_stall > 0 || throw(ArgumentError("worker_stall must be positive (Inf turns the watchdog off)"))
+        _WORKER_STALL[] = Float64(worker_stall)
     end
     queue_kw = (;
         (max_running === nothing ? (;) : (; max_running=Int(max_running)))...,
@@ -970,14 +985,94 @@ function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
         (workers === nothing || !_has_queue_workers() ? (;) : (; workers=Int(workers)))...)
     isempty(queue_kw) || !_has_job_queue() ||
         _dynamicobjects_queue(:configure_queue!)(; queue_kw...)
-    job_queue_settings()
+    settings = job_queue_settings()
+    isfinite(settings.worker_stall) && settings.workers > 0 && _start_worker_watchdog!()
+    settings
 end
 
 function job_queue_settings()
     queue = _has_job_queue() ? _dynamicobjects_queue(:queue_settings)() :
         (; max_running=0, queued=0, running=0)
     (; queue.max_running, workers=Int(get(queue, :workers, 0)),
-       abandon_after=_QUEUE_ABANDON_AFTER[], queue.queued, queue.running)
+       worker_stall=_WORKER_STALL[], abandon_after=_QUEUE_ABANDON_AFTER[],
+       queue.queued, queue.running)
+end
+
+# --- The worker process: status for the panels, a watchdog for a stall -------
+
+const _WORKER_STALL = Ref(Inf)
+const _WORKER_WATCHDOG = Threads.Atomic{Bool}(false)
+
+# DynamicObjects' `worker_status()`: `(; workers, running, pid, started_at,
+# in_flight, last_message_at)`, or `nothing` on a DynamicObjects without it.
+_worker_status() = isdefined(DynamicObjects, :worker_status) ?
+    getproperty(DynamicObjects, :worker_status)() : nothing
+
+# CPU time of a process in clock ticks, from `/proc` (Linux); `nothing` where
+# that cannot be read, so the watchdog then judges by messages alone.
+function _process_cpu_ticks(pid)
+    (Sys.islinux() && pid isa Integer) || return nothing
+    stat = try
+        read("/proc/$(pid)/stat", String)
+    catch
+        return nothing
+    end
+    # The fields after the parenthesized command name start at field 3; utime
+    # and stime are fields 14 and 15 of the line.
+    fields = split(stat[(findlast(')', stat) + 1):end])
+    length(fields) >= 13 || return nothing
+    parse(Int, fields[12]) + parse(Int, fields[13])
+end
+
+struct _WorkerStalled <: Exception
+    pid::Any
+    in_flight::Int
+    quiet_s::Float64
+end
+Base.showerror(io::IO, e::_WorkerStalled) = print(io, "the worker process (pid ", e.pid,
+    ") kept ", e.in_flight, " computation(s) in flight for ",
+    round(Int, e.quiet_s), " s with no progress frame, message or CPU time; ",
+    "configure_job_queue!'s worker_stall restarted it, failing them with ComputeAbandoned")
+
+function _start_worker_watchdog!()
+    Threads.atomic_cas!(_WORKER_WATCHDOG, false, true) && return nothing
+    errormonitor(Threads.@spawn _worker_watchdog())
+    nothing
+end
+
+# Runs while `worker_stall` is finite. A worker is stalled when, for longer
+# than `worker_stall`, it has had computations in flight and neither sent a
+# frame or message nor used CPU time (where that can be read).
+function _worker_watchdog()
+    last_pid, last_ticks, moved_at = nothing, nothing, time()
+    while true
+        stall = _WORKER_STALL[]
+        if !isfinite(stall)
+            Threads.atomic_xchg!(_WORKER_WATCHDOG, false)
+            return nothing
+        end
+        sleep(clamp(stall / 4, 1.0, 60.0))
+        status = _worker_status()
+        if status === nothing || !status.running || status.in_flight == 0
+            last_pid = nothing
+            continue
+        end
+        ticks = _process_cpu_ticks(status.pid)
+        if status.pid !== last_pid || (ticks !== nothing && ticks != last_ticks)
+            moved_at = time()
+        end
+        last_pid, last_ticks = status.pid, ticks
+        since = moved_at
+        for t in (status.last_message_at, status.started_at)
+            t isa Real && (since = max(since, Float64(t)))
+        end
+        quiet = time() - since
+        quiet > stall || continue
+        record_error(_WorkerStalled(status.pid, status.in_flight, quiet), backtrace(), nothing)
+        isdefined(DynamicObjects, :restart_worker!) &&
+            getproperty(DynamicObjects, :restart_worker!)()
+        last_pid = nothing
+    end
 end
 
 # Run `f` as the start of a route's queued computation for `tracker`'s ledger:
@@ -1175,6 +1270,7 @@ function _runtime_process_row(tracker::RuntimeTracker, running_jobs::Int)
        threads_default=Threads.nthreads(:default),
        threads_interactive=Threads.nthreads(:interactive),
        running_jobs,
+       worker=_worker_status(),
        _runtime_memory()...,
        gc_time=gc.total_time / 1.0e9,
        total_requests=tracker.total_requests,
