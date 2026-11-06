@@ -21,6 +21,142 @@
     @test !contains(leaf(h.span("plain")), ">ⓘ</button>")
 end
 
+@testitem "a first cell holding a control is never wrapped in the row's detail button" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string
+    items = [(; id="a", region="North"), (; id="b", region="South")]
+    groupings = ["None" => nothing, "Region" => r -> r.region]
+    # The three table shapes the report's cell can sit in, in both toggle modes.
+    table(cell, shape; kw...) = shape === :tree ?
+        master_detail_table(["Name", "Value"], [(; id="g", kids=items)];
+            key=r -> "k-$(r.id)", master=r -> (h.td(cell(r)), h.td("1")),
+            children=r -> get(r, :kids, ()),
+            detail_url=r -> haskey(r, :kids) ? nothing : "/d/$(r.id)", kw...) :
+        master_detail_table(["Name", "Value"], items;
+            key=r -> "k-$(r.id)", master=r -> (h.td(cell(r)), h.td("1")), detail_url=r -> "/d/$(r.id)",
+            (shape === :flat ? (;) : (; groupings, group_by=[shape === :grouped ? "Region" : "None"]))..., kw...)
+    shapes = (:flat, :tree, :grouped, :grouped_flat_view)
+    leaf(html, id) = match(Regex("<tr[^>]*id=\"[^\"]*row-[^\"]*k-$id\"[^>]*>.*?</td>", "s"), html).match
+    # What HTML forbids: a control anywhere inside a <button>.
+    nested(html) = any(m -> occursin(r"<(?:a|button|input|select|textarea|label|details)[\s/>]",
+        m.captures[1]), eachmatch(r"<button\b[^>]*>(.*?)</button>"s, html))
+    holding = (
+        "a link" => r -> h.a("Name $(r.id)"; href="/s/$(r.id)"),
+        "a link inside a span" => r -> h.span("see ", h.a("Name $(r.id)"; href="/s/$(r.id)")),
+        "a SemanticLink" => r -> SemanticLink("Name $(r.id)", "/s/$(r.id)"),
+        "Raw with a link" => r -> Raw("<A HREF=\"/s/$(r.id)\">Name $(r.id)</A>"),
+        "a checkbox in a label" => r -> h.label(h.input(type="checkbox"), "Name $(r.id)"),
+        "a drop-out" => r -> h.details(h.summary("Name $(r.id)"), h.p("panel")),
+    )
+    for (what, cell) in holding, shape in shapes, toggle in (:button, :label)
+        html = repr("text/html", table(cell, shape; detail_toggle=toggle))
+        row = leaf(html, "a")
+        # Exactly one control opens the row's detail, written beside the label.
+        @test !nested(row)
+        @test count("data-htmxo-detail-toggle=", row) == 1
+        @test contains(row, "aria-controls=\"detail-")
+        @test contains(row, "aria-expanded=\"false\"")
+        @test !contains(row, "data-htmxo-label=")
+        if shape === :flat
+            @test contains(row, ">▸</button><span data-htmxo-row-label=\"\">")
+        else
+            @test endswith(row, ">ⓘ</button></td>")
+        end
+    end
+    # A plain label is still the control under `:label`, whatever writes it.
+    plain = ("text" => r -> "Name $(r.id)", "a node" => r -> h.strong("Name $(r.id)"),
+             "Raw" => r -> Raw("<b>Name $(r.id)</b>"), "Raw whose tag only starts like a control" => r -> Raw("<abbr title=\"x\">Name $(r.id)</abbr>"))
+    for (what, cell) in plain, shape in shapes
+        row = leaf(repr("text/html", table(cell, shape; detail_toggle=:label)), "a")
+        @test !nested(row)
+        @test contains(row, "data-htmxo-label=\"\"")
+        @test !contains(row, "ⓘ") && !contains(row, "▸")
+    end
+    # Each row decides for itself: a plain row beside a linked one keeps its label button.
+    mixed = repr("text/html", table(r -> r.id == "a" ? h.a("A"; href="/s/a") : "B", :flat; detail_toggle=:label))
+    @test contains(leaf(mixed, "a"), ">▸</button>")
+    @test contains(leaf(mixed, "b"), "data-htmxo-label=\"\"")
+    # Markdown keeps the link: the separate control is chrome.
+    for shape in shapes
+        md = to_markdown_string(table(r -> h.a("Name $(r.id)"; href="/s/$(r.id)"), shape; detail_toggle=:label))
+        @test contains(md, "[Name a](/s/a)")
+        @test !contains(md, "ⓘ") && !contains(md, "▸")
+    end
+    # Sorting, search and CSV read the label's span, which holds the link alone.
+    @test contains(leaf(repr("text/html", table(r -> h.a("Name $(r.id)"; href="/s/$(r.id)"), :grouped; detail_toggle=:label)), "a"),
+        "<span data-htmxo-row-label=\"\"><a href=\"/s/a\">Name a</a></span>")
+end
+
+@testitem "a first-cell link and the row's detail control each do their own thing" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        items = [(; id="a", region="North"), (; id="b", region="North")]
+        cell(prefix) = r -> h.a("Name $(r.id)"; href="#went-$(r.id)", id="$prefix-$(r.id)")
+        content = h.div(
+            master_detail_table(["Name", "Value"], items; key=r -> "g-$(r.id)",
+                master=r -> (h.td(cell("glink")(r)), h.td("1")), detail=r -> h.p("About $(r.id)"),
+                groupings=["None" => nothing, "Region" => r -> r.region], group_by="Region",
+                initially_open=true, initially_open_detail=false, detail_toggle=:label, id="grouped"),
+            master_detail_table(["Name", "Value"], items; key=r -> "f-$(r.id)",
+                master=r -> (h.td(cell("flink")(r)), h.td("1")), detail=r -> h.p("About $(r.id)"),
+                detail_toggle=:label, id="flat"),
+            h.script(Raw(raw"""
+            window.addEventListener('load', function() {
+                const checks = [];
+                const check = (name, ok) => checks.push(name + ':' + Boolean(ok));
+                const $ = id => document.getElementById(id);
+                for (const prefix of ['glink', 'flink']) {
+                    const link = $(prefix + '-a'), row = link.closest('tr');
+                    const control = row.querySelector('[data-htmxo-detail-toggle]');
+                    const detail = document.getElementById(control.getAttribute('aria-controls'));
+                    check(prefix + '-link-outside-control', !control.contains(link) && !link.closest('button'));
+                    // What a tap at the control's centre lands on: the report's `hit=a`.
+                    control.scrollIntoView({block: 'center'});
+                    const box = control.getBoundingClientRect();
+                    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+                    check(prefix + '-tap-hits-control', hit === control);
+                    const hash = location.hash;
+                    control.click();
+                    check(prefix + '-control-opens', !detail.hidden && control.getAttribute('aria-expanded') === 'true');
+                    check(prefix + '-control-stays-on-page', location.hash === hash);
+                    control.click();
+                    check(prefix + '-control-closes', detail.hidden);
+                    link.click();
+                    check(prefix + '-link-follows', location.hash === '#went-a');
+                    check(prefix + '-link-keeps-detail-closed', detail.hidden);
+                    history.replaceState(null, '', location.pathname);
+                    row.cells[1].click();
+                    check(prefix + '-row-click-opens', !detail.hidden);
+                    row.cells[1].click();
+                }
+                const result = document.createElement('pre'); result.id = 'checks';
+                result.textContent = checks.join('\n');
+                document.body.appendChild(result);
+            });
+            """)))
+        dom = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, repr("text/html", HTMXObjects.pico_page(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION)))
+            profile = joinpath(directory, "profile")
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile file://$fixture`)
+        end
+        checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+        @test !isnothing(checks)
+        if !isnothing(checks)
+            lines = split(checks[1], '\n')
+            for line in lines
+                @test endswith(line, ":true")
+            end
+            @test length(lines) == 16
+        end
+    end
+end
+
 @testitem "a click on a row's own control neither toggles nor selects the row" setup=[ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"

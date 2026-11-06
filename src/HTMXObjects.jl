@@ -24958,8 +24958,14 @@ _md_master_cells(cells, texts) = Any[_md_master_cell(c, texts) for c in cells]
 _md_master_cell(x::AbstractFloat, texts) = number_cell(x; texts)
 _md_master_cell(x, texts) = x
 
-_md_interactive_label(::Any) = false
-_md_interactive_label(::Raw) = true
+# Whether a first cell's content holds a control of its own. A native button
+# cannot wrap one: HTML allows no interactive content inside a <button>, and a
+# tap on it lands on the inner control. Such a row keeps a separate control. A
+# value that writes its own HTML (`Raw`, `SemanticLink`, `HTMLSnapshot`) counts
+# by what it writes; text and numbers write no HTML of their own.
+const _MD_ROW_CONTROL_TAG = Regex(string("<(?:", join(_MD_ROW_CONTROLS, '|'), ")[\\s/>]"), "i")
+_md_interactive_label(x) = showable(MIME"text/html"(), x) &&
+    occursin(_MD_ROW_CONTROL_TAG, repr(MIME"text/html"(), x))
 _md_interactive_label(::_LabelledControl) = true
 # A group summary in a group row's first cell is no label either: the row
 # keeps a separate toggle beside it.
@@ -25311,8 +25317,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   as a pointer shortcut, and the button runs the row's click handler (with any
   `master_attrs` extension). A branch row click opens children and its detail
   button opens only its detail. `:label` uses the first master cell's complete
-  content as the native detail button instead, with no separate control.
-  Supply non-interactive label content in that cell; other cells can contain
+  content as the native detail button instead, with no separate control. A
+  button cannot hold a link or another control, so a row whose first cell holds
+  one keeps it as it is and gets the default's separate control (▸ in a flat
+  table, ⓘ in a hierarchy or grouped table); other cells can always contain
   links or controls. Group rows without details stay plain. The label button
   carries `data-htmxo-label`, so Markdown keeps the row's label; the other
   controls are dropped from Markdown. Sorting, search and CSV export read the
@@ -25759,8 +25767,10 @@ function master_detail_table(headers, items;
             # control. Linked leaves and branches with their own details keep
             # a separate icon, so links and child-row expansion remain distinct.
             # Flat tables retain their compact disclosure control by default.
-            label_detail = detail_toggle === :label ||
-                (!isnothing(children) && !branch && !any(_md_interactive_label, label))
+            # `:label` makes every plain label the control; a label holding a
+            # control keeps the separate one in any mode (`_md_interactive_label`).
+            label_detail = !any(_md_interactive_label, label) &&
+                (detail_toggle === :label || (!isnothing(children) && !branch))
             toggle_label, label_attrs =
                 label_detail ? (label, (; data_htmxo_label="")) :
                 isnothing(children) ? (Any[_md_disclosure_glyph(detail_open)],

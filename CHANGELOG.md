@@ -14,6 +14,20 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.75
+
+- `master_detail_table(...; detail_toggle=:label)` no longer writes a link or another
+  control inside the row's detail button. A row whose first cell holds one keeps it as
+  it is and gets the default's separate control: ▸ in a flat table, ⓘ in a hierarchy or
+  grouped table. Before, the first cell's `<a>` landed inside the `<button>`: invalid
+  HTML, and a tap on the button hit the link, so the page navigated and the detail did
+  not open. Rows with a plain label are unchanged.
+- The same check now reads what a value writes, so a `SemanticLink` or a `Raw` link
+  counts as a link in every mode. A `Raw` label that writes no control now counts as
+  plain: in a hierarchy without `:label` it becomes the row's own button, like any
+  other plain label, instead of getting ⓘ. Snag `first-cell-link-f4fd6680`
+  (ODLPlaus:review:ux).
+
 ## 0.1.74
 
 - `export_site(...; aliases)` can link an address to a file the bundle does not carry,
