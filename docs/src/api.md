@@ -3929,6 +3929,12 @@ answer's page language and audience (`page_lang()`, `private`) as it would here.
 request's `@param` values reach the worker with its root, whichever root provider built
 it, so two requests that differ only in their parameters compute with their own. A body that reads `__req__`
 stays in this process (one warning names it); pass what it needs as arguments.
+A failure in the worker answers as it does here: `unwrap_error` returns the worker's exception
+itself, so a `CallerFault` or a refused `@param` answers its status and message and an `__error__`
+hook reads it, and the error log keeps the worker's printout. An exception that cannot cross
+answers 500 and its log says why: it serializes to more than 1 MiB, holds a DynamicObjects object
+or something else that cannot be serialized, or has a type from a package this process has not
+loaded.
 `worker_stall=s` has a watchdog restart a worker whose in-flight computations have
 been quiet (no progress frame, message or CPU time) for `s` seconds, failing them
 with `ComputeAbandoned`; a heavy fit's first compile can run for tens of minutes

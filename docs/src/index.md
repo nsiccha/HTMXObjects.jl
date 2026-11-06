@@ -880,7 +880,9 @@ end
 ```
 
 The hook receives the exception wrapped like any route error, so read it with
-`unwrap_error(err)`: a `CallerFault` carries `status` and `message`.
+`unwrap_error(err)`: a `CallerFault` carries `status` and `message`. A
+`CallerFault` raised in a `@queued` computation answers the same with
+`configure_job_queue!(; workers=1)`.
 
 ### Customising
 

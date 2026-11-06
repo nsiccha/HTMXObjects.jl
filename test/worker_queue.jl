@@ -228,3 +228,96 @@ end
         end
     end
 end
+
+# Snag `caller-fault-in-53f41794`: a refusal raised in the worker reaches this
+# process as itself (DynamicObjects 0.5.13), so nothing about the answer depends
+# on `workers`. Before, each of these answered 500 with the message lost.
+@testitem "a caller fault raised in a worker answers as it does in this process" setup=[FreshTransportFixtures, WorkerAppFixtures] tags=[:integration, :workers] begin
+    using HTMXObjects, HTTP, Test
+    import HTMXObjects: _clear_operation_polls!
+
+    masked(body) = replace(body, r"Error ID: (<code>|`)[0-9a-f]+(</code>|`)" => "Error ID: <id>",
+        r"pid=\d+" => "pid=<pid>")
+    # A cold worker loads HTMXObjects and the fixture package first.
+    function polled(path; seconds=240.0)
+        answer = Ref(body_text(hx_get(path)))
+        running(answer[]) || return answer[]
+        url = poll_url(answer[])
+        timedwait(seconds; pollint=0.25) do
+            answer[] = body_text(hx_get(url))
+            !running(answer[])
+        end === :ok || error("operation never settled within $(seconds) s: $path\n$(answer[])")
+        answer[]
+    end
+    # An operation's terminal wraps its answer when it ends a poll, and the poll's
+    # status depends on timing, so a browser's row compares the answer itself.
+    article(body) = masked(something(match(r"<article.*</article>"s, body), (; match=body)).match)
+
+    # path => (status, what the message says)
+    faults = [
+        "/timecourse?n=0" => (400, "new subjects need at least 1 subject, got 0"),
+        "/options?fit=not-a-fit" => (400, "Invalid value for parameter fit"),
+        "/memoized?k=0" => (404, "unknown k 0"),
+        "/required" => (400, "Missing required parameter: must"),
+        "/typed?n=abc" => (400, "Invalid value for parameter n"),
+        "/typed?colour=blue" => (400, "red"),
+        "/typed?wait=soon" => (400, "Millis"),
+        "/probe?k=0" => (409, "probe 0 is refused"),
+    ]
+    old_dir = HTMXObjects.ERROR_DIR[]
+    try
+        mktempdir() do dir
+            HTMXObjects.ERROR_DIR[] = dir
+            log_of(response) = read(joinpath(dir, HTTP.header(response, "X-HTMXO-Error-Id") * ".log"), String)
+            answers = Dict{Int,Dict{Any,Any}}()
+            printouts = Dict{Int,Any}()
+            for workers in (0, 1)
+                configure_job_queue!(; workers)
+                _clear_operation_polls!()
+                route!(WorkerApp.FaultApp(); root_provider=RootProvider())
+                # The worker path is really taken: a computation names its process.
+                pid = parse(Int, only(match(r"pid=(\d+)", polled("/timecourse?n=2")).captures))
+                @test (pid == getpid()) == (workers == 0)
+                seen = answers[workers] = Dict{Any,Any}()
+                for (path, (status, message)) in faults
+                    for (kind, headers) in (:markdown => ["Accept" => "text/markdown"], :html => Pair{String,String}[])
+                        response = dispatch(:GET, path; headers, operation_policy=:blocking)
+                        body = masked(body_text(response))
+                        @test (path, kind, response.status) == (path, kind, status)
+                        @test contains(body, message)
+                        seen[(path, kind)] = (response.status, body)
+                        contains(log_of(response), "status:    $status\n") || @test "log of $path" == "names $status"
+                    end
+                    seen[(path, :polled)] = article(polled(path))
+                    @test contains(seen[(path, :polled)], message)
+                end
+                # The control: a server fault stays a 500 and says nothing more.
+                boom = dispatch(:GET, "/boom"; headers=["Accept" => "text/markdown"], operation_policy=:blocking)
+                @test boom.status == 500
+                seen[:boom] = (boom.status, masked(body_text(boom)))
+                @test !contains(seen[:boom][2], "server fault in the body")
+                @test contains(log_of(boom), "server fault in the body")
+                # The log keeps what the worker printed, for a refusal and a server fault.
+                refused = dispatch(:GET, "/timecourse?n=0"; operation_policy=:blocking)
+                printouts[workers] = map((refused, boom)) do response
+                    contains(log_of(response), "RemoteComputationError: in worker process $pid")
+                end
+                route!(WorkerApp.FaultHookApp())
+                hooked = dispatch(:GET, "/hooked"; operation_policy=:blocking)
+                seen[:hook] = (hooked.status, masked(body_text(hooked)))
+                @test contains(seen[:hook][2], "hook saw CallerFault status=422 message=hooked fault")
+                @test hooked.status == 422
+            end
+            @test sort!(collect(keys(answers[1])); by=repr) == sort!(collect(keys(answers[0])); by=repr)
+            for (row, answer) in answers[0]
+                @test (row => answers[1][row]) == (row => answer)
+            end
+            @test printouts[0] == (false, false)
+            @test printouts[1] == (true, true)
+        end
+    finally
+        HTMXObjects.ERROR_DIR[] = old_dir
+        configure_job_queue!(; workers=0, worker_stall=Inf)
+        _clear_operation_polls!()
+    end
+end
