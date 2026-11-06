@@ -126,7 +126,7 @@ end
             # Where Pico's header fits the window, whole, nothing moves, also
             # where it runs past `.container` (the Atlas header at 980 px, a
             # phone's browser in desktop view).
-            for (path, width) in (("", 1400), ("", 1280), ("", 1024), ("", 980), ("", 860), ("", 768),
+            for (path, width) in (("", 1400), ("", 1280), ("", 1024), ("", 980), ("", 900),
                     ("atlas", 1400), ("atlas", 1024), ("atlas", 980))
                 framed = measure("/" * path, width)
                 control = measure(isempty(path) ? "/control" : "/$path-control", width)
@@ -143,7 +143,7 @@ end
             @test measure("/control", 767).broken > 0
             # The header stays in the page, its labels whole, the navigation
             # below the brand and starting where the brand does.
-            for (path, width) in (("/", 767), ("/", 700), ("/", 600), ("/", 500), ("/atlas", 860), ("/atlas", 700),
+            for (path, width) in (("/", 860), ("/", 768), ("/", 767), ("/", 700), ("/", 600), ("/", 500), ("/atlas", 860), ("/atlas", 700),
                     ("/long", 1280), ("/long", 1024), ("/long", 700))
                 framed = measure(path, width)
                 @test (path, width, framed.overflow, framed.outside, framed.broken) == (path, width, 0, 0, 0)
@@ -152,6 +152,106 @@ end
         finally
             close(server)
         end
+    end
+end
+
+@testitem "the shell carries the label of a private nav entry" tags=[:unit] begin
+    using HTMXObjects
+    bridge = repr("text/html", pico_bridge())
+    @test contains(bridge, ":where(nav li.htmxo-private)::before { content: var(--htmxo-private-label); float: none; }")
+    @test contains(repr("text/html", HTMXObjects.pico_page(h.p("x"))), ":where(nav li.htmxo-private)::before")
+    # Only Pico needs it: a page without Pico has the plain rule of the mark.
+    @test !contains(repr("text/html", htmx(h.p("x"))), ":where(nav li.htmxo-private)::before")
+end
+
+@testitem "a private nav entry shows its label, not an empty box" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects
+    import HTMXObjects: Raw
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # What the browser computes for each entry's `::before`, read from the rendered page.
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const out = ['dark: ' + matchMedia('(prefers-color-scheme: dark)').matches];
+            const headerItems = document.querySelectorAll('body > header nav li');
+            const entry = (name, li) => {
+                const mark = getComputedStyle(li, '::before'), box = li.getBoundingClientRect();
+                out.push(name + ': ' + [mark.content, mark.float, mark.borderTopStyle, getComputedStyle(li).outlineOffset,
+                                        Math.round(box.height)].join('|'));
+            };
+            const labelled = id => document.getElementById(id).closest('li');
+            entry('header', document.querySelector('body > header nav li.htmxo-private'));
+            // A public neighbour keeps Pico's own rule, and the same row height.
+            entry('neighbour', headerItems[headerItems.length - 2]);
+            entry('breadcrumb', labelled('in-breadcrumb'));
+            entry('sidebar', labelled('in-sidebar'));
+            entry('nested', labelled('in-private'));
+            entry('outside', labelled('outside-nav'));
+            const result = document.createElement('pre'); result.id = 'checks'; result.textContent = out.join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        link(text, id) = h.a(text; href="#", id)
+        content = h.div(
+            h.nav(; aria_label="breadcrumb")(h.ul(h.li(h.a("Start"; href="#")), private(h.li(link("Pfad", "in-breadcrumb"))))),
+            h.aside(h.nav(h.ul(private(h.li(link("Seite", "in-sidebar")))))),
+            # A fragment swapped into private content carries its own mark:
+            # nested `private` calls render one, so this is written out.
+            h.div(; class="htmxo-private")(h.p("Block"),
+                h.nav(h.ul(h.li(link("Innen", "in-private"); class="htmxo-private")))),
+            h.ul(private(h.li(link("Liste", "outside-nav")))),
+            driver)
+        nav = Any["Messnetz" => "/", "Daten" => "/daten", private("Angebot" => "/angebot")]
+        page(lang, extra_head=()) = with_audience(:private) do
+            repr("text/html", HTMXObjects.pico_page(content; brand="ODL" => "/", nav, lang, assets="vendor", extra_head,
+                htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        end
+        checks(html, scheme=1) = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, html)
+            profile = joinpath(directory, "profile")
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,900 --virtual-time-budget=2000 --blink-settings=preferredColorScheme=$scheme --dump-dom --user-data-dir=$profile file://$fixture`)
+            Dict(Pair(split(line, ": "; limit=2)...) for line in
+                eachsplit(something(match(r"<pre id=\"checks\">(.*?)</pre>"s, dom), (; captures=[""])).captures[1], '\n')
+                if contains(line, ": "))
+        end
+        field(c, key, i) = split(c[key], '|')[i]
+        label = "\"nicht öffentlich\""
+        for scheme in (1, 0)
+            c = checks(page("de"), scheme)
+            @test c["dark"] == string(scheme == 0)
+            # The label reads as on any other element, on one line with its link,
+            # in a row no taller than its neighbour's, the outline inside the entry.
+            @test (scheme, c["header"]) == (scheme, "$label|none|solid|-4px|$(field(c, "neighbour", 5))")
+            for key in ("breadcrumb", "sidebar")
+                @test (scheme, key, field(c, key, 1), field(c, key, 2)) == (scheme, key, label, "none")
+            end
+            # Inside private content the mark is the block's alone.
+            @test (scheme, field(c, "nested", 1)) == (scheme, "none")
+        end
+        c = checks(page("de"))
+        # Positive controls: Pico's rule is in force on a public entry, and the
+        # mark outside a nav already read this way, its outline around the item.
+        @test field(c, "neighbour", 1) == "\"​\"" && field(c, "neighbour", 2) == "left"
+        @test field(c, "outside", 1) == label && field(c, "outside", 4) == "2px"
+        # The page's language picks the label.
+        @test field(checks(page("en")), "header", 1) == "\"not public\""
+        # The control takes the bridge's rules back: this is the empty box the
+        # snag measured, Pico's zero-width space inside the mark's border.
+        bridged = page("de")
+        rules = r":where\(nav li\.htmxo-private\) \{.*?:where\(\.htmxo-private \*\):where\(nav li\.htmxo-private\)::before \{ content: none; \}\n"s
+        @test contains(bridged, rules)
+        pico = checks(replace(bridged, rules => ""))
+        @test field(pico, "header", 1) == "\"​\"" && field(pico, "header", 2) == "left" &&
+              field(pico, "header", 3) == "solid" && field(pico, "header", 4) == "2px"
+        @test field(pico, "nested", 1) == "\"​\""
+        # An app still decides, from its own stylesheet, with a plain selector.
+        restyled(css) = checks(page("de", (h.style(Raw(css)),)))
+        @test field(restyled("nav li.htmxo-private { --htmxo-private-label: \"intern\"; }"), "header", 1) == "\"intern\""
+        @test field(restyled(".htmxo-private::before { content: none; }"), "header", 1) == "none"
     end
 end
 
