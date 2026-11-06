@@ -4563,6 +4563,12 @@ outlined and labelled "not public", with no code in the app.
   lang>` included): "nicht öffentlich" in German, "not public" otherwise. An
   app restyles it in its own stylesheet: `--htmxo-private-color`,
   `--htmxo-private-label`.
+- A private entry of a Pico `nav` (`private("Angebot" => "/angebot")` in
+  `pico_page(...; nav)`, a breadcrumb, a sidebar) shows the label before its
+  link, its outline inside the nav's row. The label takes up room in the header,
+  about 100 px for "nicht öffentlich". A header that no longer fits continues on
+  another line, its entries whole. Where several would not fit,
+  `nav li.htmxo-private { --htmxo-private-label: "intern"; }` shortens it.
 - In Markdown a block becomes a fenced div that opens with the label, and
   inline content a bracketed span (a block in a table cell too), both kept by
   Pandoc, so a private `pdf_report` shows the label as well:
