@@ -36,8 +36,10 @@ Keyword arguments:
 - `version`: opaque token for the state rendered here; echoed back as `v`.
 - `poll`: tail refresh interval (`"10s"`, `"500ms"`, a number of seconds) or
   `nothing` to refresh only on demand. Polling pauses while the tab is hidden.
-- `focus`: key of an item to centre and briefly highlight on first render
-  instead of starting at the bottom.
+- `focus`: key of an item to show and briefly highlight on first render instead
+  of starting at the bottom. An item that fits the scroll box is centred. A
+  taller one opens at its start and does not follow new messages until the
+  reader scrolls to the bottom.
 - `height`: CSS length for the scroll box's maximum height (default `60vh`, or
   set `--htmxo-thread-height` from a stylesheet).
 - `empty`: text shown while the list has no items.
@@ -476,7 +478,9 @@ live_thread_script() = h.script(Raw(raw"""
   }
   function onScroll(s) {
     var sc = s.scroller;
-    if (distance(s) <= STICK_PX) { s.stuck = true; s.unseen = 0; }
+    // A move is what sticks: the event for the client's own opening scroll
+    // arrives after `lastTop` recorded it, and is not the viewer going anywhere.
+    if (sc.scrollTop !== s.lastTop && distance(s) <= STICK_PX) { s.stuck = true; s.unseen = 0; }
     else if (sc.scrollTop < s.lastTop - 1) s.stuck = false;   // the viewer moved up
     s.lastTop = sc.scrollTop;
     s.anchors = s.stuck ? null : captureAnchors(s);
@@ -698,10 +702,13 @@ live_thread_script() = h.script(Raw(raw"""
     var focus = root.getAttribute('data-focus'), target = focus && findKey(s, focus);
     if (target) {
       s.stuck = false;
-      var sr = s.scroller.getBoundingClientRect(), tr = target.getBoundingClientRect();
-      s.scroller.scrollTop += tr.top - sr.top - (s.scroller.clientHeight - tr.height) / 2;
+      var sr = s.scroller.getBoundingClientRect(), tr = target.getBoundingClientRect(), box = s.scroller.clientHeight;
+      // Centre an item that fits. A taller one opens at its start, because it
+      // has to be read from the top, and stays there: sticking to the bottom
+      // would scroll past that start even when the bottom is only a few px away.
+      s.scroller.scrollTop += tr.top - sr.top - s.scroller.clientTop - Math.max(0, (box - tr.height) / 2);
       target.classList.add('htmxo-thread-focus');
-      s.stuck = distance(s) <= STICK_PX;
+      s.stuck = tr.height <= box && distance(s) <= STICK_PX;
     } else {
       stickBottom(s);
     }

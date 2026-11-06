@@ -14,6 +14,14 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.76
+
+- `live_thread(items; focus=key)` opens an item taller than the scroll box at its start,
+  and does not follow new messages until the reader scrolls to the bottom. Before, it
+  centred every item, so a long message opened in its middle with its start out of view:
+  a 1500 px item in a 300 px box opened 600 px past its first line. An item that fits the
+  box is still centred, and still follows new messages when it opens at the bottom.
+
 ## 0.1.75
 
 - `master_detail_table(...; detail_toggle=:label)` no longer writes a link or another
