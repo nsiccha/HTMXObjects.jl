@@ -22565,15 +22565,6 @@ function htmxoSummaryValue(reduce, inputs) {
     const sum = xs.reduce((a, b) => a + b);
     return reduce === 'mean' ? sum / xs.length : sum;
 }
-// `_print_grouped`: an integer's digits with `thousands` every three from the right.
-function htmxoGrouped(whole, thousands) {
-    let out = '';
-    for (let i = 0; i < whole.length; i++) {
-        if (i > 0 && (whole.length - i) % 3 === 0) out += thousands;
-        out += whole[i];
-    }
-    return out;
-}
 // `_format_fixed`; `minus` is the sign (a machine-read key keeps `-`).
 function htmxoFixed(x, digits, decimal, thousands, minus = '-') {
     const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
@@ -22808,7 +22799,7 @@ function htmxoRegroup(wrapper, levels) {
         }
         if ('htmxoSearch' in row.dataset) row.dataset.htmxoSearch = name;
         row.querySelector('[data-htmxo-group-label]').textContent = name;
-        row.querySelector('[data-htmxo-group-count]').textContent = '(' + list.length + ')';
+        row.querySelector('[data-htmxo-group-count]').textContent = '(' + htmxoGrouped(String(list.length), htmxoText(table, 'thousands')) + ')';
         // `_md_summary_cell`: the shown summary, and the CSV's number.
         // A cell whose row adds controls to it (the first) keeps its value
         // in an element of its own.
@@ -23450,7 +23441,9 @@ texts take `{name}` (the grouping), `group_level` also `{level}`;
 `rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
 `linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
 take `{name}` (the sort key); `interval` and `interval_signed` take
-`{estimate}`, `{lower}` and `{upper}`.
+`{estimate}`, `{lower}` and `{upper}`. A number in a text is written with
+`thousands`, like a group row's own count: `"1.672 von 1.672 Messstellen"`
+under `table_texts(:de)`, `"1,672 of 1,672 rows shown"` under `table_texts(:en)`.
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -23661,9 +23654,13 @@ h.td("22 Tsd. (13–34 Tsd.)"; interval_sort_values(22_000, 13_000, 34_000)...)
 """
 interval_sort_values(estimate, lower, upper) = sort_values(_interval_values(estimate, lower, upper)...)
 
-# A table text with its placeholders filled in. The browser runtime's
-# `htmxoText` fills the same templates from the same values.
-_table_text(texts::TableTexts, name::Symbol; values...) = _fill_text(getfield(texts, name); values...)
+# A table text with its placeholders filled in, a number written with the
+# table's `thousands` (a name made of digits is a string, and stays one). The
+# browser runtime's `htmxoText` fills the same templates from the same values.
+_table_text(texts::TableTexts, name::Symbol; values...) =
+    _fill_text(getfield(texts, name); map(v -> _table_text_value(v, texts), (; values...))...)
+_table_text_value(v, texts) = v
+_table_text_value(n::Integer, texts) = format_number(n; texts)
 
 # The texts as the JSON object `htmxoText` reads.
 _table_texts_json(texts::TableTexts) = JSON.json(texts)
@@ -24695,6 +24692,15 @@ _md_runtime_js() = _move_before_guard_js() * """
 // A table text (`TableTexts`) with its {placeholders} filled in: from the
 // nearest `data-htmxo-texts` the table's `texts=` wrote, else English.
 var htmxoTableTextsDefault = $(_table_texts_json(_EN_TABLE_TEXTS));
+// `_print_grouped`: an integer's digits with `thousands` every three from the right.
+function htmxoGrouped(whole, thousands) {
+    let out = '';
+    for (let i = 0; i < whole.length; i++) {
+        if (i > 0 && (whole.length - i) % 3 === 0) out += thousands;
+        out += whole[i];
+    }
+    return out;
+}
 function htmxoText(el, name, values) {
     var holder = el && el.closest ? el.closest('[data-htmxo-texts]') : null, texts = htmxoTableTextsDefault;
     if (holder) {
@@ -24704,7 +24710,11 @@ function htmxoText(el, name, values) {
         }
         texts = holder.htmxoTexts;
     }
-    return texts[name].replace(/[{]([A-Za-z_]+)[}]/g, function(m, k) { return values && k in values ? String(values[k]) : m; });
+    // `_table_text`: a number takes the table's `thousands`, a string stays as it is.
+    return texts[name].replace(/[{]([A-Za-z_]+)[}]/g, function(m, k) {
+        if (!values || !(k in values)) return m;
+        return typeof values[k] === 'number' ? htmxoGrouped(String(values[k]), texts.thousands) : String(values[k]);
+    });
 }
 // The control of its own that a click inside `row` landed on (a link, button,
 // form field, label, per-row form, <details> drop-out or editable text), which
@@ -26888,10 +26898,10 @@ end
 # `group_summary` names and blank cells elsewhere. Nested groups show the key
 # of their level; the indentation shows where they sit. The marks let the
 # browser fill in a group it builds from the template row (`htmxoRegroup`).
-_md_default_group_master(ncols, label_col, label, group_cell) = (key, members) ->
+_md_default_group_master(ncols, label_col, label, group_cell, texts) = (key, members) ->
     Any[col == label_col ?
             h.td(h.strong(label(key); data_htmxo_group_label=""), " ",
-                 h.small("($(length(members)))"; data_htmxo_group_count="")) :
+                 h.small("($(format_number(length(members); texts)))"; data_htmxo_group_count="")) :
             group_cell(col, key, members)
         for col in 1:ncols]
 
@@ -27114,7 +27124,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         _md_summary_cell(last(summaries[i]), value, texts, (; data_htmxo_group_summary=string(i - 1));
                          wrap=col == 1, cats=categories[i], scale="$(col - 1)-$(length(gpath(k)))")
     end
-    default_master = _md_default_group_master(ncols, label_col, k -> last(gpath(k)), group_cell)
+    default_master = _md_default_group_master(ncols, label_col, k -> last(gpath(k)), group_cell, texts)
     gmaster = something(group_master, default_master)
     subgroups(members, depth, prefix) =
         [let path = String[prefix..., k]; _MDGroup(gkey(path), path, ms) end

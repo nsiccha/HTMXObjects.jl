@@ -14,6 +14,19 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.79
+
+- A table writes the numbers in its texts with its `thousands` text, on the server and
+  in the browser: the search count (`{shown}`, `{total}`), the selection bar (`{count}`),
+  the `linked_inside_many` note, and a default group row's own count. A German table
+  over 1,672 items now reads `1.672 von 1.672 Messstellen`, where it read
+  `1672 von 1672 Messstellen` beside group sums that already wrote `1.672`. English
+  follows its own separator: `1,672 of 1,672 rows shown`. A count under 1,000 is
+  unchanged. A page exported earlier keeps its old runtime until it is exported again.
+  Code that reads a number back from one of these texts, or from `[data-htmxo-group-count]`,
+  now finds the separator in it; `htmxo:table-filtered` still carries plain numbers.
+  Snag `table-count-with-cd40a1a4` (ODLPlaus:ux-audit).
+
 ## 0.1.78
 
 - With `configure_job_queue!(; workers=1)`, a refusal raised in a `@queued` computation

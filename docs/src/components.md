@@ -726,10 +726,12 @@ A text in braces is a placeholder: `count` takes `{shown}` and `{total}` (items,
 not rows: see [Client-side search](#table-search)), the
 selection texts `{count}`, the grouping texts `{name}` (and `group_level` also
 `{level}`), `rows_failed` takes `{status}`, `linked_deep` `{levels}` and `linked_inside_many`
-`{count}`. The browser writes the live count
-and status lines from the same templates, so they are strings, not Julia
-functions: the count changes on every keystroke without asking the server. An
-unknown locale, text name or placeholder throws an `ArgumentError`.
+`{count}`. A number in a text is written with the table's `thousands`, like a
+group row's own count, so `count="{shown} von {total} Messstellen"` reads
+"1.672 von 1.672 Messstellen" under `table_texts(:de)`. The browser writes the
+live count and status lines from the same templates, so they are strings, not
+Julia functions: the count changes on every keystroke without asking the server.
+An unknown locale, text name or placeholder throws an `ArgumentError`.
 
 A table with other texts than English carries them as one `data-htmxo-texts`
 attribute on its outermost element; an English table is unchanged. Pass the
