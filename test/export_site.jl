@@ -11,7 +11,7 @@ using TestItemRunner
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
         InlineSiteApp, QueriedSiteApp, StationSiteApp, TypedSiteApp, ParallelSiteApp, MOST_RENDERING,
         BundleSiteApp, finished_bundle, plain_folder,
-        bundle_files, bundle_tree, subdirectory_misses
+        bundle_files, bundle_tree, subdirectory_misses, SectionSiteApp, SECTION_OLD_CALLS, served_at
 
     const KS = (3.0, 4.0)
     # The mount prefix the apps' links start from (they are mounted at the root).
@@ -250,6 +250,46 @@ using TestItemRunner
             h.a("Teil"; href=base * "/bundle_ansicht/teil"))
     end
 
+    # A section exported on its own, served beside a site published before it
+    # (snag `native-static-re-756c2710`, reporter ODLPlaus:ux): the routes of
+    # that site's pages count every render, which an alias to its files must
+    # never cause.
+    const SECTION_OLD_CALLS = Threads.Atomic{Int}(0)
+    @htmx struct SectionSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div(h.h1("Gemeinsamer Fit"),
+            h.a("Alt"; href=base * "/section_old"),
+            h.a("Station"; href=base * "/section_station?kenn=K1#karte"),
+            h.a("Detail"; href=base * "/section_detail"),
+            h.div(; hx_get=base * "/section_teil", hx_trigger="load"))
+        @get section_detail() = h.div(h.p("Detail"), h.a("Start"; href=base * "/"))
+        @get section_teil() = h.div(h.p("Teil"), h.a("Detail"; href=base * "/section_detail"),
+            h.a("Alt"; href=base * "/section_old"))
+        @get section_old() = (Threads.atomic_add!(SECTION_OLD_CALLS, 1); h.p("alt"))
+        @get section_station(; kenn::String="") = (Threads.atomic_add!(SECTION_OLD_CALLS, 1); h.p("station $kenn"))
+    end
+
+    # Where a browser finds each reference of each HTML file of the bundle in
+    # `dir`, with the bundle served at `http://host/site/fit/`: a path on that
+    # host, decoded, or another site's URL. A fragment (a file in an `hx/`
+    # folder) shows in the `index.html` of the folder above its `hx/`.
+    function served_at(dir)
+        found = Dict{String,Vector{String}}()
+        for file in bundle_files(dir)
+            endswith(file, ".html") || continue
+            parts = split(file, '/')
+            k = findlast(==("hx"), parts)
+            page = isnothing(k) ? file : join([parts[1:k-1]; "index.html"], '/')
+            found[file] = map(filter(a -> !isempty(a) && !startswith(a, '#') && a != "true" && a != "false",
+                                     HTMXObjects._site_references(read(joinpath(dir, file), String)))) do a
+                uri = HTTP.URIs.resolvereference(HTTP.URI("http://host/site/fit/" * page), a)
+                uri.host == "host" ? HTTP.URIs.unescapeuri(uri.path) : string(uri)
+            end
+        end
+        found
+    end
+
     # Every file of the bundle, relative to its root, with `/` between
     # directories (as a static server addresses it, also on Windows).
     bundle_files(dir) = sort!([replace(relpath(joinpath(d, f), dir), '\\' => '/')
@@ -432,6 +472,98 @@ end
     @test err isa StaticSiteIncomplete
     @test isempty(err.failed)
     @test err.unresolved == ["bundle_einfach/seite.html" => "vendor/htmx.min.js"]
+end
+
+@testitem "export_site links files outside the bundle without rendering them, and pages in a folder from there" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    # Snag `native-static-re-756c2710` (reporter ODLPlaus:ux): a section is
+    # exported on its own and served beside a site published before it. Its
+    # links to that site's pages name the published files (`aliases` to a file
+    # outside the bundle), and nothing of that site is rendered, copied or
+    # checked. A page that `file_name` puts in a folder links from that folder.
+    using Treebars
+    route!(SectionSiteApp())
+    vendorfiles()
+    old = "https://example.org/p/ODL/alt.html"
+    inside(dir, path) = startswith(path, "/site/fit/") && isfile(joinpath(dir, path[11:end]))
+    SECTION_OLD_CALLS[] = 0
+
+    # A dictionary: another site's URL, and a path from the bundle's root that
+    # leaves it. A link keeps its #id.
+    dir = joinpath(mktempdir(), "site")
+    export_site(dir; pages=["/"], aliases=Dict("/section_old" => old,
+        "/section_station?kenn=K1" => "../station-kenn-K1.html"))
+    @test SECTION_OLD_CALLS[] == 0
+    @test !any(f -> startswith(f, "section_old") || startswith(f, "section_station"), bundle_files(dir))
+    index = read(joinpath(dir, "index.html"), String)
+    @test occursin("href=\"$old\"", index)
+    @test occursin("href=\"../station-kenn-K1.html#karte\"", index)
+    @test occursin("href=\"$old\"", read(joinpath(dir, "hx", "section_teil.html"), String))
+    links = served_at(dir)
+    @test "/site/station-kenn-K1.html" in links["index.html"] && old in links["index.html"]
+    @test all(p -> p in (old, "/site/station-kenn-K1.html") || inside(dir, p), reduce(vcat, values(links)))
+
+    # A function, asked with each address and whether it loads as a fragment;
+    # pages and fragments in a folder, the published site beside the bundle.
+    asked = Set{Tuple{String,Bool}}()
+    lk = ReentrantLock()
+    alias(a; fragment) = (lock(() -> push!(asked, (a, fragment)), lk);
+        startswith(a, "/section_old") || startswith(a, "/section_station") ?
+            "../" * static_file_name(a; fragment) : nothing)
+    in_folder(a; fragment=false, ext=".html") = "gemeinsamer-fit/" * static_file_name(a; fragment, ext)
+    dir = joinpath(mktempdir(), "site")
+    export_site(dir; pages=["/"], aliases=alias, file_name=in_folder)
+    @test SECTION_OLD_CALLS[] == 0
+    @test ("/section_teil", true) in asked && ("/section_detail", false) in asked
+    @test all(startswith("gemeinsamer-fit/"), filter(!=(".nojekyll"), bundle_files(dir)))
+    index = read(joinpath(dir, "gemeinsamer-fit", "index.html"), String)
+    @test occursin("href=\"section_detail.html\"", index)
+    @test occursin("hx-get=\"hx/section_teil.html\"", index)
+    @test occursin("href=\"../../section_station-kenn-K1.html#karte\"", index)
+    @test occursin("href=\"index.html\"", read(joinpath(dir, "gemeinsamer-fit", "section_detail.html"), String))
+    teil = read(joinpath(dir, "gemeinsamer-fit", "hx", "section_teil.html"), String)
+    @test occursin("href=\"section_detail.html\"", teil) && occursin("href=\"../../section_old.html\"", teil)
+    links = served_at(dir)
+    @test "/site/section_station-kenn-K1.html" in links["gemeinsamer-fit/index.html"]
+    @test "/site/section_old.html" in links["gemeinsamer-fit/hx/section_teil.html"]
+    @test all(p -> startswith(p, "/site/section_") || inside(dir, p), reduce(vcat, values(links)))
+
+    # A fragment written for the root's pages that a page in a folder loads
+    # is a failure: its links would not resolve there.
+    flat_fragments(a; fragment=false, ext=".html") =
+        fragment ? static_file_name(a; fragment, ext) : in_folder(a; fragment, ext)
+    err = try
+        export_site(joinpath(mktempdir(), "site"); pages=["/"], aliases=alias, file_name=flat_fragments); nothing
+    catch e
+        e
+    end
+    @test err isa StaticSiteIncomplete
+    @test isempty(err.unresolved)
+    @test only(err.failed) == ("hx/section_teil.html" =>
+        "is a fragment whose links are written for the pages of the root, but " *
+        "gemeinsamer-fit/index.html in gemeinsamer-fit/ loads it, where they would not resolve; " *
+        "give it a file below gemeinsamer-fit/hx/ (file_name), or load it only from pages of the root")
+    @test SECTION_OLD_CALLS[] == 0
+
+    # A target that is neither an address of this app nor outside the bundle:
+    # refused up front from a dictionary, a failure of its address from a
+    # function (asked while a page renders), and never rendered either way.
+    @test_throws ArgumentError export_site(joinpath(mktempdir(), "site"); pages=["/"],
+        aliases=Dict("/section_old" => "alt.html"))
+    @test_throws ArgumentError export_site(joinpath(mktempdir(), "site"); pages=["/"],
+        aliases=Dict("section_old" => old))
+    err = try
+        export_site(joinpath(mktempdir(), "site"); pages=["/"],
+                    aliases=(a; fragment) -> a == "/section_old" ? "alt.html" :
+                        startswith(a, "/section_station") ? "../station.html" : nothing); nothing
+    catch e
+        e
+    end
+    @test err isa StaticSiteIncomplete && isempty(err.unresolved)
+    @test only(err.failed) == ("/section_old" => "aliases gives \"alt.html\" for \"/section_old\", " *
+        "which is neither an address of this app (starting with `/`) nor a file outside the bundle " *
+        "(another site's URL such as `https://…`, or a path from the bundle's root that leaves it, " *
+        "starting with `../`)")
+    @test SECTION_OLD_CALLS[] == 0
 end
 
 @testitem "export_site fails listing every failed answer and every unresolved reference" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
