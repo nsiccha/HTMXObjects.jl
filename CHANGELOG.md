@@ -24,6 +24,12 @@ failing at render with a `MethodError`.
   `(address; fragment) -> target` that returns `nothing` for addresses it leaves alone.
   Before, any target that did not start with `/` was an `ArgumentError`. Snag
   `native-static-re-756c2710` (ODLPlaus:ux).
+- A dictionary of `aliases` now matches an address whatever the order and escaping
+  of its query's parameters. Before, a key matched only the exact string the crawl
+  built. For a `url_params` value that string is the parameters in the element's
+  declaration order, escaped with `HTTP.URIs.escapeuri`, so a key written in another
+  order or escaping missed silently and the address was rendered. Two keys that name
+  one address with different targets are an `ArgumentError`.
 - A page that `file_name` puts in a folder (`gemeinsamer-fit/index.html`) now writes
   its links from that folder. Before, they were written from the root, so the export's
   reference check refused them. A fragment's links are written for the pages of the

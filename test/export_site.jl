@@ -261,6 +261,7 @@ using TestItemRunner
         @get index() = h.div(h.h1("Gemeinsamer Fit"),
             h.a("Alt"; href=base * "/section_old"),
             h.a("Station"; href=base * "/section_station?kenn=K1#karte"),
+            h.a("Ort"; href=base * "/section_station?kenn=K2&ort=b%20x"),
             h.a("Detail"; href=base * "/section_detail"),
             h.div(; hx_get=base * "/section_teil", hx_trigger="load"))
         @get section_detail() = h.div(h.p("Detail"), h.a("Start"; href=base * "/"))
@@ -488,19 +489,23 @@ end
     SECTION_OLD_CALLS[] = 0
 
     # A dictionary: another site's URL, and a path from the bundle's root that
-    # leaves it. A link keeps its #id.
+    # leaves it. A link keeps its #id. A key matches whatever the order and
+    # escaping of the address's parameters.
     dir = joinpath(mktempdir(), "site")
     export_site(dir; pages=["/"], aliases=Dict("/section_old" => old,
-        "/section_station?kenn=K1" => "../station-kenn-K1.html"))
+        "/section_station?kenn=K1" => "../station-kenn-K1.html",
+        "/section_station?ort=b+x&kenn=K2" => "../station-kenn-K2.html"))
     @test SECTION_OLD_CALLS[] == 0
     @test !any(f -> startswith(f, "section_old") || startswith(f, "section_station"), bundle_files(dir))
     index = read(joinpath(dir, "index.html"), String)
     @test occursin("href=\"$old\"", index)
     @test occursin("href=\"../station-kenn-K1.html#karte\"", index)
+    @test occursin("href=\"../station-kenn-K2.html\"", index)
     @test occursin("href=\"$old\"", read(joinpath(dir, "hx", "section_teil.html"), String))
     links = served_at(dir)
     @test "/site/station-kenn-K1.html" in links["index.html"] && old in links["index.html"]
-    @test all(p -> p in (old, "/site/station-kenn-K1.html") || inside(dir, p), reduce(vcat, values(links)))
+    @test all(p -> p in (old, "/site/station-kenn-K1.html", "/site/station-kenn-K2.html") || inside(dir, p),
+              reduce(vcat, values(links)))
 
     # A function, asked with each address and whether it loads as a fragment;
     # pages and fragments in a folder, the published site beside the bundle.
@@ -551,6 +556,9 @@ end
         aliases=Dict("/section_old" => "alt.html"))
     @test_throws ArgumentError export_site(joinpath(mktempdir(), "site"); pages=["/"],
         aliases=Dict("section_old" => old))
+    # Two keys that name one address, with different targets.
+    @test_throws ArgumentError export_site(joinpath(mktempdir(), "site"); pages=["/"],
+        aliases=Dict("/section_old?a=1&b=2" => "/", "/section_old?b=2&a=1" => old))
     err = try
         export_site(joinpath(mktempdir(), "site"); pages=["/"],
                     aliases=(a; fragment) -> a == "/section_old" ? "alt.html" :

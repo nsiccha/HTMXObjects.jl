@@ -7582,18 +7582,40 @@ _site_alias_refusal(address, target) =
     "this app (starting with `/`) nor a file outside the bundle (another site's URL such " *
     "as `https://…`, or a path from the bundle's root that leaves it, starting with `../`)"
 
+# What an alias key and an address the crawl names are compared by: the path
+# and the query's parameters, in any order, each name and value with its
+# escapes decoded (`+` is a space, as the page's runtime reads it). The crawl
+# builds a `url_params` value's address in its own order and escaping.
+function _site_alias_key(address::AbstractString)
+    path, query = _split_once(address, '?')
+    decode(s) = _static_unescape(replace(s, '+' => ' '))
+    params = isnothing(query) ? Tuple{String,String}[] :
+        sort!([(decode(n), decode(something(v, ""))) for (n, v) in
+               (_split_once(p, '=') for p in split(query, '&'; keepempty=false))])
+    (path, params)
+end
+
 # `aliases` as a function of an address and whether it loads as a fragment:
 # a dictionary's entries, checked here, or the caller's own function, whose
 # answers `_site_alias` checks as the crawl asks them.
 function _site_aliases(aliases::AbstractDict)
-    table = Dict{String,String}(String(a) => String(b) for (a, b) in aliases)
-    for (address, target) in table
+    table = Dict{Tuple{String,Vector{Tuple{String,String}}},Pair{String,String}}()
+    for (a, b) in aliases
+        address, target = String(a), String(b)
         startswith(address, '/') && !startswith(address, "//") || throw(ArgumentError(
             "export_site: $(repr(address)) is not an address of this app (it must start with `/`)"))
         isnothing(_site_alias_kind(target)) &&
             throw(ArgumentError("export_site: " * _site_alias_refusal(address, target)))
+        other = get(table, _site_alias_key(address), nothing)
+        isnothing(other) || last(other) == target || throw(ArgumentError(
+            "export_site: aliases names one address twice, as $(repr(first(other))) => " *
+            "$(repr(last(other))) and $(repr(address)) => $(repr(target))"))
+        table[_site_alias_key(address)] = address => target
     end
-    (address; fragment::Bool=false) -> get(table, address, nothing)
+    function alias(address; fragment::Bool=false)
+        found = get(table, _site_alias_key(address), nothing)
+        isnothing(found) ? nothing : last(found)
+    end
 end
 _site_aliases(aliases) = aliases
 
@@ -8073,7 +8095,9 @@ can run inside a serving app (it renders in process with
   bundle climbs out of that folder first). That links a section exported on its
   own to a site published beside it (served at `<site>/gemeinsamer-fit/`,
   `../` is `<site>/`), with nothing of that site rendered or copied.
-  `aliases` is a dictionary of addresses, or a function
+  `aliases` is a dictionary of addresses, whose keys match an address with
+  its query's parameters in any order and escaping (the crawl builds a
+  `url_params` value's address in an order of its own), or a function
   `(address; fragment) -> target` that answers `nothing` for an address it
   leaves alone, asked with each address an answer names (resolved, without
   its `#id`; `fragment` when it loads as a fragment), from several threads:
