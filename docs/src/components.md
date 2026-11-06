@@ -899,9 +899,11 @@ Column buttons sort siblings and move each whole subtree, keeping open details
 next to their master and preserving loaded DOM. For plain expanded group
 headings and model-name detail controls, pass `branches_collapsible=false,
 detail_toggle=:label`. Branches then have no disclosure control, while the
-complete first-cell label becomes a native button. Supply non-interactive label
-content in that cell; links or inputs can live in the other cells. Markdown
-keeps that label and the column names; it drops the search field. A branch's
+complete first-cell label becomes a native button. A button cannot hold a link
+or an input, so a row whose first cell holds one keeps it as it is, with a
+separate control beside it (▸ in a flat table, ⓘ in a hierarchy or grouped
+table); the other cells can always hold links or inputs. Markdown keeps that
+label and the column names; it drops the search field. A branch's
 detail then opens with `initially_open`, as a click on its row opens it; search
 and sort retain loaded DOM.
 By default, clicking a branch row opens or closes its immediate children;

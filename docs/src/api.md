@@ -1952,7 +1952,8 @@ itself (`id`, `onclick`, `aria-expanded`, `aria-level`, `hidden`, and the
 `data-htmxo-*` hierarchy and search attributes), `class` when `master_class`
 is given, or an attribute that `master_attrs` also sets; each throws an
 `ArgumentError`. With `detail_toggle=:label` the first cell's content becomes
-the row's toggle button, so keep holders and buttons in other cells.
+the row's toggle button, so keep holders and buttons in other cells: a first
+cell that holds one keeps it, and the row gets a separate control beside it.
 
 Because the table writes those attributes, a route that re-renders one row
 after an action does not return `master(item)`: it returns the same table call
