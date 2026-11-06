@@ -126,7 +126,7 @@ end
             # Where Pico's header fits the window, whole, nothing moves, also
             # where it runs past `.container` (the Atlas header at 980 px, a
             # phone's browser in desktop view).
-            for (path, width) in (("", 1400), ("", 1280), ("", 1024), ("", 980), ("", 900),
+            for (path, width) in (("", 1400), ("", 1280), ("", 1024),
                     ("atlas", 1400), ("atlas", 1024), ("atlas", 980))
                 framed = measure("/" * path, width)
                 control = measure(isempty(path) ? "/control" : "/$path-control", width)
@@ -141,9 +141,15 @@ end
                 @test (path, width, pico.overflow > 0, pico.outside > 0) == (path, width, true, true)
             end
             @test measure("/control", 767).broken > 0
+            # The private entry's label takes room Pico's nav does not have below
+            # `.container`, and the window still does: one line down to 900 px.
+            for width in (980, 900)
+                @test (width, measure("/control", width).broken > 0) == (width, true)
+                @test (width, measure("/", width).rows) == (width, 1)
+            end
             # The header stays in the page, its labels whole, the navigation
             # below the brand and starting where the brand does.
-            for (path, width) in (("/", 860), ("/", 768), ("/", 767), ("/", 700), ("/", 600), ("/", 500), ("/atlas", 860), ("/atlas", 700),
+            for (path, width) in (("/", 980), ("/", 900), ("/", 860), ("/", 768), ("/", 767), ("/", 700), ("/", 600), ("/", 500), ("/atlas", 860), ("/atlas", 700),
                     ("/long", 1280), ("/long", 1024), ("/long", 700))
                 framed = measure(path, width)
                 @test (path, width, framed.overflow, framed.outside, framed.broken) == (path, width, 0, 0, 0)
