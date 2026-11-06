@@ -14,6 +14,15 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.73
+
+- `master_detail_table(...; detail_instance=true)` (and `master_detail_pair`) makes
+  each row's lazy detail slot a place of its own (`data-htmxo-instance="<row key>"`,
+  `instance_scope_script`), so rows that load the same fragment, such as one station
+  in several day rows, keep their ids apart, below any place around the table. It
+  needs `detail_url`; without it the table refuses with an `ArgumentError`. Tables
+  without the keyword are unchanged.
+
 ## 0.1.72
 
 - One fragment can be open in several places of a page at once

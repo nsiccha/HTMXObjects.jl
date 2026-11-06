@@ -9,10 +9,11 @@ using TestItemRunner
 @testmodule InstanceScopeFixture begin
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
-    export scope_page, station_view, nested_answer, detail_answer, InstanceScopeApp, SCOPE_CHECKS
+    export scope_page, station_view, nested_answer, detail_answer, day_view, InstanceScopeApp, SCOPE_CHECKS
 
-    # 21 checks for each of the page's three places, 5 for the page.
-    const SCOPE_CHECKS = 21 * 3 + 5
+    # 21 checks for each of the page's three places, 5 for the page, 4 for
+    # the table whose rows load one fragment (`detail_instance=true`).
+    const SCOPE_CHECKS = 21 * 3 + 5 + 4
 
     # What an AoV plot's scripts and caption controls do with a plot id: draw
     # into the element, download it, and find its remap controls by building
@@ -106,6 +107,17 @@ using TestItemRunner
           const fresh = s.querySelector('.plot');
           check('reload-ids', (fresh.id === 'plot-1--karte' && fresh.dataset.drawn === '1') || fresh.id + ' ' + fresh.dataset.drawn);
           check('reload-unique', dupes().length === 0 || dupes().join(' '));
+          // One table, two rows loading the same address: each row's detail
+          // is a place of its own, inside the place around the table.
+          const days = ['d1-kiel', 'd2-kiel'];
+          days.forEach(k => byId('row-' + k).click());
+          const slotOf = k => byId('detail-slot-' + k);
+          await wait(() => days.every(k => slotOf(k).querySelector('.mini-plot')));
+          check('rows-ids', days.every(k => slotOf(k).querySelector('.mini-plot').id === 'mini-plot--pruefliste--' + k) ||
+            days.map(k => slotOf(k).querySelector('.mini-plot') && slotOf(k).querySelector('.mini-plot').id).join(' '));
+          check('rows-drawn', days.every(k => slotOf(k).querySelector('.mini-plot').dataset.drawn === '1'));
+          check('rows-popover', days.every(k => slotOf(k).contains(byId(slotOf(k).querySelector('[popovertarget]').getAttribute('popovertarget')))));
+          check('rows-unique', dupes().length === 0 || dupes().join(' '));
         }
       } catch (err) {
         check('error ' + String(err && err.stack || err).replace(/\s+/g, ' '), false);
@@ -149,6 +161,12 @@ using TestItemRunner
 
     nested_answer() = h.p(; id="inner-1", class="inner", aria_describedby="title-1")("inner")
     detail_answer(k) = h.p(; id="note-$k")(k)
+    # What each day row of the table loads: one address for every row.
+    day_view() = h.div(; class="mini")(
+        h.div(; id="mini-plot", class="mini-plot"),
+        h.script(Raw("FakeAoV.embed('mini-plot');")),
+        h.button(; type="button", popovertarget="mini-menu")("⬇"),
+        h.div(; id="mini-menu", popover="")("menu"))
 
     slot(id) = h.div(; id, class="slot", hx_get="/scope_teil", hx_trigger="load")
     # The page: three places, two side by side and one inside another, or the
@@ -157,7 +175,10 @@ using TestItemRunner
         place(keys, inner) = foldr((k, x) -> h.section(; data_htmxo_instance=k)(x), keys; init=inner)
         slots = [scoped ? place(keys, slot(id)) : h.section(slot(id)) for (id, keys) in
                  (("slot-karte", ("karte",)), ("slot-liste", ("liste",)), ("slot-inner", ("outer", "inner")))]
-        h.main(h.p(; id="status")("waiting"), slots..., FAKE_AOV, DRIVER)
+        days = master_detail_table(["Tag"], [(id="d1-kiel",), (id="d2-kiel",)]; key=d -> d.id,
+            master=d -> (h.td(d.id),), detail_url=_ -> "/scope_tag", detail_instance=scoped, id="days")
+        h.main(h.p(; id="status")("waiting"), slots...,
+            scoped ? h.section(; data_htmxo_instance="pruefliste")(days) : h.section(days), FAKE_AOV, DRIVER)
     end
 
     @htmx struct InstanceScopeApp
@@ -167,6 +188,7 @@ using TestItemRunner
         @get scope_teil() = station_view()
         @get scope_nested() = nested_answer()
         @get scope_detail(; k::String="") = detail_answer(k)
+        @get scope_tag() = day_view()
     end
 end
 
@@ -179,6 +201,19 @@ end
     linked = repr("text/html", htmx(h.p("x"); assets=:vendor, runtime=:linked))
     @test contains(linked, "src=\"/vendor/htmxo/instance_scope.js?v=")
     @test !contains(linked, "window.htmxoInstanceScope")
+
+    # `detail_instance=true`: each lazy detail slot is a place named by its row key.
+    rows = [(id="d1 kiel",), (id="d2-kiel",)]
+    table(; kw...) = repr("text/html", master_detail_table(["Tag"], rows; key=d -> d.id,
+        master=d -> (h.td(d.id),), kw...))
+    scoped = table(; detail_url=_ -> "/tag", detail_instance=true)
+    @test contains(scoped, "id=\"detail-slot-d1--kiel\"")
+    @test count("data-htmxo-instance=\"d1--kiel\"", scoped) == 1
+    @test count("data-htmxo-instance=\"d2-kiel\"", scoped) == 1
+    @test !contains(table(; detail_url=_ -> "/tag"), "data-htmxo-instance")
+    @test_throws ArgumentError table(; detail=d -> h.p(d.id), detail_instance=true)
+    pair = repr("text/html", master_detail_pair("k1", (h.td("x"),), nothing, 1; detail_url="/tag", detail_instance=true)[2])
+    @test contains(pair, "data-htmxo-instance=\"k1\"")
 end
 
 @testitem "a fragment open in several places keeps its ids apart in a browser" setup=[ChromeDump, InstanceScopeFixture, HTMXOTestPorts] tags=[:browser, :integration] begin
@@ -204,6 +239,7 @@ end
             path == "/scope_teil" && return html(repr("text/html", station_view()))
             path == "/scope_nested" && return html(repr("text/html", nested_answer()))
             path == "/scope_detail" && return html(repr("text/html", detail_answer(HTTP.queryparams(uri)["k"])))
+            path == "/scope_tag" && return html(repr("text/html", day_view()))
             HTTP.Response(404)
         end
         try
@@ -243,6 +279,8 @@ end
         @test "hx/scope_teil.html" in files
         @test "vendor/htmxo/instance_scope.js" in files
         @test count(f -> startswith(f, "hx/scope_detail"), files) == 2
+        # Two table rows load one address: one file.
+        @test count(f -> startswith(f, "hx/scope_tag"), files) == 1
 
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         types = Dict(".html" => "text/html; charset=utf-8", ".js" => "application/javascript", ".css" => "text/css")

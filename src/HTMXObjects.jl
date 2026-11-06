@@ -24740,10 +24740,14 @@ end
 # must carry a `[data-status]` element for the loading/retry text swaps to have
 # a target — the default does). `also_load=true` (an initially-open row) adds
 # `load` so that one slot fetches on render; collapsed slots never do.
-function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false, texts::TableTexts=_EN_TABLE_TEXTS)
+function _md_lazy_slot(safe, url, placeholder; also_load::Bool=false, instance::Bool=false,
+                       texts::TableTexts=_EN_TABLE_TEXTS)
     ph = isnothing(placeholder) ? h.small(data_status="muted")(texts.loading) : placeholder
-    h.div(id="detail-slot-$safe",
+    h.div(; id="detail-slot-$safe",
           class="htmxo-md-detail-slot",
+          # `detail_instance=true`: the slot is a place named by its row key
+          # (`instance_scope_script`), so what loads into it has ids of its own.
+          (instance ? (; data_htmxo_instance=safe) : (;))...,
           data_loaded="0",
           hx_get=string(url),
           hx_trigger=_md_lazy_trigger(; also_load),
@@ -24818,6 +24822,7 @@ end
                        master_attrs=(),
                        initially_open::Bool=false,
                        detail_url=nothing,
+                       detail_instance=false,
                        texts=table_texts())
 
 Build the `(master_tr, detail_tr)` pair for one master/detail item.
@@ -24906,6 +24911,11 @@ the user came to see (a question + answer brief, for example).
   `master_attrs` note above for the `lazy_slot_id` seam you must carry.
   HTMXObjects owns only the load/latch/retry mechanics — response caching,
   content hashing, TTL/LRU, and refresh-gating stay the caller's concern.
+- `detail_instance`: `true` makes the lazy slot a place of its own,
+  `data-htmxo-instance="<safe>"` ([`instance_scope_script`](@ref)): what loads
+  into it gets ids suffixed `--<safe>`, below any place around the table, so
+  rows that load the same fragment keep their ids apart (HTMXObjects ≥ 0.1.73).
+  Only a lazy detail is renamed; an eager `detail_body` keeps its ids.
 - `texts`: a [`TableTexts`](@ref) for the default placeholder. The status
   lines the browser writes later come from the `texts` of the
   [`sortable_table`](@ref) holding the rows, so pass both the same value.
@@ -24927,6 +24937,7 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
                             master_attrs=(),
                             initially_open::Bool=false,
                             detail_url=nothing,
+                            detail_instance::Bool=false,
                             row_toggle::Bool=true,
                             texts::TableTexts=_EN_TABLE_TEXTS,
                             _row_expanded::Bool=true)
@@ -24962,7 +24973,7 @@ function master_detail_pair(key, master_cells, detail_body, ncols::Int;
     # `div.htmxo-md-detail`. Either element keeps its content out of the
     # columns' widths (`contain: inline-size`, `htmxo_utility_styles`).
     cell_body = lazy ?
-        _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open, texts) :
+        _md_lazy_slot(safe, detail_url, detail_body; also_load=initially_open, instance=detail_instance, texts) :
         h.div(; class="htmxo-md-detail")(detail_body)
     detail = h.tr(; detail_kwargs...)(
         h.td(colspan=string(ncols))(cell_body),
@@ -25066,6 +25077,11 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   instead of rendered eagerly. Supply exactly one of `detail` / `detail_url`
   (or both: `detail` as the lazy placeholder). See [`master_detail_pair`](@ref)
   for the slot's single-flight / retry / invalidation contract.
+- `detail_instance`: `true` makes each row's lazy detail a place of its own,
+  named by its row key ([`instance_scope_script`](@ref)). Rows that load the
+  same fragment (one station in several day rows) then keep their ids apart,
+  below any `data-htmxo-instance` place around the table. Needs `detail_url`;
+  HTMXObjects ≥ 0.1.73.
 - `master_attrs(item)`: optional function returning an iterable of
   `name => value` pairs for extra `<tr>` attributes on the master row.
 - `master_class`, `detail_class`: optional extra CSS classes on the rows.
@@ -25349,6 +25365,7 @@ three unless `tables=false`; include the first two yourself only in a
 function master_detail_table(headers, items;
                              key, master, detail=nothing,
                              detail_url=nothing,
+                             detail_instance::Bool=false,
                              master_attrs=nothing,
                              master_class=nothing,
                              detail_class=nothing,
@@ -25401,7 +25418,7 @@ function master_detail_table(headers, items;
         # `children` builds: the other groupings list each leaf once.
         tree = _md_tree_grouping(groupings, items, key, children, leaf_key, leaf_order)
         return _grouped_master_detail_table(headers, isnothing(tree) ? items : tree.leaves;
-            key = isnothing(tree) ? key : tree.leaf, master, detail, detail_url, master_attrs, master_class, detail_class,
+            key = isnothing(tree) ? key : tree.leaf, master, detail, detail_url, detail_instance, master_attrs, master_class, detail_class,
             initially_open, initially_open_detail, outline=tree, branches_collapsible, detail_toggle, searchable,
             search_text, selectable, select_form, select_value, select_submit,
             expand_controls, search_query, groupings, group_by, group_master, group_by_url,
@@ -25421,6 +25438,10 @@ function master_detail_table(headers, items;
     ncols = length(headers)
     (!isnothing(children) || !isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
         "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
+    # Refused: only content swapped in gets ids of its own, and an eager
+    # detail is rendered with the table.
+    detail_instance && isnothing(detail_url) && throw(ArgumentError(
+        "master_detail_table: `detail_instance=true` names the place of each row's lazy detail; give `detail_url`"))
     # `detail_url` may be a per-item `item -> url` callback or a bare String
     # (same URL for every row — unusual, but supported).
     _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
@@ -25589,7 +25610,7 @@ function master_detail_table(headers, items;
         else
             (m, d) = master_detail_pair(item_key, cells, body, ncols;
                                     master_class, detail_class, master_attrs=attrs,
-                                    initially_open=detail_open && ancestors_open, detail_url=url,
+                                    initially_open=detail_open && ancestors_open, detail_url=url, detail_instance,
                                     row_toggle=!selecting, texts, _row_expanded=!isnothing(children))
             push!(rows, m, d)
         end
