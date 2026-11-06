@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.77
+
+- With `configure_job_queue!(; workers=1)`, a refusal raised in a `@queued` computation
+  answers as it does with `workers=0`. A `CallerFault` answers its status and message, and
+  a missing required `@param`, an `@options` violation or a value its type rejects answers
+  400 with its message, inline or polled. An `__error__` hook reads the fault through
+  `unwrap_error`. Before, each answered `500 Something went wrong` with the message lost
+  (snag `caller-fault-in-53f41794`). A server fault stays a 500, and the error log keeps the
+  worker's printout for both.
+- The `[compat]` floor for DynamicObjects rises from 0.5.10 to 0.5.13, which carries the
+  worker's exception to this process.
+- **Breaking:** an `__error__` hook no longer gets `DynamicObjects.RemoteComputationError`
+  from `unwrap_error(err)` for such a failure, only for an exception that cannot cross. That
+  answers 500, and its log says why: it serializes to more than 1 MiB (a refused `@options`
+  value carries its whole list, so about 60,000 options reach that), holds a DynamicObjects
+  object or something else that cannot be serialized, or has a type from a package this
+  process has not loaded. A hook that tested for that error reads `err.cause` instead.
+
 ## 0.1.76
 
 - `live_thread(items; focus=key)` opens an item taller than the scroll box at its start,
