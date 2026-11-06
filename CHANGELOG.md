@@ -28,7 +28,7 @@ failing at render with a `MethodError`.
 - **Breaking:** an `__error__` hook no longer gets `DynamicObjects.RemoteComputationError`
   from `unwrap_error(err)` for such a failure, only for an exception that cannot cross. That
   answers 500, and its log says why: it serializes to more than 1 MiB (a refused `@options`
-  value carries its whole list, so about 60,000 options reach that), holds a DynamicObjects
+  value carries its whole list, and a list of 60,000 short strings was over), holds a DynamicObjects
   object or something else that cannot be serialized, or has a type from a package this
   process has not loaded. A hook that tested for that error reads `err.cause` instead.
 
