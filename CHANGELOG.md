@@ -14,6 +14,21 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.80
+
+- `SemanticProse(@doc(f))` works on Julia 1.11 and later in a process without a REPL
+  session, such as a script, a test run or a deployed app. Before, it failed with
+  `MethodError: no method matching String(::Base.Docs.DocStr)`: there `@doc` returns the
+  first stored docstring, unparsed, unless something has loaded the `REPL` standard
+  library. HTMXObjects now loads `REPL`, so `@doc` gives a binding's whole documentation
+  as a `Markdown.MD` on every Julia version, as it always did on 1.10.
+- New dependency: the `REPL` standard library. Julia 1.10 always has it loaded, so
+  nothing changes there. An environment that develops HTMXObjects by path needs a
+  `Pkg.resolve()` to record it.
+- `SemanticProse(doc::Base.Docs.DocStr; references, math)` renders one stored docstring
+  alone, for example a single method's entry out of `Base.Docs.meta`. The docstring is not
+  written to.
+
 ## 0.1.79
 
 - A table writes the numbers in its texts with its `thousands` text, on the server and

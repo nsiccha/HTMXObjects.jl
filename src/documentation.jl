@@ -5,6 +5,11 @@ function SemanticProse(doc::Markdown.MD; references::AbstractDict=Dict{String,St
     SemanticProse(string(_documentation_node(doc, references)); math)
 end
 
+# One stored docstring, parsed here unless it already is. `Base.Docs.parsedoc`
+# would write its result into `doc.object`; `formatdoc` writes nothing.
+SemanticProse(doc::Base.Docs.DocStr; kwargs...) =
+    SemanticProse(isnothing(doc.object) ? Base.Docs.formatdoc(doc) : doc.object; kwargs...)
+
 # Every changed container is fresh. Leaves and metadata may be shared, but are
 # never written: Base.Docs can return the same document to several consumers.
 _documentation_node(x, references) = x

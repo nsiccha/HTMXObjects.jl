@@ -77,6 +77,12 @@ import Dates
 import Random
 import CommonMark
 import Markdown
+# Nothing here calls REPL by name: loading it is the point. `@doc` looks a
+# binding up through REPL when that is loaded, which gives all its docstrings as
+# one parsed `Markdown.MD`. Julia 1.10 always has it loaded. From 1.11 a script or
+# a deployed app does not, and `@doc` then returns the first stored `DocStr`,
+# unparsed, or `nothing`. `Base.Docs.formatdoc` is also implemented there.
+import REPL
 import JSON
 # gzip for `serve`'s response compression. HTTP.jl depends on it already.
 import CodecZlib
@@ -4089,6 +4095,7 @@ end
 """
     SemanticProse(markdown; math=true)
     SemanticProse(doc::Markdown.MD; references=Dict(), math=true)
+    SemanticProse(doc::Base.Docs.DocStr; references=Dict(), math=true)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
 are the source itself; the HTML projection renders it through
@@ -4110,6 +4117,11 @@ keeping the example and its expected output. The doc object is not mutated.
 The resulting ordinary Markdown is shared by all projections; whitespace
 is normalized by Julia's Markdown writer. String input keeps the original
 source contract above, including any literal `@ref` links.
+
+`@doc` gives a binding's whole documentation on every Julia version, because
+HTMXObjects loads REPL. A `Base.Docs.DocStr` is one stored docstring, and
+renders as that docstring alone. That is also what `@doc` returns on Julia 1.11
+or later when it is expanded before anything has loaded REPL.
 """
 struct SemanticProse <: SemanticNode
     markdown::String

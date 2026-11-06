@@ -922,6 +922,12 @@ and report projections. The original doc object is unchanged; Julia's Markdown
 writer may normalize whitespace. Doctest blocks retain their complete contents
 and use Julia syntax highlighting.
 
+`@doc(sum)` gives all of `sum`'s docstrings on every Julia version, because
+HTMXObjects loads the `REPL` standard library. Without `REPL`, Julia 1.11 and
+later return only the first stored docstring, unparsed. `SemanticProse` also
+takes such a `Base.Docs.DocStr` directly and renders that one docstring, the
+way to show a single method's documentation out of `Base.Docs.meta`.
+
 String input still means authored CommonMark: `SemanticProse(string(doc))`
 preserves that source, including any `@ref` links. Use the doc-object overload
 when displaying Julia documentation. Authored `jldoctest` fences also use Julia
