@@ -14,6 +14,28 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.74
+
+- `export_site(...; aliases)` can link an address to a file the bundle does not carry,
+  and the export then never renders, copies or checks that address. Such a target is
+  another site's URL (`https://…`, `//host/…`) or a path from the bundle's root that
+  leaves it (`../station-kenn-K.html`). This lets a section exported on its own link
+  pages of a site published beside it. `aliases` may also be a function
+  `(address; fragment) -> target` that returns `nothing` for addresses it leaves alone.
+  Before, any target that did not start with `/` was an `ArgumentError`. Snag
+  `native-static-re-756c2710` (ODLPlaus:ux).
+- A dictionary of `aliases` now matches an address whatever the order and escaping
+  of its query's parameters. Before, a key matched only the exact string the crawl
+  built. For a `url_params` value that string is the parameters in the element's
+  declaration order, escaped with `HTTP.URIs.escapeuri`, so a key written in another
+  order or escaping missed silently and the address was rendered. Two keys that name
+  one address with different targets are an `ArgumentError`.
+- A page that `file_name` puts in a folder (`gemeinsamer-fit/index.html`) now writes
+  its links from that folder. Before, they were written from the root, so the export's
+  reference check refused them. A fragment's links are written for the pages of the
+  folder above its `hx/` folder. A page that loads a fragment written for another
+  folder is now a failure. Exports whose pages all sit in the root are unchanged.
+
 ## 0.1.73
 
 - `master_detail_table(...; detail_instance=true)` (and `master_detail_pair`) makes

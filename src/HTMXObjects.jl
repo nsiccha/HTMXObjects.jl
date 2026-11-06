@@ -7555,7 +7555,7 @@ end
 
 struct _SiteCrawl
     file_name::Any
-    aliases::Dict{String,String}
+    aliases::Any  # (address; fragment) -> the alias target, or `nothing` (`_site_aliases`)
     marker::String
     strict::Bool
     entries::Vector{_SiteEntry}
@@ -7563,7 +7563,80 @@ struct _SiteCrawl
     failed::Vector{Pair{String,String}}
     private::Dict{Int,Int}  # entry answered as a private page → how many were found by then
     bundles::Set{String}  # prefixes of the mounted bundles whose files are queued
+    outside::Dict{String,Int}  # each alias target outside the bundle that answers name → its number
     lock::ReentrantLock
+end
+
+# What an alias target names: `:app` an address of this app (`/…`), `:outside`
+# a file the bundle does not carry, which links name as it is written (another
+# site's URL — `https://…`, `//host/…` — or a path that leaves the bundle's
+# folder, `../…`, resolved where the bundle is served), or `nothing` neither.
+function _site_alias_kind(target::AbstractString)
+    (startswith(target, "//") || startswith(target, "../") ||
+     occursin(r"^[A-Za-z][A-Za-z0-9+.-]*:", target)) && return :outside
+    startswith(target, '/') ? :app : nothing
+end
+
+_site_alias_refusal(address, target) =
+    "aliases gives $(repr(target)) for $(repr(address)), which is neither an address of " *
+    "this app (starting with `/`) nor a file outside the bundle (another site's URL such " *
+    "as `https://…`, or a path from the bundle's root that leaves it, starting with `../`)"
+
+# What an alias key and an address the crawl names are compared by: the path
+# and the query's parameters, in any order, each name and value with its
+# escapes decoded (`+` is a space, as the page's runtime reads it). The crawl
+# builds a `url_params` value's address in its own order and escaping.
+function _site_alias_key(address::AbstractString)
+    path, query = _split_once(address, '?')
+    decode(s) = _static_unescape(replace(s, '+' => ' '))
+    params = isnothing(query) ? Tuple{String,String}[] :
+        sort!([(decode(n), decode(something(v, ""))) for (n, v) in
+               (_split_once(p, '=') for p in split(query, '&'; keepempty=false))])
+    (path, params)
+end
+
+# `aliases` as a function of an address and whether it loads as a fragment:
+# a dictionary's entries, checked here, or the caller's own function, whose
+# answers `_site_alias` checks as the crawl asks them.
+function _site_aliases(aliases::AbstractDict)
+    table = Dict{Tuple{String,Vector{Tuple{String,String}}},Pair{String,String}}()
+    for (a, b) in aliases
+        address, target = String(a), String(b)
+        startswith(address, '/') && !startswith(address, "//") || throw(ArgumentError(
+            "export_site: $(repr(address)) is not an address of this app (it must start with `/`)"))
+        isnothing(_site_alias_kind(target)) &&
+            throw(ArgumentError("export_site: " * _site_alias_refusal(address, target)))
+        other = get(table, _site_alias_key(address), nothing)
+        isnothing(other) || last(other) == target || throw(ArgumentError(
+            "export_site: aliases names one address twice, as $(repr(first(other))) => " *
+            "$(repr(last(other))) and $(repr(address)) => $(repr(target))"))
+        table[_site_alias_key(address)] = address => target
+    end
+    function alias(address; fragment::Bool=false)
+        found = get(table, _site_alias_key(address), nothing)
+        isnothing(found) ? nothing : last(found)
+    end
+end
+_site_aliases(aliases) = aliases
+
+# The alias of `address`: `(:app, address)` for an address of this app (itself
+# when it has none), `(:outside, target)` for a file outside the bundle. A
+# target the caller's function gives that is neither is a failure of the
+# address, reported with the others once the crawl is done (it is asked while
+# a page renders); links to it name nothing.
+function _site_alias(crawl::_SiteCrawl, address::AbstractString, fragment::Bool)
+    address = String(address)
+    target = crawl.aliases(address; fragment)
+    isnothing(target) && return (:app, address)
+    kind = target isa AbstractString ? _site_alias_kind(target) : nothing
+    if isnothing(kind)
+        lock(crawl.lock) do
+            any(f -> first(f) == address, crawl.failed) ||
+                push!(crawl.failed, address => _site_alias_refusal(address, target))
+        end
+        return (:outside, "")
+    end
+    (kind, String(target))
 end
 
 # What one render of an address found, for the crawl to take in when it writes
@@ -7618,15 +7691,37 @@ function _site_identity(address::AbstractString)
 end
 
 # The address `url` names from the page at `base`, and the key of its entry
-# (its file name before a `?`) with the query a link to it keeps.
+# (its file name before a `?`) with the query a link to it keeps. `outside` is
+# what a link writes instead when an alias points outside the bundle: the
+# address then has no entry.
 function _site_address(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
     rest, id = _split_once(url, '#')
-    address = _site_resolve(base, rest)
-    address = _mounted_index(get(crawl.aliases, address, address))
     fragment = kind === :fragment
+    where, address = _site_alias(crawl, _site_resolve(base, rest), fragment)
+    if where === :outside
+        outside = isnothing(id) || occursin('#', address) ? address : address * "#" * id
+        return (; address, fragment, key="", linked=nothing, id, outside)
+    end
+    address = _mounted_index(address)
     key, linked = _split_once(_site_name(crawl, address; fragment, ext=".html"), '?')
-    (; address, fragment, key, linked, id)
+    (; address, fragment, key, linked, id, outside=nothing)
 end
+
+# What an answer writes for a file outside the bundle: a marker the export
+# replaces once every file is written, as `_site_outside_link` names it from
+# the folder of the page that shows the answer.
+function _site_outside!(crawl::_SiteCrawl, outside::String)
+    n = lock(() -> get!(crawl.outside, outside, length(crawl.outside) + 1), crawl.lock)
+    string(crawl.marker, 'o', n, 'x')
+end
+
+# An outside target as an HTML file whose links resolve against the folder
+# `from` (`"."`, the root, for any other file) names it: a path that leaves
+# the bundle is one from the bundle's root, so it climbs out of that folder
+# first; another site's URL is as it is.
+_site_outside_link(from::AbstractString, target::AbstractString) =
+    from == "." || !startswith(target, "../") ? target :
+        join(fill("..", count(==('/'), from) + 1), '/') * "/" * target
 
 # The file an address is written to. A file of a mounted bundle keeps its
 # mount path, whatever `file_name` says: the bundle's own relative links name
@@ -7646,7 +7741,9 @@ end
 function _site_private(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
     lock(() -> isempty(crawl.private), crawl.lock) && return false
     _site_internal(url) || return false
-    key = _site_address(crawl, base, url, kind).key
+    target = _site_address(crawl, base, url, kind)
+    isnothing(target.outside) || return false
+    key = target.key
     lock(crawl.lock) do
         i = get(crawl.keys, key, nothing)
         !isnothing(i) && haskey(crawl.private, i)
@@ -7688,7 +7785,8 @@ end
 # Queue `url` (if new) and return what the page writes for it.
 function _site_target!(crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
     _site_internal(url) || return nothing
-    (; address, fragment, key, linked, id) = _site_address(crawl, base, url, kind)
+    (; address, fragment, key, linked, id, outside) = _site_address(crawl, base, url, kind)
+    isnothing(outside) || return _site_outside!(crawl, outside)
     path, query = _split_once(address, '?')
     i = _site_register!(crawl, key, address, fragment)
     _site_link_text(_site_marker(crawl, i), query, linked, _static_own_extension(path), id)
@@ -7698,7 +7796,8 @@ end
 # replaces once it has queued the entry.
 function _site_target!(log::_SiteLog, crawl::_SiteCrawl, base::AbstractString, url::AbstractString, kind::Symbol)
     _site_internal(url) || return nothing
-    (; address, fragment, key, linked, id) = _site_address(crawl, base, url, kind)
+    (; address, fragment, key, linked, id, outside) = _site_address(crawl, base, url, kind)
+    isnothing(outside) || return _site_outside!(crawl, outside)
     path, query = _split_once(address, '?')
     i = lock(() -> get(crawl.keys, key, nothing), crawl.lock)
     marker = lock(log.lock) do
@@ -7945,13 +8044,20 @@ can run inside a serving app (it renders in process with
   download → `.fig`). For a type it does not list (`application/vnd.myapp`),
   `file_name` is asked with `ext=""`: the default names have no extension to
   give, so the answer fails, and an app's own `file_name` names the file with
-  an extension of its choosing. Every link is written relative to the bundle's
-  root. Under the default names two addresses never silently share a file: a
+  an extension of its choosing. Every link is relative, written from the
+  folder of the page (the bundle's root for the default names). Under the default names two addresses never silently share a file: a
   collision is a failure naming both. Addresses an app's own `file_name` gives
   one name share one file, rendered once from the first one reached (list the
   plain address in `pages` to render that one). A name with a query
   (`"lieferflaechen.html?ortsteil=0101"`) names the file before the `?`, and
   links to that address keep the query.
+- **Pages in a folder.** A `file_name` may put a page in a folder
+  (`"gemeinsamer-fit/index.html"`): its links are written from that folder
+  (`detail.html`, `../index.html`). A fragment shows in the page that loads
+  it, so its links are written for the pages of the folder above its `hx/`
+  folder: the default `hx/…` names serve the root's pages, and a page in
+  `gemeinsamer-fit/` loads fragments named `gemeinsamer-fit/hx/…`. A page that
+  loads a fragment written for another folder's pages is a failure.
 - **A page that applies its address in the browser is one file.** A page
   address with a query (`/?region=09&jahr=2024`, a zoom link) shares the file
   of the page it extends when that page is in the bundle with a file of its
@@ -7977,9 +8083,28 @@ can run inside a serving app (it renders in process with
   `hx-get` with a query) follow `controls`: `:remove` (default) leaves them
   out, `:disable` greys them out ([`StaticExport`](@ref)). A page's linked
   runtime stays linked, so the bundle carries it once.
-- `aliases` points an address that needs a server (an interactive API viewer)
-  at another address, whose file is linked instead:
-  `Dict("/api/v1/docs" => "/api/v1/openapi.json")`.
+- **Aliases.** `aliases` links an address to something else instead of
+  rendering it, wherever an answer names it. A target is either another
+  address of this app (`/…`), whose file is linked instead (an address that
+  needs a server, such as an interactive API viewer:
+  `Dict("/api/v1/docs" => "/api/v1/openapi.json")`), or a file the bundle does
+  not carry, which links name exactly as given and the export never renders,
+  reads or checks: another site's URL (`https://…`, `//host/…`), or a path
+  from the bundle's root that leaves it (`../station-kenn-K.html`), which a
+  browser resolves where the bundle is served (a page in a folder of the
+  bundle climbs out of that folder first). That links a section exported on its
+  own to a site published beside it (served at `<site>/gemeinsamer-fit/`,
+  `../` is `<site>/`), with nothing of that site rendered or copied.
+  `aliases` is a dictionary of addresses, whose keys match an address with
+  its query's parameters in any order and escaping (the crawl builds a
+  `url_params` value's address in an order of its own), or a function
+  `(address; fragment) -> target` that answers `nothing` for an address it
+  leaves alone, asked with each address an answer names (resolved, without
+  its `#id`; `fragment` when it loads as a fragment), from several threads:
+  `(a; fragment) -> startswith(a, "/station") ? "../" * old_name(a; fragment) : nothing`.
+  A dictionary's target that is neither is an `ArgumentError`; a function's
+  is a failure of that address. A link to an outside target keeps the `#id`
+  it names.
 - `parent` is the progress node each route's work hangs under (`dispatch`).
 - **Threads.** With `parallel=true` pages render concurrently, as many at
   once as the process can keep busy: its default threads (`julia -t 8`), or
@@ -8044,16 +8169,16 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     audience = StaticExport(nothing, controls, "", :linked, audience).audience
     isdir(dir) && !isempty(readdir(dir)) && throw(ArgumentError(
         "export_site writes into a new or empty directory; $(repr(dir)) is not empty"))
-    aliases = Dict{String,String}(String(a) => String(b) for (a, b) in aliases)
-    for address in Iterators.flatten((pages, keys(aliases), values(aliases)))
+    for address in pages
         startswith(address, '/') && !startswith(address, "//") || throw(ArgumentError(
             "export_site: $(repr(address)) is not an address of this app (it must start with `/`)"))
     end
+    aliases = _site_aliases(aliases)
     mkpath(dir)
     root = normpath(abspath(dir))
     crawl = _SiteCrawl(file_name, aliases, "htmxo" * Random.randstring('a':'z', 12) * "f",
         file_name === static_file_name, _SiteEntry[], Dict{String,Int}(), Pair{String,String}[],
-        Dict{Int,Int}(), Set{String}(), ReentrantLock())
+        Dict{Int,Int}(), Set{String}(), Dict{String,Int}(), ReentrantLock())
     foreach(p -> _site_target!(crawl, "/", p, :full), pages)
     written = _SiteWritten(root)
     cpus = parallel ? _usable_cpus() : 1
@@ -8100,15 +8225,32 @@ function export_site(dir::AbstractString; pages, file_name=static_file_name, con
     # A failed address keeps its own path, which the reference check below
     # does not report again.
     failed = Set(first(_split_once(a, '?')) for (a, _) in crawl.failed)
-    unmarked(m) = (k = parse(Int, m[length(crawl.marker)+1:end-1]);
-                   get(() -> first(_split_once(crawl.entries[k].address, '?')), written.links, k))
-    marker = Regex(crawl.marker * "[0-9]+x")
+    targets = Vector{String}(undef, length(crawl.outside))
+    foreach(((t, n),) -> targets[n] = t, crawl.outside)
+    outside = Set{String}()
+    # An HTML file's links resolve against the folder of the page that shows
+    # it: a page below the root, or a fragment of one, names its files from
+    # there.
+    function unmarked(from, m)
+        if m[ncodeunits(crawl.marker)+1] == 'o'
+            link = _site_outside_link(from, targets[parse(Int, m[ncodeunits(crawl.marker)+2:end-1])])
+            push!(outside, link)
+            return link
+        end
+        k = parse(Int, m[ncodeunits(crawl.marker)+1:end-1])
+        link = get(() -> first(_split_once(crawl.entries[k].address, '?')), written.links, k)
+        from == "." ? link : _site_relative_link(from, link)
+    end
+    marker = Regex(crawl.marker * "o?[0-9]+x")
     for k in written.marked
         file = written.paths[k]
-        write(file, _site_unmark(read(file, String), marker, unmarked, endswith(file, ".html")))
+        html = endswith(file, ".html")
+        from = html ? _static_link(_slash_relpath(_site_page_folder(root, dirname(file)), root)) : "."
+        write(file, _site_unmark(read(file, String), marker, m -> unmarked(from, m), html))
     end
     touch(joinpath(root, ".nojekyll"))
-    unresolved = _site_unresolved(root, failed)
+    unresolved, misplaced = _site_unresolved(root, failed, outside)
+    append!(crawl.failed, misplaced)
     bytes = sum(filesize, values(written.paths); init=0)
     files = length(written.paths)
     isempty(crawl.failed) && isempty(unresolved) ||
@@ -8188,8 +8330,8 @@ end
 # it. A page whose file `file_name` names with a query is none: its links keep
 # that query, which a link to another address would lose.
 function _site_page_entry(crawl::_SiteCrawl, page::AbstractString)
-    (; address, key, linked) = _site_address(crawl, "/", page, :full)
-    isnothing(linked) || return nothing
+    (; address, key, linked, outside) = _site_address(crawl, "/", page, :full)
+    isnothing(linked) && isnothing(outside) || return nothing
     j = lock(() -> get(crawl.keys, key, nothing), crawl.lock)
     isnothing(j) || crawl.entries[j].fragment ||
         crawl.strict && _site_identity(crawl.entries[j].address) != _site_identity(address) ? nothing : j
@@ -8473,23 +8615,59 @@ end
 # the page that shows it, the file's own folder, except for a fragment (a file
 # in an `hx/` folder), which shows in the page of the folder above `hx/`. So a
 # page written below the root, such as a mounted bundle's, is checked where
-# its links point, not against same-named files in the root.
-function _site_unresolved(root::AbstractString, failed::Set{String})
+# its links point, not against same-named files in the root. A link an alias
+# points outside the bundle (`outside`, as written) is not checked.
+#
+# Also returns, as `file => why`, each fragment a page of another folder
+# loads: its links are written for the pages of the folder above its `hx/`,
+# so they would not resolve in that page.
+function _site_unresolved(root::AbstractString, failed::Set{String}, outside::Set{String}=Set{String}())
     unresolved = Pair{String,String}[]
+    misplaced = Pair{String,String}[]
+    folder(f) = (rel = _slash_relpath(f, root); rel == "." ? "the root" : rel * "/")
+    same(a, b) = normpath(joinpath(a, "")) == normpath(joinpath(b, ""))
     for (dirpath, _, files) in walkdir(root), f in sort(files)
         endswith(f, ".html") || continue
         file = joinpath(dirpath, f)
         page = _site_page_folder(root, dirpath)
         for address in _site_references(read(file, String))
             (_site_internal(address) && address != "true" && address != "false") || continue
+            address in outside && continue
             path = first(split(address, r"[?#]"; limit=2))
             target = normpath(joinpath(page, _static_unescape(path)))
             ok = startswith(path, '/') ? path in failed :
                  startswith(target, joinpath(root, "")) && isfile(target)
-            ok || push!(unresolved, _slash_relpath(file, root) => address)
+            if !ok
+                push!(unresolved, _slash_relpath(file, root) => address)
+            elseif !startswith(path, '/') && endswith(target, ".html")
+                shown = _site_page_folder(root, dirname(target))
+                same(shown, dirname(target)) || same(shown, page) ||
+                    any(p -> first(p) == _slash_relpath(target, root), misplaced) ||
+                    push!(misplaced, _slash_relpath(target, root) =>
+                        "is a fragment whose links are written for the pages of $(folder(shown)), " *
+                        "but $(_slash_relpath(file, root)) in $(folder(page)) loads it, where they " *
+                        "would not resolve; give it a file below $(folder(page) == "the root" ? "" : folder(page))hx/ " *
+                        "(file_name), or load it only from pages of $(folder(shown))")
+            end
         end
     end
-    unresolved
+    unresolved, misplaced
+end
+
+# `link`, a file's address from the bundle's root (with any query it keeps),
+# as an HTML file whose links resolve against the folder `from` names it. A
+# rooted address (one whose export failed) stays as it is.
+function _site_relative_link(from::AbstractString, link::AbstractString)
+    startswith(link, '/') && return link
+    path, query = _split_once(link, '?')
+    a = split(from, '/')
+    b = split(path, '/')
+    n = 0
+    while n < length(a) && n < length(b) - 1 && a[n+1] == b[n+1]
+        n += 1
+    end
+    rel = join([fill("..", length(a) - n); b[n+1:end]], '/')
+    isnothing(query) ? rel : rel * "?" * query
 end
 
 # The folder a relative address in an HTML file of `dirpath` resolves against:
