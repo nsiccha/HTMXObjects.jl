@@ -253,3 +253,127 @@ end
         end
     end
 end
+
+@testitem "a table writes the numbers in its texts with its thousands text" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    items = [(id="k$i", name="Messstelle $i", land=i <= 1200 ? "Bayern" : "Hessen") for i in 1:1672]
+    cells(it) = (h.td(it.name), h.td(it.land))
+    table(; kw...) = repr("text/html", master_detail_table(["Name", "Land"], items;
+        key=it -> it.id, master=cells, detail=it -> h.p("d"), searchable=true, kw...))
+    # The written text alone, so a failure names it instead of printing the page.
+    written(pattern, html) = [m[1] for m in eachmatch(pattern, html)]
+    search_count(html) = only(written(r"data-htmxo-table-count[^>]*>([^<]*)<", html))
+    group_counts(html) = written(r"data-htmxo-group-count[^>]*>([^<]*)<", html)
+    de = table_texts(:de; count="{shown} von {total} Messstellen")
+
+    # The search count, in every table that has one.
+    @test search_count(table(; texts=de)) == "1.672 von 1.672 Messstellen"
+    @test search_count(table()) == "1,672 of 1,672 rows shown"
+    rows = [h.tr(h.td("r$i")) for i in 1:1000]
+    @test search_count(repr("text/html", sortable_table(["A"], rows; searchable=true, texts=de))) == "1.000 von 1.000 Messstellen"
+    @test search_count(repr("text/html", render_table((; a=collect(1:1000)); searchable=true, texts=de))) == "1.000 von 1.000 Messstellen"
+    # A table that asks for no separator gets none, and a short count has none to take.
+    @test search_count(table(; texts=table_texts(:de; thousands=""))) == "1672 von 1672 Zeilen angezeigt"
+    @test search_count(repr("text/html", sortable_table(["A"], rows[1:999]; searchable=true, texts=de))) == "999 von 999 Messstellen"
+
+    # A default group row's own count, as the group sums beside it are written.
+    grouped = table(; texts=de, groupings=["Keine" => nothing, "Land" => it -> it.land], group_by=["Land"])
+    @test "(1.200)" in group_counts(grouped) && "(472)" in group_counts(grouped)
+
+    # The other texts that take a number go through the same fill; a name made of
+    # digits is still a name.
+    @test HTMXObjects._table_text(de, :selected; count=1672) == "1.672 ausgewählt"
+    @test HTMXObjects._table_text(de, :group_add; name="12345") == "Nach 12345 gruppieren"
+
+    # `htmxoText` groups a number, so the runtime that carries it carries the grouping too.
+    @test contains(repr("text/html", master_detail_js()), "function htmxoGrouped(")
+end
+
+@testitem "a table's live counts follow its thousands text browser" setup=[ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        items = [(id="k$i", name="Messstelle $i", land=i <= 1200 ? "Bayern" : "Hessen") for i in 1:1672]
+        german = master_detail_table(["Name", "Land"], items; key=it -> it.id,
+            master=it -> (h.td(it.name), h.td(it.land)), detail=it -> h.p("d"),
+            groupings=["Keine" => nothing, "Land" => it -> it.land], group_by=["Keine"],
+            searchable=true, selectable="ids", link="items", id="de",
+            texts=table_texts(:de; count="{shown} von {total} Messstellen"))
+        english = sortable_table(["Name"], [h.tr(h.td("r$i")) for i in 1:1000]; searchable=true, id="en")
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const wait = async (cond, n = 200) => { for (let i = 0; i < n && !cond(); i++) await new Promise(r => setTimeout(r, 20)); return cond(); };
+            const root = id => document.getElementById(id).closest('.htmxo-searchable-table');
+            const search = (id, v) => { const i = root(id).querySelector('input[type="search"]'); i.value = v; i.dispatchEvent(new Event('input', {bubbles: true})); };
+            const count = id => root(id).querySelector('[data-htmxo-table-count]').textContent;
+            const selection = () => document.getElementById('de').closest('.htmxo-selectable-table').querySelector('[data-htmxo-selection-count]').textContent;
+            const bayern = Array.from({length: 1200}, (_, i) => 'k' + (i + 1));
+            // The first paint and the browser's live count write one text.
+            check('first-paint', count('de') === '1.672 von 1.672 Messstellen');
+            search('de', 'bayern');
+            check('live-count', count('de') === '1.200 von 1.672 Messstellen');
+            htmxoSelectRows('#de', bayern);
+            check('selected', selection() === '1.200 ausgewählt');
+            search('de', 'hessen');
+            check('selected-filtered', selection() === '1.200 ausgewählt (1.200 durch den Filter ausgeblendet)');
+            search('de', '');
+            check('cleared', count('de') === '1.672 von 1.672 Messstellen');
+            // A group the browser builds writes its count as the server's does.
+            [...root('de').querySelectorAll('.htmxo-group-pills button')].find(b => b.textContent.includes('Land')).click();
+            const groupCount = key => {
+                const label = [...document.querySelectorAll('#de [data-htmxo-group-label]')].find(l => l.textContent === key);
+                return label && label.closest('td').querySelector('[data-htmxo-group-count]').textContent;
+            };
+            check('group-count', await wait(() => groupCount('Bayern') === '(1.200)'));
+            check('short-group-count', groupCount('Hessen') === '(472)');
+            check('selected-collapsed', selection() === '1.200 ausgewählt (1.200 in eingeklappten Gruppen)');
+            // The note on a collapsed group holding the hovered items.
+            htmxoLink('items', bayern);
+            const groupRow = [...document.querySelectorAll('#de [data-htmxo-group-label]')].find(l => l.textContent === 'Bayern').closest('tr');
+            check('linked-note', groupRow.cells[0].dataset.htmxoLinkedNote === '↳ 1.200 darin');
+            htmxoLink('items', null);
+            // A table without texts= takes English's separator on the same page.
+            check('english', count('en') === '1,000 of 1,000 rows shown');
+            search('en', 'r10');
+            check('english-short', count('en') === '12 of 1,000 rows shown');
+            // A name made of digits is text, and a status has too few digits to group.
+            const el = document.getElementById('de');
+            check('name-stays', htmxoText(el, 'group_add', {name: '12345'}) === 'Nach 12345 gruppieren');
+            check('status', htmxoText(el, 'rows_failed', {status: 503}) === 'Laden der Zeilen fehlgeschlagen (503)');
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(german, english, driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()), pico_version=nothing,
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            HTTP.Response(200, ["Content-Type" => "text/html"], page)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=20000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                lines = split(checks[1], '\n')
+                for line in lines
+                    @test endswith(line, ":true")
+                end
+                @test length(lines) == 13
+            end
+        finally
+            close(server)
+        end
+    end
+end
