@@ -4395,10 +4395,9 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   list (`application/vnd.myapp`) `file_name` is asked with `ext=""`: the
   default names have none to give, so that answer fails, and your own
   `file_name` names its file with an extension of its choosing
-  (`static_file_name(a; fragment, ext=".myapp")`). Every link is written
-  relative to the root, which is why every page lives there: a fragment's
-  links resolve against the page that loads it, so they are right in all of
-  them.
+  (`static_file_name(a; fragment, ext=".myapp")`). Every link is relative,
+  written from the folder of the page (the bundle's root for the default
+  names).
 
   | Address | File |
   |---|---|
@@ -4418,6 +4417,13 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   with a query (`"lieferflaechen.html?ortsteil=0101"`) names the file before
   the `?`, and links to that address keep the query; list its plain address
   in `pages` so that one is rendered.
+- **Pages in a folder.** A `file_name` of yours may put a page in a folder
+  (`"gemeinsamer-fit/index.html"`): its links are written from that folder
+  (`detail.html`, `../index.html`). A fragment shows in the page that loads
+  it, so its links are written for the pages of the folder above its `hx/`
+  folder: the default `hx/…` names serve the root's pages, and a page in
+  `gemeinsamer-fit/` loads fragments named `gemeinsamer-fit/hx/…`. A page that
+  loads a fragment written for another folder's pages is a failure.
 - **A page that applies its address in the browser is one file**, with no
   `file_name` of yours. A page address with a query (`/?region=09&jahr=2024`,
   a zoom link) shares the file of its page (`/`) when that page is in the
@@ -4440,10 +4446,27 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])   # → (; files, bytes
   route's default, or fails when a parameter is required; declare its values
   with `url_params` on that element ([Page address parameters](#page-address-parameters)),
   or leave it out of the static page.
-- `aliases = Dict("/api/v1/docs" => "/api/v1/openapi.json")` links an address
-  that needs a server to another one. `parent` is the progress node the routes'
-  work hangs under. A route that wants to say it is a snapshot tests
-  `static_export(__req__) !== nothing`.
+- **Aliases** link an address to something else instead of rendering it,
+  wherever an answer names it. A target is either another address of this app
+  (`/…`), whose file is linked instead, as for an address that needs a server
+  (`aliases = Dict("/api/v1/docs" => "/api/v1/openapi.json")`), or a file the
+  bundle does not carry, which links name exactly as given and the export
+  never renders, reads or checks: another site's URL (`https://…`, `//host/…`),
+  or a path from the bundle's root that leaves it (`../station-kenn-K.html`),
+  which a browser resolves where the bundle is served (a page in a folder of
+  the bundle climbs out of that folder first). That links a section exported on
+  its own to a site published beside it, with nothing of that site rendered or
+  copied. `aliases` is a dictionary of addresses, whose keys match an address
+  with its query's parameters in any order and escaping, or a function
+  `(address; fragment) -> target` that answers `nothing` for an address it
+  leaves alone, asked with each address an answer names (resolved, without its
+  `#id`; `fragment` when it loads as a fragment), from several threads:
+  `(a; fragment) -> startswith(a, "/station") ? "../" * old_name(a; fragment) : nothing`.
+  A dictionary's target that is neither is an `ArgumentError`, as are two keys
+  that name one address with different targets; a function's is a failure of
+  that address. A link to an outside target keeps the `#id` it names.
+- `parent` is the progress node the routes' work hangs under. A route that
+  wants to say it is a snapshot tests `static_export(__req__) !== nothing`.
 - **Threads.** With `parallel=true` pages render concurrently, as many at
   once as the process can keep busy (its default threads, or fewer under a
   CPU quota such as a container's), and their files are written one at a
