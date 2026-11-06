@@ -32741,6 +32741,13 @@ under Pico, and then continues on further lines: the navigation below the brand,
 starting where the brand does, its entries whole. A later
 `body > header nav, body > header nav ul { flex-wrap: nowrap; }` keeps one line.
 
+A [`private`](@ref) entry of any Pico `nav` (a header, a breadcrumb, a sidebar)
+shows the label of every private part before its link, its outline inside the
+nav's row. Pico styles the same `::before` as the label, so this rule lives here
+rather than in [`htmxo_utility_styles`](@ref). The label takes up room in the
+header: about 100 px for "nicht öffentlich". Where several would not fit,
+`nav li.htmxo-private { --htmxo-private-label: "intern"; }` shortens it.
+
 A button without a colour class (`<button>`, `<input type=submit|button>`,
 `role="button"`, a bare `.outline`) takes Pico's own slate outline — the look
 of `class="secondary outline"` — in place of Pico's azure fill, in its rest,
@@ -32815,6 +32822,17 @@ body > header nav {
 }
 body > header nav ul { flex-wrap: wrap; }
 body > header nav ul:last-of-type { margin-left: calc(var(--pico-nav-element-spacing-horizontal) * -1); }
+/* Pico gives every `nav li` a `::before` of its own, a zero-width space floated
+   left. Its rule is unlayered, so it beats the private mark in
+   `htmxo_utility_styles()`, which is layered, while the mark's border and
+   padding, which Pico does not set, still apply: a private entry showed an empty
+   box, and so did one inside private content, which shows no label at all. These
+   rules are as weak as Pico's and come after it, so an app's own rule still wins.
+   Pico pads a `nav li` by 1rem above and below, so the outline moves inside the
+   entry to stay within the row. */
+:where(nav li.htmxo-private) { outline-offset: calc(var(--pico-nav-element-spacing-horizontal) * -0.5); }
+:where(nav li.htmxo-private)::before { content: var(--htmxo-private-label); float: none; }
+:where(.htmxo-private *):where(nav li.htmxo-private)::before { content: none; }
 /* Pico paints a button without a colour class in its primary azure. It takes
    Pico's slate outline (`.secondary.outline`) instead, through the same three
    variables Pico sets on every button; `.secondary` and `.contrast` keep
@@ -33479,7 +33497,9 @@ body > header nav a[aria-current="page"] { font-weight: 600; }
    answer holds. The label is in the element's language. A table row or row
    group carries its label in its first cell. Private content shown inside
    private content (a fragment loaded into it) is marked once. An app restyles
-   it in its own stylesheet: `--htmxo-private-color`, `--htmxo-private-label`. */
+   it in its own stylesheet: `--htmxo-private-color`, `--htmxo-private-label`.
+   Pico's own `nav li::before` beats these rules: `pico_bridge()` sets the label
+   of a `nav li` again. */
 :root { --htmxo-private-label: $(_css_string(_PRIVATE_LABELS.en)); }
 $(join(("[lang|=\"$k\"] { --htmxo-private-label: $(_css_string(v)); }" for (k, v) in pairs(_PRIVATE_LABELS)), "\n"))
 .htmxo-private {

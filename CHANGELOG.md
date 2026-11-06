@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.77
+
+- A `private(...)` entry of a Pico `nav` shows its label ("nicht öffentlich", "not
+  public") instead of an empty box, in a `pico_page` header, a breadcrumb and a
+  sidebar, and its outline stays inside the nav's row. An entry inside private content
+  shows no box at all. The cause was Pico's `nav li::before`, which beat the label;
+  `pico_bridge()` now sets it. The label takes up about 100 px of the header, so a full
+  one reaches its next line sooner: `test/site_frame.jl`'s header with one such entry
+  now stays on one line down to a 900 px window, and used to down to 768 px.
+  `nav li.htmxo-private { --htmxo-private-label: "intern"; }` shortens it.
+
 ## 0.1.76
 
 - `live_thread(items; focus=key)` opens an item taller than the scroll box at its start,
