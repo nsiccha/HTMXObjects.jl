@@ -950,6 +950,14 @@ and audience around the computation, so `page_lang()` and `private` read in the
 worker as they do here. The default `0` keeps every computation in this
 process.
 
+A failure in the worker answers as it does here (DynamicObjects 0.5.13):
+`unwrap_error` returns the worker's exception itself, so a `CallerFault` or a
+refused `@param` answers its status and message and an `__error__` hook reads
+it, and the error log keeps the worker's printout. An exception that cannot
+cross answers 500 and its log says why: it serializes to more than 1 MiB, holds
+a DynamicObjects object or something else that cannot be serialized, or has a
+type from a package this process has not loaded.
+
 `worker_stall=s` (default `Inf`, off) has a watchdog restart the worker when a
 computation has been in flight for `s` seconds with no progress frame, no
 message and no CPU time moved meanwhile, failing those computations with

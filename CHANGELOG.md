@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.77
+## 0.1.79
 
 - A table writes the numbers in its texts with its `thousands` text, on the server and
   in the browser: the search count (`{shown}`, `{total}`), the selection bar (`{count}`),
@@ -26,6 +26,35 @@ failing at render with a `MethodError`.
   Code that reads a number back from one of these texts, or from `[data-htmxo-group-count]`,
   now finds the separator in it; `htmxo:table-filtered` still carries plain numbers.
   Snag `table-count-with-cd40a1a4` (ODLPlaus:ux-audit).
+
+## 0.1.78
+
+- With `configure_job_queue!(; workers=1)`, a refusal raised in a `@queued` computation
+  answers as it does with `workers=0`. A `CallerFault` answers its status and message, and
+  a missing required `@param`, an `@options` violation or a value its type rejects answers
+  400 with its message, inline or polled. An `__error__` hook reads the fault through
+  `unwrap_error`. Before, each answered `500 Something went wrong` with the message lost
+  (snag `caller-fault-in-53f41794`). A server fault stays a 500, and the error log keeps the
+  worker's printout for both.
+- The `[compat]` floor for DynamicObjects rises from 0.5.10 to 0.5.13, which carries the
+  worker's exception to this process.
+- **Breaking:** an `__error__` hook no longer gets `DynamicObjects.RemoteComputationError`
+  from `unwrap_error(err)` for such a failure, only for an exception that cannot cross. That
+  answers 500, and its log says why: it serializes to more than 1 MiB (a refused `@options`
+  value carries its whole list, and a list of 60,000 short strings was over), holds a DynamicObjects
+  object or something else that cannot be serialized, or has a type from a package this
+  process has not loaded. A hook that tested for that error reads `err.cause` instead.
+
+## 0.1.77
+
+- A `private(...)` entry of a Pico `nav` shows its label ("nicht öffentlich", "not
+  public") instead of an empty box, in a `pico_page` header, a breadcrumb and a
+  sidebar, and its outline stays inside the nav's row. An entry inside private content
+  shows no box at all. The cause was Pico's `nav li::before`, which beat the label;
+  `pico_bridge()` now sets it. The label takes up about 100 px of the header, so a full
+  one reaches its next line sooner: `test/site_frame.jl`'s header with one such entry
+  now stays on one line down to a 900 px window, and used to down to 768 px.
+  `nav li.htmxo-private { --htmxo-private-label: "intern"; }` shortens it.
 
 ## 0.1.76
 

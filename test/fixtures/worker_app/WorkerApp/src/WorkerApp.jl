@@ -59,4 +59,47 @@ seen() = "lang=$(something(HTMXObjects.page_lang(), "none")) audience=$(HTMXObje
     @get light() = h.p("light pid=$(getpid()) $(seen())"; id="light")
 end
 
+# Types of the app's own that a parameter fault holds, in `allowed` and in `type`.
+@enum Colour red green
+struct Millis
+    value::Int
+end
+Base.parse(::Type{Millis}, text::AbstractString) = Millis(parse(Int, text))
+
+# Refusals raised inside a computation, which runs in the worker with `workers=1`.
+@htmx struct FaultApp
+    @param fit::String = "good"
+    @options(fit) = ["good", "better"]
+    @param n::Int = 1
+    @param must::Int
+    @param colour::Colour = red
+    @param wait::Millis = Millis(1)
+    scenario = n == 0 ? throw(CallerFault(400, "new subjects need at least 1 subject, got 0")) : n
+    "A fresh route whose non-route property raises the fault"
+    @queued @fresh @get timecourse() = h.p("timecourse pid=$(getpid()) scenario=$scenario")
+    "A fresh route reading a parameter outside its options"
+    @queued @fresh @get options() = h.p("options pid=$(getpid()) fit=$fit")
+    "A memoized route raising the fault in its own body"
+    @queued @get memoized(; k::Int=1) = k == 0 ? throw(CallerFault(404, "unknown k 0")) : h.p("memoized pid=$(getpid()) k=$k")
+    "A required parameter that is missing"
+    @queued @fresh @get required() = h.p("required $must")
+    "A value the declared type rejects, and a value outside the app's own Enum and parsed type"
+    @queued @fresh @get typed() = h.p("typed pid=$(getpid()) n=$n colour=$colour wait=$(wait.value)")
+    "An unmarked route reading a @queued property that raises the fault"
+    @queued heavy_probe(k::Int) = k == 0 ? throw(CallerFault(409, "probe 0 is refused")) : (; pid=getpid(), k)
+    @fresh @get probe(; k::Int=1) = h.p("probe $(heavy_probe(k))")
+    "A server fault"
+    @queued @fresh @get boom() = error("server fault in the body")
+end
+
+# An `__error__` hook reads the fault through `unwrap_error`, as the docs say.
+@htmx struct FaultHookApp
+    __error__(err) = begin
+        fault = unwrap_error(err)
+        fault isa CallerFault ? h.p("hook saw CallerFault status=$(fault.status) message=$(fault.message)") :
+            h.p("hook saw $(typeof(fault))")
+    end
+    @queued @fresh @get hooked() = throw(CallerFault(422, "hooked fault"))
+end
+
 end
