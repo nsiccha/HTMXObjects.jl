@@ -74,6 +74,54 @@ using TestItemRunner
     end
 end
 
+@testitem "@doc gives a binding's whole documentation in a process without a REPL session" tags=[:unit] begin
+    # On Julia 1.11 or later, `@doc` needs REPL loaded for this. A fresh process,
+    # since anything that ran in this one (`using Pkg`) may have loaded it already.
+    code = """
+    using HTMXObjects, Markdown
+    print(typeof(@doc(sum)), " ", occursin("`reduce`", repr("text/markdown", SemanticProse(@doc(sum)))))
+    """
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
+    @test read(cmd, String) == "Markdown.MD true"
+end
+
+@testitem "A stored Julia docstring renders alone, and is not written to" tags=[:unit] begin
+    using HTMXObjects, Markdown
+    references = Dict("reduce" => "/reduce")
+    data() = Dict{Symbol,Any}(:module => @__MODULE__, :path => "doc.jl", :linenumber => 1)
+
+    unparsed = Base.Docs.docstr("""
+        Uses [`reduce`](@ref) and [`unknown`](@ref).
+
+        ```jldoctest named
+        julia> 1 + 1
+        2
+        ```
+        """, data())
+    prose = SemanticProse(unparsed; references, math=false)
+    source = repr("text/markdown", prose)
+    html = repr("text/html", prose)
+    @test unparsed.object === nothing
+    @test !prose.math
+    @test occursin("[`reduce`](/reduce)", source)
+    @test !occursin("@ref", source)
+    @test occursin("<code>unknown</code>", html)
+    @test occursin("```julia\njulia> 1 + 1\n2\n```", source)
+    @test occursin("class=\"language-julia\"", html)
+
+    parsed = Base.Docs.docstr(md"Parsed already, with [`reduce`](@ref).", data())
+    @test occursin("[`reduce`](/reduce)", repr("text/markdown", SemanticProse(parsed; references)))
+    @test parsed.object isa Markdown.MD
+
+    # A real binding: each stored docstring is its own prose, and `@doc` holds them all.
+    stored = Base.Docs.meta(Base)[Base.Docs.Binding(Base, :sum)]
+    each = [repr("text/markdown", SemanticProse(stored.docs[sig])) for sig in stored.order]
+    @test length(each) > 1
+    @test allunique(each)
+    whole = repr("text/markdown", SemanticProse(@doc(sum)))
+    @test all(text -> occursin(first(split(text, '\n')), whole), each)
+end
+
 @testitem "doctests use Julia highlighting without changing authored source or code" tags=[:unit] begin
     using HTMXObjects
     for info in ("jldoctest", "jldoctest named", "jldoctest; output = false", "JLDOCtest named; filter = f")
