@@ -16889,38 +16889,6 @@ function _route_path(prefix::AbstractString, name::Symbol, param_strs::AbstractV
     isempty(segs) ? "/" : "/" * join(segs, "/")
 end
 
-# The value a type annotation captured in `meta(T)` names in `mod`
-# (`name::Symbol`, `stage::Stage`, `m::Mod.T`, `xs::Vector{Int}`), found by
-# looking names up rather than by `Core.eval`. While a package image is being
-# written, Julia refuses `Core.eval` into every module but the one being
-# compiled (`jl_check_open_for`), even for a side-effect-free name. Route
-# registration runs there whenever an app package's `__init__` calls `route!`
-# and another package that depends on it is precompiled, and whenever a
-# `@compile_workload` routes an app that mounts another package's page
-# (snag `route-registrati-3c241ef5`). A form a lookup cannot express (a call,
-# `where`, a `<:` parameter) still evaluates, which works at run time; while an
-# image is written into a closed module, it is refused with the way out.
-_lookup_annotation(mod::Module, ex::Symbol) = getglobal(mod, ex)
-_lookup_annotation(::Module, ex::GlobalRef) = getglobal(ex.mod, ex.name)
-_lookup_annotation(::Module, ex::QuoteNode) = ex.value
-_lookup_annotation(::Module, ex) = ex  # a literal: `3` in `NTuple{3,Int}`, an interpolated type
-function _lookup_annotation(mod::Module, ex::Expr)
-    if ex.head === :. && length(ex.args) == 2 && ex.args[2] isa QuoteNode
-        return getproperty(_lookup_annotation(mod, ex.args[1]), ex.args[2].value)
-    elseif ex.head === :curly && !any(a -> Meta.isexpr(a, (:<:, :>:)), ex.args)
-        return Core.apply_type(Any[_lookup_annotation(mod, a) for a in ex.args]...)
-    end
-    try
-        Core.eval(mod, ex)
-    catch err
-        err isa ErrorException && occursin("closed module", err.msg) || rethrow()
-        throw(ArgumentError("the type annotation `$ex` in $mod needs evaluating, " *
-            "and Julia evaluates into no other package's module while a package " *
-            "image is written. Name it — `const T = $ex` in $mod, then `x::T` — " *
-            "since HTMXObjects resolves `T`, `Mod.T` and `T{…}` annotations by name."))
-    end
-end
-
 # Compute the URL prefix and the chain step (`(name, types)`) for a nested
 # include. For non-indexed includes the prefix gains one segment (`/<name>`)
 # and the step has empty `types`. For indexed includes (`@include sub(x::T) = …`)
@@ -16937,7 +16905,13 @@ function _nested_prefix_and_step(OwnerT, name::Symbol, info, prefix::AbstractStr
         nm = first(DynamicObjects.extractnames(ex))
         push!(pos_idx_names, string(nm))
         type_expr = Meta.isexpr(ex, :(::)) && length(ex.args) == 2 ? ex.args[2] : nothing
-        push!(types, isnothing(type_expr) ? nothing : _lookup_annotation(mod, type_expr))
+        # A lookup, not `Core.eval`: while a package image is written, Julia
+        # refuses evaluation into every module but the one being compiled, and
+        # route registration runs there when an app's `__init__` calls `route!`
+        # or a `@compile_workload` routes another package's page (snag
+        # `route-registrati-3c241ef5`).
+        push!(types, isnothing(type_expr) ? nothing :
+                     DynamicObjects.resolve_annotation(mod, type_expr))
     end
     # Drop `:index` from the URL segment — mirrors `_route_path`'s
     # `name === :index || push!(segs, string(name))` rule. So
@@ -17831,7 +17805,7 @@ function _reflect_resolve_type(mod, ty)
     # matching DO `property_signature`'s type contract. Serves the @param path;
     # the call-sig path resolves via DO directly (see `_reflect_call_params`).
     # A lookup, not an eval, so it still resolves while an image is written.
-    try _lookup_annotation(mod, ty) catch; nothing end
+    try DynamicObjects.resolve_annotation(mod, ty) catch; nothing end
 end
 
 # Source bucket for request-parsed params by HTTP method — mirrors the
