@@ -2460,6 +2460,8 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     for ri in route_info
         push!(block.args[1].args, _generate_extract_args(type_name, ri.prop_name, ri.verb, ri.pos_params, ri.kw_params,
                                                          ri.rest_kw, param_names))
+        push!(block.args[1].args, _generate_route_keywords(type_name, ri.prop_name, ri.verb,
+                                                           ri.kw_params, ri.rest_kw))
     end
     # Emit the child-type methods for @include externals.
     # (Inline `@struct` children are emitted by DO's macro itself, on the same
@@ -2740,6 +2742,23 @@ end
 
 # Dispatch target for generated route arg extraction methods.
 function _extract_args end
+
+# Generate `_route_keywords(::Type{T}, ::Val{name}, ::Verb{V}) = (names, rest)`
+# for one route: the keyword names it declares, in order, and whether it ends
+# in a keyword splat (`fields...`), which takes every other submitted field.
+# `_check_undeclared_params` reads it; it is keyed exactly like `_extract_args`,
+# so a route that has one has the other.
+function _generate_route_keywords(type_name, prop_name, verb, kw_params, rest_kw)
+    _M = @__MODULE__
+    _fname = Expr(:., _M, QuoteNode(:_route_keywords))
+    _verb_ann = Expr(:(::), Expr(:curly, GlobalRef(_M, :Verb), QuoteNode(_verb_short(verb))))
+    _call = Expr(:call, _fname,
+        :(::Type{$type_name}), :(::Val{$(QuoteNode(prop_name))}), _verb_ann)
+    Expr(:(=), _call, QuoteNode((Tuple(Symbol[first.(kw_params)...]), rest_kw !== nothing)))
+end
+
+# Dispatch target for the generated per-route keyword lists.
+function _route_keywords end
 
 
 """
@@ -10213,6 +10232,130 @@ function _collect_rest_params!(kw, src, fallback, bound)
     kw
 end
 
+# What a request's parameters that its route does not take get: the mount
+# chain's `__undeclared_params__`, the innermost declaration winning as for
+# `__lang__`. `:ignore` (no declaration) drops them, as routes always have;
+# `:warn` answers as before and logs one warning; `:refuse` answers 400
+# (`UndeclaredParams`). `allow` names parameters the whole app accepts.
+struct _UndeclaredParamsPolicy
+    action::Symbol
+    allow::Vector{String}
+end
+const _UNDECLARED_PARAM_ACTIONS = (:ignore, :warn, :refuse)
+const _IGNORE_UNDECLARED_PARAMS = _UndeclaredParamsPolicy(:ignore, String[])
+
+function _undeclared_params_policy(objects)
+    policy = _IGNORE_UNDECLARED_PARAMS
+    for obj in objects
+        declared = _page_declaration(obj, :__undeclared_params__)
+        isnothing(declared) || (policy = _undeclared_params_value(obj, declared))
+    end
+    policy
+end
+
+_undeclared_params_value(obj, action::Symbol) =
+    _UndeclaredParamsPolicy(_undeclared_params_action(obj, action, action), String[])
+function _undeclared_params_value(obj, declared::NamedTuple)
+    all(in((:action, :allow)), keys(declared)) && haskey(declared, :action) ||
+        _undeclared_params_error(obj, declared)
+    allow = get(declared, :allow, ())
+    allow isa Union{Tuple,AbstractVector} &&
+        all(n -> n isa Union{Symbol,AbstractString}, allow) ||
+        _undeclared_params_error(obj, declared)
+    _UndeclaredParamsPolicy(_undeclared_params_action(obj, declared.action, declared),
+                            String[String(n) for n in allow])
+end
+_undeclared_params_value(obj, declared) = _undeclared_params_error(obj, declared)
+_undeclared_params_action(obj, action::Symbol, declared) =
+    action in _UNDECLARED_PARAM_ACTIONS ? action : _undeclared_params_error(obj, declared)
+_undeclared_params_action(obj, action, declared) = _undeclared_params_error(obj, declared)
+_undeclared_params_error(obj, got) = throw(ArgumentError(string(
+    "`__undeclared_params__` on ", nameof(typeof(obj)), " must be :ignore, :warn or :refuse, ",
+    "or (; action, allow) with one of them as `action` and a tuple of parameter names as `allow`, ",
+    "or nothing to keep the enclosing struct's; got ", repr(got))))
+
+# Names the framework reads on any route (`_reserved_param_name`: `plain`,
+# `markdown`, `error`, `v`, every `__` protocol name), and `tab`, which a
+# semantic page reads from its address to open a tab. Never undeclared.
+_framework_param_name(key::AbstractString) = _reserved_param_name(key) || key == "tab"
+
+# A page load: a GET that asks for HTML (a browser navigation) or htmx's
+# history restore. Its query string is the page's own address, where a tab
+# bar, `url_params` and `gallery_grid` keep view state for the page's scripts
+# that the page's route does not take, so it is never checked.
+_page_load_request(req::HTTP.Request) =
+    req.method == "GET" && _operation_rich_page_request(req)
+
+_reads_query_only(::Union{Verb{:GET},Verb{:DELETE},Verb{:WEBSOCKET},Verb{:SSE}}) = true
+_reads_query_only(::Verb) = false
+
+# The parameter names a request submits where its route reads them: the query
+# string, and for POST/PUT/PATCH also the body when it is a form. A body says
+# so with its Content-Type (urlencoded or multipart); a body without one is a
+# form only for a route that reads form fields (`reads_form`), as
+# `_generate_extract_args` builds its sources only then. A JSON or other raw
+# body submits no names.
+function _submitted_param_names(req::HTTP.Request, verb::Verb, reads_form::Bool)
+    names = String[String(k) for k in keys(queryparams(req))]
+    _reads_query_only(verb) && return names
+    ct = lowercase(HTTP.header(req, "Content-Type", ""))
+    form = occursin("application/x-www-form-urlencoded", ct) ||
+        occursin("multipart/form-data", ct) || (isempty(ct) && reads_form)
+    form || return names
+    for key in keys(bodyparams(req))
+        key = String(key)
+        key in names || push!(names, key)
+    end
+    names
+end
+
+_push_unique!(names::Vector{String}, name) =
+    (s = String(name); s in names || push!(names, s); names)
+
+"""
+    _check_undeclared_params(target, LeafT, name, verb, req)
+
+Apply the mount chain's `__undeclared_params__` to one request, before its
+arguments are parsed (so a misspelled required keyword is named as the unknown
+parameter it is). Nothing happens under `:ignore`, for a page load
+(`_page_load_request`), or for a route with a keyword splat, which takes every
+field. Otherwise the submitted names (`_submitted_param_names`) are compared
+with what the route takes: its keywords, the `@param`s of every struct in
+`target.objects` (inline and external mounts alike), its semantic context
+inputs, the policy's `allow`, and the framework's own names
+(`_framework_param_name`). Any other name is undeclared: `:warn` logs it,
+`:refuse` throws `UndeclaredParams`. A mutation's result poll and a semantic
+form refresh never get here (`_run_operation` answers them first).
+"""
+function _check_undeclared_params(target, LeafT, name::Symbol, verb::Verb, req::HTTP.Request)
+    objects = get(target, :objects, Any[target.leaf])
+    policy = _undeclared_params_policy(objects)
+    policy.action === :ignore && return nothing
+    _page_load_request(req) && return nothing
+    keywords, rest = _route_keywords(LeafT, Val(name), verb)
+    rest && return nothing
+    params = String[]
+    for obj in objects, param in Base.invokelatest(_param_names, typeof(obj))
+        _push_unique!(params, param)
+    end
+    submitted = _submitted_param_names(req, verb, !isempty(keywords) || !isempty(params))
+    isempty(submitted) && return nothing
+    accepted = String[String(k) for k in keywords]
+    foreach(p -> _push_unique!(accepted, p), params)
+    descriptor = _property_descriptor(LeafT, name, _verb_symbol(verb))
+    foreach(input -> _push_unique!(accepted, input.name), _operation_context_inputs(descriptor))
+    foreach(n -> _push_unique!(accepted, n), policy.allow)
+    unknown = sort!([key for key in submitted
+                     if !(key in accepted) && !_framework_param_name(key)])
+    isempty(unknown) && return nothing
+    err = UndeclaredParams(unknown, accepted)
+    if policy.action === :warn
+        @warn sprint(showerror, err) method=req.method path=first(split(req.target, '?')) _group=:undeclared_params
+        return nothing
+    end
+    throw(err)
+end
+
 # A submitted option carries only its stable wire value. Recover the
 # actual machine object from the bound, lazily evaluated `__options__` property
 # before the ordinary parser sees it. This is essential for node-valued domains
@@ -12729,9 +12872,27 @@ struct InvalidParamValue <: Exception
     reason::String
 end
 Base.showerror(io::IO, e::InvalidParamValue) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
+
+"""
+    HTMXObjects.UndeclaredParams(names, accepted)
+
+A request submitted query or form parameters that its route does not take
+(`names`, sorted), in an app whose mount chain declares
+`__undeclared_params__ = :refuse`. It is answered `400 Bad Request` like a
+missing required parameter, and its message names `names` and the parameters
+the route does take (`accepted`: its keywords, the `@param`s of every struct
+from the root to the route, its semantic context inputs, then the declaration's
+`allow` names). See `__undeclared_params__` in the API reference.
+"""
+struct UndeclaredParams <: Exception
+    names::Vector{String}
+    accepted::Vector{String}
+end
+Base.showerror(io::IO, e::UndeclaredParams) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
+
 # Every submitted-value fault: answered 400, titled with the app's 400 reason
 # phrase (`Bad Request` in English).
-const _SubmittedValueFault = Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue}
+const _SubmittedValueFault = Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue,UndeclaredParams}
 
 """
     CallerFault(status, message)
@@ -12905,6 +13066,9 @@ A text in braces is a placeholder the framework fills in: `server_fault` and
 parameter has a closed domain by `"; "` and `allowed_values` with `{allowed}`,
 or when its declared type rejected the value by `"; "` and `expected_type` with
 `{type}` (then the parser's own reason, as Julia writes it, in parentheses);
+`unknown_params` takes `{names}`, the parameters a route does not take (under
+`__undeclared_params__ = :refuse`), followed by `"; "` and `accepted_params`
+with `{accepted}`, or `no_params` when the route takes none;
 `result_unavailable_detail` takes `{verb}` and `{route}`; `stalled_detail` takes
 `{label}`, `{elapsed}` and `{bound}`, followed by `stalled_rerun` for a read or
 `stalled_not_repeated` (`{verb}`) for a mutation; `loading_named` takes
@@ -12921,6 +13085,9 @@ struct ErrorTexts
     invalid_value::String              # a submitted value is outside its domain
     allowed_values::String             # ... and the values it takes
     expected_type::String              # ... or the type it must parse as
+    unknown_params::String             # parameters a route does not take
+    accepted_params::String            # ... and the parameters it does take
+    no_params::String                  # ... or that it takes none
     result_unavailable::String         # heading: a mutation's result is gone
     result_unavailable_detail::String
     stalled::String                    # heading: an operation passed its stall bound
@@ -12943,6 +13110,7 @@ end
 const _ERROR_TEXT_PLACEHOLDERS = (
     server_fault = (:id,), error_id = (:id,), missing_param = (:name,), invalid_value = (:name, :value),
     allowed_values = (:allowed,), expected_type = (:type,),
+    unknown_params = (:names,), accepted_params = (:accepted,),
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
     loading_named = (:label,),
@@ -12958,6 +13126,9 @@ const _ERROR_TEXT_LOCALES = (
         invalid_value = "Invalid value for parameter {name}: {value}",
         allowed_values = "allowed values: {allowed}",
         expected_type = "expected {type}",
+        unknown_params = "Unknown parameter: {names}",
+        accepted_params = "accepted parameters: {accepted}",
+        no_params = "no parameters accepted",
         result_unavailable = "Result unavailable",
         result_unavailable_detail = "The result of this {verb} {route} submission is no longer available. It ran at most once and was not repeated; reload to see the current state.",
         stalled = "Operation stalled",
@@ -12985,6 +13156,9 @@ const _ERROR_TEXT_LOCALES = (
         invalid_value = "Ungültiger Wert für {name}: {value}",
         allowed_values = "zulässige Werte: {allowed}",
         expected_type = "erwartet {type}",
+        unknown_params = "Unbekannte Angabe: {names}",
+        accepted_params = "zulässige Angaben: {accepted}",
+        no_params = "keine Angaben zulässig",
         result_unavailable = "Ergebnis nicht mehr verfügbar",
         result_unavailable_detail = "Das Ergebnis dieser Übermittlung ({verb} {route}) ist nicht mehr verfügbar. Sie wurde höchstens einmal ausgeführt und nicht wiederholt; laden Sie die Seite neu, um den aktuellen Stand zu sehen.",
         stalled = "Vorgang hängt",
@@ -13099,6 +13273,10 @@ function _caller_fault_message(e::InvalidParamValue, texts::ErrorTexts)
         "; ", _fill_text(texts.expected_type; type=e.type))
     isempty(e.reason) ? message : string(message, " (", e.reason, ")")
 end
+_caller_fault_message(e::UndeclaredParams, texts::ErrorTexts) =
+    string(_fill_text(texts.unknown_params; names=join(e.names, ", ")), "; ",
+        isempty(e.accepted) ? texts.no_params :
+            _fill_text(texts.accepted_params; accepted=join(e.accepted, ", ")))
 _caller_fault_message(e::CallerFault, ::ErrorTexts) = e.message
 _caller_fault_message(e::OperationResultUnavailable, texts::ErrorTexts) =
     _fill_text(texts.result_unavailable_detail; verb=e.verb, route=e.route)
@@ -16525,6 +16703,7 @@ function _run_operation(target, LeafT, name::Symbol, verb_inst::Verb,
         return (; context=target.context, root=target.root, leaf=target.leaf,
                   idx_vals=(), kw_pairs=Pair{Symbol,Any}[], value)
     end
+    _check_undeclared_params(target, LeafT, name, verb_inst, req)
     idx_vals, kw_pairs = _extract_args(LeafT, Val(name), verb_inst, req, base, n_params)
     verb = _verb_symbol(verb_inst)
     descriptor = _property_descriptor(LeafT, name, verb)

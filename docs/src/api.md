@@ -1360,6 +1360,59 @@ ErrorTexts
 error_texts
 ```
 
+### Parameters a route does not take {#undeclared-params}
+
+A route binds the parameters it declares. By default a query or form
+parameter it does not declare is dropped, and the route answers with its
+defaults: `?raw=1&field=command` on `@get row(id; raw="")` answers as if
+`field` had not been sent, and a `reason=` posted to
+`@post mark(id; to, note="")` stores an empty note. An app can refuse such a
+parameter instead, once, on its root struct:
+
+```julia
+@htmx struct App
+    __undeclared_params__ = (; action=:refuse, allow=("from", "by"))
+    @param lang::String = "en"
+    @include rows = Rows()
+end
+```
+
+`__undeclared_params__` is read along the mount chain like `__lang__`: the
+innermost declaration wins, so one line on the root covers every mounted
+struct, and a mounted struct can declare its own. It takes `:ignore` (the
+default without a declaration: drop them), `:warn` (answer as before and log
+one warning per request naming them), or `:refuse`, either alone or as
+`(; action, allow)`, where `allow` lists parameter names the whole app accepts.
+Any other value is the route's error, naming the struct.
+
+Under `:refuse` such a request answers **400 Bad Request** like a missing
+required parameter (`HTMXObjects.UndeclaredParams`), with a message that names
+the unknown parameters and the ones the route takes:
+`Unknown parameter: field; accepted parameters: raw, lang, from, by`. A route
+takes its keywords, the `@param`s of every struct from the root down to its
+own, its semantic context inputs, the `allow` names, and the names the
+framework reads itself: `plain`, `markdown`, `error`, `v`, `tab` and every
+`__`-prefixed name. The check runs before the arguments are parsed, so a
+misspelled required keyword is named as the unknown parameter it is. `:warn`
+is the way to find out what an app's own pages and clients send before
+switching to `:refuse`.
+
+What is checked:
+
+- The query string, and for `POST`/`PUT`/`PATCH` also a form body: one whose
+  `Content-Type` is urlencoded or multipart, or one without a `Content-Type`
+  sent to a route that reads form fields. A JSON or other raw body sends no
+  parameters. A name counts even with an empty value.
+- Not a route with a keyword splat (`@post create(; template, fields...)`):
+  it takes every field, so it is how one route accepts what the app refuses.
+- Not a page load: a `GET` that asks for HTML (a browser opening the page) or
+  htmx's history restore. Its query string is the page's own address, where a
+  `tabset`, [`url_params`](#page-address-parameters) and `gallery_grid` keep
+  view state that the page's route does not take.
+  The same address fetched by a script or by `dispatch` is checked.
+- Not a mutation's result poll or a semantic form refresh, which carry none of
+  the route's fields.
+
 ## Semantic applications
 
 `semantic_app` turns one mounted semantic graph into the ordinary operation
@@ -2695,9 +2748,13 @@ declared type rejects the value: `?n=abc` for `n::Int`, `?b=300` for
 the value and the expected type) map to **400** on a non-HTMX request and
 render a `Bad Request` article; under HTMX they too stay 200. This holds
 wherever the value is converted: a route keyword or path parameter, `@param`,
-`@header`, or an indexed `@include` segment. Like every error answer they are
+`@header`, or an indexed `@include` segment. `HTMXObjects.UndeclaredParams`
+(raised under `__undeclared_params__ = :refuse` when a request sends a
+parameter its route does not take; see
+[Parameters a route does not take](#undeclared-params)) is answered the same
+way. Like every error answer they are
 recorded: an error log whose header says `status:    400`, the error id in the
-article and in `X-HTMXO-Error-Id`, and `__on_error__`. None of the three is
+article and in `X-HTMXO-Error-Id`, and `__on_error__`. None of the four is
 exported, so catching one needs the qualified name. A declared type with no
 `parse` method at all is not a caller fault but a declaration bug, and stays a
 500. A route body raises its own
