@@ -1,26 +1,36 @@
-@testitem "index annotations are looked up, not evaluated" setup=[HTMXOTestImports] tags=[:unit] begin
-    # `_lookup_annotation` resolves what `@include item(x::T)` captured without
-    # `Core.eval`, which Julia refuses into a closed module while an image is
-    # written (snag `route-registrati-3c241ef5`).
-    lookup = HTMXObjects._lookup_annotation
+@testitem "index and @param annotations resolve without evaluating" setup=[HTMXOTestImports] tags=[:unit] begin
+    # Both places HTMXObjects reads an annotation go through
+    # `DynamicObjects.resolve_annotation`, which looks names up instead of
+    # `Core.eval`, refused into a closed module while an image is written
+    # (snag `route-registrati-3c241ef5`): `_nested_prefix_and_step` for
+    # `@include item(x::T)` and `_reflect_resolve_type` for `@param` types.
     m = Module(:AnnotationOwner)
     Core.eval(m, :(struct Stage end))
+    Core.eval(m, :(struct Owner end))
     Core.eval(m, :(const Key = Symbol))
     Core.eval(m, :(module Inner struct Deep end end))
-    @test lookup(m, :Symbol) === Symbol
-    @test lookup(m, :Stage) === m.Stage
-    @test lookup(m, :Key) === Symbol
-    @test lookup(m, :(Inner.Deep)) === m.Inner.Deep
-    @test lookup(m, :(Vector{Stage})) === Vector{m.Stage}
-    @test lookup(m, :(Union{Int,Nothing})) === Union{Int,Nothing}
-    @test lookup(m, :(NTuple{3,Int})) === NTuple{3,Int}
-    @test lookup(m, :(Val{:a})) === Val{:a}
-    @test lookup(m, GlobalRef(Base, :Int)) === Int
-    @test lookup(m, Float64) === Float64
-    # A form a lookup cannot express still evaluates outside image generation.
-    @test lookup(m, :(typeof(1))) === Int
-    @test lookup(m, :(Vector{<:Real})) == Vector{<:Real}
-    @test_throws UndefVarError lookup(m, :NoSuchType)
+    forms = Any[:Symbol, :Stage, :Key, :(Inner.Deep), :(Vector{Stage}),
+                :(Union{Int,Nothing}), :(NTuple{3,Int}), :(Val{:a}),
+                GlobalRef(Base, :Int), Float64,
+                # forms HTMXObjects' own copy (0.1.82) still evaluated
+                :(typeof(1)), :(Vector{<:Real}), :(Vector{T} where T<:Integer)]
+    expected = Any[Symbol, m.Stage, Symbol, m.Inner.Deep, Vector{m.Stage},
+                   Union{Int,Nothing}, NTuple{3,Int}, Val{:a}, Int, Float64,
+                   Int, Vector{<:Real}, Vector{T} where T<:Integer]
+    indices = Any[Expr(:(::), Symbol(:x, i), f) for (i, f) in enumerate(forms)]
+    prefix, step = HTMXObjects._nested_prefix_and_step(m.Owner, :item, (; indices), "")
+    @test prefix == "item/" * join(("{x$i}" for i in eachindex(forms)), "/")
+    for (got, want, form) in zip(step.types, expected, forms)
+        @test got == want
+    end
+    resolve = HTMXObjects._reflect_resolve_type
+    for (form, want) in zip(forms, expected)
+        @test resolve(m, form) == want
+    end
+    # An unbound name maps to `nothing`, as in DO's `property_signature`.
+    @test resolve(m, :NoSuchType) === nothing
+    @test_throws UndefVarError HTMXObjects._nested_prefix_and_step(
+        m.Owner, :item, (; indices=Any[:(x::NoSuchType)]), "")
 end
 
 @testitem "an app's routes register while a package image is written" setup=[HTMXOTestImports] tags=[:integration, :precompile] begin
@@ -39,6 +49,10 @@ end
             @direct @get index() = "owner"
             @include item(name::Symbol) = begin
                 @direct @get source() = "item:" * repr(name)
+            end
+            # A call: HTMXObjects 0.1.82 still evaluated this form.
+            @include nth(n::typeof(1)) = begin
+                @direct @get source() = "nth:" * string(n + 1)
             end
         end
         end
@@ -63,7 +77,8 @@ end
         using HTMXObjects, ImageRouteApp
         const GENERATING = ccall(:jl_generating_output, Cint, ())
         const ANSWERS = (String(dispatch(:GET, "/row/41/source").body),
-                         String(dispatch(:GET, "/data/item/abc/source").body))
+                         String(dispatch(:GET, "/data/item/abc/source").body),
+                         String(dispatch(:GET, "/data/nth/6/source").body))
         end
         """)
         write(joinpath(dir, "ImageRouteWorkload.jl"), """
@@ -110,7 +125,7 @@ end
         @test finished
         @test ok
         @test !contains(text, "closed module")
-        @test contains(text, """[fixture] downstream answered 1 ("row:42", "item::abc")""")
+        @test contains(text, """[fixture] downstream answered 1 ("row:42", "item::abc", "nth:7")""")
         @test contains(text, "[fixture] workload answered item::xyz")
     end
 end

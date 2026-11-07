@@ -91,11 +91,11 @@ version = "1.6.0"
 
 [[deps.DynamicObjects]]
 deps = ["Malt", "Mmap", "SHA", "ScopedValues", "Serialization", "Treebars"]
-git-tree-sha1 = "eaea060013fb1ab65c3b64545734e899a11f3296"
-repo-rev = "3713189125737a4170b0af4aeeb4f297d9582a40"
+git-tree-sha1 = "066db2b9dc33bc02ec0b2e3c1284dbd280995a55"
+repo-rev = "a763fd4d2c18e693175fa09445eb7df67723ae0f"
 repo-url = "https://github.com/nsiccha/DynamicObjects.jl.git"
 uuid = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
-version = "0.5.13"
+version = "0.5.14"
 
     [deps.DynamicObjects.extensions]
     DataFramesArrowExt = ["Arrow", "DataFrames"]
@@ -128,7 +128,7 @@ version = "1.1.0"
 deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "JSON", "LazyArtifacts", "LibGit2", "MIMEs", "Markdown", "REPL", "Random", "ScopedValues", "Sockets", "Tables"]
 path = ".."
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
-version = "0.1.80"
+version = "0.1.83"
 weakdeps = ["Treebars"]
 
     [deps.HTMXObjects.extensions]

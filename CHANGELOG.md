@@ -14,6 +14,18 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.83
+
+- Index and `@param` annotations resolve through `DynamicObjects.resolve_annotation`
+  (DynamicObjects 0.5.14), so every annotation form resolves while a package image is
+  written, not only `x::T`, `x::Mod.T` and `x::T{…}`: a call (`x::typeof(y)`), a `<:`
+  or `>:` parameter (`xs::Vector{<:Real}`), a `where` clause, a tuple and a macro call
+  (`x::@NamedTuple{a::Int}`) too. Only syntax that resolver cannot express still
+  evaluates; while an image is written into a closed module that is refused with an
+  `ArgumentError` saying to name the annotation (`const T = …`, then `x::T`).
+  HTMXObjects' own resolver from 0.1.82 is gone. `[compat] DynamicObjects` is now
+  `0.5.14`.
+
 ## 0.1.82
 
 - `route!` registers an app while a package image is written. An app package whose
