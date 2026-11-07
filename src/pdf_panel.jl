@@ -1,10 +1,11 @@
 # --- PDF panel: a document beside the text, its quoted passages marked ---
 #
 # A side panel that shows a PDF (every page one below the other, each drawn by
-# PDF.js as it comes into view) beside the content that quotes it. The
-# references in the content (`pdf_ref`) name the file, the page and the quoted
-# words; each reference's passage is marked on its page, in the reference's
-# colour. Every reference and mark is always lightly highlighted; pointing at
+# PDF.js as it comes into view) or an HTML document (a fragment the app serves,
+# loaded with an htmx GET) beside the content that quotes it. The references in
+# the content (`pdf_ref`) name the document, the page or anchor and the quoted
+# words; each reference's passage is marked in the document, in the
+# reference's colour. Every reference and mark is always lightly highlighted; pointing at
 # one shows it and its counterpart more strongly without moving anything; only
 # a click moves: a reference's click opens the panel at its passage, a mark's
 # click goes to its reference. References, marks and any linked table rows
@@ -19,7 +20,8 @@ The words of a [`pdf_panel`](@ref): its accessible name and
 and `no_match` when no document matches), the page line (`page`, with
 `{page}` and `{pages}`), the bar's buttons (`previous_page`, `next_page`,
 `colours`, `colours_help`, `open_file`, `close`) and the status line
-(`loading`, `failed`, `not_found`, `empty`).
+(`loading`, `failed`, `not_found` on a PDF's page, `not_in_document` in an
+HTML document, `empty`).
 Build one with [`pdf_panel_texts`](@ref).
 """
 struct PdfPanelTexts
@@ -37,6 +39,7 @@ struct PdfPanelTexts
     loading::String         # status: the file is loading
     failed::String          # status: the file could not be shown (the error follows)
     not_found::String       # status: the quoted words are not on the page
+    not_in_document::String # status: the quoted words are not in the HTML document
     empty::String           # status: the panel opened before any reference
 end
 
@@ -58,6 +61,7 @@ const _PDF_TEXT_LOCALES = (
         loading = "Loading the document …",
         failed = "The file could not be shown",
         not_found = "The quoted words were not found on this page",
+        not_in_document = "The quoted words were not found in this document",
         empty = "No document yet: a reference opens its document here.",
     ),
     de = (
@@ -75,6 +79,7 @@ const _PDF_TEXT_LOCALES = (
         loading = "Dokument wird geladen …",
         failed = "Die Datei konnte nicht angezeigt werden",
         not_found = "Die zitierten Worte stehen nicht auf dieser Seite",
+        not_in_document = "Die zitierten Worte stehen nicht in diesem Dokument",
         empty = "Noch kein Dokument: Ein Verweis öffnet sein Dokument hier.",
     ),
 )
@@ -117,18 +122,42 @@ function _pdf_file_name(url::AbstractString)
     isempty(name) ? String(url) : String(name)
 end
 
-_pdf_document(url::AbstractString) = (_pdf_file_name(url), _pdf_url(url))
-_pdf_document(d::Pair{<:AbstractString,<:AbstractString}) = (String(first(d)), _pdf_url(last(d)))
+# What a document is: a PDF, drawn by PDF.js, or an HTML document, a fragment
+# the panel loads with an htmx GET. LOCKSTEP: `kindOf` in the script, and the
+# static export's `_static_panel_url` in HTMXObjects.jl.
+const _PDF_KINDS = (:pdf, :html)
+const _PDF_KIND_ATTR = Symbol("data-htmxo-pdf-kind")
+_pdf_kind(fname, kind) = kind in _PDF_KINDS ? kind : throw(ArgumentError(
+    "$fname: `kind` is :pdf or :html, got $(repr(kind))"))
+# An element the static export reads as one that loads an HTML document.
+_pdf_html(attrs) = get(attrs, _PDF_KIND_ATTR, "") == "html"
+
+# A document of the panel as (title, address, kind).
+_pdf_document(url::AbstractString) = (_pdf_file_name(url), _pdf_url(url), :pdf)
+_pdf_document(d::Pair{<:AbstractString,<:AbstractString}) = (String(first(d)), _pdf_url(last(d)), :pdf)
+function _pdf_document(d::NamedTuple)
+    haskey(d, :url) && d.url isa AbstractString && !isempty(d.url) && all(in((:url, :title, :kind)), keys(d)) ||
+        throw(ArgumentError("pdf_panel: a document record is `(; url, title, kind)` with a non-empty `url`, got $(repr(d))"))
+    title = get(d, :title, nothing)
+    title === nothing || title isa AbstractString || throw(ArgumentError(
+        "pdf_panel: a document's `title` is a string, got $(repr(title))"))
+    (title === nothing ? _pdf_file_name(d.url) : String(title), _pdf_url(d.url),
+     _pdf_kind("pdf_panel", get(d, :kind, :pdf)))
+end
 _pdf_document(d) = throw(ArgumentError(
-    "pdf_panel: a document is its address or `title => address`, got $(repr(d))"))
+    "pdf_panel: a document is its address, `title => address` or `(; url, title, kind)`, got $(repr(d))"))
 
 """
     pdf_panel(documents=(); id, link=id, texts=nothing, pdfjs, class="", assets=true)
 
-A side panel that shows a PDF beside the content that quotes it: every page of
-the file one below the other, each drawn as it comes into view (PDF.js, loaded
-from jsDelivr the first time the panel opens), with the passage of every
-[`pdf_ref`](@ref) to the file marked on its page in the reference's colour.
+A side panel that shows a document beside the content that quotes it, with
+the passage of every [`pdf_ref`](@ref) to it marked in the reference's colour.
+A PDF is every page of the file one below the other, each drawn as it comes
+into view (PDF.js, loaded from jsDelivr the first time the panel shows a PDF),
+each passage marked on its page. An HTML document (`kind=:html`) is the
+fragment its address answers to an htmx GET, as an [`htmx`](@ref) page would
+swap it in: its code is highlighted as the page highlights code, and each
+passage is marked over its words without changing the fragment.
 It starts closed. A reference's click opens it at its passage, a
 [`pdf_toggle`](@ref) shows and hides it, and its bar has the document chooser,
 the page line with previous and next page, "Colours" (each passage in its own
@@ -136,8 +165,11 @@ colour, or only the passages pointed at and gone to), a link that opens the
 file itself and a close button. [`pdf_beside`](@ref) places it beside the
 content, pinned while the content scrolls by.
 
-- `documents`: the files the chooser offers, each its address (named by its
-  file name) or `title => address`. A reference to a file not listed adds it.
+- `documents`: the documents the chooser offers, PDFs and HTML documents
+  together, each its address (a PDF named by its file name),
+  `title => address` (a PDF), or a record `(; url, title, kind)` whose `kind`
+  is `:pdf` (the default) or `:html`. A reference to a document not listed
+  adds it.
 - `id`: the panel's element id, which references and toggles name.
 - `link`: the hover-link group (`htmxo:link`) of the references, their
   marks and any table rows showing the same items; defaults to `id`.
@@ -182,7 +214,19 @@ beginning of them (at least 24 letters), comparing letters and digits only, so
 line breaks, hyphenation and quotes in the PDF do not matter. Where neither
 is on the page, the panel goes to the page's top and says so.
 
-Script hooks: `window.htmxoPdf.show(panel, {url, page, key})` and
+**An HTML document** has no pages: a reference names its place as the
+address's `#anchor` (an element id in the fragment, such as a heading's), and
+the panel opens there, or at the passage when the reference quotes words.
+The quoted words are looked for from the anchor on, then in the whole
+document, compared as for a PDF; where they are not there, the panel goes to
+the anchor (else the top) and says so. The page line and its buttons are
+hidden while an HTML document is shown. Its passages are boxes over the
+words, as on a PDF's page, and follow them when the panel's width changes or
+a script changes the fragment (code highlighted after it arrived). Its
+address answers the htmx GET (`HX-Request: true`) with a fragment, as an
+[`htmx`](@ref) route does; a failed answer is shown as the panel's failure.
+
+Script hooks: `window.htmxoPdf.show(panel, {url, page, key, kind, anchor})` and
 `window.htmxoPdf.toggle(panel, open)` (`panel` an element or its id). The
 panel dispatches `htmxo:pdf-toggle` (detail `{open}`) when it opens or
 closes, and a cancelable `htmxo:pdf-goto` (detail `{key, group}`) before a
@@ -196,7 +240,9 @@ The panel is HTML only: a Markdown answer leaves it out.
 rewritten as their links are: each reference's file, the lone document's and
 each chooser document's address. The panel therefore shows the file the
 export wrote, served from the bundle's root or a subdirectory, and
-`export_site` follows every one of them. A document keeps the title the live
+`export_site` follows every one of them. An HTML document's address is
+rewritten as an `hx-get` is, to the fragment the export writes below `hx/`,
+while a reference's link names the page. A document keeps the title the live
 page gives it. PDF.js still comes from `pdfjs` (by default jsDelivr), which is
 not rewritten.
 
@@ -204,8 +250,12 @@ not rewritten.
 @get bericht() = pdf_beside(
     h.article(h.p("Der Träger sichert den Kinderschutz ",
         pdf_ref("(Konzept, S. 12)", "/files/konzept.pdf"; page=12, panel="originale",
-                quoted="Kinderschutz ist Aufgabe aller Träger"), ".")),
-    pdf_panel(["Konzept" => "/files/konzept.pdf"]; id="originale"))
+                quoted="Kinderschutz ist Aufgabe aller Träger"), ".",
+        " Gemeldet wird binnen eines Tages ",
+        pdf_ref("(Verfahren)", "/verfahren#meldung"; kind=:html, panel="originale",
+                quoted="binnen eines Tages an das Jugendamt"), ".")),
+    pdf_panel(["Konzept" => "/files/konzept.pdf",
+               (title="Verfahren", url="/verfahren", kind=:html)]; id="originale"))
 ```
 """
 function pdf_panel(documents=(); id::AbstractString, link::AbstractString=id, texts=nothing,
@@ -213,16 +263,17 @@ function pdf_panel(documents=(); id::AbstractString, link::AbstractString=id, te
     isempty(id) && throw(ArgumentError("pdf_panel: `id` must not be empty"))
     isempty(link) && throw(ArgumentError("pdf_panel: `link` must not be empty"))
     t = _pdf_texts(texts)
-    docs = [_pdf_document(d) for d in (documents isa Union{AbstractString,Pair} ? (documents,) : documents)]
-    length(unique(last.(docs))) == length(docs) || throw(ArgumentError(
-        "pdf_panel: a document is listed twice: $(join(unique(filter(u -> count(==(u), last.(docs)) > 1, last.(docs))), ", "))"))
-    first_url = isempty(docs) ? nothing : last(first(docs))
+    docs = [_pdf_document(d) for d in (documents isa Union{AbstractString,Pair,NamedTuple} ? (documents,) : documents)]
+    urls = [url for (_, url, _) in docs]
+    length(unique(urls)) == length(docs) || throw(ArgumentError(
+        "pdf_panel: a document is listed twice: $(join(unique(filter(u -> count(==(u), urls) > 1, urls)), ", "))"))
+    first_url = isempty(docs) ? nothing : first(urls)
     panel = h.aside(; id, class=isempty(class) ? "htmxo-pdf-panel" : "htmxo-pdf-panel " * class,
                     hidden=true, aria_label=t.label, data_htmxo_pdf_viewer="", data_htmxo_pdf_link=link,
                     data_htmxo_pdfjs=endswith(pdfjs, '/') ? pdfjs : pdfjs * "/",
                     data_htmxo_pdf_hues="on",
                     data_text_page=t.page, data_text_loading=t.loading, data_text_failed=t.failed,
-                    data_text_not_found=t.not_found, data_text_empty=t.empty,
+                    data_text_not_found=t.not_found, data_text_not_in_document=t.not_in_document, data_text_empty=t.empty,
                     data_text_documents=t.documents, data_text_search=t.search, data_text_no_match=t.no_match)(
         (assets ? pdf_panel_assets() : ())...,
         h.div(; class="htmxo-pdf-bar")(
@@ -252,70 +303,118 @@ _pdf_choice_name(id::AbstractString) = "htmxo-pdf-document-" * id
 # `_RADIO_MAX` as for generated forms). The first document is the one chosen.
 # The script draws it again in these forms when a reference adds a file
 # (`redraw`), reading the threshold from `data-htmxo-pdf-pills`.
+#
+# An HTML document's title or radio says so (`data-htmxo-pdf-kind="html"`), so
+# the script loads it as one and a static export maps its address as a
+# fragment's.
 function _pdf_chooser(id::AbstractString, docs, t::PdfPanelTexts)
     name, n = _pdf_choice_name(id), length(docs)
-    first_url = n == 0 ? nothing : last(first(docs))
+    first_url = n == 0 ? nothing : docs[1][2]
+    kind(k) = k === :html ? "html" : nothing
     form = n == 0 ? () :
-        n == 1 ? (h.span(first(only(docs)); class="htmxo-pdf-title", data_htmxo_pdf_url=first_url),) :
-        n <= _RADIO_MAX ? (radio_group(name, [url => title for (title, url) in docs]; label=t.documents, value=first_url),) :
-        (_choice_list(name, t.documents, [(; value=url, label=title) for (title, url) in docs], first_url;
+        n == 1 ? (h.span(docs[1][1]; class="htmxo-pdf-title", data_htmxo_pdf_url=first_url,
+                         data_htmxo_pdf_kind=kind(docs[1][3])),) :
+        n <= _RADIO_MAX ? (radio_group(name, [url => title for (title, url, _) in docs]; label=t.documents, value=first_url),) :
+        (_choice_list(name, t.documents, [(; value=url, label=title) for (title, url, _) in docs], first_url;
                       texts=error_texts(:en; choice_search=t.search, choice_no_match=t.no_match)),)
+    html = Set(url for (_, url, k) in docs if k === :html)
+    n > 1 && !isempty(html) && (form = map(node -> _pdf_mark_html(node, html), form))
     h.div(; class="htmxo-pdf-documents", data_htmxo_pdf_document="", data_htmxo_pdf_pills=string(_RADIO_MAX))(form...)
 end
 
-"""
-    pdf_ref(text, url; page=1, panel, quoted=nothing, key=nothing, hue=nothing,
-            document=nothing, attrs...)
+# The chooser's radios of the HTML documents `html` (their addresses) marked
+# as such; everything else as it is.
+_pdf_mark_html(x, html) = x
+_pdf_mark_html(xs::AbstractVector, html) = Any[_pdf_mark_html(x, html) for x in xs]
+function _pdf_mark_html(node::Node, html::Set{String})
+    attrs = HTMX.attrs(node)
+    if HTMX.tag(node) === :input && get(attrs, :type, "") == "radio" && get(attrs, :value, nothing) in html
+        attrs = copy(attrs)
+        attrs[_PDF_KIND_ATTR] = "html"
+    end
+    Node(HTMX.tag(node), attrs, Any[_pdf_mark_html(child, html) for child in HTMX.children(node)])
+end
 
-A reference to a passage of a PDF: a link to `url` at `page` (`url#page=12`)
+"""
+    pdf_ref(text, url; page=nothing, panel, quoted=nothing, key=nothing, hue=nothing,
+            document=nothing, kind=:pdf, attrs...)
+
+A reference to a passage of a document: a link to `url` at `page`
+(`url#page=12`), or for an HTML document (`kind=:html`) to `url` as given,
 that, on a page with the [`pdf_panel`](@ref) `panel`, opens that panel at the
 passage instead, marked. It is a chip: always lightly highlighted in its
 colour, more strongly while pointed at, most strongly once clicked. A
 modified click (new tab, new window) and a page without the panel open the
-file itself. Its Markdown is the link, `[text](url#page=12)`.
+document itself. Its Markdown is the link, `[text](url#page=12)`.
 
-- `page`: the page the passage stands on, counted from 1 as a PDF viewer
-  counts, not the number printed on the page.
+- `page`: the page of a PDF the passage stands on, counted from 1 as a PDF
+  viewer counts, not the number printed on the page; 1 when not given. An
+  HTML document has no pages and refuses one.
+- `kind`: `:pdf` (the default) or `:html`, an HTML document the panel loads
+  with an htmx GET. The `#anchor` of its address (`/methodik#annahmen`) names
+  the element the passage stands in (a section's heading, say): the panel
+  opens there, and looks for the quoted words from there on first.
 - `quoted`: the quoted words. Every reference with a quote marks its passage
-  on its page; one without opens the page's top and marks nothing.
+  (on its page of a PDF); one without opens the page's top (the anchor, else
+  the top, of an HTML document) and marks nothing.
 - `key`: the passage's key in the panel's hover-link group. References with
   one key share one mark (the same passage quoted twice), and a table row
   keyed alike (`link=`, **Hover linking**) lights it too. It defaults to a
-  digest of `url`, `page` and `quoted`.
+  digest of `url`, `page` (or anchor) and `quoted`.
 - `hue`: the colour, 1 to 8, of HTMXObjects' categorical palette
   (`--htmxo-category-1` …); by default one picked from `key`, so a passage
   keeps its colour wherever it is quoted. Give neighbouring references
   different hues (`hue=mod1(i, 8)`) where they stand in a list.
-- `document`: the file's title in the panel's chooser when the panel does not
-  list it; by default its file name (as `url` names it, so a static export
+- `document`: the document's title in the panel's chooser when the panel does
+  not list it; by default its file name (as `url` names it, so a static export
   that gives the file another address titles it alike).
 - `attrs` go on the link (`class`, `title`, `id`, …).
 
 A reference inside a table row of the panel's link group takes the row's key:
 the row announces its key when pointed at, so give the reference the row's
 link key.
+
+```julia
+pdf_ref("(Annahmen)", "/methodik#annahmen"; kind=:html, panel="quellen",
+        quoted="die Fahrten je Zone folgen einer Poisson-Verteilung")
+```
 """
-function pdf_ref(text, url::AbstractString; page::Integer=1, panel::AbstractString, quoted=nothing,
-                 key=nothing, hue=nothing, document=nothing, attrs...)
+function pdf_ref(text, url::AbstractString; page=nothing, panel::AbstractString, quoted=nothing,
+                 key=nothing, hue=nothing, document=nothing, kind::Symbol=:pdf, attrs...)
     isempty(url) && throw(ArgumentError("pdf_ref: `url` must not be empty"))
     isempty(panel) && throw(ArgumentError("pdf_ref: `panel` must name the pdf_panel's id"))
-    page >= 1 || throw(ArgumentError("pdf_ref: `page` counts from 1, got $page"))
+    _pdf_kind("pdf_ref", kind)
+    html = kind === :html
+    html && page !== nothing && throw(ArgumentError(
+        "pdf_ref: an HTML document has no pages; name the passage's place as the address's `#anchor`, got page=$(repr(page))"))
+    page = something(page, 1)
+    page isa Integer && page >= 1 || throw(ArgumentError("pdf_ref: `page` counts from 1, got $(repr(page))"))
     quoted === nothing || quoted isa AbstractString || throw(ArgumentError(
         "pdf_ref: `quoted` is the quoted words as a string, got $(repr(quoted))"))
     quoted isa AbstractString && isempty(strip(quoted)) && (quoted = nothing)
     hue === nothing || (hue isa Integer && 1 <= hue <= _TALLY_PALETTE) || throw(ArgumentError(
         "pdf_ref: `hue` is a colour of the categorical palette, 1 to $_TALLY_PALETTE, got $(repr(hue))"))
     file = _pdf_url(url)
-    key = key === nothing ? (quoted === nothing ? nothing : _thread_digest(string(file, "#page=", page, "\n", quoted))) :
+    # An HTML document's place is its address's own fragment; a PDF's is its page.
+    anchor = html ? _pdf_anchor(url) : nothing
+    place = html ? (anchor === nothing ? "" : "#" * anchor) : string("#page=", page)
+    key = key === nothing ? (quoted === nothing ? nothing : _thread_digest(string(file, place, "\n", quoted))) :
         string(key)
     hue = hue === nothing ? (key === nothing ? nothing : Int(_fnv1a(key) % _TALLY_PALETTE) + 1) : Int(hue)
     # The title is named here, from the address the app serves, so a static
     # export (which gives the file another address) titles it as the live page.
-    h.a(; href=string(file, "#page=", page), data_htmxo_pdf_ref="", data_htmxo_pdf_panel=panel,
-        data_htmxo_pdf_url=file, data_htmxo_pdf_page=string(page), data_htmxo_pdf_quote=quoted,
+    h.a(; href=string(file, place), data_htmxo_pdf_ref="", data_htmxo_pdf_panel=panel,
+        data_htmxo_pdf_url=file, data_htmxo_pdf_page=html ? nothing : string(page),
+        data_htmxo_pdf_kind=html ? "html" : nothing, data_htmxo_pdf_anchor=anchor, data_htmxo_pdf_quote=quoted,
         data_htmxo_pdf_key=key, data_htmxo_pdf_hue=hue === nothing ? nothing : string(hue),
         data_htmxo_pdf_document=document === nothing ? _pdf_file_name(file) : string(document),
         aria_controls=panel, attrs...)(text)
+end
+
+# The fragment of an address (`/methodik#annahmen` → "annahmen"), or nothing.
+function _pdf_anchor(url::AbstractString)
+    parts = split(url, '#'; limit=2)
+    length(parts) == 2 && !isempty(parts[2]) ? String(parts[2]) : nothing
 end
 
 """
@@ -382,6 +481,13 @@ pdf_panel_styles() = h.style(Raw(raw"""
 .htmxo-pdf-page { position: relative; background: #fff; box-shadow: 0 0 0 1px var(--pico-muted-border-color, #ccc); }
 .htmxo-pdf-page canvas { display: block; }
 .htmxo-pdf-marks { position: absolute; inset: 0; pointer-events: none; }
+/* An HTML document: the fragment at the panel's width in the page's text
+   size, its passages boxes over its words in a layer of their own; no page
+   line. */
+.htmxo-pdf-panel[data-htmxo-pdf-kind="html"] .htmxo-pdf-pages { display: block; }
+.htmxo-pdf-panel[data-htmxo-pdf-kind="html"] .htmxo-pdf-pager { display: none; }
+.htmxo-pdf-doc { position: relative; display: flow-root; font-size: 1rem; }   /* its content's margins stay inside it */
+.htmxo-pdf-html { overflow-wrap: anywhere; }
 .htmxo-pdf-beside[data-htmxo-pdf-open] {
     display: grid; gap: 1rem; align-items: start;
     grid-template-columns: minmax(0, 1fr) minmax(min(22rem, 100%), var(--htmxo-pdf-width, 40%));
@@ -462,6 +568,14 @@ a[data-htmxo-pdf-ref][data-htmxo-pdf-flash] { animation: htmxo-pdf-flash 1.6s ea
     background: color-mix(in srgb, var(--htmxo-pdf-hue, #ffc400) 55%, transparent);
     outline: 2px solid var(--htmxo-pdf-hue, #ffc400); outline-offset: 1px;
 }
+/* Code in an HTML document wraps at the panel's width rather than scrolling
+   sideways under its marks (unlayered: highlighters set it unlayered). Over a
+   dark page a mark lightens what it covers, as it darkens it over a light one. */
+.htmxo-pdf-html pre, .htmxo-pdf-html pre > code, .htmxo-pdf-html pre[class*="language-"], .htmxo-pdf-html code[class*="language-"] {
+    white-space: pre-wrap; overflow-wrap: anywhere;
+}
+[data-theme="dark"] .htmxo-pdf-doc .htmxo-pdf-hit { mix-blend-mode: screen; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .htmxo-pdf-doc .htmxo-pdf-hit { mix-blend-mode: screen; } }
 /* Colours off: only the passages pointed at and gone to, in a marker's yellow. */
 .htmxo-pdf-panel[data-htmxo-pdf-hues="off"] .htmxo-pdf-hit { visibility: hidden; --htmxo-pdf-hue: #ffc400; }
 .htmxo-pdf-panel[data-htmxo-pdf-hues="off"] .htmxo-pdf-hit:is([data-htmxo-pdf-lit], [data-htmxo-pdf-active]) { visibility: visible; }
@@ -673,6 +787,7 @@ pdf_panel_script() = h.script(Raw(raw"""
   // (radio_group's markup), a long list a searchable list (choice_list's
   // markup, which the page's choice_list script drives). Each document is a
   // radio whose value is its address; the lone title carries its address.
+  // An HTML document's title or radio says so (`data-htmxo-pdf-kind`).
   function chooser(aside) { return aside.querySelector('[data-htmxo-pdf-document]'); }
   function choiceTitle(radio) {
     var label = radio.closest('label'), name = label.querySelector('.htmxo-choice-label');
@@ -680,10 +795,18 @@ pdf_panel_script() = h.script(Raw(raw"""
   }
   function documents(box) {
     var one = box.querySelector('[data-htmxo-pdf-url]');
-    if (one) return [{url: one.dataset.htmxoPdfUrl, title: one.textContent}];
+    if (one) return [{url: one.dataset.htmxoPdfUrl, title: one.textContent, kind: one.dataset.htmxoPdfKind || 'pdf'}];
     return Array.prototype.map.call(box.querySelectorAll('input[type="radio"]'), function (radio) {
-      return {url: radio.value, title: choiceTitle(radio)};
+      return {url: radio.value, title: choiceTitle(radio), kind: radio.dataset.htmxoPdfKind || 'pdf'};
     });
+  }
+  // Whether the document at `url` is a PDF or an HTML document: as the
+  // chooser says, else a reference to it. LOCKSTEP: `_pdf_kind`.
+  function kindOf(aside, url) {
+    var listed = documents(chooser(aside)).filter(function (d) { return d.url === url; })[0];
+    if (listed) return listed.kind;
+    var ref = refs(aside).filter(function (r) { return r.dataset.htmxoPdfUrl === url; })[0];
+    return ref && ref.dataset.htmxoPdfKind === 'html' ? 'html' : 'pdf';
   }
   // The document chosen: the lone one, the radio checked, else the first.
   function chosen(aside) {
@@ -702,14 +825,15 @@ pdf_panel_script() = h.script(Raw(raw"""
   // `_choice_list`'s markup in HTMXObjects.jl.
   function redraw(aside, docs, url) {
     var box = chooser(aside), name = 'htmxo-pdf-document-' + aside.id, label = text(aside, 'Documents');
+    function kinded(d, attrs) { if (d.kind === 'html') attrs['data-htmxo-pdf-kind'] = 'html'; return attrs; }
     function radio(d) {
-      var input = make('input', d.url === url ? {type: 'radio', name: name, value: d.url, checked: ''} :
-                                                {type: 'radio', name: name, value: d.url});
+      var input = make('input', kinded(d, d.url === url ? {type: 'radio', name: name, value: d.url, checked: ''} :
+                                                          {type: 'radio', name: name, value: d.url}));
       input.checked = d.url === url;
       return input;
     }
     var title = (docs.filter(function (d) { return d.url === url; })[0] || {title: ''}).title, form;
-    if (docs.length === 1) form = make('span', {'class': 'htmxo-pdf-title', 'data-htmxo-pdf-url': docs[0].url}, [docs[0].title]);
+    if (docs.length === 1) form = make('span', kinded(docs[0], {'class': 'htmxo-pdf-title', 'data-htmxo-pdf-url': docs[0].url}), [docs[0].title]);
     else if (docs.length <= Number(box.dataset.htmxoPdfPills)) form = make('fieldset', {},
       [make('legend', {}, [label])].concat(docs.map(function (d) { return make('label', {}, [radio(d), d.title]); })));
     else {
@@ -731,13 +855,13 @@ pdf_panel_script() = h.script(Raw(raw"""
     }
     box.replaceChildren(form);
   }
-  // The chooser names file `url` as the one shown, adding it (titled `title`,
-  // else by its file name) when it is not listed. No event is sent: the
-  // chooser's own change is the reader's choice.
-  function pick(aside, url, title) {
+  // The chooser names document `url` (of `kind`) as the one shown, adding it
+  // (titled `title`, else by its file name) when it is not listed. No event is
+  // sent: the chooser's own change is the reader's choice.
+  function pick(aside, url, title, kind) {
     var box = chooser(aside), docs = documents(box);
     if (!docs.some(function (d) { return d.url === url; })) {
-      docs.push({url: url, title: title || fileName(url)});
+      docs.push({url: url, title: title || fileName(url), kind: kind});
       return redraw(aside, docs, url);
     }
     box.querySelectorAll('input[type="radio"]').forEach(function (radio) { if (radio.value === url) radio.checked = true; });
@@ -780,6 +904,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     var file = aside.htmxoPdfFile;
     if (file) {
       if (file.observer) file.observer.disconnect();
+      if (file.stop) file.stop();
       file.boxes.forEach(function (entry, i) { release(file, i + 1); });
     }
     aside.htmxoPdfFile = null;
@@ -794,10 +919,10 @@ pdf_panel_script() = h.script(Raw(raw"""
   function layout(aside, url) {
     var view = aside.querySelector('[data-htmxo-pdf-pages]');
     var width = Math.max(200, view.clientWidth), file = aside.htmxoPdfFile;
-    if (file && file.url === url && file.width === width) return file.ready;
-    if (file && file.url !== url) { clear(aside); width = Math.max(200, view.clientWidth); }
+    if (file && file.kind === 'pdf' && file.url === url && file.width === width) return file.ready;
+    if (file && (file.url !== url || file.kind !== 'pdf')) { clear(aside); width = Math.max(200, view.clientWidth); }
     else if (file && file.observer) file.observer.disconnect();
-    file = {url: url, width: width, boxes: []};
+    file = {url: url, kind: 'pdf', width: width, boxes: []};
     aside.htmxoPdfFile = file;
     file.ready = load(aside.dataset.htmxoPdfjs, url).then(function (loaded) {
       file.lib = loaded.lib;
@@ -865,7 +990,8 @@ pdf_panel_script() = h.script(Raw(raw"""
     var seen = {}, out = [];
     refs(aside).forEach(function (ref) {
       var key = ref.dataset.htmxoPdfKey, quote = ref.dataset.htmxoPdfQuote;
-      if (!key || !quote || seen[key] || ref.dataset.htmxoPdfUrl !== url || (Number(ref.dataset.htmxoPdfPage) || 1) !== n) return;
+      if (!key || !quote || seen[key] || ref.dataset.htmxoPdfUrl !== url || ref.dataset.htmxoPdfKind === 'html' ||
+          (Number(ref.dataset.htmxoPdfPage) || 1) !== n) return;
       seen[key] = true;
       out.push({key: key, quote: quote, hue: ref.dataset.htmxoPdfHue || '', label: ref.textContent.trim()});
     });
@@ -920,6 +1046,209 @@ pdf_panel_script() = h.script(Raw(raw"""
       light(aside);
     });
   }
+  // --- An HTML document: the fragment its address answers an htmx GET with,
+  // swapped in as htmx swaps (so the page's scripts, its code highlighting
+  // among them, see it as any swapped content), its passages boxes over their
+  // words in a layer above it, as on a PDF's page. Nothing is written into the
+  // fragment, so a highlighter that redraws a code block (PrismJS leaves code
+  // that holds elements plain) keeps working, and the boxes follow it.
+  function fetchHtml(url, body) {
+    return fetch(url, {headers: {'HX-Request': 'true', 'HX-Current-URL': location.href}, credentials: 'same-origin'})
+      .then(function (response) {
+        if (!response.ok) throw new Error(response.status + ' ' + response.statusText);
+        var error = response.headers.get('X-HTMXO-Error-Id');
+        return response.text().then(function (html) {
+          if (window.htmx && typeof window.htmx.swap === 'function') window.htmx.swap(body, html, {swapStyle: 'innerHTML'});
+          else {
+            body.innerHTML = html;
+            if (window.htmx) { window.htmx.process(body); window.htmx.trigger(body, 'htmx:load'); }
+          }
+          if (window.htmxoSyntax) window.htmxoSyntax.highlight(body);
+          // a failed fragment answers with its error, shown as htmx shows it
+          if (error) throw new Error('error ' + error);
+        });
+      });
+  }
+  // The document `url` laid out in the panel (an empty one at once, its
+  // fragment once it arrives), and its passages kept over their words while
+  // the panel's width or the fragment changes.
+  function htmlDocument(aside, url) {
+    var file = aside.htmxoPdfFile;
+    if (file && file.kind === 'html' && file.url === url) return file.ready;
+    clear(aside);
+    file = {url: url, kind: 'html', boxes: []};
+    file.body = make('div', {'class': 'htmxo-pdf-html'});
+    file.layer = make('div', {'class': 'htmxo-pdf-marks'});
+    file.doc = make('div', {'class': 'htmxo-pdf-doc'}, [file.body, file.layer]);
+    aside.htmxoPdfFile = file;
+    aside.querySelector('[data-htmxo-pdf-pages]').replaceChildren(file.doc);
+    file.ready = fetchHtml(url, file.body).then(function () {
+      if (aside.htmxoPdfFile !== file) return file;
+      file.loaded = true;
+      watch(aside, file);
+      return file;
+    }, function (error) {
+      if (aside.htmxoPdfFile === file) aside.htmxoPdfFile = null;   // asked for again, it loads anew
+      throw error;
+    });
+    return file.ready;
+  }
+  function watch(aside, file) {
+    var queued = false;
+    function again(changed) {
+      if (changed) file.model = null;
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(function () { queued = false; placeAll(aside, file); });
+    }
+    var resized = typeof ResizeObserver === 'function' ? new ResizeObserver(function () { again(false); }) : null;
+    var changed = typeof MutationObserver === 'function' ? new MutationObserver(function () { again(true); }) : null;
+    if (resized) resized.observe(file.doc);
+    if (changed) changed.observe(file.body, {childList: true, subtree: true, characterData: true});
+    // a box in the fragment that scrolls (a wide table) carries its words along
+    function scrolled() { again(false); }
+    file.body.addEventListener('scroll', scrolled, true);
+    file.stop = function () {
+      if (resized) resized.disconnect();
+      if (changed) changed.disconnect();
+      file.body.removeEventListener('scroll', scrolled, true);
+    };
+  }
+  // Letters as `letters` reads them, one character at a time, so that each
+  // letter knows the character it came from.
+  function letter(c) {
+    if (c.length === 1 && c.charCodeAt(0) < 128) return /[0-9A-Za-z]/.test(c) ? c.toLowerCase() : '';
+    return letters(c);
+  }
+  function lettersOf(words) { var out = ''; for (var c of words) out += letter(c); return out; }
+  // The fragment's letters, in order, and where each came from: its text node
+  // (`owner`) and the characters it spans there (`from`, `to`). Scripts and
+  // styles hold no text.
+  function textOf(body) {
+    var model = {letters: '', nodes: [], starts: [], owner: [], from: [], to: []};
+    var walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {acceptNode: function (node) {
+      return node.parentElement.closest('script, style, noscript') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }});
+    var all = [];
+    for (var node = walker.nextNode(); node; node = walker.nextNode()) {
+      var n = model.nodes.length, at = 0;
+      model.nodes.push(node);
+      model.starts.push(model.owner.length);
+      for (var c of node.data) {
+        var part = letter(c);
+        for (var k = 0; k < part.length; k++) { model.owner.push(n); model.from.push(at); model.to.push(at + c.length); }
+        all.push(part);
+        at += c.length;
+      }
+    }
+    model.letters = all.join('');
+    return model;
+  }
+  // The element a reference's `#anchor` names in the fragment, if any.
+  function anchorIn(body, anchor) {
+    if (!anchor) return null;
+    var id = anchor;
+    try { id = decodeURIComponent(anchor); } catch (e) {}
+    return body.querySelector('[id="' + CSS.escape(id) + '"]') || body.querySelector('[name="' + CSS.escape(id) + '"]');
+  }
+  // The first letter at or after element `el`.
+  function after(model, el) {
+    for (var n = 0; n < model.nodes.length; n++) {
+      var node = model.nodes[n];
+      if (el.contains(node) || el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) return model.starts[n];
+    }
+    return model.letters.length;
+  }
+  // The passages quoted from the document `url`, once each.
+  function htmlPassages(aside, url) {
+    var seen = {}, out = [];
+    refs(aside).forEach(function (ref) {
+      var key = ref.dataset.htmxoPdfKey, quote = ref.dataset.htmxoPdfQuote;
+      if (!key || !quote || seen[key] || ref.dataset.htmxoPdfUrl !== url || ref.dataset.htmxoPdfKind !== 'html') return;
+      seen[key] = true;
+      out.push({key: key, quote: quote, anchor: ref.dataset.htmxoPdfAnchor || '', hue: ref.dataset.htmxoPdfHue || '',
+                label: ref.textContent.trim()});
+    });
+    return out;
+  }
+  // Where the boxes the fragment's scroll boxes around `el` let show.
+  function clipOf(el, doc) {
+    var clip = {left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity};
+    for (; el && el !== doc; el = el.parentElement) {
+      var style = getComputedStyle(el);
+      if (style.overflowX === 'visible' && style.overflowY === 'visible') continue;
+      var r = el.getBoundingClientRect();
+      clip = {left: Math.max(clip.left, r.left), top: Math.max(clip.top, r.top),
+              right: Math.min(clip.right, r.right), bottom: Math.min(clip.bottom, r.bottom)};
+    }
+    return clip;
+  }
+  // Boxes on one line that touch, joined into one (the words of a line, set
+  // in several elements).
+  function lines(rects) {
+    var out = [];
+    rects.forEach(function (r) {
+      var line = out.filter(function (o) {
+        var shared = Math.min(o.bottom, r.bottom) - Math.max(o.top, r.top);
+        return shared > 0.5 * Math.min(o.bottom - o.top, r.bottom - r.top) && r.left <= o.right + 2 && r.right >= o.left - 2;
+      })[0];
+      if (!line) return out.push({left: r.left, right: r.right, top: r.top, bottom: r.bottom});
+      line.left = Math.min(line.left, r.left);
+      line.right = Math.max(line.right, r.right);
+      line.top = Math.min(line.top, r.top);
+      line.bottom = Math.max(line.bottom, r.bottom);
+    });
+    return out;
+  }
+  // Mark every passage of the document anew: each found from its anchor on,
+  // else anywhere, as the boxes its words take on screen, line by line.
+  function placeAll(aside, file) {
+    if (aside.htmxoPdfFile !== file || !file.loaded) return;
+    var model = file.model || (file.model = textOf(file.body)), box = file.doc.getBoundingClientRect();
+    var located = {};
+    file.layer.replaceChildren();
+    htmlPassages(aside, file.url).forEach(function (passage) {
+      var wanted = lettersOf(passage.quote), el = anchorIn(file.body, passage.anchor), at = null;
+      if (el) {
+        var start = after(model, el);
+        at = found(model.letters.slice(start), wanted);
+        if (at) at = [at[0] + start, at[1]];
+      }
+      at = at || found(model.letters, wanted);
+      located[passage.key] = !!at;
+      if (!at) return;
+      // Every text node from the passage's first letter to its last, the
+      // spaces and punctuation between them too (a code token of its own),
+      // as one box per line.
+      var first = model.owner[at[0]], last = model.owner[at[0] + at[1] - 1], rects = [];
+      for (var n = first; n <= last; n++) {
+        var node = model.nodes[n], range = document.createRange();
+        range.setStart(node, n === first ? model.from[at[0]] : 0);
+        range.setEnd(node, n === last ? model.to[at[0] + at[1] - 1] : node.length);
+        var clip = clipOf(node.parentElement, file.doc);
+        Array.prototype.forEach.call(range.getClientRects(), function (r) {
+          var cut = {left: Math.max(r.left, clip.left), right: Math.min(r.right, clip.right),
+                     top: Math.max(r.top, clip.top), bottom: Math.min(r.bottom, clip.bottom)};
+          if (cut.right - cut.left >= 1 && cut.bottom - cut.top >= 1) rects.push(cut);
+        });
+      }
+      lines(rects).forEach(function (r) {
+        var hit = document.createElement('div');
+        hit.className = 'htmxo-pdf-hit';
+        hit.dataset.htmxoPdfKey = passage.key;
+        if (passage.hue) hit.dataset.htmxoPdfHue = passage.hue;
+        hit.title = passage.label;
+        hit.style.left = (r.left - box.left) + 'px';
+        hit.style.top = (r.top - box.top) + 'px';
+        hit.style.width = (r.right - r.left) + 'px';
+        hit.style.height = (r.bottom - r.top) + 'px';
+        file.layer.appendChild(hit);
+      });
+    });
+    file.found = located;
+    light(aside);
+  }
+
   // Scroll the panel to a passage, a third of the way down, or to a page's top.
   function reach(aside, target, smooth) {
     var bar = aside.querySelector('.htmxo-pdf-bar').offsetHeight;
@@ -993,16 +1322,18 @@ pdf_panel_script() = h.script(Raw(raw"""
     ref.setAttribute('data-htmxo-pdf-flash', '');
     setTimeout(function () { ref.removeAttribute('data-htmxo-pdf-flash'); }, 1600);
   }
-  // Show file `url` at the passage `key` on page `page`, or at the page's top
-  // without one, opening the panel. Until it is there, the pages are marked
-  // `aria-busy`.
+  // Show document `url` at the passage `key` on page `page` (of a PDF) or from
+  // `anchor` on (of an HTML document), or at the page's top (the anchor, else
+  // the top) without one, opening the panel. Until it is there, the pages are
+  // marked `aria-busy`.
   function show(aside, o) {
     if (!o || !o.url) return;
     wire(aside);
-    pick(aside, o.url, o.title);
+    var kind = o.kind === 'html' || o.kind === 'pdf' ? o.kind : kindOf(aside, o.url), anchor = o.anchor ? String(o.anchor) : '';
+    pick(aside, o.url, o.title, kind);
     open(aside, true, o.ref || null);
     var page = Math.max(1, Number(o.page) || 1), key = o.key == null ? null : String(o.key);
-    aside.querySelector('[data-htmxo-pdf-file]').href = o.url + '#page=' + page;
+    aside.querySelector('[data-htmxo-pdf-file]').href = kind === 'html' ? o.url + (anchor ? '#' + anchor : '') : o.url + '#page=' + page;
     aside.htmxoPdfActive = key;
     light(aside);
     var token = (aside.htmxoPdfToken || 0) + 1;
@@ -1011,7 +1342,25 @@ pdf_panel_script() = h.script(Raw(raw"""
     view.setAttribute('aria-busy', 'true');
     function done() { if (token === aside.htmxoPdfToken) view.removeAttribute('aria-busy'); }
     var file = aside.htmxoPdfFile;
-    if (!file || file.url !== o.url || !file.boxes.length) note(aside, text(aside, 'Loading'));
+    var shown = file && file.kind === kind && file.url === o.url && (kind === 'html' ? file.loaded : file.boxes.length > 0);
+    // another document: the one shown goes at once (a failed one too)
+    if (!(file && file.kind === kind && file.url === o.url)) clear(aside);
+    aside.setAttribute('data-htmxo-pdf-kind', kind);
+    if (!shown) note(aside, text(aside, 'Loading'));
+    if (kind === 'html') {
+      htmlDocument(aside, o.url).then(function (file) {
+        if (token !== aside.htmxoPdfToken) return;
+        placeAll(aside, file);
+        var hit = key ? file.layer.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-key="' + CSS.escape(key) + '"]') : null;
+        var quoted = key != null && Object.prototype.hasOwnProperty.call(file.found || {}, key);
+        note(aside, quoted && !file.found[key] ? text(aside, 'NotInDocument') : '');
+        var place = hit || anchorIn(file.body, anchor);
+        if (place) reach(aside, place, o.smooth);
+        else aside.scrollTo({top: 0, behavior: o.smooth ? 'smooth' : 'instant'});   // the document's top
+        done();
+      }).catch(function (error) { if (token === aside.htmxoPdfToken) { failed(aside, error); done(); } });
+      return;
+    }
     layout(aside, o.url).then(function (file) {
       if (token !== aside.htmxoPdfToken) return;
       var n = Math.min(page, file.boxes.length);
@@ -1031,7 +1380,7 @@ pdf_panel_script() = h.script(Raw(raw"""
   // Lay the pages out again at the panel's new width, at the same place.
   function refresh(aside) {
     var file = aside.htmxoPdfFile;
-    if (aside.hidden || !file) return;
+    if (aside.hidden || !file || file.kind !== 'pdf') return;   // an HTML document's marks follow it themselves
     var view = aside.querySelector('[data-htmxo-pdf-pages]');
     if (Math.max(200, view.clientWidth) === file.width) return;
     var share = aside.scrollTop / Math.max(1, aside.scrollHeight);
@@ -1062,6 +1411,7 @@ pdf_panel_script() = h.script(Raw(raw"""
       event.preventDefault();
       event.stopPropagation();
       show(panel, {url: target.dataset.htmxoPdfUrl, page: target.dataset.htmxoPdfPage, key: target.dataset.htmxoPdfKey,
+                   kind: target.dataset.htmxoPdfKind === 'html' ? 'html' : 'pdf', anchor: target.dataset.htmxoPdfAnchor,
                    title: target.dataset.htmxoPdfDocument, ref: target});
       return;
     }
@@ -1089,14 +1439,16 @@ pdf_panel_script() = h.script(Raw(raw"""
     var radio = event.target;
     if (!(radio && radio.type === 'radio' && radio.checked && radio.closest)) return;
     var box = radio.closest('[data-htmxo-pdf-document]'), aside = box && box.closest('[data-htmxo-pdf-viewer]');
-    if (aside) show(aside, {url: radio.value, page: 1});
+    if (aside) show(aside, {url: radio.value, page: 1, kind: radio.dataset.htmxoPdfKind === 'html' ? 'html' : 'pdf'});
   });
   // New content (an htmx swap, a thread's new item) may bring references:
-  // mark their passages on the pages drawn, and show them lit or gone to.
+  // mark their passages on the pages drawn (in the HTML document shown), and
+  // show them lit or gone to.
   function renew() {
     document.querySelectorAll('[data-htmxo-pdf-viewer]').forEach(function (aside) {
       var file = aside.htmxoPdfFile;
-      if (file && !aside.hidden) file.boxes.forEach(function (entry, i) {
+      if (file && !aside.hidden && file.kind === 'html') placeAll(aside, file);
+      else if (file && !aside.hidden) file.boxes.forEach(function (entry, i) {
         if (entry.task) marks(aside, file, i + 1).catch(function (error) { failed(aside, error); });
       });
       light(aside);
