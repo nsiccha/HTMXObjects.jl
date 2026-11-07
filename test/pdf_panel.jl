@@ -61,11 +61,17 @@
                 h.p("Reports ", pdf_ref("(annex, p. 2)", "/pdfx_datei/anlage"; page=2, panel="orig", id="r2",
                                         quoted="reported to the youth office"), "."),
                 pdf_toggle("orig", "Originale"; id="toggle"),
+                h.p("Trips ", pdf_ref("(Methodik)", "/pdfx_text#methodik"; kind=:html, panel="orig", id="rh",
+                                      quoted="follow a Poisson distribution"), "."),
                 h.p(h.a("Pills"; href="/pdfx_pills"), " ", h.a("List"; href="/pdfx_list"))),
             pdf_panel(["Leistungsbeschreibung" => "/pdfx_datei/lb"]; id="orig"))
-        @get pdfx_pills() = pdf_panel(["LB" => "/pdfx_datei/lb", "Anlage" => "/pdfx_datei/anlage"]; id="pills")
+        @get pdfx_pills() = pdf_panel(["LB" => "/pdfx_datei/lb", "Anlage" => "/pdfx_datei/anlage",
+                                       (title="Text", url="/pdfx_text", kind=:html)]; id="pills")
         @get pdfx_list() = pdf_panel(["Teil $i" => "/pdfx_datei/teil$i" for i in 1:9]; id="list")
         @direct @get pdfx_datei(name::String) = MIMEResponse("application/pdf", PDF3)
+        # an HTML document the panel loads as a fragment (snag pdf-panel-shows-b0bebb33)
+        @get pdfx_text() = h.article(h.h2("Methodik"; id="methodik"),
+                                     h.p("Trips per zone follow a Poisson distribution."))
     end
 end
 
@@ -195,6 +201,57 @@ end
     @test occursin(r"^<div class=\"htmxo-pdf-beside\" data-htmxo-pdf-beside=\"\"><div class=\"htmxo-pdf-beside-content\"><p>content</p></div><aside id=\"orig\"", b)
 end
 
+@testitem "pdf_ref and pdf_panel take HTML documents: an anchor, no pages" setup=[PdfFixtures] tags=[:unit] begin
+    # Snag pdf-panel-shows-b0bebb33: a cited brief section or code range is an
+    # HTML fragment, shown in the same panel as the PDFs.
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string
+    r = html(pdf_ref("(Methodik)", "/agents/a/briefs/b#annahmen"; kind=:html, panel="orig",
+                     quoted="Fahrten je Zone folgen einer Poisson-Verteilung"))
+    @test occursin("href=\"/agents/a/briefs/b#annahmen\"", r)             # the address as given, its anchor kept
+    @test occursin("data-htmxo-pdf-url=\"/agents/a/briefs/b\"", r)         # the document: the address without it
+    @test occursin("data-htmxo-pdf-kind=\"html\"", r) && occursin("data-htmxo-pdf-anchor=\"annahmen\"", r)
+    @test !occursin("data-htmxo-pdf-page", r) && !occursin("#page=", r)
+    key = match(r"data-htmxo-pdf-key=\"([^\"]+)\"", r)[1]
+    # the anchor is part of the passage's key, as a PDF's page is
+    @test !occursin(key, html(pdf_ref("x", "/agents/a/briefs/b#andere"; kind=:html, panel="orig",
+                                      quoted="Fahrten je Zone folgen einer Poisson-Verteilung")))
+    @test occursin(key, html(pdf_ref("x", "/agents/a/briefs/b#annahmen"; kind=:html, panel="orig",
+                                     quoted="Fahrten je Zone folgen einer Poisson-Verteilung")))
+    # no anchor: the document's top; a query stays part of the address
+    code = html(pdf_ref("(L. 4–9)", "/code?path=src/m.jl&line=4-9"; kind=:html, panel="orig"))
+    @test occursin("href=\"/code?path=src/m.jl&amp;line=4-9\"", code) && !occursin("data-htmxo-pdf-anchor", code)
+    @test occursin("data-htmxo-pdf-document=\"m.jl\"", code)
+    # a PDF reference is as before: its key does not change
+    pdf = html(pdf_ref("(S. 12)", "/files/k.pdf"; page=12, panel="orig", quoted="Kinderschutz ist Aufgabe aller Träger"))
+    @test occursin("href=\"/files/k.pdf#page=12\"", pdf) && !occursin("data-htmxo-pdf-kind", pdf)
+    @test occursin("data-htmxo-pdf-key=\"$(HTMXObjects._thread_digest("/files/k.pdf#page=12\nKinderschutz ist Aufgabe aller Träger"))\"", pdf)
+    @test occursin("href=\"/files/k.pdf#page=1\"", html(pdf_ref("x", "/files/k.pdf"; panel="orig", kind=:pdf)))
+    @test strip(to_markdown_string(h.p("Siehe ", pdf_ref("Annahmen", "/m#a"; kind=:html, panel="p"), "."))) ==
+          "Siehe [Annahmen](/m#a)."
+    @test_throws ArgumentError pdf_ref("x", "/m#a"; kind=:html, panel="p", page=2)
+    @test_throws ArgumentError pdf_ref("x", "/m"; kind=:word, panel="p")
+    @test_throws ArgumentError pdf_ref("x", "/m.pdf"; panel="p", page=1.5)
+    # the panel lists PDFs and HTML documents together; an HTML document says so
+    one = html(pdf_panel((title="Methodik", url="/m#a", kind=:html); id="p", assets=false))
+    @test occursin("<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"/m\" data-htmxo-pdf-kind=\"html\">Methodik</span>", one)
+    @test occursin("data-text-not-in-document=\"The quoted words were not found in this document\"", one)
+    pills = html(pdf_panel(["LB" => "/lb.pdf", (url="/plan.pdf",), (title="Methodik", url="/m", kind=:html)]; id="p", assets=false))
+    @test occursin("value=\"/lb.pdf\" checked=\"true\">LB</label>", pills)
+    @test occursin("value=\"/plan.pdf\">plan.pdf</label>", pills)                                     # a record, named by its file
+    @test occursin("value=\"/m\" data-htmxo-pdf-kind=\"html\">Methodik</label>", pills)
+    @test count("data-htmxo-pdf-kind", pills) == 1
+    many = html(pdf_panel([i == 9 ? (title="Methodik", url="/m", kind=:html) : "/d$i.pdf" for i in 1:9]; id="p", assets=false))
+    @test occursin("<input type=\"radio\" name=\"htmxo-pdf-document-p\" value=\"/m\" data-htmxo-pdf-kind=\"html\">", many)
+    @test count("data-htmxo-pdf-kind", many) == 1
+    @test pdf_panel_texts(:de).not_in_document == "Die zitierten Worte stehen nicht in diesem Dokument"
+    @test_throws ArgumentError pdf_panel([(url="/m", kind=:word)]; id="p")
+    @test_throws ArgumentError pdf_panel([(url="",)]; id="p")
+    @test_throws ArgumentError pdf_panel([(url="/m", other=1)]; id="p")
+    @test_throws ArgumentError pdf_panel([(url="/m", title=3)]; id="p")
+    @test_throws ArgumentError pdf_panel(["/m", (url="/m#x", kind=:html)]; id="p")                  # listed twice
+end
+
 @testitem "pdf_panel in a static export loads the files the export wrote" setup=[PdfFixtures] tags=[:unit] begin
     # Snag pdf-panel-static-81f73b0d (ODLPlaus:review): export_site rewrote a
     # reference's href, but its data-htmxo-pdf-url, the lone document's and the
@@ -228,6 +285,16 @@ end
     @test occursin("value=\"pdfx_datei-anlage.pdf\">Anlage</label>", pills)
     list = read(joinpath(dir, "pdfx_list.html"), String)
     @test count(r"<input type=\"radio\" name=\"htmxo-pdf-document-list\" value=\"pdfx_datei-teil\d\.pdf\"", list) == 9
+    # an HTML document: the panel loads the fragment the export wrote below hx/,
+    # the reference's link names the page (snag pdf-panel-shows-b0bebb33)
+    rh = tag(index, "rh")
+    @test occursin("data-htmxo-pdf-url=\"hx/pdfx_text.html\"", rh) && occursin("href=\"pdfx_text.html#methodik\"", rh)
+    @test occursin("data-htmxo-pdf-kind=\"html\"", rh)
+    fragment = read(joinpath(dir, "hx", "pdfx_text.html"), String)
+    @test occursin("<h2 id=\"methodik\">Methodik</h2>", fragment) && !occursin("<html", fragment)
+    @test occursin("<html", read(joinpath(dir, "pdfx_text.html"), String))
+    @test occursin("value=\"hx/pdfx_text.html\" data-htmxo-pdf-kind=\"html\">Text</label>", pills)
+    @test "hx/pdfx_text.html" in HTMXObjects._site_references(index)
     # no panel is left with an address of the live app
     for page in (index, pills, list)
         @test !occursin("data-htmxo-pdf-url=\"/", page) && !occursin("value=\"/pdfx", page)
@@ -242,6 +309,10 @@ end
           occursin("href=\"/odl/pdfx_datei/lb#page=3\"", tag(page, "r3"))
     @test occursin("data-htmxo-pdf-url=\"/odl/pdfx_datei/lb\">Leistungsbeschreibung</span>", page)
     @test occursin("value=\"/odl/pdfx_datei/anlage\">Anlage</label>",
+                   String(dispatch(:GET, "/pdfx_pills"; static=spec).body))
+    @test occursin("data-htmxo-pdf-url=\"/odl/hx/pdfx_text\"", tag(page, "rh")) &&
+          occursin("href=\"/odl/pdfx_text#methodik\"", tag(page, "rh"))
+    @test occursin("value=\"/odl/hx/pdfx_text\" data-htmxo-pdf-kind=\"html\">Text</label>",
                    String(dispatch(:GET, "/pdfx_pills"; static=spec).body))
     # the live page keeps the app's addresses
     live = String(dispatch(:GET, "/").body)
@@ -876,6 +947,218 @@ end
                     endswith(line, ":true") || println("pdf_panel keep browser: ", line)
                 end
                 @test count(==('\n'), checks[1]) + 1 == 14
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "pdf_panel browser: an HTML document beside the text, its passages marked over its words" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    # Snag pdf-panel-shows-b0bebb33: a cited brief section or code range (an HTML
+    # fragment) opens in the same panel as the PDFs, under the same reader rule.
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        pdf = tiny_pdf(PDF_PAGES)
+        # The fragment its address answers an htmx GET with; a plain GET gets a full page.
+        brief = """
+            <article>
+            <h2 id="intro">Introduction</h2>
+            <p id="p-early">The zones are counted once a year by the office.</p>
+            <p id="p-long">Trips per zone follow a <em>Poisson distribution</em> whose rate grows with the number of residents and workplaces in the zone and in its neighbours.</p>
+            <h2 id="later">Later section</h2>
+            <p id="p-late">Again: the zones are counted once a year by the office, and nobody else counts them.</p>
+            <pre><code class="language-julia" id="code">function rate(zone)
+                exp(alpha + beta * log(residents(zone)))
+            end</code></pre>
+            <div style="height: 1500px"></div>
+            <p id="p-end">The last words of the document stand here at its very end.</p>
+            </article>"""
+        ref(id, text, url; kw...) = pdf_ref(text, url; panel="orig", id, kind=:html, kw...)
+        content = h.div(; id="content")(
+            h.p("Trips ", ref("h1", "(model)", "/brief"; quoted="follow a Poisson distribution whose rate grows"),
+                " are counted ", ref("h2", "(later)", "/brief#later"; quoted="the zones are counted once a year by the office"), "."),
+            h.p("The rate ", ref("h3", "(code)", "/brief"; quoted="exp(alpha + beta * log(residents(zone)))"),
+                "; the section ", ref("h4", "(later section)", "/brief#later"), "; ",
+                ref("h5", "(missing)", "/brief"; quoted="This sentence is not in the document at all"), "; ",
+                ref("h6", "(end)", "/brief"; quoted="The last words of the document stand here"), "; ",
+                ref("hb", "(broken)", "/broken"; quoted="words that cannot be shown"), "; ",
+                pdf_ref("(p. 2)", "/doc.pdf"; panel="orig", id="pd", page=2, quoted="reported to the youth office")),
+            h.template(; id="late")(ref("hl", "(late)", "/brief"; quoted="number of residents and workplaces")),
+            h.div(; style="height: 2000px"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+            const checks = [];
+            const check = (name, ok) => checks.push([name, Boolean(ok)]);
+            const tick = () => fetch('/tick').then(r => r.text());
+            const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
+            const aside = document.getElementById('orig'), beside = aside.closest('[data-htmxo-pdf-beside]');
+            const ref = id => document.getElementById(id), key = id => ref(id).dataset.htmxoPdfKey;
+            const hits = k => [...aside.querySelectorAll('.htmxo-pdf-hit')].filter(x => x.dataset.htmxoPdfKey === k);
+            const lit = el => el.hasAttribute('data-htmxo-pdf-lit'), active = el => el.hasAttribute('data-htmxo-pdf-active');
+            const over = (el, from) => el.dispatchEvent(new PointerEvent('pointerover', {bubbles: true, relatedTarget: from || null}));
+            const note = () => aside.querySelector('[data-htmxo-pdf-note]').textContent;
+            const busy = () => aside.querySelector('[data-htmxo-pdf-pages]').hasAttribute('aria-busy');
+            const pageLine = () => aside.querySelector('[data-htmxo-pdf-page-info]').textContent;
+            const pager = () => getComputedStyle(aside.querySelector('.htmxo-pdf-pager')).display;
+            const inPanel = el => { const a = aside.getBoundingClientRect(), r = el.getBoundingClientRect(); return r.top >= a.top && r.bottom <= a.bottom; };
+            const meets = (a, b) => { const r = a.getBoundingClientRect(), s = b.getBoundingClientRect();
+                                      return r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top; };
+            const doc = id => aside.querySelector('.htmxo-pdf-html [id="' + id + '"]');
+            // where words stand on screen, as the test finds them itself: the last line's box
+            const wordsAt = (node, words) => { const i = node.data.indexOf(words), r = document.createRange();
+                                               r.setStart(node, i); r.setEnd(node, i + words.length);
+                                               const all = r.getClientRects(); return all[all.length - 1]; };
+            const near = (a, b) => Math.abs(a.right - b.right) < 1.5 && Math.abs(a.top - b.top) < 1.5;
+            const unmodified = el => new Promise(ok => {
+                el.addEventListener('click', e => { ok(e.defaultPrevented); e.preventDefault(); }, {once: true});
+            });
+            let loads = 0;
+            document.addEventListener('htmx:load', e => { if (e.target.closest && e.target.closest('.htmxo-pdf-html')) loads++; });
+            try {
+                // a click on a reference to an HTML document opens it beside the text at the passage
+                ref('h1').click();
+                await wait(() => !busy() && hits(key('h1')).length > 0);
+                check('opened', !aside.hidden && beside.hasAttribute('data-htmxo-pdf-open'));
+                check('html-kind', aside.dataset.htmxoPdfKind === 'html' && !!doc('p-long'));
+                check('fragment-swapped', !aside.textContent.includes('FULL PAGE') && loads > 0);
+                check('no-page-line', pager() === 'none' && pageLine() === '');
+                check('chosen', aside.querySelector('input[type="radio"][value="/brief"]').checked);
+                check('h1-active', hits(key('h1')).every(active) && active(ref('h1')));
+                check('h1-in-view', inPanel(hits(key('h1'))[0]));
+                check('h1-over-its-words', hits(key('h1')).every(x => meets(x, doc('p-long'))) &&
+                    hits(key('h1')).some(x => meets(x, doc('p-long').querySelector('em'))));
+                const tail = doc('p-long').lastChild, h1last = () => hits(key('h1'))[hits(key('h1')).length - 1].getBoundingClientRect();
+                const before = wordsAt(tail, 'rate grows');
+                check('h1-ends-at-its-words', near(h1last(), before));
+                check('fragment-untouched', !aside.querySelector('.htmxo-pdf-html .htmxo-pdf-hit') &&
+                    doc('p-long').innerHTML.includes('<em>Poisson distribution</em> whose'));
+                check('note-empty', note() === '');
+                // the panel wider: the words wrap anew and the marks follow them
+                beside.style.setProperty('--htmxo-pdf-width', '60%');
+                await wait(() => near(h1last(), wordsAt(tail, 'rate grows')), 40);
+                const after = wordsAt(tail, 'rate grows');
+                check('resize-follows', near(h1last(), after) && (Math.abs(after.top - before.top) > 1 || Math.abs(after.right - before.right) > 1));
+                // from the anchor on: the same words before it are not the passage
+                ref('h2').click();
+                await wait(() => !busy() && hits(key('h2')).some(active));
+                check('anchor-first', hits(key('h2')).length > 0 &&
+                    hits(key('h2')).every(x => meets(x, doc('p-late')) && !meets(x, doc('p-early'))));
+                // a script that changes the fragment: the marks follow the words
+                doc('p-early').append(' More words.'.repeat(60));
+                await wait(() => hits(key('h2')).length > 0 && hits(key('h2')).every(x => meets(x, doc('p-late'))), 40);
+                check('change-follows', hits(key('h2')).length > 0 && hits(key('h2')).every(x => meets(x, doc('p-late'))));
+                // an anchor without quoted words: its element at the top, below the bar
+                ref('h4').click();
+                await wait(() => !busy());
+                const bar = aside.querySelector('.htmxo-pdf-bar').getBoundingClientRect().bottom, top = doc('later').getBoundingClientRect().top;
+                check('anchor-top', top >= bar - 1 && top < bar + 40 && note() === '');
+                // quoted words the document lacks: said so
+                ref('h5').click();
+                await wait(() => note() === 'The quoted words were not found in this document');
+                check('not-in-document', note() === 'The quoted words were not found in this document');
+                // code the page's PrismJS highlights is marked over its tokens, the code left to PrismJS
+                await wait(() => doc('code') && doc('code').querySelector('.token'), 600);
+                ref('h3').click();
+                await wait(() => !busy() && hits(key('h3')).some(active));
+                check('code-highlighted', !!doc('code').querySelector('.token'));
+                check('code-marked', hits(key('h3')).length > 0 && hits(key('h3')).every(x => meets(x, doc('code'))) &&
+                    !doc('code').querySelector('.htmxo-pdf-hit'));
+                // one box for the line, its tokens, spaces and punctuation together
+                check('code-one-box', hits(key('h3')).length === 1);
+                // a passage far down: the panel scrolls to it
+                ref('h6').click();
+                await wait(() => !busy() && hits(key('h6')).some(active));
+                check('far-in-view', inPanel(hits(key('h6'))[0]));
+                // pointing lights both and scrolls nothing; a click on a passage goes to its reference
+                ref('h1').click();
+                await wait(() => !busy() && hits(key('h1')).some(active) && inPanel(hits(key('h1'))[0]));
+                const s0 = aside.scrollTop, y0 = scrollY;
+                over(ref('h2'));
+                check('hover-lights-mark', hits(key('h2')).every(lit) && !hits(key('h1')).some(lit) && aside.scrollTop === s0 && scrollY === y0);
+                over(document.body, ref('h2'));
+                check('hover-ends', !hits(key('h2')).some(lit));
+                hits(key('h1'))[0].dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+                check('mark-lights-ref', lit(ref('h1')) && !lit(ref('h2')) && aside.scrollTop === s0 && scrollY === y0);
+                aside.dispatchEvent(new MouseEvent('mouseleave'));
+                scrollTo(0, document.body.scrollHeight);
+                await tick();
+                hits(key('h1'))[0].click();
+                const r = ref('h1').getBoundingClientRect();
+                check('mark-goes', r.top >= 0 && r.bottom <= innerHeight && ref('h1').hasAttribute('data-htmxo-pdf-flash'));
+                // a reference that arrives later is marked in the document shown
+                const late = document.getElementById('late').content.firstElementChild.cloneNode(true);
+                ref('content').appendChild(late);
+                late.dispatchEvent(new CustomEvent('htmx:load', {bubbles: true}));
+                await wait(() => hits(key('hl')).length > 0, 40);
+                check('late-marked', hits(key('hl')).length > 0 && hits(key('hl')).every(x => meets(x, doc('p-long'))));
+                // colours off: only the passages pointed at and gone to show
+                aside.querySelector('[data-htmxo-pdf-colours]').click();
+                check('colours-off', getComputedStyle(hits(key('hl'))[0]).visibility === 'hidden' &&
+                    getComputedStyle(hits(key('h1'))[0]).visibility === 'visible');
+                aside.querySelector('[data-htmxo-pdf-colours]').click();
+                // a PDF after the HTML document: its pages and page line, the document gone
+                ref('pd').click();
+                await wait(() => pageLine() === 'page 2 of 2' && hits(key('pd')).some(active));
+                check('pdf-after-html', aside.dataset.htmxoPdfKind === 'pdf' && !aside.querySelector('.htmxo-pdf-doc') &&
+                    pager() !== 'none' && aside.querySelector('input[type="radio"][value="/doc.pdf"]').checked);
+                check('pdf-marked', hits(key('pd')).length === 1);
+                // and the HTML document again: no pages, no page line
+                ref('h1').click();
+                await wait(() => !busy() && hits(key('h1')).some(active));
+                check('html-after-pdf', aside.dataset.htmxoPdfKind === 'html' && !aside.querySelector('.htmxo-pdf-page') && pageLine() === '');
+                // a document that fails to load says so
+                ref('hb').click();
+                await wait(() => note().startsWith('The file could not be shown'));
+                check('broken', note().startsWith('The file could not be shown: 500') && !busy());
+                // chosen in the chooser, an HTML document opens at its top
+                aside.querySelector('input[type="radio"][value="/brief"]').click();
+                await wait(() => !busy() && !!doc('intro'));
+                check('chosen-top', aside.dataset.htmxoPdfKind === 'html' && aside.scrollTop === 0 && note() === '');
+                // a modified click opens the document itself
+                const ctrl = unmodified(ref('h1'));
+                ref('h1').dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, ctrlKey: true}));
+                check('modified-click-own', !(await ctrl));
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(h.main(pdf_beside(content,
+                pdf_panel(["Fixture" => "/doc.pdf", (title="Brief", url="/brief", kind=:html)]; id="orig"))), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        html_type = ["Content-Type" => "text/html; charset=utf-8"]
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" ? HTTP.Response(200, html_type, page) :
+            path == "/brief" ? HTTP.Response(200, html_type, HTTP.header(req, "HX-Request") == "true" ? brief :
+                                             "<!doctype html><html><body><p>FULL PAGE</p></body></html>") :
+            path == "/broken" ? HTTP.Response(500, "broken") :
+            path == "/doc.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) :
+            path == "/tick" ? (sleep(0.05); HTTP.Response(200, "ok")) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; timeout=180)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                    endswith(line, ":true") || println("pdf_panel browser (HTML): ", line)
+                end
+                @test count(==('\n'), checks[1]) + 1 == 32
             end
         finally
             close(server)

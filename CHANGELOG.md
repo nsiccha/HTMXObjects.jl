@@ -14,6 +14,22 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.85
+
+- `pdf_panel` shows HTML documents next to PDFs (snag `pdf-panel-shows-b0bebb33`):
+  a cited section of a brief, a range of code, a page of the app. `pdf_ref(text, url;
+  kind=:html, quoted, panel)` names its place as the address's `#anchor` (`page=` is
+  refused for one), and `pdf_panel` lists it as a record `(; url, title, kind=:html)`
+  beside its PDFs (`url` and `title => url` stay PDFs). The panel fetches the address
+  with `HX-Request: true` and swaps the fragment in as htmx does, so the page's code
+  highlighting runs on it; it opens at the anchor and at the quoted words (looked for
+  from the anchor on first), marks them under the same reader rule as a PDF's passages,
+  and hides the page line. The marks are boxes over the words, never elements in the
+  fragment, and follow them as the panel's width or the fragment changes. New text
+  `not_in_document` in `PdfPanelTexts`. `window.htmxoPdf.show` takes `kind` and
+  `anchor`. A static export rewrites an HTML document's address to the fragment it
+  writes below `hx/`.
+
 ## 0.1.84
 
 - `export_site` writes a page or fragment whose inline `<script>`, `<style>` or HTML

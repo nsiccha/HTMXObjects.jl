@@ -6614,7 +6614,8 @@ alone, so concurrent ordinary requests are unaffected.
   semantic elements' included (a [`SemanticLink`](@ref)'s `href`, `external=true`
   too, and a [`SemanticAction`](@ref)'s `hx-get`), for every document a
   [`pdf_panel`](@ref) and its [`pdf_ref`](@ref)s load (a reference's and the
-  lone document's `data-htmxo-pdf-url`, each chooser radio's value), and for
+  lone document's `data-htmxo-pdf-url`, each chooser radio's value; an HTML
+  document's address takes the default rule of an `hx-get`), and for
   every address a route body passes to [`static_url`](@ref) (one inside a
   script or a JSON payload, which the walk cannot see).
   A `String` replaces the attribute verbatim — relative targets such as
@@ -6832,7 +6833,8 @@ _StaticRules(spec, unservable, variants) =
 # maps each of them, the private check reads them, and `export_site`'s
 # reference check reads them in the written HTML. LOCKSTEP: `pdf_ref`,
 # `_pdf_chooser` in `src/pdf_panel.jl`.
-const _STATIC_LINK_ATTRS = (:href, :src, Symbol("data-htmxo-pdf-url"))
+const _PDF_URL_ATTR = Symbol("data-htmxo-pdf-url")
+const _STATIC_LINK_ATTRS = (:href, :src, _PDF_URL_ATTR)
 # An element with one of these attributes holds a list of documents, each a
 # radio whose value is the document's address: a `pdf_panel`'s chooser (pills
 # or a searchable list). Inside it, a radio's `value` is mapped like an `href`.
@@ -7275,14 +7277,17 @@ function _static_walk(node::Node, rules::_StaticRules)
     # `/hx/` fragment subtree — full pages link to other full pages).
     # A mapped address takes the caller's target instead. A PDF panel's
     # documents and references (`data-htmxo-pdf-url`, its chooser's radios)
-    # follow the same rule, so the panel loads the file the link names.
+    # follow the same rule, so the panel loads the file the link names; an
+    # HTML document among them, which the panel loads with an htmx GET, is
+    # the fragment an `hx-get` names (`_static_panel_url`).
     for sym in _STATIC_LINK_ATTRS
         haskey(new_attrs, sym) || continue
-        new_attrs[sym] = _static_url(spec, new_attrs[sym])
+        new_attrs[sym] = sym === _PDF_URL_ATTR ? _static_panel_url(rules, attrs, new_attrs[sym]) :
+            _static_url(spec, new_attrs[sym])
     end
     if rules.address_values && HTMX.tag(node) === :input && get(new_attrs, :type, "") == "radio" &&
        haskey(new_attrs, :value)
-        new_attrs[:value] = _static_url(spec, new_attrs[:value])
+        new_attrs[:value] = _static_panel_url(rules, attrs, new_attrs[:value])
     end
     # A page address htmx writes into the address bar keeps its query, which
     # the page reads in the browser (`_static_page_url`).
@@ -7322,7 +7327,19 @@ const _STATIC_ADDRESS_ATTRS = (Symbol("hx-get") => :fragment, (_STATIC_LINK_ATTR
     Symbol("hx-push-url") => :full, Symbol("hx-replace-url") => :full)
 _static_links_private(spec::StaticExport, attrs) = any(_STATIC_ADDRESS_ATTRS) do (sym, kind)
     address = get(attrs, sym, nothing)
+    kind = sym === _PDF_URL_ATTR && _pdf_html(attrs) ? :fragment : kind
     address isa AbstractString && _url_map_private(spec.url_map, address, kind)
+end
+
+# What a `pdf_panel` document's address (a reference's or the lone title's
+# `data-htmxo-pdf-url`, a chooser radio's value) becomes: an HTML document,
+# which the panel loads with an htmx GET, the fragment an `hx-get` of it
+# loads; a PDF the file a link to it names. LOCKSTEP: `_pdf_chooser`,
+# `pdf_ref` in `src/pdf_panel.jl`.
+function _static_panel_url(rules::_StaticRules, attrs, url)
+    _pdf_html(attrs) || return _static_url(rules.spec, url)
+    target = _static_url_target(rules.spec, url, :fragment)
+    isnothing(target) ? _static_hx_url(rules, url) : target
 end
 _url_map_private(url_map, address, kind) = false
 

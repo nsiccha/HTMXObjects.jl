@@ -89,9 +89,11 @@ run it locally.
 
 ## PDF panel {#pdf-panel}
 
-A report that quotes a PDF, built on [`pdf_panel`](components.md#pdf-panel):
-each reference is a coloured chip, and its passage is marked in the same
-colour on its page of the PDF beside the report. Pointing at a reference, a
+A report that quotes a PDF and an HTML document (the method behind it),
+built on [`pdf_panel`](components.md#pdf-panel): each reference is a coloured
+chip, and its passage is marked in the same colour in the document beside the
+report, on its page of the PDF or over its words in the method, its code
+highlighted. Pointing at a reference, a
 requirement's row or a marked passage shows its counterparts more strongly
 without scrolling anything; a click on a reference opens the panel at its
 passage, a click on a passage goes back to its reference.

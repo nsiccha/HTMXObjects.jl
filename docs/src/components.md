@@ -1796,13 +1796,15 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
-### `pdf_panel` — a PDF beside the text, its quoted passages marked {#pdf-panel}
+### `pdf_panel` — a PDF or an HTML document beside the text, its quoted passages marked {#pdf-panel}
 
-A side panel for a PDF the page quotes: every page of the file one below the
-other, each drawn by [PDF.js](https://mozilla.github.io/pdf.js/) (loaded from
-jsDelivr the first time the panel opens) as it comes into view. Each
-reference in the text, a `pdf_ref`, names the file, the page and the quoted
-words, and its passage is marked on that page in the reference's colour.
+A side panel for a document the page quotes. A PDF is every page of the file
+one below the other, each drawn by [PDF.js](https://mozilla.github.io/pdf.js/)
+(loaded from jsDelivr the first time the panel shows a PDF) as it comes into
+view. An HTML document (`kind=:html`: a brief's section, a range of code, a
+page of the app) is the fragment its address answers an htmx GET with. Each
+reference in the text, a `pdf_ref`, names the document, the page (or anchor)
+and the quoted words, and its passage is marked in the reference's colour.
 
 ```julia
 const PLAN = "/files/plan.pdf"
@@ -1813,6 +1815,18 @@ const PLAN = "/files/plan.pdf"
                     quoted="reported to the youth office within one day"), "."),
         pdf_toggle("plan", "Show the plan")),
     pdf_panel(["Child protection plan" => PLAN]; id="plan"))
+```
+
+An HTML document shares the panel and its rules. Its reference names the
+place as the address's `#anchor` instead of a page:
+
+```julia
+@get bericht() = pdf_beside(
+    h.article(h.p("Trips follow a Poisson distribution ",
+        pdf_ref("(method)", "/methodik#annahmen"; kind=:html, panel="quellen",
+                quoted="trips per zone follow a Poisson distribution"), ".")),
+    pdf_panel(["Plan" => "/files/plan.pdf", (title="Method", url="/methodik", kind=:html)];
+              id="quellen"))
 ```
 
 - **Every reference and its mark are always lightly highlighted**, in a
@@ -1864,7 +1878,21 @@ const PLAN = "/files/plan.pdf"
   beginning of them (24 letters at least), comparing letters and digits
   only. Where neither is on the page the panel goes to the page's top and
   says so.
-- Page scripts: `window.htmxoPdf.show(panel, {url, page, key})`,
+- **An HTML document** (`pdf_ref(…; kind=:html)`, a document record
+  `(; url, title, kind=:html)`) is fetched with `HX-Request: true` and
+  swapped in as htmx swaps, so the page's scripts see it: its code is
+  highlighted as the page's code is. It has no pages: the page line and its
+  buttons are hidden, and `page=` is refused. The address's `#anchor` names
+  the element the passage stands in (a section's heading): the panel opens
+  there, and looks for the quoted words from there on before it looks in the
+  whole document; where they are not there, it goes to the anchor (else the
+  top) and says so. Its passages are boxes over the words, as on a PDF's
+  page, never elements inside the fragment, so a highlighter that redraws a
+  code block keeps working; they follow the words when the panel's width or
+  the fragment changes. A document chosen in the chooser opens at its top. A
+  failed answer (an error status, or an `X-HTMXO-Error-Id` fragment, which
+  stays shown) says the document could not be shown.
+- Page scripts: `window.htmxoPdf.show(panel, {url, page, key, kind, anchor})`,
   `window.htmxoPdf.toggle(panel, open)`, and the events `htmxo:pdf-toggle`
   (`{open}`) and `htmxo:pdf-goto` (`{key, group}`, cancelable, before a mark's
   click goes to its reference).
@@ -1879,6 +1907,8 @@ In a static export ([`export_site`](api.md#whole-site-export), a `StaticExport`
 rewritten as their links are: each reference's file, the lone document's and
 each chooser document's address. The panel shows the file the export wrote,
 from the bundle's root or a subdirectory, and a document keeps its live title.
+An HTML document's address is rewritten as an `hx-get`'s is, to the fragment
+the export writes below `hx/`, while its references' links name the page.
 PDF.js still comes from `pdfjs` (by default jsDelivr), which is not rewritten.
 
 ### Content units — one identity, several layers, any depth {#content-units}

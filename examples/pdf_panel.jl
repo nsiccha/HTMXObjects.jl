@@ -1,12 +1,16 @@
-# A report that quotes a PDF, with the PDF beside it (`pdf_panel`):
+# A report that quotes a PDF and an HTML document, with them beside it
+# (`pdf_panel`):
 #   - each reference (`pdf_ref`) is a chip, always lightly highlighted in its
-#     colour; its passage is marked in the same colour on its page
+#     colour; its passage is marked in the same colour on its page of the PDF,
+#     or over its words in the HTML document (the procedure, a route of this
+#     app that answers htmx with a fragment; its code highlighted)
 #   - pointing at a reference, a requirement's row or a marked passage shows
 #     its counterparts more strongly; nothing scrolls
 #   - a click on a reference opens the panel at its passage; a click on a
 #     passage goes to its reference
 #   - the table's rows and the references share one hover-link group, so a
 #     row lights the passage its requirement quotes
+#   - the panel's pills switch between the plan and the procedure
 #
 # Run with:  julia --project examples/pdf_panel.jl
 # Then open: http://localhost:8080
@@ -25,14 +29,29 @@ const REQUIREMENTS = [
 
 # A reference to the plan, opening the panel `plan`.
 cite(plan, text, page, quoted; kw...) = pdf_ref(text, plan; page, quoted, panel="plan", kw...)
+# A reference to a place (`#anchor`) of the procedure, an HTML document.
+cite_html(procedure, text, anchor, quoted) =
+    pdf_ref(text, string(procedure, "#", anchor); kind=:html, quoted, panel="plan")
+
+const RULE = """
+function deadline(reported_at)
+    reported_at + Day(1)   # the youth office hears of it within one day
+end"""
 
 @htmx struct App
     __page__(content) = htmx(h.main(class="container")(content); pico_version="2", title="PDF panel")
-    @get index() = report(__self__ / "plan")
+    @get index() = report(__self__ / "plan", __self__ / "procedure")
     @get plan() = HTTP.Response(200, ["Content-Type" => "application/pdf"], PDF)
+    # The procedure: under htmx (the panel) its fragment, else a page of its own.
+    @get procedure() = h.article(
+        h.h2("How a suspicion is handled"; id="handling"),
+        h.p("Whoever notices something tells the lead. The lead checks every report on the same day ",
+            "and decides on the next steps together with a second specialist."),
+        h.h2("The deadline as code"; id="deadline"),
+        h.pre(h.code(RULE; class="language-julia")))
 end
 
-report(plan) = h.article(
+report(plan, procedure) = h.article(
     h.hgroup(h.h1("Child protection: our answers"), h.p(pdf_toggle("plan", "Show the plan"))),
     pdf_beside(
         h.div(
@@ -46,12 +65,16 @@ report(plan) = h.article(
                 cite(plan, "(p. 3)", 3, "reported to the youth office within one day"; key="r3"),
                 ", and the parents are told unless that puts the child at risk ",
                 cite(plan, "(p. 3)", 3, "The lead informs the parents unless this would put the child at risk"), "."),
+            h.p("Two people decide what happens next ",
+                cite_html(procedure, "(procedure)", "handling", "decides on the next steps together with a second specialist"),
+                ", and the deadline is computed, not guessed ",
+                cite_html(procedure, "(code)", "deadline", "reported_at + Day(1)"), "."),
             h.h2("Requirements"),
             sortable_table(["Requirement", "Where the plan says so"],
                 [h.tr(h.td(r.id), h.td(cite(plan, "page $(r.page)", r.page, r.quoted; key=r.id));
                       data_htmxo_link_key=r.id)
                  for r in REQUIREMENTS]; link="plan")),
-        pdf_panel(["Child protection plan" => plan]; id="plan")))
+        pdf_panel(["Child protection plan" => plan, (title="Our procedure", url=procedure, kind=:html)]; id="plan")))
 
 function main(; port=8080)
     route!(App())
