@@ -8569,9 +8569,49 @@ _body_contains(body::AbstractVector{UInt8}, s::AbstractString) = !isnothing(find
 # the written HTML.
 const _SITE_ATTRIBUTE = Regex("\\b(?:" * join(string.(first.(_STATIC_ADDRESS_ATTRS)), '|') * ")=\"([^\"]*)\"")
 const _SITE_SCRIPT_URL = r"\"url\":\"([^\"]*)\""
-# An HTML comment, or a `<script>`/`<style>` element: its tag's attributes,
-# then its text, which ends at the first closing tag (as a browser reads it).
-const _SITE_RAW_TEXT = r"<!--.*?-->|<(script|style)\b((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>(.*?)</\1\b[^>]*>"si
+# The start of an HTML comment, or a `<script>`/`<style>` start tag: its name
+# and attributes (possessive, so a long tag is read in one pass). The closing
+# tag of each kind (comment, script, style) is searched for apart.
+const _SITE_RAW_OPEN = r"<(?:!--|(script|style)\b((?:[^>\"']++|\"[^\"]*+\"|'[^']*+')*+)>)"i
+const _SITE_RAW_CLOSE = ("-->", r"</script\b[^>]*>"i, r"</style\b[^>]*>"i)
+
+# Calls `f(markup, raw)` for each HTML comment and `<script>`/`<style>` element
+# of `html`, in order, and returns the text after the last one. `markup` is the
+# text before it (from the end of the previous one); `raw` holds its tag's
+# `name` (`nothing` for a comment) and `attributes`, its `text`, which ends at
+# the first closing tag (as a browser reads it), and the whole `element`. One
+# that nothing closes is none, and the next may start inside it.
+#
+# No pattern is matched across a text: PCRE stops on one of more than about
+# ten million characters ("match limit exceeded"), and a page may carry its
+# data inline (snag `odlplaus-s-stati-cff9ee9c`). Each byte is searched at
+# most once for a closing tag of a kind that is not there, so many unclosed
+# tags do not make the time quadratic: no closing tag of a kind starts at or
+# after `none[kind]`. A start tag can begin inside an earlier one's attribute
+# value, before that byte, so its search runs up to it; a closing tag that
+# starts before it also ends before it, at the latest at the `>` there.
+function _site_raw_texts(f, html::AbstractString)
+    at = search = 1
+    none = fill(ncodeunits(html) + 1, 3)
+    while true
+        open = match(_SITE_RAW_OPEN, html, search)
+        isnothing(open) && return SubString(html, at)
+        from = open.offset + ncodeunits(open.match)
+        name = open[1]
+        kind = isnothing(name) ? 1 : lowercase(name) == "script" ? 2 : 3
+        close = from >= none[kind] ? nothing : findnext(_SITE_RAW_CLOSE[kind],
+            none[kind] > ncodeunits(html) ? html : SubString(html, 1, none[kind] - 1), from)
+        if isnothing(close)
+            none[kind] = min(none[kind], from)
+            search = nextind(html, open.offset)
+        else
+            f(SubString(html, at, prevind(html, open.offset)),
+              (; name, attributes=open[2], text=SubString(html, from, prevind(html, first(close))),
+                 element=SubString(html, open.offset, last(close))))
+            at = search = last(close) + 1
+        end
+    end
+end
 
 # The addresses an HTML file names, in order: each `href`, `src`, `hx-get`,
 # `hx-push-url`, `hx-replace-url` and `data-htmxo-pdf-url` attribute of an
@@ -8593,16 +8633,14 @@ end
 # with the text of each `<script>`, in order. An HTML comment and the text of
 # a `<script>` or `<style>` hold no elements; the tag's own attributes do.
 function _site_scan(markup, script, html::AbstractString)
-    at = 1
-    for m in eachmatch(_SITE_RAW_TEXT, html)
-        markup(SubString(html, at, prevind(html, m.offset)))
-        if !isnothing(m[1])
-            markup(m[2])
-            lowercase(m[1]) == "script" && script(m[3])
+    rest = _site_raw_texts(html) do before, raw
+        markup(before)
+        if !isnothing(raw.name)
+            markup(raw.attributes)
+            lowercase(raw.name) == "script" && script(raw.text)
         end
-        at = m.offset + ncodeunits(m.match)
     end
-    markup(SubString(html, at))
+    markup(rest)
     nothing
 end
 
@@ -8628,13 +8666,11 @@ end
 function _site_unmark(text::AbstractString, marker::Regex, link, html::Bool)
     html || return replace(text, marker => link)
     io = IOBuffer()
-    at = 1
-    for m in eachmatch(_SITE_RAW_TEXT, text)
-        print(io, replace(SubString(text, at, prevind(text, m.offset)), marker => escape_html ∘ link))
-        print(io, replace(m.match, marker => link))
-        at = m.offset + ncodeunits(m.match)
+    rest = _site_raw_texts(text) do before, raw
+        print(io, replace(before, marker => escape_html ∘ link))
+        print(io, replace(raw.element, marker => link))
     end
-    print(io, replace(SubString(text, at), marker => escape_html ∘ link))
+    print(io, replace(rest, marker => escape_html ∘ link))
     String(take!(io))
 end
 

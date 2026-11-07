@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.84
+
+- `export_site` writes a page or fragment whose inline `<script>`, `<style>` or HTML
+  comment is longer than about ten million characters, such as a region map that carries
+  its data inline. Such an export used to stop with
+  `PCRE.exec error: match limit exceeded`: each script, style and comment was found with
+  one regular expression matched across its whole text, and PCRE gives up after about
+  ten million steps. Now only the opening tag is matched, and the closing tag is
+  searched for from there, so a text of any length is read in time proportional to its
+  length. What the export reads and writes is unchanged.
+
 ## 0.1.83
 
 - Index and `@param` annotations resolve through `DynamicObjects.resolve_annotation`
