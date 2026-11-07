@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.81
+
+- `__undeclared_params__` lets an app refuse query and form parameters that a route
+  does not take. A route has always dropped them and answered with its defaults, so a
+  misspelled or guessed parameter got a wrong answer that looked right:
+  `?raw=1&field=command` served what `?raw=1` serves. Declared on the root struct,
+  `__undeclared_params__ = (; action=:refuse, allow=("from", "by"))` answers such a
+  request `400 Bad Request` with
+  `Unknown parameter: field; accepted parameters: raw, lang, from, by`
+  (`HTMXObjects.UndeclaredParams`, worded by the app's `ErrorTexts`). `:warn` answers
+  as before and logs one warning per request; `:ignore` is the default. It is read along
+  the mount chain like `__lang__`, so a mounted struct can declare its own. A route
+  takes its keywords, every `@param` from the root down, its semantic context inputs,
+  the `allow` names and the framework's own (`plain`, `markdown`, `error`, `v`, `tab`,
+  `__…`). Not checked: a route with a keyword splat, a browser's page load (its address
+  keeps view state for the page's scripts), a JSON or other raw body, and a mutation's
+  result poll. Without a declaration nothing changes.
+- `ErrorTexts` gains `unknown_params` (`{names}`), `accepted_params` (`{accepted}`) and
+  `no_params`, in English and German.
+
 ## 0.1.80
 
 - `SemanticProse(@doc(f))` works on Julia 1.11 and later in a process without a REPL
