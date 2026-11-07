@@ -10,9 +10,11 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    # A passing job takes ~17 min; a hung one used to hold its runner for
-    # GitHub's 6 h default. HTMXO_TEST_PROGRESS names the item it hung in.
-    timeout-minutes: 60
+    # A passing job took ~17 min with 38 test files (2026-10-12) and 57 min
+    # with 109 (ubuntu, Julia 1, 2026-11-07); macOS and `pre` ran past 60.
+    # A hung one used to hold its runner for GitHub's 6 h default.
+    # HTMXO_TEST_PROGRESS names the item it hung in.
+    timeout-minutes: 120
     strategy:
       matrix:
         julia-version: ['lts', '1', 'pre']
