@@ -9,7 +9,7 @@ using TestItemRunner
     using HTMXObjects, HTTP
     import HTMXObjects: h, Raw
     export ExportSiteApp, BrokenSiteApp, CollidingSiteApp, PlacedSiteApp, PLACED_CALLS,
-        InlineSiteApp, QueriedSiteApp, StationSiteApp, TypedSiteApp, ParallelSiteApp, MOST_RENDERING,
+        InlineSiteApp, BigInlineSiteApp, QueriedSiteApp, StationSiteApp, TypedSiteApp, ParallelSiteApp, MOST_RENDERING,
         BundleSiteApp, finished_bundle, plain_folder,
         bundle_files, bundle_tree, subdirectory_misses, SectionSiteApp, SECTION_OLD_CALLS, served_at
 
@@ -78,6 +78,21 @@ using TestItemRunner
                          repr(static_url(__req__, base * "/inline_raster")) * "}};")))
         @get inline_bericht() = h.p("Bericht")
         @direct @get inline_raster() = MIMEResponse("application/geo+json", "{\"type\":\"FeatureCollection\",\"features\":[]}")
+    end
+
+    # A page and a fragment that carry their data inline, as a region map
+    # does, in a 50 MB script: more than PCRE matches a pattern across (snag
+    # `odlplaus-s-stati-cff9ee9c`). The script names a file, so the export
+    # rewrites it.
+    big_inline_script(req) = h.script(Raw("var data = [" * "1.25,"^10_000_000 * "0];\nvar spec = {\"data\":{\"url\":" *
+                                          repr(static_url(req, base * "/big_raster")) * "}};"))
+    @htmx struct BigInlineSiteApp
+        __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
+            pico_version=HTMXObjects._PICO_VERSION)
+        @get index() = h.div(hx_link(base * "/big_teil"; hx_target="#inhalt")("Teil"), h.div(; id="inhalt"),
+                             big_inline_script(__req__))
+        @get big_teil() = h.div(h.a("Start"; href=base * "/"), big_inline_script(__req__))
+        @direct @get big_raster() = MIMEResponse("application/geo+json", "{\"type\":\"FeatureCollection\",\"features\":[]}")
     end
 
     # Counted with an atomic: an export renders pages on several threads.
@@ -617,6 +632,52 @@ end
     @test isfile(joinpath(dir, "inline_raster.geojson"))
     @test "inline_raster.geojson" in HTMXObjects._site_references(index)
     @test isfile(joinpath(dir, "inline_bericht.html"))
+    @test isempty(subdirectory_misses(dir))
+end
+
+@testitem "export_site reads and rewrites a script, style or comment larger than PCRE matches across" tags=[:unit] begin
+    import HTMXObjects
+    # A pattern matched across a text of more than about ten million
+    # characters stops with "PCRE.exec error: match limit exceeded" (snag
+    # `odlplaus-s-stati-cff9ee9c`). Each text here is over 50 MB.
+    data = "[1.25,2.5],"^4_600_000
+    link(m) = "f.html?m=" * m * "&k=1"
+    marker = r"mk[0-9]+x"
+    for (open, close, script) in (("<script type=\"application/json\">", "</script>", true),
+                                  ("<style media=\"all\">", "</STYLE >", false),
+                                  ("<!--", "-->", false))
+        html = "<a href=\"mk1x\">a</a>" * open * "{\"url\":\"mk2x\"} <a href=\"mk3x\">" * data * close *
+               "<a href=\"mk4x\">b</a>"
+        @test ncodeunits(html) > 50_000_000
+        # Only a script's text is read, for its Vega urls; no text holds elements.
+        @test HTMXObjects._site_references(html) == (script ? ["mk1x", "mk2x", "mk4x"] : ["mk1x", "mk4x"])
+        @test isempty(HTMXObjects._site_url_params(html))
+        # An address is escaped where it is an attribute's value, not inside the text.
+        @test HTMXObjects._site_unmark(html, marker, link, true) ==
+              "<a href=\"f.html?m=mk1x&amp;k=1\">a</a>" * open *
+              "{\"url\":\"f.html?m=mk2x&k=1\"} <a href=\"f.html?m=mk3x&k=1\">" * data * close *
+              "<a href=\"f.html?m=mk4x&amp;k=1\">b</a>"
+    end
+    # A tag nothing closes holds no text: the elements after it are read.
+    @test HTMXObjects._site_references("<script><a href=\"x\">a</a><!-- <a href=\"y\"> --><style>") == ["x"]
+end
+
+@testitem "export_site writes a page and a fragment whose inline script is larger than PCRE matches across" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
+    using Treebars
+    route!(BigInlineSiteApp())
+    vendorfiles()
+    dir = joinpath(mktempdir(), "site")
+    r = export_site(dir; pages=["/"])
+    @test r.files == length(bundle_files(dir)) - 1
+    for file in ("index.html", "big_teil.html", "hx/big_teil.html")
+        html = read(joinpath(dir, file), String)
+        @test ncodeunits(html) > 50_000_000
+        @test occursin("var data = [" * "1.25,"^10_000_000 * "0];", html)
+        @test occursin("\"url\":\"big_raster.geojson\"", html)
+        @test "big_raster.geojson" in HTMXObjects._site_references(html)
+    end
+    @test occursin("hx-get=\"hx/big_teil.html\"", read(joinpath(dir, "index.html"), String))
+    @test isfile(joinpath(dir, "big_raster.geojson"))
     @test isempty(subdirectory_misses(dir))
 end
 
