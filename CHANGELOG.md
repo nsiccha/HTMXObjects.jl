@@ -14,6 +14,25 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.82
+
+- `route!` registers an app while a package image is written. An app package whose
+  `__init__` calls `route!` used to make every package that depends on it fail to
+  precompile with ``Evaluation into the closed module `<Pkg>` breaks incremental
+  compilation`` as soon as the app mounted an indexed `@include` or `@struct` with a
+  typed index, such as `DataSources`' `source_item(name::Symbol)`. A `@compile_workload`
+  that routes an app mounting another package's such page failed the same way, and so
+  did `reflect` there. Registration evaluated each index annotation into the module that
+  declares the include, and Julia refuses evaluation into every module but the one being
+  compiled while an image is written. Annotations are now looked up by name: `x::T`,
+  `x::Mod.T` and `x::T{…}` of those resolve anywhere. A guard that returns from
+  `__init__` before `route!` while `ccall(:jl_generating_output, Cint, ()) != 0` is no
+  longer needed.
+- An annotation a lookup cannot express (a call such as `x::typeof(y)`, a `where`, or a
+  `<:` parameter) still evaluates, which works at run time. While an image is written
+  into a closed module it is refused with an `ArgumentError` that names the annotation
+  and says to give it a name (`const T = …`, then `x::T`).
+
 ## 0.1.81
 
 - `__undeclared_params__` lets an app refuse query and form parameters that a route
