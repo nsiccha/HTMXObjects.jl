@@ -11,6 +11,11 @@
 #   - the table's rows and the references share one hover-link group, so a
 #     row lights the passage its requirement quotes
 #   - the panel's pills switch between the plan and the procedure
+#   - the panel opens beside the report; the switch in its bar floats it over
+#     the page instead, on the right or below, and its inner edge resizes it
+#     (both kept for the next visit); closed, it leaves a tab on its edge
+#   - a reference inside the note (a modal dialog) opens the panel above the
+#     dialog; closing the note leaves the panel open beside the report
 #
 # Run with:  julia --project examples/pdf_panel.jl
 # Then open: http://localhost:8080
@@ -69,12 +74,20 @@ report(plan, procedure) = h.article(
                 cite_html(procedure, "(procedure)", "handling", "decides on the next steps together with a second specialist"),
                 ", and the deadline is computed, not guessed ",
                 cite_html(procedure, "(code)", "deadline", "reported_at + Day(1)"), "."),
+            h.p(h.button(; type="button", class="secondary", onclick="document.getElementById('note').showModal()")(
+                "Read the note on reporting")),
+            h.dialog(; id="note")(h.article(
+                h.h3("Reporting"),
+                h.p("Whoever suspects that a child is at risk reports it, and the report reaches the youth office within a day ",
+                    cite(plan, "(p. 3)", 3, "reported to the youth office within one day"), "."),
+                h.footer(h.button(; type="button", onclick="this.closest('dialog').close()")("Close")))),
             h.h2("Requirements"),
             sortable_table(["Requirement", "Where the plan says so"],
                 [h.tr(h.td(r.id), h.td(cite(plan, "page $(r.page)", r.page, r.quoted; key=r.id));
                       data_htmxo_link_key=r.id)
                  for r in REQUIREMENTS]; link="plan")),
-        pdf_panel(["Child protection plan" => plan, (title="Our procedure", url=procedure, kind=:html)]; id="plan")))
+        pdf_panel(["Child protection plan" => plan, (title="Our procedure", url=procedure, kind=:html)]; id="plan");
+        placements=(:beside, :right, :bottom)))
 
 function main(; port=8080)
     route!(App())

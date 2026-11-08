@@ -1796,7 +1796,7 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
-### `pdf_panel` — a PDF or an HTML document beside the text, its quoted passages marked {#pdf-panel}
+### `pdf_panel` — a PDF or an HTML document beside the text or over the page, its quoted passages marked {#pdf-panel}
 
 A side panel for a document the page quotes. A PDF is every page of the file
 one below the other, each drawn by [PDF.js](https://mozilla.github.io/pdf.js/)
@@ -1851,6 +1851,33 @@ place as the address's `#anchor` instead of a page:
   (40 %, at least 22rem; `--htmxo-pdf-width`), below a page's own sticky
   header (`--htmxo-sticky-top`). Opening or closing it keeps the clicked
   reference where it was on screen.
+- **Floating over the page.** `pdf_overlay(panel)` floats the open panel over
+  the page, which keeps its width and layout: on the right (40 %, at least
+  22rem, below the sticky header) or below (the whole width, half the window
+  high; `--htmxo-pdf-sheet-height`), with a switch in the bar between the two.
+  Mount it once, outside the region htmx swaps, with an empty document list:
+  every `pdf_ref` that names its id opens it, also one in content a later
+  swap brings.
+  `pdf_beside(content, panel; placements=(:beside, :right, :bottom))` offers
+  the same switch and starts beside the content; `placement=` names the
+  placement either starts in.
+- **The reader shapes it.** The panel's inner edge (the divider beside the
+  content, the left edge on the right, the top edge below) resizes it: drag
+  it with a mouse, a pen or a finger, or focus it and use the arrow keys,
+  Home and End. The placement picked last and each placement's size are kept
+  in the browser's `localStorage` (`htmxo-pdf-placement`,
+  `htmxo-pdf-size-<placement>`), so they survive a reload; a browser that
+  keeps nothing opens the panel as the app says. Closed after showing a
+  document, the panel leaves a tab on its edge that reopens it at the same
+  document and place. A reference the panel below would cover is scrolled up
+  just above it. On a narrow screen (48rem or less) every placement lies
+  below, and the switch is hidden.
+- **From a modal dialog.** A dialog opened with `showModal()` makes the rest
+  of the page inert, a panel there too. A reference inside the dialog
+  therefore opens the panel inside it, floating above its content and usable
+  there. When the dialog closes, the panel goes back to its place on the
+  page, still open. Content that replaces the dialog's own leaves the panel
+  in it.
 - The bar has the document chooser, the page line with previous and next,
   **Colours** (off: only the passages pointed at and gone to, in a marker's
   yellow), **Open file** and close. Its words follow the page's language
@@ -1893,7 +1920,8 @@ place as the address's `#anchor` instead of a page:
   failed answer (an error status, or an `X-HTMXO-Error-Id` fragment, which
   stays shown) says the document could not be shown.
 - Page scripts: `window.htmxoPdf.show(panel, {url, page, key, kind, anchor})`,
-  `window.htmxoPdf.toggle(panel, open)`, and the events `htmxo:pdf-toggle`
+  `window.htmxoPdf.toggle(panel, open)`, `window.htmxoPdf.place(panel, placement)`,
+  and the events `htmxo:pdf-toggle`
   (`{open}`) and `htmxo:pdf-goto` (`{key, group}`, cancelable, before a mark's
   click goes to its reference).
 

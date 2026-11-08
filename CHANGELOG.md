@@ -14,6 +14,37 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.86
+
+- `pdf_overlay(panel; placements=(:right, :bottom), placement)` floats a `pdf_panel` over
+  the page, so the page keeps its width and layout: on the right (40 % of the window, at
+  least 22rem, below `--htmxo-sticky-top`) or below (the whole width, half the window
+  high; `--htmxo-pdf-sheet-height`). Mount it once outside the swapped region, with an
+  empty document list, and every `pdf_ref` naming its id opens it (todo `0eqeadr`,
+  decision `Claude:pdf-crosslinks/0v6tyyq`).
+- `pdf_beside(content, panel; placements=(:beside,), placement)` offers the same
+  floating placements beside its own. With two or more placements, the panel's bar has
+  a switch between them (`data-htmxo-pdf-place` buttons, hidden on a narrow screen,
+  where every placement lies below).
+- The panel's inner edge resizes it in every placement: the divider beside the
+  content, the left edge on the right, the top edge below. It is a focusable separator
+  (arrow keys, Home, End) and follows a mouse, a pen or a finger. The placement picked
+  last and each placement's size are kept in `localStorage` (`htmxo-pdf-placement`,
+  `htmxo-pdf-size-<placement>`); a browser that keeps nothing gets the app's placement.
+- A panel closed after showing a document leaves a tab on its edge that reopens it at
+  the same document and place.
+- A reference that the panel below would cover is scrolled just above it.
+- A reference inside a modal dialog (`showModal()`) opens the panel inside the dialog,
+  above its content and usable there; the panel goes back to its place, still open,
+  when the dialog closes. Before, it opened beneath the dialog's top layer, where the
+  dialog's inertness made it unusable.
+- New texts in `PdfPanelTexts`: `placement`, `beside`, `right`, `bottom`, `resize`,
+  `reopen`. `window.htmxoPdf.place(panel, placement)` switches from a script.
+- **Breaking** for a page's own CSS only: the open `pdf_beside` grid has a third
+  column, the 1rem divider between the content and the panel (it replaces the 1rem
+  gap), and the panel's cell is `grid-column: 3`. On a narrow screen the open panel is
+  the full-width sheet below (it was a card 60 % of the window high, inset by .5rem).
+
 ## 0.1.85
 
 - `pdf_panel` shows HTML documents next to PDFs (snag `pdf-panel-shows-b0bebb33`):
