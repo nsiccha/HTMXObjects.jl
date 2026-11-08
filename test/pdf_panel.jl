@@ -198,7 +198,47 @@ end
     @test occursin(">Originale</button>", html(pdf_toggle("orig", "Originale"; class="secondary")))
     @test strip(to_markdown_string(h.div(h.p("a"), pdf_toggle("orig")))) == "a"
     b = html(pdf_beside(h.p("content"), pdf_panel(; id="orig", assets=false)))
-    @test occursin(r"^<div class=\"htmxo-pdf-beside\" data-htmxo-pdf-beside=\"\"><div class=\"htmxo-pdf-beside-content\"><p>content</p></div><aside id=\"orig\"", b)
+    @test occursin(r"^<div class=\"htmxo-pdf-beside\" data-htmxo-pdf-beside=\"\" data-htmxo-pdf-placements=\"beside\" data-htmxo-pdf-placement=\"beside\" data-htmxo-pdf-default=\"beside\"><div class=\"htmxo-pdf-beside-content\"><p>content</p></div><aside id=\"orig\"", b)
+end
+
+@testitem "pdf_overlay and pdf_beside: where the panel stands, and the switch between placements" setup=[PdfFixtures] tags=[:unit] begin
+    # Todo 0eqeadr (Claude:pdf-crosslinks, decision 0v6tyyq): a panel floating
+    # over the page, on the right or below, with a switch; pdf_beside offers it too.
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string
+    panel = pdf_panel(; id="quellen", assets=false)
+    o = html(pdf_overlay(panel))
+    @test occursin(r"^<div class=\"htmxo-pdf-float\" data-htmxo-pdf-float=\"\" data-htmxo-pdf-placements=\"right bottom\" data-htmxo-pdf-placement=\"right\" data-htmxo-pdf-default=\"right\"><aside id=\"quellen\"", o)
+    @test occursin("data-htmxo-pdf-placement=\"bottom\" data-htmxo-pdf-default=\"bottom\"", html(pdf_overlay(panel; placement=:bottom)))
+    @test occursin("data-htmxo-pdf-placements=\"bottom\" data-htmxo-pdf-placement=\"bottom\"", html(pdf_overlay(panel; placements=(:bottom,))))
+    @test occursin("data-htmxo-pdf-placements=\"bottom right\"", html(pdf_overlay(panel; placements=[:bottom, :right])))
+    @test occursin("class=\"htmxo-pdf-float page-pdf\"", html(pdf_overlay(panel; class="page-pdf")))
+    @test strip(to_markdown_string(h.div(h.p("Text"), pdf_overlay(panel)))) == "Text"          # HTML only
+    b = html(pdf_beside(h.p("x"), panel; placements=(:beside, :right, :bottom)))
+    @test occursin("data-htmxo-pdf-placements=\"beside right bottom\" data-htmxo-pdf-placement=\"beside\" data-htmxo-pdf-default=\"beside\"", b)
+    @test occursin("data-htmxo-pdf-placement=\"right\"", html(pdf_beside(h.p("x"), panel; placements=(:beside, :right), placement=:right)))
+    @test strip(to_markdown_string(pdf_beside(h.p("x"), panel; placements=(:beside, :bottom)))) == "x"
+    # refused: no placement, an unknown or repeated one, one beside nothing, a start not offered
+    @test_throws ArgumentError pdf_overlay(panel; placements=())
+    @test_throws ArgumentError pdf_overlay(panel; placements=(:beside, :right))
+    @test_throws ArgumentError pdf_overlay(panel; placements=(:left,))
+    @test_throws ArgumentError pdf_overlay(panel; placements=(:right, :right))
+    @test_throws ArgumentError pdf_overlay(panel; placements=(:bottom,), placement=:right)
+    @test_throws ArgumentError pdf_beside(h.p("x"), panel; placements=(:top,))
+    @test_throws ArgumentError pdf_beside(h.p("x"), panel; placement=:right)
+    # the panel's bar carries the switch, hidden until a place offers two placements
+    s = html(panel)
+    switch = match(r"<span class=\"htmxo-pdf-places\" role=\"group\" aria-label=\"Where the document stands\" data-htmxo-pdf-places=\"\" hidden=\"true\">(.*?)</span><button type=\"button\" data-htmxo-pdf-close"s, s)
+    @test !isnothing(switch)
+    buttons = collect(eachmatch(r"<button type=\"button\" data-htmxo-pdf-place=\"(\w+)\" aria-pressed=\"false\" aria-label=\"([^\"]+)\" title=\"[^\"]+\" hidden=\"true\"><svg ", switch[1]))
+    @test [m[1] for m in buttons] == ["beside", "right", "bottom"]
+    @test [m[2] for m in buttons] == ["Beside the text", "Over the page, on the right", "Over the page, below"]
+    @test occursin("data-text-resize=\"Size of the document\"", s) && occursin("data-text-reopen=\"Show the document again\"", s)
+    de = HTMXObjects._with_page_lang(() -> html(pdf_panel(; id="x", assets=false)), "de")
+    @test occursin("aria-label=\"Wo das Dokument steht\"", de) && occursin("aria-label=\"Über der Seite, unten\"", de) &&
+          occursin("data-text-reopen=\"Dokument wieder zeigen\"", de)
+    own = html(pdf_panel(; id="x", assets=false, texts=pdf_panel_texts(; bottom="Unten", reopen="Wieder")))
+    @test occursin("aria-label=\"Unten\"", own) && occursin("data-text-reopen=\"Wieder\"", own)
 end
 
 @testitem "pdf_ref and pdf_panel take HTML documents: an anchor, no pages" setup=[PdfFixtures] tags=[:unit] begin
@@ -1159,6 +1199,397 @@ end
                     endswith(line, ":true") || println("pdf_panel browser (HTML): ", line)
                 end
                 @test count(==('\n'), checks[1]) + 1 == 32
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "pdf_panel browser: floating over the page, the switch, resizing, the edge tab and a modal dialog" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    # Todo 0eqeadr (Claude:pdf-crosslinks, decision 0v6tyyq): a page-level panel,
+    # mounted once outside the content, floats on the right or below; the reader
+    # switches, resizes and reopens it, the choice and the size survive a reload,
+    # and a reference inside a showModal() dialog opens it above the dialog. In
+    # light and in dark.
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        pdf = tiny_pdf(PDF_PAGES)
+        two_lines = "every provider and of everyone who works with children"
+        ref(id, text; kw...) = pdf_ref(text, "/doc.pdf"; panel="page-pdf", id, kw...)
+        filler(n) = [h.p("Filler paragraph $i of the dialog, so that it scrolls.") for i in 1:n]
+        content = h.div(; id="content")(
+            h.p("Intro ", ref("r1", "(p. 1)"; page=1, quoted=two_lines), " and the toggle ", pdf_toggle("page-pdf"; id="toggle"), "."),
+            h.div(; style="height: 700px"),
+            h.p("Lower down ", ref("r2", "(p. 2)"; page=2, quoted="reported to the youth office"), "."),
+            h.p("Another panel ", pdf_ref("(other)", "/doc.pdf"; panel="other-pdf", id="ro", page=1), "."),
+            h.div(; style="height: 2500px"),
+            h.dialog(; id="modal")(h.article(; style="max-height: 70vh; overflow: auto")(
+                filler(6)..., h.p("In the dialog ", ref("rd", "(dialog)"; page=1, quoted="Other text on the first page")), filler(30)...)))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+            const theme = new URLSearchParams(location.search).get('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', theme);
+            const phase = sessionStorage.getItem('phase') || '1';
+            const checks = JSON.parse(sessionStorage.getItem('checks') || '[]');
+            const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
+            const tick = () => fetch('/tick').then(r => r.text());
+            const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
+            const aside = document.getElementById('page-pdf'), home = aside.parentElement;
+            const wrap = () => aside.closest('[data-htmxo-pdf-float]'), placement = () => wrap().dataset.htmxoPdfPlacement;
+            const ref = id => document.getElementById(id), rect = el => el.getBoundingClientRect();
+            const W = () => document.documentElement.clientWidth, H = () => innerHeight;
+            const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+            const handle = () => wrap().querySelector(':scope > .htmxo-pdf-resize');
+            const tab = () => document.querySelector('[data-htmxo-pdf-tab="page-pdf"]');
+            const button = p => aside.querySelector('[data-htmxo-pdf-place="' + p + '"]');
+            const pressed = p => button(p).getAttribute('aria-pressed') === 'true';
+            const drawn = n => aside.querySelector('.htmxo-pdf-page[data-htmxo-pdf-page="' + n + '"][data-htmxo-pdf-drawn]');
+            const busy = () => aside.querySelector('[data-htmxo-pdf-pages]').hasAttribute('aria-busy');
+            const pageLine = () => aside.querySelector('[data-htmxo-pdf-page-info]').textContent;
+            const near = (a, b, d = 2) => Math.abs(a - b) <= d;
+            // the pages laid out at the panel's width (a new width lays them out again, after a while)
+            const laidOut = () => { const v = aside.querySelector('[data-htmxo-pdf-pages]'), pg = aside.querySelector('.htmxo-pdf-page');
+                                    return !!pg && Math.abs(rect(pg).width - Math.max(200, v.clientWidth)) < 1.5; };
+            // whether a click at the middle of `el` reaches it (not inert, not covered)
+            const reach = el => { const r = rect(el), at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                                  return !!at && (at === el || el.contains(at)); };
+            const width = () => rect(ref('content')).width, scrolls = () => document.documentElement.scrollWidth > W();
+            const pointer = (type, el, x, y, kind) => el.dispatchEvent(new PointerEvent(type, {bubbles: true, cancelable: true,
+                pointerId: 7, isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, pointerType: kind || 'mouse'}));
+            const drag = (el, dx, dy, kind) => { const r = rect(el), x = r.left + r.width / 2, y = r.top + r.height / 2;
+                pointer('pointerdown', el, x, y, kind); pointer('pointermove', el, x + dx / 2, y + dy / 2, kind);
+                pointer('pointermove', el, x + dx, y + dy, kind); pointer('pointerup', el, x + dx, y + dy, kind); };
+            const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}));
+            const kept = name => localStorage.getItem(name);
+            const rgb = c => (c.match(/[\d.]+/g) || []).map(Number);
+            const lum = c => { const v = rgb(c).slice(0, 3).map(x => { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); });
+                               return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]; };
+            const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+            const opaque = c => { const v = rgb(c); return v.length === 3 || v[3] === 1; };
+            // an element's text against what lies behind it: its own background, else the first opaque one around it
+            const ink = el => { let bg = el; while (bg && !opaque(getComputedStyle(bg).backgroundColor)) bg = bg.parentElement;
+                                return contrast(getComputedStyle(el).color, bg ? getComputedStyle(bg).backgroundColor : 'rgb(255, 255, 255)'); };
+            try {
+                if (phase === '1') {
+                    const w0 = width();
+                    check('theme', document.documentElement.dataset.theme === theme);
+                    check('closed', aside.hidden && !wrap().hasAttribute('data-htmxo-pdf-open') && !tab() && kept('htmxo-pdf-placement') === null);
+                    // a reference opens it on the right, over the page, which keeps its layout
+                    ref('r1').click();
+                    await wait(() => !busy() && drawn(1));
+                    const p = rect(aside);
+                    check('opens-right', !aside.hidden && placement() === 'right' && near(p.right, W()) && near(p.top, 0) &&
+                          near(p.bottom, H()) && near(p.width, Math.max(22 * rem, 0.4 * W())), {p, W: W(), rem});
+                    check('right-keeps-layout', width() === w0 && !scrolls(), {w0, now: width()});
+                    check('right-opaque', opaque(getComputedStyle(aside).backgroundColor) && reach(aside.querySelector('[data-htmxo-pdf-close]')));
+                    check('switch', !aside.querySelector('[data-htmxo-pdf-places]').hidden && !button('right').hidden &&
+                          !button('bottom').hidden && button('beside').hidden && pressed('right') && !pressed('bottom'));
+                    check('switch-ink', ink(button('right')) >= 4.5 && ink(button('bottom')) >= 4.5, [ink(button('right')), ink(button('bottom'))]);
+                    // its left edge: a separator, dragged by touch and moved by the arrow keys
+                    const edge = handle();
+                    check('separator', edge && edge.getAttribute('role') === 'separator' && edge.tabIndex === 0 &&
+                          edge.getAttribute('aria-orientation') === 'vertical' &&
+                          edge.getAttribute('aria-valuenow') === String(Math.round(100 * p.width / W())) &&
+                          reach(edge) && near(rect(edge).left + rect(edge).width / 2, p.left), edge && rect(edge));
+                    drag(edge, -100, 0, 'touch');
+                    const p2 = rect(aside);
+                    check('drag-right', near(p2.width, p.width + 100) && near(p2.right, W()) && kept('htmxo-pdf-size-right') === String(Math.round(p2.width)),
+                          {was: p.width, now: p2.width, kept: kept('htmxo-pdf-size-right')});
+                    edge.focus();
+                    key(edge, 'ArrowRight');
+                    check('keys-right', document.activeElement === edge && near(rect(aside).width, p2.width - 16) &&
+                          kept('htmxo-pdf-size-right') === String(Math.round(rect(aside).width)) &&
+                          near(rect(edge).left + rect(edge).width / 2, rect(aside).left));
+                    // switched below: the whole width, half the window high
+                    button('bottom').click();
+                    await wait(() => !busy() && drawn(1));
+                    const b = rect(aside);
+                    check('to-bottom', placement() === 'bottom' && near(b.left, 0) && near(b.right, W()) && near(b.bottom, H()) &&
+                          near(b.height, 0.5 * H()) && pressed('bottom') && !pressed('right'), {b});
+                    check('bottom-kept', kept('htmxo-pdf-placement') === 'bottom');
+                    check('bottom-keeps-layout', width() === w0 && !scrolls());
+                    check('bottom-separator', handle().getAttribute('aria-orientation') === 'horizontal' &&
+                          near(rect(handle()).top + rect(handle()).height / 2, b.top) && reach(handle()));
+                    await wait(() => laidOut() && drawn(1));
+                    const pg = rect(aside.querySelector('.htmxo-pdf-page'));
+                    check('bottom-reading-width', pg.width <= 56 * rem + 1 && pg.width > 400 && Math.abs((pg.left - b.left) - (b.right - pg.right)) < 40, {pg, b});
+                    drag(handle(), 0, -100);
+                    check('drag-bottom', near(rect(aside).height, b.height + 100) && kept('htmxo-pdf-size-bottom') === String(Math.round(rect(aside).height)),
+                          {was: b.height, now: rect(aside).height});
+                    // a reference the panel would cover is lifted just above it
+                    scrollTo(0, scrollY + rect(ref('r2')).top - (rect(aside).top + 60));
+                    await tick();
+                    const y0 = scrollY;
+                    check('r2-covered', rect(ref('r2')).top > rect(aside).top);
+                    ref('r2').click();
+                    await wait(() => !busy() && drawn(2));
+                    const r2 = rect(ref('r2'));
+                    check('ref-in-view', r2.bottom <= rect(aside).top && r2.bottom > rect(aside).top - 40 && scrollY > y0,
+                          {r2, top: rect(aside).top, y0, y: scrollY});
+                    // closed, it leaves a tab on its edge, which reopens it at the same document and place
+                    aside.scrollTop = 150;
+                    await tick(); await tick();
+                    const at0 = aside.scrollTop, url0 = aside.htmxoPdfFile.url;
+                    aside.querySelector('[data-htmxo-pdf-close]').click();
+                    const t = tab();
+                    check('closed-tab', aside.hidden && t && !t.hidden && t.textContent === 'Document' && near(rect(t).bottom, H()) &&
+                          rect(t).right <= W() && reach(t), t && rect(t));
+                    check('tab-ink', ink(t) >= 4.5, ink(t));
+                    check('closed-keeps-layout', width() === w0 && !scrolls());
+                    t.click();
+                    await wait(() => !busy());
+                    check('tab-reopens', !aside.hidden && t.hidden && aside.htmxoPdfFile.url === url0 && near(aside.scrollTop, at0) &&
+                          placement() === 'bottom', {at: aside.scrollTop, at0});
+                    // the toggle as ever
+                    ref('toggle').click();
+                    check('toggle-closes', aside.hidden && ref('toggle').getAttribute('aria-pressed') === 'false' && !tab().hidden);
+                    ref('toggle').click();
+                    check('toggle-opens', !aside.hidden && ref('toggle').getAttribute('aria-pressed') === 'true' && tab().hidden);
+                    // a modal dialog puts the page out of reach; a reference in it opens the panel above it
+                    const dialog = ref('modal');
+                    dialog.showModal();
+                    check('page-inert', !reach(aside.querySelector('[data-htmxo-pdf-close]')));
+                    ref('rd').scrollIntoView({block: 'end'});
+                    ref('rd').click();
+                    const rdKey = ref('rd').dataset.htmxoPdfKey;
+                    await wait(() => !busy() && aside.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-key="' + rdKey + '"][data-htmxo-pdf-active]'));
+                    const controls = ['[data-htmxo-pdf-close]', '[data-htmxo-pdf-colours]', '[data-htmxo-pdf-step="1"]',
+                                      '[data-htmxo-pdf-place="right"]'].map(q => aside.querySelector(q));
+                    check('in-dialog', dialog.contains(aside) && !aside.hidden && placement() === 'bottom' && near(rect(aside).bottom, H()));
+                    check('dialog-controls-reached', controls.every(reach) && reach(handle()), controls.map(reach));
+                    const close = aside.querySelector('[data-htmxo-pdf-close]');
+                    close.focus();
+                    check('dialog-focus', document.activeElement === close);
+                    check('dialog-ref-in-view', rect(ref('rd')).bottom <= rect(aside).top && rect(ref('rd')).top >= rect(dialog.querySelector('article')).top,
+                          {rd: rect(ref('rd')), top: rect(aside).top});
+                    const mark = aside.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-key="' + rdKey + '"]');
+                    check('dialog-mark-reached', reach(mark));
+                    mark.click();
+                    check('dialog-mark-goes', ref('rd').hasAttribute('data-htmxo-pdf-flash'));
+                    aside.querySelector('[data-htmxo-pdf-step="1"]').click();
+                    check('dialog-step', pageLine() === 'page 2 of 2');
+                    // the dialog's content replaced: the panel stays in it, at its place (one it went to at
+                    // once: a smooth scroll does not finish under the virtual clock)
+                    window.htmxoPdf.show('page-pdf', {url: '/doc.pdf', page: 2});
+                    await wait(() => !busy() && laidOut());
+                    await tick();
+                    const at1 = aside.scrollTop, tracked = aside.htmxoPdfScrolled;
+                    dialog.replaceChildren(dialog.querySelector('article').cloneNode(true));
+                    await tick();
+                    check('replaced-keeps-panel', dialog.contains(aside) && !aside.hidden && reach(close) && at1 > 100 && near(aside.scrollTop, at1),
+                          {inside: dialog.contains(aside), at: aside.scrollTop, at1, tracked});
+                    // the dialog closed: the panel back on the page, open and usable
+                    dialog.close();
+                    await wait(() => !dialog.contains(aside));
+                    await tick();
+                    const marks = [];
+                    for (let it = document.createNodeIterator(document.body, NodeFilter.SHOW_COMMENT), n; (n = it.nextNode());) marks.push(n.data);
+                    check('dialog-closed', home.contains(aside) && wrap() === home && !aside.hidden && placement() === 'bottom' &&
+                          reach(close) && reach(handle()) && !document.querySelector('[data-htmxo-pdf-carrier]') &&
+                          !marks.some(m => m.includes('htmxo-pdf-panel')), {home: home.contains(aside), marks});
+                    sessionStorage.setItem('phase', '2');
+                    sessionStorage.setItem('checks', JSON.stringify(checks));
+                    location.reload();
+                    return;
+                }
+                // after a reload: the reader's placement and sizes
+                ref('r1').click();
+                await wait(() => !busy() && drawn(1));
+                check('reload-placement', placement() === 'bottom' && pressed('bottom'));
+                check('reload-size-bottom', near(rect(aside).height, Number(kept('htmxo-pdf-size-bottom'))), [rect(aside).height, kept('htmxo-pdf-size-bottom')]);
+                button('right').click();
+                check('reload-size-right', placement() === 'right' && near(rect(aside).width, Number(kept('htmxo-pdf-size-right'))));
+                aside.querySelector('[data-htmxo-pdf-close]').click();
+                // storage that throws: the app's own placement (this panel's is below)
+                const getItem = Storage.prototype.getItem;
+                Storage.prototype.getItem = function () { throw new Error('denied'); };
+                const other = document.getElementById('other-pdf');
+                ref('ro').click();
+                await wait(() => !other.hidden);
+                check('storage-throws', other.closest('[data-htmxo-pdf-float]').dataset.htmxoPdfPlacement === 'bottom' &&
+                      getItem.call(localStorage, 'htmxo-pdf-placement') === 'right');
+                Storage.prototype.getItem = getItem;
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            sessionStorage.clear();
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(h.main(content, pdf_overlay(pdf_panel(; id="page-pdf")),
+                pdf_overlay(pdf_panel(["Fixture" => "/doc.pdf"]; id="other-pdf"); placement=:bottom)), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) :
+            path == "/doc.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) :
+            path == "/tick" ? (sleep(0.05); HTTP.Response(200, "ok")) : HTTP.Response(404)
+        end
+        try
+            for theme in ("light", "dark")
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=180000 --dump-dom --user-data-dir=$profile "http://127.0.0.1:$port/?theme=$theme"`; timeout=240)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                if !isnothing(checks)
+                    for line in split(checks[1], '\n')
+                        @test endswith(line, ":true")
+                        endswith(line, ":true") || println("pdf_panel floating browser ($theme): ", line)
+                    end
+                    @test count(==('\n'), checks[1]) + 1 == 38
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "pdf_panel browser: beside with a switch, the divider resizes it, a narrow screen shows it below" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    # Todo 0eqeadr: the LAN chat and the card deck keep the panel beside their
+    # content and gain the switch; the divider resizes it, keeping the clicked
+    # reference in place while the content wraps anew.
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        pdf = tiny_pdf(PDF_PAGES)
+        words = "Every provider makes sure that everyone who works with children in its care knows these requirements. "
+        content = h.div(; id="content")(
+            [h.p(repeat(words, 3), pdf_ref("(p. $(1 + i % 2))", "/doc.pdf"; page=1 + i % 2, panel="orig", id="ref-$i",
+                                           quoted=isodd(i) ? "reported to the youth office" : "the task of every provider"))
+             for i in 1:30]...)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+            const narrowRun = new URLSearchParams(location.search).has('narrow');
+            const checks = [];
+            const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
+            const tick = () => fetch('/tick').then(r => r.text());
+            const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
+            const aside = document.getElementById('orig'), wrap = aside.closest('[data-htmxo-pdf-beside]');
+            const box = wrap.querySelector(':scope > .htmxo-pdf-beside-content');
+            const placement = () => wrap.dataset.htmxoPdfPlacement, rect = el => el.getBoundingClientRect();
+            const W = () => document.documentElement.clientWidth, H = () => innerHeight;
+            const handle = () => wrap.querySelector(':scope > .htmxo-pdf-resize'), tab = () => wrap.querySelector(':scope > .htmxo-pdf-tab');
+            const button = p => aside.querySelector('[data-htmxo-pdf-place="' + p + '"]');
+            const drawn = () => aside.querySelector('.htmxo-pdf-page[data-htmxo-pdf-drawn]');
+            const busy = () => aside.querySelector('[data-htmxo-pdf-pages]').hasAttribute('aria-busy');
+            const near = (a, b, d = 2) => Math.abs(a - b) <= d;
+            const reach = el => { const r = rect(el), at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                                  return !!at && (at === el || el.contains(at)); };
+            const pointer = (type, el, x, y) => el.dispatchEvent(new PointerEvent(type, {bubbles: true, cancelable: true,
+                pointerId: 3, isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, pointerType: 'mouse'}));
+            const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}));
+            const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+            try {
+                const full = rect(box).width, ref = document.getElementById('ref-14');
+                ref.scrollIntoView({block: 'center'});
+                await tick();
+                if (narrowRun) {
+                    // a narrow screen: below, whatever the placement, the content keeping its width; no switch
+                    ref.click();
+                    await wait(() => !busy() && drawn());
+                    check('narrow-below', placement() === 'bottom' && aside.htmxoPdfPlace === 'beside' && near(rect(aside).left, 0) &&
+                          near(rect(aside).right, W()) && near(rect(aside).bottom, H()) && near(rect(box).width, full), {p: rect(aside)});
+                    check('narrow-no-switch', getComputedStyle(aside.querySelector('[data-htmxo-pdf-places]')).display === 'none');
+                    check('narrow-ref-in-view', rect(ref).bottom <= rect(aside).top, {r: rect(ref), top: rect(aside).top});
+                } else {
+                    // beside at first: the content narrows, the divider stands between the two
+                    const before = rect(ref).top;
+                    ref.click();
+                    await wait(() => !busy() && drawn());
+                    await settle();
+                    check('beside', placement() === 'beside' && rect(box).width < full - 300 && rect(aside).left >= rect(box).right &&
+                          near(rect(ref).top, before, 1), {box: rect(box), aside: rect(aside), before, now: rect(ref).top});
+                    const edge = handle();
+                    check('divider', edge && rect(edge).left >= rect(box).right - 1 && rect(edge).right <= rect(aside).left + 1 &&
+                          edge.getAttribute('aria-orientation') === 'vertical' && reach(edge));
+                    check('switch-three', ['beside', 'right', 'bottom'].every(p => !button(p).hidden) && button('beside').getAttribute('aria-pressed') === 'true');
+                    // dragged 120 px to the left: the panel wider, the content narrower, the reference where it was
+                    const pw = rect(aside).width, cw = rect(box).width, top = rect(ref).top, r = rect(edge);
+                    pointer('pointerdown', edge, r.left + r.width / 2, r.top + 50);
+                    pointer('pointermove', edge, r.left + r.width / 2 - 60, r.top + 50);
+                    pointer('pointermove', edge, r.left + r.width / 2 - 120, r.top + 50);
+                    pointer('pointerup', edge, r.left + r.width / 2 - 120, r.top + 50);
+                    await settle();
+                    check('divider-drag', near(rect(aside).width, pw + 120) && near(rect(box).width, cw - 120) && near(rect(ref).top, top, 1) &&
+                          localStorage.getItem('htmxo-pdf-size-beside') === String(Math.round(rect(aside).width)),
+                          {pw, now: rect(aside).width, cw, box: rect(box).width, top, at: rect(ref).top});
+                    // the keys: End is the largest, Home the smallest size
+                    edge.focus();
+                    key(edge, 'End');
+                    check('divider-end', near(rect(box).width, 240, 1), rect(box).width);
+                    key(edge, 'Home');
+                    check('divider-home', near(rect(aside).width, 240, 1) && localStorage.getItem('htmxo-pdf-size-beside') === '240', rect(aside).width);
+                    key(edge, 'ArrowLeft');
+                    check('divider-key', near(rect(aside).width, 256, 1));
+                    // on the right, over the page: the content gets its width back
+                    button('right').click();
+                    await settle();
+                    check('to-right', placement() === 'right' && near(rect(box).width, full) && near(rect(aside).right, W()) &&
+                          button('right').getAttribute('aria-pressed') === 'true');
+                    // back beside, at the size it had there
+                    button('beside').click();
+                    await settle();
+                    check('back-beside', placement() === 'beside' && near(rect(aside).width, 256, 1) && rect(aside).left >= rect(box).right);
+                    // closed: its tab at the content's edge, which reopens it beside the content
+                    aside.querySelector('[data-htmxo-pdf-close]').click();
+                    await settle();
+                    const t = tab();
+                    check('beside-tab', aside.hidden && t && !t.hidden && rect(t).left >= rect(box).right && rect(t).right <= rect(wrap).right + 1 &&
+                          rect(t).top > 0 && rect(t).bottom < H() && reach(t), t && {t: rect(t), box: rect(box), wrap: rect(wrap)});
+                    t.click();
+                    await wait(() => !busy() && drawn());
+                    check('tab-reopens', !aside.hidden && t.hidden && placement() === 'beside' && drawn() && rect(aside).left >= rect(box).right,
+                          {hidden: aside.hidden, tab: t.hidden, at: placement(), drawn: !!drawn(), busy: busy()});
+                }
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(h.main(pdf_beside(content, pdf_panel(["Fixture" => "/doc.pdf"]; id="orig");
+                                                         placements=(:beside, :right, :bottom))), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) :
+            path == "/doc.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) :
+            path == "/tick" ? (sleep(0.05); HTTP.Response(200, "ok")) : HTTP.Response(404)
+        end
+        try
+            for (size, query, n) in (("1400,1000", "", 11), ("600,900", "?narrow=1", 3))
+                dom = mktempdir() do profile
+                    dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=$size --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/$query`; timeout=180)
+                end
+                checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+                @test !isnothing(checks)
+                if !isnothing(checks)
+                    for line in split(checks[1], '\n')
+                        @test endswith(line, ":true")
+                        endswith(line, ":true") || println("pdf_panel beside switch browser ($size): ", line)
+                    end
+                    @test count(==('\n'), checks[1]) + 1 == n
+                end
             end
         finally
             close(server)

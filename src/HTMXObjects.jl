@@ -41,7 +41,7 @@ export CaptionTexts, caption_texts
 export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script
-export pdf_panel, pdf_ref, pdf_toggle, pdf_beside, pdf_panel_texts, PdfPanelTexts, pdf_panel_assets, pdf_panel_styles, pdf_panel_script
+export pdf_panel, pdf_ref, pdf_toggle, pdf_beside, pdf_overlay, pdf_panel_texts, PdfPanelTexts, pdf_panel_assets, pdf_panel_styles, pdf_panel_script
 export card_deck, card_deck_texts, CardDeckTexts, card_deck_assets, card_deck_styles, card_deck_script
 export htmxo_theme, pico_bridge, vitepress_bridge,
     vitepress_asset_dir, vitepress_theme_install, htmxo_embed_html,

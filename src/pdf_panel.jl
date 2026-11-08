@@ -19,9 +19,11 @@ The words of a [`pdf_panel`](@ref): its accessible name and
 (`documents`) and, for a long list of documents, its search field (`search`,
 and `no_match` when no document matches), the page line (`page`, with
 `{page}` and `{pages}`), the bar's buttons (`previous_page`, `next_page`,
-`colours`, `colours_help`, `open_file`, `close`) and the status line
+`colours`, `colours_help`, `open_file`, `close`), the status line
 (`loading`, `failed`, `not_found` on a PDF's page, `not_in_document` in an
-HTML document, `empty`).
+HTML document, `empty`), and where the panel stands: the placement switch
+(`placement`, with `beside`, `right` and `bottom`), the edge that resizes it
+(`resize`) and the tab a closed panel leaves (`reopen`).
 Build one with [`pdf_panel_texts`](@ref).
 """
 struct PdfPanelTexts
@@ -41,6 +43,12 @@ struct PdfPanelTexts
     not_found::String       # status: the quoted words are not on the page
     not_in_document::String # status: the quoted words are not in the HTML document
     empty::String           # status: the panel opened before any reference
+    placement::String       # the placement switch's accessible name
+    beside::String          # ... pinned beside the text
+    right::String           # ... over the page, on the right
+    bottom::String          # ... over the page, below
+    resize::String          # the edge that resizes the panel
+    reopen::String          # the tab a closed panel leaves on its edge
 end
 
 const _PDF_TEXT_PLACEHOLDERS = (page = (:page, :pages),)
@@ -63,6 +71,12 @@ const _PDF_TEXT_LOCALES = (
         not_found = "The quoted words were not found on this page",
         not_in_document = "The quoted words were not found in this document",
         empty = "No document yet: a reference opens its document here.",
+        placement = "Where the document stands",
+        beside = "Beside the text",
+        right = "Over the page, on the right",
+        bottom = "Over the page, below",
+        resize = "Size of the document",
+        reopen = "Show the document again",
     ),
     de = (
         label = "Dokument",
@@ -81,6 +95,12 @@ const _PDF_TEXT_LOCALES = (
         not_found = "Die zitierten Worte stehen nicht auf dieser Seite",
         not_in_document = "Die zitierten Worte stehen nicht in diesem Dokument",
         empty = "Noch kein Dokument: Ein Verweis öffnet sein Dokument hier.",
+        placement = "Wo das Dokument steht",
+        beside = "Neben dem Text",
+        right = "Über der Seite, rechts",
+        bottom = "Über der Seite, unten",
+        resize = "Größe des Dokuments",
+        reopen = "Dokument wieder zeigen",
     ),
 )
 
@@ -163,7 +183,9 @@ It starts closed. A reference's click opens it at its passage, a
 the page line with previous and next page, "Colours" (each passage in its own
 colour, or only the passages pointed at and gone to), a link that opens the
 file itself and a close button. [`pdf_beside`](@ref) places it beside the
-content, pinned while the content scrolls by.
+content, pinned while the content scrolls by; [`pdf_overlay`](@ref) floats it
+over the page, on the right or below. Either can offer the reader a switch
+between those placements, and the panel's inner edge resizes it.
 
 - `documents`: the documents the chooser offers, PDFs and HTML documents
   together, each its address (a PDF named by its file name),
@@ -274,7 +296,8 @@ function pdf_panel(documents=(); id::AbstractString, link::AbstractString=id, te
                     data_htmxo_pdf_hues="on",
                     data_text_page=t.page, data_text_loading=t.loading, data_text_failed=t.failed,
                     data_text_not_found=t.not_found, data_text_not_in_document=t.not_in_document, data_text_empty=t.empty,
-                    data_text_documents=t.documents, data_text_search=t.search, data_text_no_match=t.no_match)(
+                    data_text_documents=t.documents, data_text_search=t.search, data_text_no_match=t.no_match,
+                    data_text_resize=t.resize, data_text_reopen=t.reopen)(
         (assets ? pdf_panel_assets() : ())...,
         h.div(; class="htmxo-pdf-bar")(
             _pdf_chooser(id, docs, t),
@@ -287,10 +310,46 @@ function pdf_panel(documents=(); id::AbstractString, link::AbstractString=id, te
                     h.button(; type="button", data_htmxo_pdf_step="1", aria_label=t.next_page, title=t.next_page)("›")),
                 h.button(; type="button", data_htmxo_pdf_colours="", aria_pressed="true", title=t.colours_help)(t.colours),
                 h.a(; data_htmxo_pdf_file="", href=first_url, target="_blank", rel="noopener")(t.open_file * " ↗"),
+                _pdf_place_switch(t),
                 h.button(; type="button", data_htmxo_pdf_close="", aria_label=t.close, title=t.close)("✕"))),
         h.p(; class="htmxo-pdf-note", data_htmxo_pdf_note="", role="status")(),
         h.div(; class="htmxo-pdf-pages", data_htmxo_pdf_pages="")())
     html_only(panel)
+end
+
+# Where a panel can stand (`pdf_beside`, `pdf_overlay`): pinned beside the
+# content, or over the page on the right or below. LOCKSTEP: `PLACES` in the
+# script.
+const _PDF_PLACEMENTS = (:beside, :right, :bottom)
+
+# The placement switch: one button per placement, all hidden until the script
+# shows those the panel's place offers (two or more). Each icon draws the
+# window, the panel filled.
+const _PDF_PLACE_ICONS = (
+    beside = """<rect x="1" y="2.75" width="8" height="10.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="10.5" y="2" width="4.5" height="12" rx="1.25" fill="currentColor"/>""",
+    right = """<rect x="1" y="2.75" width="14" height="10.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8.5" y="2" width="6.5" height="12" rx="1.25" fill="currentColor"/>""",
+    bottom = """<rect x="1" y="2.75" width="14" height="10.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7.5" width="14" height="6.5" rx="1.25" fill="currentColor"/>""",
+)
+_pdf_place_switch(t::PdfPanelTexts) =
+    h.span(; class="htmxo-pdf-places", role="group", aria_label=t.placement, data_htmxo_pdf_places="", hidden=true)(
+        (h.button(; type="button", data_htmxo_pdf_place=string(p), aria_pressed="false", aria_label=getfield(t, p),
+                  title=getfield(t, p), hidden=true)(
+            Raw("""<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">""" *
+                getfield(_PDF_PLACE_ICONS, p) * "</svg>"))
+         for p in _PDF_PLACEMENTS)...)
+
+# The placements a `pdf_beside` or `pdf_overlay` offers (`allowed` of them),
+# as given, and the one it starts in.
+function _pdf_placements(fname, placements, placement, allowed)
+    list = placements isa Symbol ? [placements] : collect(placements)
+    isempty(list) && throw(ArgumentError("$fname: `placements` names at least one of $(join(repr.(allowed), ", "))"))
+    for p in list
+        p in allowed || throw(ArgumentError("$fname: a placement is one of $(join(repr.(allowed), ", ")), got $(repr(p))"))
+    end
+    allunique(list) || throw(ArgumentError("$fname: a placement is named twice in $(repr(placements))"))
+    placement = something(placement, first(list))
+    placement in list || throw(ArgumentError("$fname: `placement` is one of `placements` ($(join(repr.(list), ", "))), got $(repr(placement))"))
+    (join(string.(list), ' '), string(placement))
 end
 
 # The radios of a panel's chooser share a name of their own, so two panels
@@ -430,26 +489,93 @@ pdf_toggle(panel::AbstractString, label=nothing; texts=nothing, attrs...) =
                        aria_pressed="false", attrs...)(something(label, _pdf_texts(texts).label)))
 
 """
-    pdf_beside(content, panel; class="")
+    pdf_beside(content, panel; placements=(:beside,), placement=first(placements), class="")
 
 `content` with the [`pdf_panel`](@ref) `panel` beside it: while the panel is
 open the two share the width (the panel 40 %, at least 22rem; set
 `--htmxo-pdf-width` to change it) and the panel stays in view while the
 content scrolls by, below a page's own sticky header (`--htmxo-sticky-top`).
-Closed, the content has the whole width. On a narrow screen the open panel
-lies over the lower part of the window. Opening or closing it keeps the
+Closed, the content has the whole width. Opening or closing it keeps the
 reference clicked last (else the content at the top of the window, below
 a table's sticky header) where it was on screen while the content wraps
 anew.
+
+- `placements`: where the reader can have the panel, of `:beside` (pinned
+  beside the content, which narrows), `:right` and `:bottom` (floating over
+  the page, as [`pdf_overlay`](@ref) floats it, the content keeping its
+  width). With two or more, the panel's bar has a switch between them.
+- `placement`: the one it opens in until the reader picks another.
+
+The divider between the content and the panel resizes it (drag it, or focus
+it and use the arrow keys). On a narrow screen (48rem or less) the open panel
+lies over the lower part of the window whatever the placement. See
+[`pdf_overlay`](@ref) for what the reader's choices keep, the tab a closed
+panel leaves, and a panel opened from a modal dialog.
 """
-pdf_beside(content, panel; class::AbstractString="") =
-    h.div(; class=isempty(class) ? "htmxo-pdf-beside" : "htmxo-pdf-beside " * class, data_htmxo_pdf_beside="")(
+function pdf_beside(content, panel; placements=(:beside,), placement=nothing, class::AbstractString="")
+    list, start = _pdf_placements("pdf_beside", placements, placement, _PDF_PLACEMENTS)
+    h.div(; class=isempty(class) ? "htmxo-pdf-beside" : "htmxo-pdf-beside " * class, data_htmxo_pdf_beside="",
+          data_htmxo_pdf_placements=list, data_htmxo_pdf_placement=start, data_htmxo_pdf_default=start)(
         h.div(; class="htmxo-pdf-beside-content")(content), panel)
+end
+
+"""
+    pdf_overlay(panel; placements=(:right, :bottom), placement=first(placements), class="")
+
+The [`pdf_panel`](@ref) `panel` floating over the page while it is open, so
+the page keeps its width and layout: on the right (`:right`, 40 % of the
+window, at least 22rem, below a page's own sticky header
+`--htmxo-sticky-top`; `--htmxo-pdf-width`), or below (`:bottom`, the whole
+width, half the window high; `--htmxo-pdf-sheet-height`). `placements` are
+those the reader can choose between, with a switch in the panel's bar when
+there are two; `placement` is the one it opens in until the reader picks
+another. Mount it once, outside the region htmx swaps, with an empty
+document list, and every [`pdf_ref`](@ref) naming its id opens it, also one
+a later swap brings and one inside an open modal dialog:
+
+```julia
+__page__(content) = htmx(h.main(content, pdf_overlay(pdf_panel(; id="quellen"))))
+```
+
+**What the reader's choices keep.** The placement picked last and each
+placement's size are kept in the browser (`localStorage`, under
+`htmxo-pdf-placement` and `htmxo-pdf-size-<placement>`), for every panel
+that offers that placement; where the browser keeps nothing, the panel opens
+as the app says. The panel's inner edge resizes it: drag it (mouse, pen or
+touch), or focus it and use the arrow keys (Home and End for the smallest
+and largest size).
+
+**Closing it leaves a tab on its edge** once it has shown a document; the
+tab reopens it at the same document and place. [`pdf_toggle`](@ref) works as
+beside the content.
+
+**The clicked reference stays in view**: a reference that the panel below
+would cover is scrolled up just above it, and the page gains the room below
+its end to do so. (A panel on the right lies over the right of the page; a
+reference there stays under it.)
+
+**From a modal dialog** (`dialog.showModal()`, whose top layer makes the
+rest of the page inert): a reference inside it opens the panel inside the
+dialog, floating above it and usable there (on the right, or below, as the
+reader chose), and the panel goes back to its place on the page, still
+open, when the dialog closes. Something that replaces the dialog's content
+leaves the panel in it.
+
+On a narrow screen (48rem or less) the open panel lies over the lower part
+of the window whatever the placement, and the switch is hidden. HTML only:
+a Markdown answer leaves it out.
+"""
+function pdf_overlay(panel; placements=(:right, :bottom), placement=nothing, class::AbstractString="")
+    list, start = _pdf_placements("pdf_overlay", placements, placement, (:right, :bottom))
+    html_only(h.div(; class=isempty(class) ? "htmxo-pdf-float" : "htmxo-pdf-float " * class, data_htmxo_pdf_float="",
+                    data_htmxo_pdf_placements=list, data_htmxo_pdf_placement=start, data_htmxo_pdf_default=start)(panel))
+end
 
 """
     pdf_panel_styles()
 
-CSS for [`pdf_panel`](@ref), [`pdf_ref`](@ref) and [`pdf_beside`](@ref).
+CSS for [`pdf_panel`](@ref), [`pdf_ref`](@ref), [`pdf_beside`](@ref) and
+[`pdf_overlay`](@ref).
 Layout sits inside `@layer htmxo`; the references, marks and the bar's
 controls are unlayered, because Pico styles links and buttons unlayered.
 """
@@ -488,32 +614,121 @@ pdf_panel_styles() = h.style(Raw(raw"""
 .htmxo-pdf-panel[data-htmxo-pdf-kind="html"] .htmxo-pdf-pager { display: none; }
 .htmxo-pdf-doc { position: relative; display: flow-root; font-size: 1rem; }   /* its content's margins stay inside it */
 .htmxo-pdf-html { overflow-wrap: anywhere; }
-.htmxo-pdf-beside[data-htmxo-pdf-open] {
-    display: grid; gap: 1rem; align-items: start;
-    grid-template-columns: minmax(0, 1fr) minmax(min(22rem, 100%), var(--htmxo-pdf-width, 40%));
+/* Where the panel stands (pdf_beside, pdf_overlay, and the carrier a modal
+   dialog holds it in): the wrapper says which placement is shown
+   (`data-htmxo-pdf-placement`). Its cell is the panel, or the private wrapper
+   around it (which carries its "not public" mark). The reader's size, set on
+   the wrapper by the resize edge, wins over the app's; the spans are the
+   panel's width on the right and its height below. */
+[data-htmxo-pdf-placements] {
+    --htmxo-pdf-surface: var(--pico-background-color, Canvas); --htmxo-pdf-ink: var(--pico-color, CanvasText);
+    --htmxo-pdf-span: min(100%, max(var(--htmxo-pdf-reader-width, 22rem), var(--htmxo-pdf-reader-width, var(--htmxo-pdf-width, 40%))));
+    --htmxo-pdf-rise: min(calc(100% - var(--htmxo-sticky-top, 0px) - 2.5rem), var(--htmxo-pdf-reader-height, var(--htmxo-pdf-sheet-height, 50dvh)));
 }
-.htmxo-pdf-beside > .htmxo-pdf-beside-content { min-width: 0; }
-/* What sticks is the grid's cell: the panel, or the private wrapper around it
-   (which carries its "not public" mark), so it never scrolls away in a box no
-   taller than itself. */
-.htmxo-pdf-beside > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
+/* Beside: the content, the divider that resizes the panel, the panel. */
+.htmxo-pdf-beside[data-htmxo-pdf-open][data-htmxo-pdf-placement="beside"] {
+    display: grid; gap: 0; align-items: start;
+    grid-template-columns: minmax(0, 1fr) 1rem
+        minmax(min(var(--htmxo-pdf-reader-width, 22rem), 100%), var(--htmxo-pdf-reader-width, var(--htmxo-pdf-width, 40%)));
+}
+/* Closed after showing a document, its tab stands at the content's edge. */
+.htmxo-pdf-beside[data-htmxo-pdf-placement="beside"]:not([data-htmxo-pdf-open]):has(> .htmxo-pdf-tab:not([hidden])) {
+    display: grid; gap: .5rem; align-items: start; grid-template-columns: minmax(0, 1fr) auto;
+}
+.htmxo-pdf-beside > .htmxo-pdf-beside-content { min-width: 0; grid-column: 1; grid-row: 1; }
+/* What sticks is the grid's cell: the panel, or the private wrapper around
+   it, so it never scrolls away in a box no taller than itself. */
+[data-htmxo-pdf-placement="beside"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
+    grid-column: 3; grid-row: 1;
     position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + .5rem);
     max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - 1rem);
     max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - 1rem);
 }
-.htmxo-pdf-beside > .htmxo-private:has(> .htmxo-pdf-panel) { display: flex; flex-direction: column; align-items: flex-start; }
-.htmxo-pdf-beside > .htmxo-private > .htmxo-pdf-panel { align-self: stretch; min-height: 0; max-height: none; }
-.htmxo-pdf-beside > .htmxo-private:has(> .htmxo-pdf-panel[hidden]) { display: none; }
-@media (max-width: 48rem) {
-    .htmxo-pdf-beside[data-htmxo-pdf-open] { display: block; }
-    .htmxo-pdf-beside > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
-        position: fixed; inset: auto .5rem .5rem .5rem; top: auto; z-index: 20; max-height: 60vh; max-height: 60dvh;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
-    }
+[data-htmxo-pdf-placements] > .htmxo-private:has(> .htmxo-pdf-panel) { display: flex; flex-direction: column; align-items: flex-start; }
+[data-htmxo-pdf-placements] > .htmxo-private > .htmxo-pdf-panel { align-self: stretch; flex: 1 1 auto; min-height: 0; max-height: none; }
+[data-htmxo-pdf-placements] > .htmxo-private:has(> .htmxo-pdf-panel[hidden]) { display: none; }
+/* Floating over the page, which keeps its width and layout: on the right,
+   below the page's own sticky header, or below, the whole width. */
+[data-htmxo-pdf-placement="right"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)),
+[data-htmxo-pdf-placement="bottom"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
+    position: fixed; z-index: var(--htmxo-pdf-layer, 30); box-sizing: border-box; margin: 0; max-height: none;
+    background: var(--pico-background-color, Canvas);
 }
+[data-htmxo-pdf-placement="right"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
+    top: var(--htmxo-sticky-top, 0px); right: 0; bottom: 0; width: var(--htmxo-pdf-span);
+    border-radius: var(--pico-border-radius, .25rem) 0 0 var(--pico-border-radius, .25rem);
+    box-shadow: -6px 0 18px rgba(0, 0, 0, .2);
+}
+[data-htmxo-pdf-placement="bottom"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
+    left: 0; right: 0; bottom: 0; height: var(--htmxo-pdf-rise);
+    border-radius: var(--pico-border-radius, .25rem) var(--pico-border-radius, .25rem) 0 0;
+    box-shadow: 0 -6px 18px rgba(0, 0, 0, .2);
+}
+/* Below, the pages (and an HTML document's lines) keep a reading width. */
+[data-htmxo-pdf-placement="bottom"] .htmxo-pdf-pages { max-width: var(--htmxo-pdf-page-width, 56rem); margin-inline: auto; }
+/* The edge that resizes the panel: the divider beside the content, the
+   panel's left edge on the right, its top edge below. Wide enough for a
+   finger; its grip is the line drawn in it. */
+.htmxo-pdf-resize {
+    box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+    touch-action: none; user-select: none; -webkit-user-select: none; z-index: calc(var(--htmxo-pdf-layer, 30) + 1);
+}
+.htmxo-pdf-resize::before {
+    content: ""; border-radius: 999px; transition: background-color .12s;
+    background: color-mix(in srgb, var(--pico-color, CanvasText) 30%, transparent);
+}
+.htmxo-pdf-resize:is(:hover, :focus-visible, [data-htmxo-pdf-dragging])::before { background: var(--pico-primary, Highlight); }
+.htmxo-pdf-resize:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: -2px; }
+[data-htmxo-pdf-placements]:not([data-htmxo-pdf-open]) > .htmxo-pdf-resize { display: none; }
+[data-htmxo-pdf-placement="beside"] > .htmxo-pdf-resize {
+    grid-column: 2; grid-row: 1; position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + .5rem); cursor: col-resize;
+    height: calc(100vh - var(--htmxo-sticky-top, 0px) - 1rem); height: calc(100dvh - var(--htmxo-sticky-top, 0px) - 1rem);
+}
+[data-htmxo-pdf-placement="right"] > .htmxo-pdf-resize {
+    position: fixed; top: var(--htmxo-sticky-top, 0px); bottom: 0; width: 1rem; right: calc(var(--htmxo-pdf-span) - .5rem); cursor: col-resize;
+}
+[data-htmxo-pdf-placement="bottom"] > .htmxo-pdf-resize {
+    position: fixed; left: 0; right: 0; height: 1rem; bottom: calc(var(--htmxo-pdf-rise) - .5rem); cursor: row-resize;
+}
+:is([data-htmxo-pdf-placement="beside"], [data-htmxo-pdf-placement="right"]) > .htmxo-pdf-resize::before { width: 4px; height: 2.5rem; }
+[data-htmxo-pdf-placement="bottom"] > .htmxo-pdf-resize::before { width: 2.5rem; height: 4px; }
+/* The tab a closed panel leaves on its edge. */
+.htmxo-pdf-tab { z-index: var(--htmxo-pdf-layer, 30); }
+.htmxo-pdf-tab[hidden] { display: none; }
+[data-htmxo-pdf-placement="beside"] > .htmxo-pdf-tab {
+    grid-column: 2; grid-row: 1; position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + 40vh);
+}
+[data-htmxo-pdf-placement="right"] > .htmxo-pdf-tab { position: fixed; right: 0; top: 50%; transform: translateY(-50%); }
+[data-htmxo-pdf-placement="bottom"] > .htmxo-pdf-tab { position: fixed; right: 1.5rem; bottom: 0; }
+/* Room below the page's end, so a reference there can stand above the panel below. */
+.htmxo-pdf-room { pointer-events: none; }
 }
 .htmxo-pdf-controls button { width: auto; margin: 0; padding: .15rem .55rem; font-size: inherit; line-height: 1.4; }
 .htmxo-pdf-controls [data-htmxo-pdf-close] { margin-left: auto; }
+/* The placement switch: joined buttons (Pico's group look) of their own
+   size, not the bar's whole width; hidden on a narrow screen, where every
+   placement lies below. */
+.htmxo-pdf-controls > .htmxo-pdf-places[role="group"] { display: inline-flex; width: auto; margin: 0; vertical-align: middle; }
+.htmxo-pdf-controls > .htmxo-pdf-places[role="group"] > button { flex: 0 0 auto; }
+.htmxo-pdf-controls > .htmxo-pdf-places[hidden], .htmxo-pdf-controls > .htmxo-pdf-places > [hidden] { display: none; }
+@media (max-width: 48rem) { .htmxo-pdf-controls > .htmxo-pdf-places[role="group"] { display: none; } }
+.htmxo-pdf-controls [data-htmxo-pdf-place] { padding: .15rem .35rem; }
+.htmxo-pdf-controls [data-htmxo-pdf-place] > svg { display: block; width: 1.1em; height: 1.1em; }
+.htmxo-pdf-bar [data-htmxo-pdf-place][aria-pressed="true"] {
+    --pico-background-color: var(--pico-secondary-background); --pico-color: var(--pico-secondary-inverse);
+}
+/* The tab: the panel's name, upright on a side edge, flat on the lower one. */
+button.htmxo-pdf-tab {
+    width: auto; margin: 0; padding: .7rem .3rem; font-size: .8125rem; line-height: 1.2; writing-mode: vertical-rl;
+    color: var(--htmxo-pdf-ink); background-color: var(--htmxo-pdf-surface);
+    border: 1px solid var(--pico-muted-border-color, color-mix(in srgb, currentColor 25%, transparent));
+    border-radius: .45rem 0 0 .45rem; box-shadow: 0 2px 10px rgba(0, 0, 0, .25);
+}
+button.htmxo-pdf-tab:is(:hover, :focus-visible) { background-color: color-mix(in srgb, var(--htmxo-pdf-ink) 8%, var(--htmxo-pdf-surface)); }
+[data-htmxo-pdf-placement="beside"] > button.htmxo-pdf-tab { border-radius: .45rem; }
+[data-htmxo-pdf-placement="bottom"] > button.htmxo-pdf-tab {
+    writing-mode: horizontal-tb; padding: .3rem .9rem; border-radius: .45rem .45rem 0 0;
+}
 /* The chooser's pills and list (the page's own look for them) sized to the
    bar; its name is for assistive technology only. */
 .htmxo-pdf-documents > fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
@@ -585,7 +800,7 @@ a[data-htmxo-pdf-ref][data-htmxo-pdf-flash] { animation: htmxo-pdf-flash 1.6s ea
     pdf_panel_script()
 
 Client runtime for [`pdf_panel`](@ref), [`pdf_ref`](@ref),
-[`pdf_toggle`](@ref) and [`pdf_beside`](@ref): delegated listeners that serve
+[`pdf_toggle`](@ref), [`pdf_beside`](@ref) and [`pdf_overlay`](@ref): delegated listeners that serve
 every panel and reference however it reaches the page (page load, htmx swap,
 a [`live_thread`](@ref) item), and `window.htmxoPdf`. Safe to include more than
 once.
@@ -617,7 +832,7 @@ pdf_panel_script() = h.script(Raw(raw"""
 
   function element(panel) { return typeof panel === 'string' ? document.getElementById(panel) : panel; }
   function panelOf(el) {
-    var aside = document.getElementById(el.dataset.htmxoPdfPanel || el.dataset.htmxoPdfToggle || '');
+    var aside = document.getElementById(el.dataset.htmxoPdfPanel || el.dataset.htmxoPdfToggle || el.dataset.htmxoPdfTab || '');
     return aside && aside.hasAttribute('data-htmxo-pdf-viewer') ? aside : null;
   }
   function group(aside) { return aside.dataset.htmxoPdfLink || aside.id; }
@@ -625,10 +840,17 @@ pdf_panel_script() = h.script(Raw(raw"""
     return Array.prototype.slice.call(document.querySelectorAll(
       '[data-htmxo-pdf-ref][data-htmxo-pdf-panel="' + CSS.escape(aside.id) + '"]'));
   }
-  function beside(aside) { return aside.closest('[data-htmxo-pdf-beside]'); }
+  // The panel's cell (the panel, or the private wrapper around it), and the
+  // wrapper that places it: pdf_beside's, pdf_overlay's, or the carrier a
+  // modal dialog holds it in.
+  function cellOf(aside) { var up = aside.parentElement; return up && up.classList.contains('htmxo-private') ? up : aside; }
+  function wrapOf(aside) {
+    var up = cellOf(aside).parentElement;
+    return up && (up.hasAttribute('data-htmxo-pdf-beside') || up.hasAttribute('data-htmxo-pdf-float')) ? up : null;
+  }
   function content(aside) {
-    var wrap = beside(aside);
-    return wrap ? wrap.querySelector(':scope > .htmxo-pdf-beside-content') : null;
+    var wrap = wrapOf(aside);
+    return wrap && wrap.hasAttribute('data-htmxo-pdf-beside') ? wrap.querySelector(':scope > .htmxo-pdf-beside-content') : null;
   }
   function visible(el) { return el.getClientRects().length > 0; }
   function text(aside, name) { return aside.dataset['text' + name] || ''; }
@@ -738,8 +960,10 @@ pdf_panel_script() = h.script(Raw(raw"""
     if (aside.htmxoPdfHold) aside.htmxoPdfHold();
     var box = content(aside);
     if (!box || typeof ResizeObserver !== 'function') return;
+    // where to hold it: `reveal` lifts it above a panel below
+    var target = aside.htmxoPdfHeld = {el: el, top: top};
     var observer = new ResizeObserver(function () {
-      var moved = el.getBoundingClientRect().top - top;
+      var moved = target.el.getBoundingClientRect().top - target.top;
       if (Math.abs(moved) >= 0.5) window.scrollBy(0, moved);
     });
     var timer = setTimeout(stop, 1000);
@@ -748,39 +972,372 @@ pdf_panel_script() = h.script(Raw(raw"""
       clearTimeout(timer);
       STOPS.forEach(function (name) { window.removeEventListener(name, stop, true); });
       if (aside.htmxoPdfHold === stop) aside.htmxoPdfHold = null;
+      if (aside.htmxoPdfHeld === target) aside.htmxoPdfHeld = null;
     }
     STOPS.forEach(function (name) { window.addEventListener(name, stop, true); });
     observer.observe(box);
     aside.htmxoPdfHold = stop;
   }
-  function open(aside, state, ref) {
+  // The anchor back where it was on screen while the content wraps anew.
+  function settle(aside, held, top) {
+    if (!held) return;
+    var moved = held.getBoundingClientRect().top - top;
+    if (moved) window.scrollBy(0, moved);
+    hold(aside, held, top);
+  }
+  // Open or close the panel. `ref` is the reference clicked, `from` the
+  // element that asked (a toggle, the tab), which may stand in a modal dialog.
+  function open(aside, state, ref, from) {
     if (ref) aside.htmxoPdfRef = aside.htmxoPdfKeep = ref;
-    if (state !== aside.hidden) return;
+    if (state) {
+      var dialog = modalOf(ref || from);
+      if (dialog) carry(aside, dialog);
+      furnish(aside);
+    }
+    if (state !== aside.hidden) { if (state && ref) reveal(aside, ref); return; }
     // Closing keeps the reference clicked last while the panel was open.
     var keep = state ? ref : aside.htmxoPdfKeep;
     if (state && !ref) aside.htmxoPdfKeep = null;
-    var wrap = beside(aside), held = anchor(aside, keep), top = held && held.getBoundingClientRect().top;
+    var wrap = wrapOf(aside), held = anchor(aside, keep), top = held && held.getBoundingClientRect().top;
+    if (!state) aside.htmxoPdfScrolled = aside.scrollTop;
+    if (state && wrap) place(aside, preferred(wrap, aside));
     aside.hidden = !state;
     if (wrap) wrap.toggleAttribute('data-htmxo-pdf-open', state);
     document.querySelectorAll('[data-htmxo-pdf-toggle="' + CSS.escape(aside.id) + '"]').forEach(function (b) {
       b.setAttribute('aria-pressed', String(state));
     });
+    tab(aside);
     if (!state) light(aside);
-    if (held) {
-      var moved = held.getBoundingClientRect().top - top;
-      if (moved) window.scrollBy(0, moved);
-      hold(aside, held, top);
+    else {
+      // reopened at the place it was at, its pages drawn again
+      if (aside.htmxoPdfFile && aside.htmxoPdfScrolled && Math.abs(aside.scrollTop - aside.htmxoPdfScrolled) > 1) aside.scrollTop = aside.htmxoPdfScrolled;
+      wake(aside);
+      if (wrap) resize(aside, null);
     }
+    room(aside);
+    settle(aside, held, top);
+    if (state && ref) reveal(aside, ref);
     aside.dispatchEvent(new CustomEvent('htmxo:pdf-toggle', {bubbles: true, detail: {open: state}}));
   }
-  function toggle(aside, state) {
+  function toggle(aside, state, from) {
     if (state == null) state = aside.hidden;
     if (!state) return open(aside, false);
-    if (aside.htmxoPdfFile) { open(aside, true); refresh(aside); return; }
+    if (aside.htmxoPdfFile) { open(aside, true, null, from); refresh(aside); return; }
     var url = chosen(aside);
-    if (url) show(aside, {url: url, page: 1});
-    else { open(aside, true); note(aside, text(aside, 'Empty')); }
+    if (url) show(aside, {url: url, page: 1, from: from});
+    else { open(aside, true, null, from); note(aside, text(aside, 'Empty')); }
   }
+
+  // --- Where the panel stands. Its wrapper offers placements
+  // (`data-htmxo-pdf-placements`): pinned beside the content, or floating over
+  // the page on the right or below; the one shown is its
+  // `data-htmxo-pdf-placement`. The reader's last choice and each placement's
+  // size are kept in the browser, where it keeps anything. LOCKSTEP:
+  // `_PDF_PLACEMENTS`.
+  var PLACES = ['beside', 'right', 'bottom'];
+  var narrow = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 48rem)') : null;
+  function stored(name) { try { return window.localStorage.getItem(name); } catch (e) { return null; } }
+  function store(name, value) { try { window.localStorage.setItem(name, value); } catch (e) {} }
+  function offered(wrap) {
+    var beside = wrap.hasAttribute('data-htmxo-pdf-beside');
+    var list = (wrap.dataset.htmxoPdfPlacements || '').split(/\s+/).filter(function (p) {
+      return PLACES.indexOf(p) >= 0 && (beside || p !== 'beside');
+    });
+    return list.length ? list : [beside ? 'beside' : 'right'];
+  }
+  // The placement the reader picked last, where the wrapper offers it (as
+  // the browser keeps it, else as this panel was shown); else the app's.
+  function preferred(wrap, aside) {
+    var list = offered(wrap), choices = [stored('htmxo-pdf-placement'), aside && aside.htmxoPdfPlace, wrap.dataset.htmxoPdfDefault];
+    for (var i = 0; i < choices.length; i++) if (list.indexOf(choices[i]) >= 0) return choices[i];
+    return list[0];
+  }
+  function shownAt(wrap) { return wrap.getAttribute('data-htmxo-pdf-placement'); }
+  // Show the panel in placement `wanted`; on a narrow screen it lies below.
+  function place(aside, wanted) {
+    var wrap = wrapOf(aside);
+    if (!wrap) return;
+    var list = offered(wrap);
+    if (list.indexOf(wanted) < 0) wanted = preferred(wrap, aside);
+    aside.htmxoPdfPlace = wanted;
+    wrap.setAttribute('data-htmxo-pdf-placement', narrow && narrow.matches ? 'bottom' : wanted);
+    var group = aside.querySelector('[data-htmxo-pdf-places]');
+    if (group) {
+      group.hidden = list.length < 2;
+      group.querySelectorAll('[data-htmxo-pdf-place]').forEach(function (b) {
+        b.hidden = list.indexOf(b.dataset.htmxoPdfPlace) < 0;
+        b.setAttribute('aria-pressed', String(b.dataset.htmxoPdfPlace === wanted));
+      });
+    }
+    resize(aside, null);
+    room(aside);
+  }
+  // The reader's pick in the switch: kept, and shown, the content held in
+  // place while it wraps anew, the clicked reference kept in view.
+  function choose(aside, wanted) {
+    store('htmxo-pdf-placement', wanted);
+    var held = anchor(aside, aside.htmxoPdfKeep), top = held && held.getBoundingClientRect().top;
+    place(aside, wanted);
+    settle(aside, held, top);
+    refresh(aside);
+    reveal(aside, aside.htmxoPdfKeep);
+  }
+
+  // The panel's size: its width beside the content and on the right, its
+  // height below, within bounds that leave the page usable.
+  function bounds(wrap, at) {
+    if (at === 'bottom') return [120, Math.max(120, window.innerHeight - stickyTop() - 40)];
+    var room = at === 'beside' ? wrap.getBoundingClientRect().width - 16 : window.innerWidth, least = Math.min(240, room);
+    return [least, Math.max(least, room - (at === 'beside' ? 240 : 160))];
+  }
+  function sizeOf(aside) {
+    var wrap = wrapOf(aside), r = cellOf(aside).getBoundingClientRect();
+    return wrap && shownAt(wrap) === 'bottom' ? r.height : r.width;
+  }
+  // Size the panel where it is shown: `px`, else the size the reader left it
+  // at there, else the app's; `save` keeps it.
+  function resize(aside, px, save) {
+    var wrap = wrapOf(aside);
+    if (!wrap) return;
+    var at = shownAt(wrap), name = at === 'bottom' ? '--htmxo-pdf-reader-height' : '--htmxo-pdf-reader-width';
+    wrap.style.removeProperty(at === 'bottom' ? '--htmxo-pdf-reader-width' : '--htmxo-pdf-reader-height');
+    if (px == null) { var was = Number(stored('htmxo-pdf-size-' + at)); px = was > 0 ? was : null; }
+    if (px == null) wrap.style.removeProperty(name);
+    else {
+      var b = bounds(wrap, at);
+      px = Math.round(Math.min(Math.max(px, b[0]), b[1]));
+      wrap.style.setProperty(name, px + 'px');
+      if (save) store('htmxo-pdf-size-' + at, String(px));
+    }
+    edge(aside);
+  }
+  // The resize edge as a separator: its orientation, and the panel's share
+  // of the window (of the content and panel beside it), in per cent.
+  function edge(aside) {
+    var handle = aside.htmxoPdfEdge, wrap = wrapOf(aside);
+    if (!handle || !wrap || aside.hidden) return;
+    var at = shownAt(wrap), b = bounds(wrap, at);
+    var whole = at === 'bottom' ? window.innerHeight : at === 'beside' ? wrap.getBoundingClientRect().width : window.innerWidth;
+    function share(px) { return String(Math.round(100 * px / Math.max(1, whole))); }
+    handle.setAttribute('aria-orientation', at === 'bottom' ? 'horizontal' : 'vertical');
+    handle.setAttribute('aria-valuemin', share(b[0]));
+    handle.setAttribute('aria-valuemax', share(b[1]));
+    handle.setAttribute('aria-valuenow', share(sizeOf(aside)));
+  }
+  // Dragged (mouse, pen or touch), the panel follows the pointer.
+  function drag(aside, e) {
+    var wrap = wrapOf(aside), handle = aside.htmxoPdfEdge;
+    if (!wrap || e.button !== 0) return;
+    e.preventDefault();
+    var at = shownAt(wrap), start = sizeOf(aside), x0 = e.clientX, y0 = e.clientY, last = null;
+    var held = at === 'beside' ? anchor(aside, aside.htmxoPdfKeep) : null, top = held && held.getBoundingClientRect().top;
+    try { handle.setPointerCapture(e.pointerId); } catch (error) {}
+    handle.setAttribute('data-htmxo-pdf-dragging', '');
+    function move(ev) {
+      if (ev.pointerId !== e.pointerId) return;
+      last = at === 'bottom' ? start + (y0 - ev.clientY) : start + (x0 - ev.clientX);
+      resize(aside, last);
+      if (held) { var moved = held.getBoundingClientRect().top - top; if (Math.abs(moved) >= 0.5) window.scrollBy(0, moved); }
+    }
+    function end(ev) {
+      if (ev.pointerId !== e.pointerId) return;
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', end);
+      document.removeEventListener('pointercancel', end);
+      handle.removeAttribute('data-htmxo-pdf-dragging');
+      if (last != null) resize(aside, last, true);
+      room(aside);
+      settle(aside, held, top);
+      refresh(aside);
+    }
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', end);
+    document.addEventListener('pointercancel', end);
+  }
+  // Focused, the arrow keys move the edge (Shift: in larger steps), Home and
+  // End give the smallest and largest size.
+  function nudge(aside, e) {
+    var wrap = wrapOf(aside);
+    if (!wrap) return;
+    var at = shownAt(wrap), b = bounds(wrap, at), step = e.shiftKey ? 64 : 16, size = sizeOf(aside), to;
+    if (e.key === (at === 'bottom' ? 'ArrowUp' : 'ArrowLeft')) to = size + step;
+    else if (e.key === (at === 'bottom' ? 'ArrowDown' : 'ArrowRight')) to = size - step;
+    else if (e.key === 'Home') to = b[0];
+    else if (e.key === 'End') to = b[1];
+    else return;
+    e.preventDefault();
+    var held = at === 'beside' ? anchor(aside, aside.htmxoPdfKeep) : null, top = held && held.getBoundingClientRect().top;
+    resize(aside, to, true);
+    room(aside);
+    settle(aside, held, top);
+    clearTimeout(aside.htmxoPdfRelayout);
+    aside.htmxoPdfRelayout = setTimeout(function () { refresh(aside); }, 200);
+  }
+  // The resize edge and the tab a closed panel leaves, in the panel's wrapper.
+  function furnish(aside) {
+    var wrap = wrapOf(aside);
+    if (!wrap) return;
+    if (!aside.htmxoPdfEdge) {
+      var handle = aside.htmxoPdfEdge = make('div', {'class': 'htmxo-pdf-resize', role: 'separator', tabindex: '0',
+        'aria-controls': aside.id, 'aria-label': text(aside, 'Resize'), title: text(aside, 'Resize'), 'data-htmxo-pdf-resize': aside.id});
+      handle.addEventListener('pointerdown', function (e) { drag(aside, e); });
+      handle.addEventListener('keydown', function (e) { nudge(aside, e); });
+    }
+    if (!aside.htmxoPdfTab) aside.htmxoPdfTab = make('button', {type: 'button', 'class': 'htmxo-pdf-tab', 'data-htmxo-pdf-tab': aside.id,
+      'aria-controls': aside.id, title: text(aside, 'Reopen'), hidden: ''}, [aside.getAttribute('aria-label') || '']);
+    if (aside.htmxoPdfEdge.parentNode !== wrap) wrap.insertBefore(aside.htmxoPdfEdge, cellOf(aside));
+    if (aside.htmxoPdfTab.parentNode !== wrap) wrap.appendChild(aside.htmxoPdfTab);
+  }
+  // Closed after showing a document, the panel leaves its tab.
+  function tab(aside) { if (aside.htmxoPdfTab) aside.htmxoPdfTab.hidden = !aside.hidden || !aside.htmxoPdfShown; }
+  // Room below the page's end while the panel lies below, so that a
+  // reference there can stand above it.
+  function room(aside) {
+    var wrap = wrapOf(aside), spacer = aside.htmxoPdfRoom;
+    if (!(wrap && !aside.hidden && aside.isConnected && !wrap.hasAttribute('data-htmxo-pdf-carrier') && shownAt(wrap) === 'bottom')) {
+      if (spacer) spacer.remove();
+      return;
+    }
+    if (!spacer) spacer = aside.htmxoPdfRoom = make('div', {'class': 'htmxo-pdf-room', 'aria-hidden': 'true'});
+    spacer.style.height = Math.ceil(cellOf(aside).getBoundingClientRect().height) + 'px';
+    if (spacer.parentNode !== document.body) document.body.appendChild(spacer);
+  }
+  // A reference the panel below covers is lifted just above it, as little as
+  // that takes and never under a sticky header: the boxes around it that
+  // scroll first, then the window (not behind a modal dialog). A panel on the
+  // right lies over the right of the page: nothing scrolls sideways.
+  function reveal(aside, ref) {
+    var wrap = wrapOf(aside);
+    if (!ref || !ref.isConnected || !visible(ref) || aside.hidden || !wrap || shownAt(wrap) !== 'bottom') return;
+    room(aside);
+    var edgeTop = cellOf(aside).getBoundingClientRect().top - 8, r = ref.getBoundingClientRect();
+    if (r.bottom <= edgeTop || r.top >= window.innerHeight) return;
+    var by = Math.min(r.bottom - edgeTop, r.top - stickyTop() - 8);
+    for (var box = ref.parentElement; box && by > 0.5 && box !== document.body && box !== document.documentElement; box = box.parentElement) {
+      if (box.scrollHeight <= box.clientHeight || !/auto|scroll/.test(getComputedStyle(box).overflowY)) continue;
+      var before = box.scrollTop;
+      box.scrollTop = before + Math.min(by, ref.getBoundingClientRect().top - box.getBoundingClientRect().top - 8);
+      by -= box.scrollTop - before;
+    }
+    var modal = false;
+    try { modal = !!ref.closest('dialog:modal'); } catch (e) {}
+    if (by > 0.5 && !modal) window.scrollBy(0, by);
+    if (aside.htmxoPdfHeld && aside.htmxoPdfHeld.el === ref) aside.htmxoPdfHeld.top = ref.getBoundingClientRect().top;
+  }
+
+  // --- A modal dialog (`showModal()`) puts itself in the top layer and the
+  // rest of the page out of reach, a popover too. Opened from one, the panel
+  // goes into it, floating above its content in a carrier of its own, and
+  // goes back to its place, still open, when the dialog closes or goes; a
+  // comment marks that place meanwhile. Something that replaces the dialog's
+  // content leaves the panel in it.
+  function modalOf(el) {
+    try {
+      for (var d = el && el.closest ? el.closest('dialog') : null; d; d = d.parentElement && d.parentElement.closest('dialog'))
+        if (d.matches(':modal')) return d;
+      var all = document.querySelectorAll('dialog:modal');
+      return all.length ? all[all.length - 1] : null;
+    } catch (e) { return null; }
+  }
+  // Move `el` keeping its state where the browser can (moveBefore), and the
+  // panel's place in its document.
+  function moveTo(parent, el, next) {
+    if (typeof parent.moveBefore === 'function' && el.isConnected && parent.isConnected) {
+      try { parent.moveBefore(el, next || null); return; } catch (e) {}
+    }
+    parent.insertBefore(el, next || null);
+  }
+  // The place the panel is at, as it is shown (else as it was last shown:
+  // a detached or hidden panel has none), kept across `act`, its pages
+  // observed anew where it now stands.
+  function keepPlace(aside, act) {
+    var at = aside.isConnected && !aside.hidden ? aside.scrollTop : aside.htmxoPdfScrolled;
+    act();
+    if (at != null && !aside.hidden && Math.abs(aside.scrollTop - at) > 1) aside.scrollTop = at;
+    if (!aside.hidden) wake(aside);
+  }
+  function carry(aside, dialog) {
+    var cell = cellOf(aside);
+    if (dialog.contains(cell)) return;
+    var home = aside.htmxoPdfHome, carrier = aside.htmxoPdfCarrier;
+    if (!home) {
+      var wrap = wrapOf(aside), mark = document.createComment(' htmxo-pdf-panel ' + aside.id + ' ');
+      cell.parentNode.insertBefore(mark, cell);
+      home = aside.htmxoPdfHome = {wrap: wrap, mark: mark};
+      if (wrap) wrap.removeAttribute('data-htmxo-pdf-open');
+      var floating = wrap ? offered(wrap).filter(function (p) { return p !== 'beside'; }) : [];
+      if (!floating.length) floating = ['right'];
+      var app = wrap && floating.indexOf(wrap.dataset.htmxoPdfDefault) >= 0 ? wrap.dataset.htmxoPdfDefault : floating[0];
+      carrier = aside.htmxoPdfCarrier = make('div', {'class': 'htmxo-pdf-float', 'data-htmxo-pdf-float': '',
+        'data-htmxo-pdf-carrier': aside.id, 'data-htmxo-pdf-placements': floating.join(' '),
+        'data-htmxo-pdf-default': app, 'data-htmxo-pdf-placement': app});
+    }
+    aside.htmxoPdfDialog = dialog;
+    keepPlace(aside, function () {
+      moveTo(dialog, carrier, null);
+      moveTo(carrier, cell, null);
+    });
+    if (!aside.hidden) { carrier.setAttribute('data-htmxo-pdf-open', ''); place(aside, preferred(carrier, aside)); refresh(aside); }
+    furnish(aside);
+    watchDialog(aside);
+  }
+  function watchDialog(aside) {
+    if (aside.htmxoPdfWatch || typeof MutationObserver !== 'function') return;
+    var observer = new MutationObserver(function () {
+      var dialog = aside.htmxoPdfDialog, carrier = aside.htmxoPdfCarrier, modal = false;
+      if (!aside.htmxoPdfHome) return;
+      try { modal = dialog.isConnected && dialog.matches(':modal'); } catch (e) {}
+      if (modal) {
+        if (carrier.parentNode !== dialog) keepPlace(aside, function () { moveTo(dialog, carrier, null); });
+        return;
+      }
+      var other = modalOf(null);
+      if (other) carry(aside, other); else goHome(aside);
+    });
+    observer.observe(document.documentElement, {childList: true, subtree: true, attributes: true, attributeFilter: ['open']});
+    aside.htmxoPdfWatch = function () { observer.disconnect(); aside.htmxoPdfWatch = null; };
+  }
+  function goHome(aside) {
+    var home = aside.htmxoPdfHome, carrier = aside.htmxoPdfCarrier, cell = cellOf(aside);
+    if (aside.htmxoPdfWatch) aside.htmxoPdfWatch();
+    aside.htmxoPdfHome = aside.htmxoPdfDialog = null;
+    if (!home.mark.isConnected) {
+      // its place went with the content around it: a new panel of its id
+      // took it, or the panel floats from the page's end
+      aside.htmxoPdfCarrier = null;
+      var twin = Array.prototype.some.call(document.querySelectorAll('[id="' + CSS.escape(aside.id) + '"]'),
+                                           function (el) { return el !== aside; });
+      if (twin) { carrier.remove(); return; }
+      carrier.removeAttribute('data-htmxo-pdf-carrier');
+      keepPlace(aside, function () { moveTo(document.body, carrier, null); });
+      room(aside);
+      return;
+    }
+    keepPlace(aside, function () {
+      moveTo(home.mark.parentNode, cell, home.mark);
+      home.mark.remove();
+      furnish(aside);
+      carrier.remove();
+    });
+    if (home.wrap) {
+      home.wrap.toggleAttribute('data-htmxo-pdf-open', !aside.hidden);
+      if (!aside.hidden) place(aside, preferred(home.wrap, aside));
+    }
+    tab(aside);
+    refresh(aside);
+  }
+  // Content an htmx swap replaces keeps no panel: the panel steps out first,
+  // and goes back into its dialog once the new content is in.
+  document.addEventListener('htmx:beforeSwap', function (event) {
+    var target = event.detail && event.detail.target;
+    if (!target) return;
+    document.querySelectorAll('[data-htmxo-pdf-carrier]').forEach(function (carrier) {
+      if (target.contains(carrier)) {
+        var aside = document.getElementById(carrier.dataset.htmxoPdfCarrier);
+        if (aside) keepPlace(aside, function () { moveTo(document.body, carrier, null); });
+      }
+    });
+  });
 
   // --- The document chooser, as pdf_panel's `_pdf_chooser` draws it, never a
   // native select box: one document is its title, a few a row of pills
@@ -911,7 +1468,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     aside.htmxoPdfPinned = null;
     aside.querySelector('[data-htmxo-pdf-pages]').replaceChildren();
     aside.querySelector('[data-htmxo-pdf-page-info]').textContent = '';
-    aside.scrollTop = 0;
+    scrollPanel(aside, 0);
   }
   // The file's pages laid out at the panel's width, a box of its final size
   // each, so nothing moves as they are drawn; each drawn once it comes near
@@ -972,6 +1529,15 @@ pdf_panel_script() = h.script(Raw(raw"""
       if (!(error && error.name === 'RenderingCancelledException')) failed(aside, error);
     });
     marks(aside, file, n).catch(function (error) { failed(aside, error); });
+  }
+  // The pages observed anew, so those in view are drawn: an observer whose
+  // root was hidden when its pages were laid out (a layout that finished
+  // while the panel was closed) does not report them once the panel shows.
+  function wake(aside) {
+    var file = aside.htmxoPdfFile;
+    if (!file || !file.observer) return;
+    file.observer.disconnect();
+    file.boxes.forEach(function (entry) { file.observer.observe(entry.box); });
   }
   function release(file, n) {
     var entry = file.boxes[n - 1];
@@ -1249,12 +1815,19 @@ pdf_panel_script() = h.script(Raw(raw"""
     light(aside);
   }
 
+  // Scroll the panel to `top`, and note where it goes: the place it comes
+  // back to after a move, without waiting for its scroll event.
+  function scrollPanel(aside, top, smooth) {
+    top = Math.max(0, Math.min(top, aside.scrollHeight - aside.clientHeight));
+    aside.scrollTo({top: top, behavior: smooth ? 'smooth' : 'instant'});
+    aside.htmxoPdfScrolled = top;
+  }
   // Scroll the panel to a passage, a third of the way down, or to a page's top.
   function reach(aside, target, smooth) {
     var bar = aside.querySelector('.htmxo-pdf-bar').offsetHeight;
     var top = aside.scrollTop + target.getBoundingClientRect().top - aside.getBoundingClientRect().top;
     top -= target.classList.contains('htmxo-pdf-hit') ? aside.clientHeight / 3 : bar + 8;
-    aside.scrollTo({top: Math.max(0, top), behavior: smooth ? 'smooth' : 'instant'});
+    scrollPanel(aside, top, smooth);
   }
   // The page shown: the one the panel went to last, until the reader scrolls
   // it; then the one at the panel's upper third.
@@ -1274,7 +1847,11 @@ pdf_panel_script() = h.script(Raw(raw"""
     if (aside.htmxoPdfWired) return;
     aside.htmxoPdfWired = true;
     var at = null;
-    aside.addEventListener('scroll', function () { requestAnimationFrame(function () { info(aside); }); }, {passive: true});
+    aside.addEventListener('scroll', function () {
+      // the place it is at, to come back to after closing or moving it
+      if (!aside.hidden && aside.isConnected) aside.htmxoPdfScrolled = aside.scrollTop;
+      requestAnimationFrame(function () { info(aside); });
+    }, {passive: true});
     ['wheel', 'touchstart', 'keydown', 'pointerdown'].forEach(function (name) {
       aside.addEventListener(name, function () { aside.htmxoPdfPinned = null; }, {passive: true});
     });
@@ -1317,6 +1894,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     var last = aside.htmxoPdfRef, ref = last && list.indexOf(last) >= 0 && visible(last) ? last : list.filter(visible)[0];
     if (!ref) return;
     if (!whole(ref)) ref.scrollIntoView({block: 'center'});
+    reveal(aside, ref);   // not under the panel below
     ref.removeAttribute('data-htmxo-pdf-flash');
     void ref.offsetWidth;
     ref.setAttribute('data-htmxo-pdf-flash', '');
@@ -1331,7 +1909,8 @@ pdf_panel_script() = h.script(Raw(raw"""
     wire(aside);
     var kind = o.kind === 'html' || o.kind === 'pdf' ? o.kind : kindOf(aside, o.url), anchor = o.anchor ? String(o.anchor) : '';
     pick(aside, o.url, o.title, kind);
-    open(aside, true, o.ref || null);
+    aside.htmxoPdfShown = true;
+    open(aside, true, o.ref || null, o.from || null);
     var page = Math.max(1, Number(o.page) || 1), key = o.key == null ? null : String(o.key);
     aside.querySelector('[data-htmxo-pdf-file]').href = kind === 'html' ? o.url + (anchor ? '#' + anchor : '') : o.url + '#page=' + page;
     aside.htmxoPdfActive = key;
@@ -1356,7 +1935,7 @@ pdf_panel_script() = h.script(Raw(raw"""
         note(aside, quoted && !file.found[key] ? text(aside, 'NotInDocument') : '');
         var place = hit || anchorIn(file.body, anchor);
         if (place) reach(aside, place, o.smooth);
-        else aside.scrollTo({top: 0, behavior: o.smooth ? 'smooth' : 'instant'});   // the document's top
+        else scrollPanel(aside, 0, o.smooth);   // the document's top
         done();
       }).catch(function (error) { if (token === aside.htmxoPdfToken) { failed(aside, error); done(); } });
       return;
@@ -1385,7 +1964,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     if (Math.max(200, view.clientWidth) === file.width) return;
     var share = aside.scrollTop / Math.max(1, aside.scrollHeight);
     layout(aside, file.url).then(function () {
-      aside.scrollTo({top: share * aside.scrollHeight, behavior: 'instant'});
+      scrollPanel(aside, share * aside.scrollHeight);
       info(aside);
     }).catch(function (error) { failed(aside, error); });
   }
@@ -1401,7 +1980,7 @@ pdf_panel_script() = h.script(Raw(raw"""
   // Capture, so a reference in a table row never also opens or closes the row.
   document.addEventListener('click', function (event) {
     var target = event.target.closest && event.target.closest('[data-htmxo-pdf-ref], [data-htmxo-pdf-toggle], ' +
-      '[data-htmxo-pdf-step], [data-htmxo-pdf-close], [data-htmxo-pdf-colours]');
+      '[data-htmxo-pdf-tab], [data-htmxo-pdf-step], [data-htmxo-pdf-close], [data-htmxo-pdf-colours], [data-htmxo-pdf-place]');
     if (!target) return;
     if (target.hasAttribute('data-htmxo-pdf-ref')) {
       // a modified click opens the file itself, as does a page without the panel
@@ -1415,11 +1994,11 @@ pdf_panel_script() = h.script(Raw(raw"""
                    title: target.dataset.htmxoPdfDocument, ref: target});
       return;
     }
-    if (target.hasAttribute('data-htmxo-pdf-toggle')) {
+    if (target.hasAttribute('data-htmxo-pdf-toggle') || target.hasAttribute('data-htmxo-pdf-tab')) {
       var toggled = panelOf(target);
       if (!toggled) return;
       event.stopPropagation();
-      toggle(toggled);
+      toggle(toggled, target.hasAttribute('data-htmxo-pdf-tab') ? true : null, target);
       return;
     }
     var aside = target.closest('[data-htmxo-pdf-viewer]');
@@ -1427,6 +2006,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     event.stopPropagation();
     if (target.hasAttribute('data-htmxo-pdf-step')) step(aside, Number(target.dataset.htmxoPdfStep));
     else if (target.hasAttribute('data-htmxo-pdf-close')) open(aside, false);
+    else if (target.hasAttribute('data-htmxo-pdf-place')) choose(aside, target.dataset.htmxoPdfPlace);
     else if (target.hasAttribute('data-htmxo-pdf-colours')) {
       var on = target.getAttribute('aria-pressed') !== 'true';
       target.setAttribute('aria-pressed', String(on));
@@ -1456,15 +2036,28 @@ pdf_panel_script() = h.script(Raw(raw"""
   }
   document.addEventListener('htmx:load', renew);
   document.addEventListener('htmxo:thread-updated', renew);
-  // The pages are drawn to the panel's width: lay them out again when that changes.
+  // The pages are drawn to the panel's width: lay them out again when that
+  // changes; the panel's size stays within its bounds.
   var pending = null;
   window.addEventListener('resize', function () {
     clearTimeout(pending);
-    pending = setTimeout(function () { document.querySelectorAll('[data-htmxo-pdf-viewer]').forEach(refresh); }, 200);
+    pending = setTimeout(function () {
+      document.querySelectorAll('[data-htmxo-pdf-viewer]').forEach(function (aside) {
+        if (!aside.hidden && wrapOf(aside)) { resize(aside, null); room(aside); }
+        refresh(aside);
+      });
+    }, 200);
+  });
+  // A narrow screen shows every placement below; a wide one, the reader's.
+  if (narrow && typeof narrow.addEventListener === 'function') narrow.addEventListener('change', function () {
+    document.querySelectorAll('[data-htmxo-pdf-viewer]').forEach(function (aside) {
+      if (!aside.hidden && wrapOf(aside)) { place(aside, aside.htmxoPdfPlace); refresh(aside); }
+    });
   });
   window.htmxoPdf = {
     show: function (panel, o) { var aside = element(panel); if (aside) show(aside, o); },
-    toggle: function (panel, state) { var aside = element(panel); if (aside) toggle(aside, state); }
+    toggle: function (panel, state) { var aside = element(panel); if (aside) toggle(aside, state); },
+    place: function (panel, placement) { var aside = element(panel); if (aside && wrapOf(aside)) choose(aside, placement); }
   };
 })();
 """))
@@ -1473,7 +2066,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     pdf_panel_assets()
 
 Style and script for [`pdf_panel`](@ref), [`pdf_ref`](@ref),
-[`pdf_toggle`](@ref) and [`pdf_beside`](@ref). A `pdf_panel` carries them
+[`pdf_toggle`](@ref), [`pdf_beside`](@ref) and [`pdf_overlay`](@ref). A `pdf_panel` carries them
 itself unless built with `assets=false`; put them in the head of a page that
 builds its panel so.
 """

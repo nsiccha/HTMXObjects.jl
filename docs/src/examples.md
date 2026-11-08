@@ -96,7 +96,10 @@ report, on its page of the PDF or over its words in the method, its code
 highlighted. Pointing at a reference, a
 requirement's row or a marked passage shows its counterparts more strongly
 without scrolling anything; a click on a reference opens the panel at its
-passage, a click on a passage goes back to its reference.
+passage, a click on a passage goes back to its reference. The switch in the
+panel's bar floats it over the page, on the right or below, and its inner edge
+resizes it; a reference inside the note, a modal dialog, opens the panel above
+the dialog.
 
 [View source](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/pdf_panel.jl)
 
