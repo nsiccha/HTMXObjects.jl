@@ -1237,7 +1237,10 @@ end
             const phase = sessionStorage.getItem('phase') || '1';
             const checks = JSON.parse(sessionStorage.getItem('checks') || '[]');
             const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
-            const tick = () => fetch('/tick').then(r => r.text());
+            // Each wait asks the server (50 ms of real time, for PDF.js's real work), then lets
+            // 20 ms of virtual time pass: virtual time stands still while a fetch is pending, so
+            // waits of fetches alone left Chrome no animation frame, in which PDF.js draws.
+            const tick = () => fetch('/tick').then(r => r.text()).then(() => new Promise(ok => setTimeout(ok, 20)));
             const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
             const aside = document.getElementById('page-pdf'), home = aside.parentElement;
             const wrap = () => aside.closest('[data-htmxo-pdf-float]'), placement = () => wrap().dataset.htmxoPdfPlacement;
@@ -1477,7 +1480,10 @@ end
             const narrowRun = new URLSearchParams(location.search).has('narrow');
             const checks = [];
             const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
-            const tick = () => fetch('/tick').then(r => r.text());
+            // Each wait asks the server (50 ms of real time, for PDF.js's real work), then lets
+            // 20 ms of virtual time pass: virtual time stands still while a fetch is pending, so
+            // waits of fetches alone left Chrome no animation frame, in which PDF.js draws.
+            const tick = () => fetch('/tick').then(r => r.text()).then(() => new Promise(ok => setTimeout(ok, 20)));
             const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
             const aside = document.getElementById('orig'), wrap = aside.closest('[data-htmxo-pdf-beside]');
             const box = wrap.querySelector(':scope > .htmxo-pdf-beside-content');

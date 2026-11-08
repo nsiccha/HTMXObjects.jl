@@ -1009,9 +1009,8 @@ pdf_panel_script() = h.script(Raw(raw"""
     tab(aside);
     if (!state) light(aside);
     else {
-      // reopened at the place it was at, its pages drawn again
+      // reopened at the place it was at
       if (aside.htmxoPdfFile && aside.htmxoPdfScrolled && Math.abs(aside.scrollTop - aside.htmxoPdfScrolled) > 1) aside.scrollTop = aside.htmxoPdfScrolled;
-      wake(aside);
       if (wrap) resize(aside, null);
     }
     room(aside);
@@ -1248,13 +1247,11 @@ pdf_panel_script() = h.script(Raw(raw"""
     parent.insertBefore(el, next || null);
   }
   // The place the panel is at, as it is shown (else as it was last shown:
-  // a detached or hidden panel has none), kept across `act`, its pages
-  // observed anew where it now stands.
+  // a detached or hidden panel has none), kept across `act`.
   function keepPlace(aside, act) {
     var at = aside.isConnected && !aside.hidden ? aside.scrollTop : aside.htmxoPdfScrolled;
     act();
     if (at != null && !aside.hidden && Math.abs(aside.scrollTop - at) > 1) aside.scrollTop = at;
-    if (!aside.hidden) wake(aside);
   }
   function carry(aside, dialog) {
     var cell = cellOf(aside);
@@ -1529,15 +1526,6 @@ pdf_panel_script() = h.script(Raw(raw"""
       if (!(error && error.name === 'RenderingCancelledException')) failed(aside, error);
     });
     marks(aside, file, n).catch(function (error) { failed(aside, error); });
-  }
-  // The pages observed anew, so those in view are drawn: an observer whose
-  // root was hidden when its pages were laid out (a layout that finished
-  // while the panel was closed) does not report them once the panel shows.
-  function wake(aside) {
-    var file = aside.htmxoPdfFile;
-    if (!file || !file.observer) return;
-    file.observer.disconnect();
-    file.boxes.forEach(function (entry) { file.observer.observe(entry.box); });
   }
   function release(file, n) {
     var entry = file.boxes[n - 1];
