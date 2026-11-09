@@ -328,6 +328,46 @@ the label's `title` and the same `ⓘ`. `ColumnSpec` works in every `headers` ve
 `sortable_table` and `master_detail_table`, and as a `render_table` column
 through `columns = ["name" => ColumnSpec(...)]`.
 
+#### Column alignment {#column-alignment}
+
+A column's alignment is one fact about the column, stated on its header:
+`ColumnSpec(label; align = :left | :center | :right)` (HTMXObjects ≥ 0.1.89).
+The table aligns the header (its label, the `ⓘ`, the `▾` sort menu and the
+caret, still sorting on click and keyboard) and every cell it renders in that
+column, so a reader matches each number to its heading:
+
+```julia
+sortable_table(["Model", ColumnSpec("Time (s)"; align = :right),
+                ColumnSpec("Speed-up"; align = :right, help = "RK time / Stan time.")], rows)
+render_table(df; columns = ["t" => ColumnSpec("Time (s)"; align = :right)])
+master_detail_table(["Name", ColumnSpec("Status"; align = :center), "Amount"], items; key, master, detail)
+```
+
+- The alignment is in the HTML the server sends (`data-htmxo-align` on the
+  `<th>` and the `<td>`s), so the first paint, a page without JavaScript, a
+  `record!` bundle and a PDF of the page agree. `master_detail_table` writes it
+  on its group rows and their summaries, on row updates, lazy rows and the row
+  the browser builds its group rows from when it regroups.
+- `sortable_table`'s rows are yours: the table aligns a copy of each cell and
+  leaves your nodes untouched. A cell that says how it is aligned keeps it
+  (`data_htmxo_align`, an inline `text-align`, a `u-text-left` / `-center` /
+  `-right` class); a cell spanning columns and a `detail-<key>` row are no cell
+  of one column and stay as they are.
+- **Number columns are right-aligned by default.** A number cell
+  (`number_cell`, a float in `render_table` or among the cells `master`
+  returns, `IntervalEstimate` / `interval_cell`, a `ColumnSummary` group cell,
+  any `<td>` with `data_htmxo_number`) sits at the right of its column, and a
+  column whose cells are all number cells (blank ones aside) right-aligns its
+  header too. `align = :left` keeps such a column at the left, header and
+  cells. Integers written as they are (years, ids) are not number cells.
+- Markdown (`?plain`), the CSV and search are unchanged. A pre-built `h.th`
+  header is used as-is, alignment included.
+
+Don't align a column by restyling its header or cells in app CSS: the header's
+sort button is a `<button>` Pico styles, and Pico's own `td, th { text-align:
+start }` sits outside any layer. The rules that align columns ship, unlayered,
+in `sortable_table_styles()`, which every `htmx()` / `pico_page` page carries.
+
 #### Several sort orders for one column {#table-sort-keys}
 
 A cell that combines several quantities can be sorted by each of them. The

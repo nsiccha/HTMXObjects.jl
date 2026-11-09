@@ -20783,10 +20783,10 @@ function _sort_dir_token(dir)
 end
 
 """
-    ColumnSpec(label; help=nothing, sort_keys=())
+    ColumnSpec(label; help=nothing, sort_keys=(), align=nothing)
 
-A table column header that carries an explanation, several sort orders, or
-both. Use it among the `headers` of [`sortable_table`](@ref) (and so of
+A table column header that carries an explanation, several sort orders, an
+alignment, or any of them. Use it among the `headers` of [`sortable_table`](@ref) (and so of
 [`master_detail_table`](@ref)), or as a column of [`render_table`](@ref)
 (`columns=`), wherever a `String` header would go: the column stays auto-wired
 exactly like a `String` — the sort button with keyboard sorting,
@@ -20842,6 +20842,25 @@ browser, so every key works in a static export too; Markdown, CSV and search
 read the cell as it shows. The reader's choice is part of the sort state:
 `htmxoSortState` returns its `sort_key` and `default_sort` takes it back
 (see [`sortable_table`](@ref)).
+
+# Alignment: `align`
+
+`align = :left`, `:center` or `:right` aligns the column: its header (the
+label with its `ⓘ`, `▾` and sort caret, still sorting) and every cell the
+table renders in it, group rows and their summaries included, in the HTML the
+server sends:
+
+```julia
+sortable_table(["Model", ColumnSpec("Time (s)"; align = :right)], rows)
+render_table(df; columns = ["t" => ColumnSpec("Time (s)"; align = :right)])
+```
+
+A hand-built cell that sets its own alignment (`data-htmxo-align`, an inline
+`text-align`, a `u-text-left`/`-center`/`-right` class) keeps it, and a cell
+spanning columns is left as it is. Without `align`, a column of number cells
+([`number_cell`](@ref), floats, [`IntervalEstimate`](@ref), group sums) is
+right-aligned, header included; `align = :left` keeps such a column at the
+left. Markdown, CSV and search are unchanged.
 """
 struct ColumnSpec
     label::String
@@ -20849,10 +20868,22 @@ struct ColumnSpec
     # `name => f` (computed per item by the table) or `name => nothing` (each
     # cell carries the values); empty for a column with one order.
     sort_keys::Vector{Pair{String,Any}}
+    # `:left`, `:center` or `:right`; `nothing` leaves the column to the
+    # table (number columns right, others as the page styles them).
+    align::Union{Nothing,Symbol}
 end
-ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=()) =
+ColumnSpec(label, help, sort_keys) = ColumnSpec(label, help, sort_keys, nothing)
+ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=(), align=nothing) =
     ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
-        _column_sort_keys(label, sort_keys))
+        _column_sort_keys(label, sort_keys), _column_align(label, align))
+
+const _COLUMN_ALIGNS = (:left, :center, :right)
+_column_align(label, ::Nothing) = nothing
+_column_align(label, align::AbstractString) = _column_align(label, Symbol(align))
+_column_align(label, align::Symbol) = align in _COLUMN_ALIGNS ? align :
+    throw(ArgumentError(string("ColumnSpec(", repr(label), "): align is :left, :center or :right; got ", repr(align))))
+_column_align(label, align) = throw(ArgumentError(string("ColumnSpec(", repr(label),
+    "): align is :left, :center or :right; got ", repr(align))))
 
 _column_sort_key(label, name::Union{AbstractString,Symbol}) = String(name) => nothing
 _column_sort_key(label, key::Pair) = last(key) isa Base.Callable ? string(first(key)) => last(key) :
@@ -20892,7 +20923,7 @@ _computed_sort_keys(col::ColumnSpec) = !isempty(col.sort_keys) && !isnothing(las
 _computed_sort_keys(_) = false
 # The header as `sortable_table` sees it once the table has written the values.
 _sort_key_names_only(col::ColumnSpec) = _computed_sort_keys(col) ?
-    ColumnSpec(col.label, col.help, Pair{String,Any}[first(k) => nothing for k in col.sort_keys]) : col
+    ColumnSpec(col.label, col.help, Pair{String,Any}[first(k) => nothing for k in col.sort_keys], col.align) : col
 _sort_key_names_only(hdr) = hdr
 
 """
@@ -20962,6 +20993,98 @@ _plain_th_content(col::ColumnSpec) = isnothing(col.help) ? (col.label,) :
 _table_th(hdr, i, ds, sortable, texts) = hdr
 _table_th(hdr::Union{AbstractString,ColumnSpec}, i, ds, sortable, texts) = sortable ?
     _sortable_th(hdr, i, ds, texts) : h.th(_plain_th_content(hdr)...)
+
+# --- Column alignment ---
+# A column's alignment rides on its header and cells as `data-htmxo-align`,
+# styled by `sortable_table_styles()` outside any layer (Pico aligns every
+# `td`/`th` to the start, unlayered). A `ColumnSpec(align)` aligns its header
+# and every cell the table renders in its column. Without one, a column whose
+# cells are all number cells right-aligns its header; the stylesheet
+# right-aligns number cells (`data-htmxo-number`) wherever they are, so rows
+# the browser adds later (a regroup, a row update, lazy rows) need nothing.
+_header_align(hdr::ColumnSpec) = hdr.align
+_header_align(_) = nothing
+
+const _ALIGN_ATTR = Symbol("data-htmxo-align")
+
+# How many columns a cell covers, as `htmxoCellAt` counts them: a cell
+# spanning columns sits under its first.
+_cell_span(cell::Node) = max(something(tryparse(Int, string(get(HTMX.attrs(cell), :colspan, "1"))), 1), 1)
+_is_cell(x) = x isa Node && HTMX.tag(x) in (:td, :th)
+
+# A cell that already says how it is aligned keeps it.
+function _cell_aligned(cell::Node)
+    a = HTMX.attrs(cell)
+    (haskey(a, _ALIGN_ATTR) || haskey(a, :align)) && return true
+    occursin("text-align", string(get(a, :style, ""))) && return true
+    occursin(r"(^|\s)u-text-(left|center|right)(\s|$)", string(get(a, :class, "")))
+end
+
+_with_align(node::Node, align::Symbol) =
+    Node(HTMX.tag(node), merge(copy(HTMX.attrs(node)), Dict{Symbol,Any}(_ALIGN_ATTR => String(align))),
+        HTMX.children(node))
+
+# A copy of a master row whose cells take their column's alignment (`aligns`,
+# one entry per column, `nothing` for none); the caller's row is untouched,
+# and a row with nothing to align is returned as it is. A `detail-<key>`
+# companion spans the table and is no cell of a column.
+_aligned_row(row, aligns) = row
+function _aligned_row(row::Node, aligns)
+    HTMX.tag(row) === :tr && _is_master_row(row) || return row
+    kids = HTMX.children(row)
+    out = nothing
+    col = 1
+    for (k, cell) in enumerate(kids)
+        _is_cell(cell) || continue
+        span = _cell_span(cell)
+        align = span == 1 && col <= length(aligns) ? aligns[col] : nothing
+        col += span
+        (isnothing(align) || _cell_aligned(cell)) && continue
+        isnothing(out) && (out = Any[kids...])
+        out[k] = _with_align(cell, align)
+    end
+    isnothing(out) ? row : Node(HTMX.tag(row), copy(HTMX.attrs(row)), out)
+end
+# The rows with every cell of an aligned column aligned (`ColumnSpec(align)`).
+function _aligned_rows(rows, headers)
+    aligns = Union{Nothing,Symbol}[_header_align(hdr) for hdr in headers]
+    all(isnothing, aligns) ? rows : Any[_aligned_row(row, aligns) for row in rows]
+end
+
+# The columns whose master-row cells are all number cells
+# (`data-htmxo-number`), blank cells aside and at least one: their header is
+# right-aligned with them. A cell spanning columns counts in none.
+function _number_columns(rows, n::Int)
+    state = zeros(Int8, n)  # 0: no cell yet, 1: number cells so far, -1: some other cell
+    attr = Symbol("data-htmxo-number")
+    for row in rows
+        row isa Node && HTMX.tag(row) === :tr && _is_master_row(row) || continue
+        col = 1
+        for cell in HTMX.children(row)
+            _is_cell(cell) || continue
+            span = _cell_span(cell)
+            if span == 1 && col <= n && state[col] >= 0
+                state[col] = haskey(HTMX.attrs(cell), attr) ? Int8(1) : _cell_blank(cell) ? state[col] : Int8(-1)
+            end
+            col += span
+        end
+    end
+    Set(findall(==(1), state))
+end
+# A cell with nothing in it but white space, read from the node tree alone:
+# other content (a plot, rendered markup) counts as content, unrendered.
+_cell_blank(x::AbstractString) = isempty(strip(x))
+_cell_blank(::Nothing) = true
+_cell_blank(x::Node) = all(_cell_blank, HTMX.children(x))
+_cell_blank(_) = false
+
+# A `String` or `ColumnSpec` header takes its column's alignment: its own, else
+# `:right` over a column of number cells. A pre-built `<th>` is the caller's own.
+function _aligned_th(th, hdr, numeric::Bool)
+    th isa Node && !isnothing(_header_label(hdr)) || return th
+    align = something(_header_align(hdr), numeric ? :right : nothing, Some(nothing))
+    isnothing(align) ? th : _with_align(th, align)
+end
 
 # Resolve `default_sort` to `(1-based column index, "asc"|"desc", key)`, `key`
 # the 0-based index of the column's sort key (0 for a column with one order).
@@ -23538,6 +23661,14 @@ function sortable_table_styles()
 }
 .htmxo-sortable-table tbody tr[id^="row-"][onclick] > td { cursor: pointer; }
 .htmxo-sortable-table tbody tr[id^="detail-"] > td { padding: 0; border: none; }
+/* Column alignment (`ColumnSpec(label; align)`): a number cell sits at the
+   right of its column, and a column's `data-htmxo-align`, on its header and
+   cells, wins over that. Unlayered, as Pico's `td, th { text-align: start }`
+   is; the header's sort button follows its <th> (`text-align: inherit`). */
+td[data-htmxo-number] { text-align: right; }
+:is(th, td)[data-htmxo-align="left"] { text-align: left; }
+:is(th, td)[data-htmxo-align="center"] { text-align: center; }
+:is(th, td)[data-htmxo-align="right"] { text-align: right; }
 /* Hover linking (`link=`): the rows holding the hovered item are tinted and
    outlined; a shown row that holds it in a collapsed group gets a dashed
    outline, labelled on its top edge by the first cell's note. Neither moves
@@ -24617,6 +24748,10 @@ function sortable_table(headers, rows;
     # A column of interval cells (`interval_cell`) sorts by their five keys.
     interval_cols = _interval_columns(rows)
     headers = _interval_headers(headers, interval_cols, texts)
+    # A `ColumnSpec(align)` aligns its column's cells; a column of number
+    # cells right-aligns its header (see *Column alignment* in `ColumnSpec`).
+    rows = _aligned_rows(rows, headers)
+    number_cols = _number_columns(rows, length(headers))
     ds = _resolve_default_sort(default_sort, headers)
     # Its rows are built already: a column's sort keys name the orders, and
     # each cell carries the values (`sort_values`).
@@ -24634,8 +24769,9 @@ function sortable_table(headers, rows;
     isnothing(ds) || _presorted ||
         (rows = _default_sort_rows(rows, ds, headers; hierarchy=haskey(kwargs, :data_htmxo_hierarchy)))
 
-    th_nodes = [i in interval_cols ? _interval_csv_th(_table_th(hdr, i, ds, sortable, texts), texts) :
-                _table_th(hdr, i, ds, sortable, texts) for (i, hdr) in enumerate(headers)]
+    th_nodes = [_aligned_th(i in interval_cols ? _interval_csv_th(_table_th(hdr, i, ds, sortable, texts), texts) :
+                            _table_th(hdr, i, ds, sortable, texts), hdr, i in number_cols)
+                for (i, hdr) in enumerate(headers)]
 
     # Always include `htmxo-sortable-table` when sorting is on — that's
     # the hook `sortable_table_styles()` reads, and it makes call sites
@@ -26084,6 +26220,9 @@ function master_detail_table(headers, items;
         end
     end
     visit_siblings(items, "", 1, true)
+    # Every row this call renders (a whole table, a row update, lazy rows, the
+    # browser's group-row template) aligns the cells of an aligned column.
+    rows = _aligned_rows(rows, headers)
     _rows_only && return rows
     isnothing(update) || return _md_row_update(rows, get(kwargs, :id, nothing);
         something(_update_scope, (; ids=["row-" * _md_safe_key(k) for k in update_keys]))...,
@@ -27127,7 +27266,8 @@ end
 _interval_headers(headers, cols, texts) = isempty(cols) ? headers :
     Any[i in cols && !isnothing(_header_label(hdr)) && isempty(_sort_key_names(hdr)) ?
             ColumnSpec(_header_label(hdr), hdr isa ColumnSpec ? hdr.help : nothing,
-                       Pair{String,Any}[name => nothing for name in interval_sort_keys(; texts)]) : hdr
+                       Pair{String,Any}[name => nothing for name in interval_sort_keys(; texts)],
+                       hdr isa ColumnSpec ? hdr.align : nothing) : hdr
         for (i, hdr) in enumerate(headers)]
 # The header of a column of interval cells names its bounds for the ⬇ CSV.
 _interval_csv_th(th::Node, texts) = Node(HTMX.tag(th), merge(copy(HTMX.attrs(th)), Dict{Symbol,Any}(
