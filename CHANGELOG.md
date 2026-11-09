@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.87
+## 0.1.88
 
 - `pdf_panel_assets()` and `card_deck_assets()` join the page runtime that
   `htmx(...; runtime=:linked)` links (snag `pdf-panel-assets-69b95c16`). Placed in
@@ -28,6 +28,22 @@ failing at render with a `MethodError`.
   `copy_vendorfiles` writes them into a bundle, and a default static export puts them
   back inline. An inline shell, and a component that carries its own assets, are
   unchanged.
+
+## 0.1.87
+
+- `pdf_overlay` and `pdf_beside` keep the panel above a bar fixed along the bottom of
+  the window, as they keep it below a page's sticky header (`--htmxo-sticky-top`).
+  Every placement (beside the content, on the right, below), its resize edge and the
+  tab a closed panel leaves end above the higher of `--htmxo-sticky-bottom` (new: the
+  height of an app's own fixed bottom bar) and `--htmxo-overlay-h`, the live height
+  that the KB's overlay bar (`htmx(…; overlay=true)`) publishes, and follow the bar as
+  it grows. The largest size below and "is this reference in view" count that band
+  too. Before, the panel on the right and below reached the window's bottom, so the
+  bar hid their lowest 70 px and the tab below entirely (snag
+  `pdf-overlay-floa-0fc53f98`, reported by `Claude:pdf-crosslinks`).
+- The panel's script now measures `--htmxo-sticky-top` as a length, so `3rem` counts as
+  48 px rather than 3 px where it sets the largest size below, lifts a reference above
+  the panel, and decides whether a reference is in view.
 
 ## 0.1.86
 

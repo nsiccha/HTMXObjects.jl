@@ -1602,3 +1602,175 @@ end
         end
     end
 end
+
+@testitem "pdf_panel browser: every placement ends above a bar fixed at the bottom of the window" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
+    # Snag pdf-overlay-floa-0fc53f98 (Claude:pdf-crosslinks): the KB's overlay bar
+    # (`htmx(...; overlay=true)`) is fixed along the window's bottom and publishes
+    # its live height as `--htmxo-overlay-h`; an app's own fixed bottom bar
+    # declares `--htmxo-sticky-bottom`. The panel ends above the higher of the
+    # two in every placement, and below `--htmxo-sticky-top` (given in rem here),
+    # follows the bar as it grows, and its tab and resize edge stay usable.
+    using HTMXObjects, HTTP, Sockets
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        pdf = tiny_pdf(PDF_PAGES)
+        ref(id, text; kw...) = pdf_ref(text, "/doc.pdf"; panel="pdf", id, kw...)
+        content = h.div(; id="content")(
+            h.p("Intro ", ref("r1", "(p. 1)"; page=1, quoted="every provider and of everyone who works with children"), "."),
+            h.div(; style="height: 1200px"),
+            h.p("Lower down ", ref("r2", "(p. 2)"; page=2, quoted="reported to the youth office"), "."),
+            h.div(; style="height: 2500px"))
+        # A sticky header 3rem high, and a bar like the KB's: fixed along the
+        # bottom, its live height in `--htmxo-overlay-h` and the body's padding.
+        shell = h.style(Raw(raw"""
+        :root { --htmxo-sticky-top: 3rem; }
+        #head { position: sticky; top: 0; z-index: 40; height: 3rem; margin: 0; background: #ddd; }
+        #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 70px; z-index: 2147483000; background: #222; }
+        """))
+        bar = h.script(Raw(raw"""
+        (function () {
+            const bar = document.getElementById('bar');
+            const sync = () => { document.documentElement.style.setProperty('--htmxo-overlay-h', bar.offsetHeight + 'px');
+                                 document.body.style.paddingBottom = bar.offsetHeight + 'px'; };
+            new ResizeObserver(sync).observe(bar);
+            sync();
+        })();
+        """))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+            const checks = [];
+            const check = (name, ok, seen) => checks.push([ok ? name : name + ' ' + JSON.stringify(seen), Boolean(ok)]);
+            // Each wait asks the server (50 ms of real time, for PDF.js's real work), then lets
+            // 20 ms of virtual time pass, so that Chrome draws frames (see the floating item).
+            const tick = () => fetch('/tick').then(r => r.text()).then(() => new Promise(ok => setTimeout(ok, 20)));
+            const wait = async (cond, n = 400) => { for (let i = 0; i < n && !cond(); i++) await tick(); return cond(); };
+            const aside = document.getElementById('pdf'), wrap = aside.closest('[data-htmxo-pdf-placements]');
+            const placement = () => wrap.dataset.htmxoPdfPlacement, rect = el => el.getBoundingClientRect();
+            const ref = id => document.getElementById(id), bar = document.getElementById('bar');
+            const H = () => innerHeight, rem = parseFloat(getComputedStyle(document.documentElement).fontSize), T = 3 * rem;
+            const floor = () => H() - rect(bar).height;
+            const handle = () => wrap.querySelector(':scope > .htmxo-pdf-resize'), tab = () => wrap.querySelector(':scope > .htmxo-pdf-tab');
+            const button = p => aside.querySelector('[data-htmxo-pdf-place="' + p + '"]');
+            const drawn = n => aside.querySelector('.htmxo-pdf-page[data-htmxo-pdf-page="' + n + '"][data-htmxo-pdf-drawn]');
+            const busy = () => aside.querySelector('[data-htmxo-pdf-pages]').hasAttribute('aria-busy');
+            const hit = key => aside.querySelector('.htmxo-pdf-hit[data-htmxo-pdf-key="' + key + '"]');
+            const near = (a, b, d = 2) => Math.abs(a - b) <= d;
+            const at = (x, y) => document.elementFromPoint(x, y);
+            // whether a click at the middle of `el` reaches it, and one just above its lower edge
+            const reach = el => { const r = rect(el), e = at(r.left + r.width / 2, r.top + r.height / 2); return !!e && (e === el || el.contains(e)); };
+            const reachLow = el => { const r = rect(el), e = at(r.left + r.width / 2, r.bottom - 4); return !!e && (e === el || el.contains(e)); };
+            const pointer = (type, el, x, y) => el.dispatchEvent(new PointerEvent(type, {bubbles: true, cancelable: true,
+                pointerId: 5, isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, pointerType: 'mouse'}));
+            const drag = (el, dy) => { const r = rect(el), x = r.left + r.width / 2, y = r.top + r.height / 2;
+                pointer('pointerdown', el, x, y); pointer('pointermove', el, x, y + dy / 2);
+                pointer('pointermove', el, x, y + dy); pointer('pointerup', el, x, y + dy); };
+            const setBar = px => { bar.style.height = px + 'px'; return wait(() => getComputedStyle(document.documentElement).getPropertyValue('--htmxo-overlay-h').trim() === px + 'px'); };
+            const settle = async () => { for (let i = 0; i < 4; i++) await tick(); };
+            try {
+                check('bar', near(floor(), H() - 70, 0.5) && getComputedStyle(document.documentElement).getPropertyValue('--htmxo-overlay-h').trim() === '70px');
+                // beside, stuck below the header: its lower edge (and the divider's) above the bar
+                ref('r1').click();
+                await wait(() => !busy() && drawn(1));
+                scrollTo(0, 300);
+                await settle();
+                const s = rect(aside);
+                check('beside', placement() === 'beside' && near(s.top, T + 0.5 * rem) && near(s.bottom, floor() - 0.5 * rem) &&
+                      near(rect(handle()).bottom, floor() - 0.5 * rem) && reachLow(aside), {s, floor: floor(), handle: rect(handle())});
+                // on the right: from the header down to the bar, its edge too
+                button('right').click();
+                await settle();
+                const p = rect(aside);
+                check('right', placement() === 'right' && near(p.top, T) && near(p.bottom, floor()) &&
+                      near(rect(handle()).bottom, floor()) && reachLow(aside), {p, floor: floor(), T});
+                // below: half the window high, standing on the bar
+                button('bottom').click();
+                await settle();
+                const b = rect(aside);
+                check('bottom', placement() === 'bottom' && near(b.bottom, floor()) && near(b.height, 0.5 * H()) &&
+                      near(rect(handle()).top + rect(handle()).height / 2, b.top) && reach(handle()) && reachLow(aside), {b, floor: floor()});
+                // dragged up as far as it goes: 2.5rem short of the header, which is given in rem
+                drag(handle(), -1000);
+                await tick();
+                const most = floor() - T - 2.5 * rem;
+                check('bottom-highest', near(rect(aside).height, most) && near(rect(aside).bottom, floor()) &&
+                      localStorage.getItem('htmxo-pdf-size-bottom') === String(Math.round(most)), {h: rect(aside).height, most});
+                drag(handle(), 400);
+                await tick();
+                // the bar grows (the KB's chat opens): the panel rises with it, and back
+                await setBar(300);
+                await tick();
+                check('follows-bar', near(rect(aside).bottom, H() - 300) && rect(aside).top >= T - 0.5, rect(aside));
+                await setBar(70);
+                await tick();
+                check('follows-bar-back', near(rect(aside).bottom, floor()), rect(aside));
+                // an app's own fixed bottom bar higher than the KB's: the higher one counts
+                document.documentElement.style.setProperty('--htmxo-sticky-bottom', '90px');
+                await tick();
+                check('sticky-bottom', near(rect(aside).bottom, H() - 90), rect(aside));
+                document.documentElement.style.removeProperty('--htmxo-sticky-bottom');
+                await tick();
+                // closed below: its tab stands on the bar, where it takes a click
+                aside.querySelector('[data-htmxo-pdf-close]').click();
+                check('bottom-tab', !tab().hidden && near(rect(tab()).bottom, floor()) && reach(tab()), rect(tab()));
+                tab().click();
+                await wait(() => !busy());
+                // on the right, a reference under the bar is not in view: its mark scrolls it above the bar
+                button('right').click();
+                await settle();
+                scrollTo(0, scrollY + rect(ref('r2')).top - 300);
+                await tick();
+                ref('r2').click();
+                const key = ref('r2').dataset.htmxoPdfKey;
+                await wait(() => !busy() && drawn(2) && hit(key));
+                scrollTo(0, scrollY + rect(ref('r2')).top - (H() - 40));
+                await tick();
+                check('r2-under-bar', rect(ref('r2')).top > floor(), rect(ref('r2')));
+                hit(key).click();
+                await tick();
+                check('mark-lifts-ref', rect(ref('r2')).bottom <= floor() && rect(ref('r2')).top >= T, rect(ref('r2')));
+                // closed on the right: its tab in the middle of the band between the header and the bar
+                aside.querySelector('[data-htmxo-pdf-close]').click();
+                const t = rect(tab());
+                check('right-tab', near((t.top + t.bottom) / 2, (T + floor()) / 2) && reach(tab()), {t, T, floor: floor()});
+            } catch (error) {
+                check('error ' + error.message, false);
+            }
+            const result = document.createElement('pre');
+            result.id = 'checks';
+            result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        page = repr("text/html", htmx(h.h1(; id="head")("Header"),
+                h.main(pdf_beside(content, pdf_panel(["Fixture" => "/doc.pdf"]; id="pdf"); placements=(:beside, :right, :bottom))),
+                h.div(; id="bar"), bar, driver;
+            extra_head=(shell,), hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) :
+            path == "/doc.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) :
+            path == "/tick" ? (sleep(0.05); HTTP.Response(200, "ok")) : HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`; timeout=180)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                    endswith(line, ":true") || println("pdf_panel bottom bar browser: ", line)
+                end
+                @test count(==('\n'), checks[1]) + 1 == 12
+            end
+        finally
+            close(server)
+        end
+    end
+end

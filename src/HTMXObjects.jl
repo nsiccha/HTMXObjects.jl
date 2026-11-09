@@ -3400,7 +3400,9 @@ Pass `nothing` to leave the template out; code then stays plain, unless the
 page loads PrismJS itself (`window.Prism`), which the runtime then uses.
 Pass `overlay=true` to load the KB-app overlay bar (`<KB_ORIGIN>/overlay/bar.js`);
 it defaults to `false` — the bundle is served only by the KB app, so standalone
-pages omit the fetch.
+pages omit the fetch. The bar is fixed along the window's bottom and publishes
+its live height as `--htmxo-overlay-h`, which [`pdf_overlay`](@ref) and
+[`pdf_beside`](@ref) keep clear of.
 
 `preload_version` loads htmx's [`preload` extension](https://htmx.org/extensions/preload/),
 enables it page-wide and adds [`preload_runtime_js`](@ref). It is inert until an

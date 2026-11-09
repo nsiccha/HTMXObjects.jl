@@ -1861,6 +1861,11 @@ place as the address's `#anchor` instead of a page:
   `pdf_beside(content, panel; placements=(:beside, :right, :bottom))` offers
   the same switch and starts beside the content; `placement=` names the
   placement either starts in.
+- **A bar fixed along the window's bottom stays clear**, as the sticky
+  header does: every placement, its resize edge and its tab end above the
+  higher of `--htmxo-sticky-bottom` (the height of the page's own fixed
+  bottom bar) and `--htmxo-overlay-h`, the live height that the KB's overlay
+  bar (`htmx(...; overlay=true)`) publishes, following the bar as it grows.
 - **The reader shapes it.** The panel's inner edge (the divider beside the
   content, the left edge on the right, the top edge below) resizes it: drag
   it with a mouse, a pen or a finger, or focus it and use the arrow keys,
