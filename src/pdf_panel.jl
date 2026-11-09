@@ -494,7 +494,8 @@ pdf_toggle(panel::AbstractString, label=nothing; texts=nothing, attrs...) =
 `content` with the [`pdf_panel`](@ref) `panel` beside it: while the panel is
 open the two share the width (the panel 40 %, at least 22rem; set
 `--htmxo-pdf-width` to change it) and the panel stays in view while the
-content scrolls by, below a page's own sticky header (`--htmxo-sticky-top`).
+content scrolls by, below a page's own sticky header (`--htmxo-sticky-top`)
+and above a bar fixed along the window's bottom (see [`pdf_overlay`](@ref)).
 Closed, the content has the whole width. Opening or closing it keeps the
 reference clicked last (else the content at the top of the window, below
 a table's sticky header) where it was on screen while the content wraps
@@ -536,6 +537,13 @@ a later swap brings and one inside an open modal dialog:
 ```julia
 __page__(content) = htmx(h.main(content, pdf_overlay(pdf_panel(; id="quellen"))))
 ```
+
+**A bar fixed along the window's bottom** stays clear, as a sticky header
+does: in every placement the panel, its resize edge and its tab end above
+the higher of `--htmxo-sticky-bottom` (set it to the height of the page's
+own fixed bottom bar, as `--htmxo-sticky-top` to its sticky header's) and
+`--htmxo-overlay-h`, the live height that the KB's overlay bar
+(`htmx(...; overlay=true)`) publishes, and they follow the bar as it grows.
 
 **What the reader's choices keep.** The placement picked last and each
 placement's size are kept in the browser (`localStorage`, under
@@ -623,7 +631,19 @@ pdf_panel_styles() = h.style(Raw(raw"""
 [data-htmxo-pdf-placements] {
     --htmxo-pdf-surface: var(--pico-background-color, Canvas); --htmxo-pdf-ink: var(--pico-color, CanvasText);
     --htmxo-pdf-span: min(100%, max(var(--htmxo-pdf-reader-width, 22rem), var(--htmxo-pdf-reader-width, var(--htmxo-pdf-width, 40%))));
-    --htmxo-pdf-rise: min(calc(100% - var(--htmxo-sticky-top, 0px) - 2.5rem), var(--htmxo-pdf-reader-height, var(--htmxo-pdf-sheet-height, 50dvh)));
+    --htmxo-pdf-rise: min(calc(100% - var(--htmxo-sticky-top, 0px) - var(--htmxo-pdf-below) - 2.5rem), var(--htmxo-pdf-reader-height, var(--htmxo-pdf-sheet-height, 50dvh)));
+}
+/* The band of the window the panel keeps to: below a page's own sticky
+   header, and above a bar fixed along the window's bottom, the higher of an
+   app's own (`--htmxo-sticky-bottom`) and the KB's overlay bar, which
+   publishes its live height (`--htmxo-overlay-h`). The script measures the
+   band with the probe, so a length in any unit counts. */
+:is([data-htmxo-pdf-placements], .htmxo-pdf-probe) {
+    --htmxo-pdf-below: max(var(--htmxo-sticky-bottom, 0px), var(--htmxo-overlay-h, 0px));
+}
+.htmxo-pdf-probe {
+    position: fixed; left: 0; width: 0; top: var(--htmxo-sticky-top, 0px); bottom: var(--htmxo-pdf-below);
+    visibility: hidden; pointer-events: none;
 }
 /* Beside: the content, the divider that resizes the panel, the panel. */
 .htmxo-pdf-beside[data-htmxo-pdf-open][data-htmxo-pdf-placement="beside"] {
@@ -641,26 +661,27 @@ pdf_panel_styles() = h.style(Raw(raw"""
 [data-htmxo-pdf-placement="beside"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
     grid-column: 3; grid-row: 1;
     position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + .5rem);
-    max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - 1rem);
-    max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - 1rem);
+    max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-pdf-below) - 1rem);
+    max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-pdf-below) - 1rem);
 }
 [data-htmxo-pdf-placements] > .htmxo-private:has(> .htmxo-pdf-panel) { display: flex; flex-direction: column; align-items: flex-start; }
 [data-htmxo-pdf-placements] > .htmxo-private > .htmxo-pdf-panel { align-self: stretch; flex: 1 1 auto; min-height: 0; max-height: none; }
 [data-htmxo-pdf-placements] > .htmxo-private:has(> .htmxo-pdf-panel[hidden]) { display: none; }
 /* Floating over the page, which keeps its width and layout: on the right,
-   below the page's own sticky header, or below, the whole width. */
+   below the page's own sticky header, or below, the whole width; both above
+   a bar fixed along the window's bottom. */
 [data-htmxo-pdf-placement="right"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)),
 [data-htmxo-pdf-placement="bottom"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
     position: fixed; z-index: var(--htmxo-pdf-layer, 30); box-sizing: border-box; margin: 0; max-height: none;
     background: var(--pico-background-color, Canvas);
 }
 [data-htmxo-pdf-placement="right"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
-    top: var(--htmxo-sticky-top, 0px); right: 0; bottom: 0; width: var(--htmxo-pdf-span);
+    top: var(--htmxo-sticky-top, 0px); right: 0; bottom: var(--htmxo-pdf-below); width: var(--htmxo-pdf-span);
     border-radius: var(--pico-border-radius, .25rem) 0 0 var(--pico-border-radius, .25rem);
     box-shadow: -6px 0 18px rgba(0, 0, 0, .2);
 }
 [data-htmxo-pdf-placement="bottom"] > :is(.htmxo-pdf-panel, .htmxo-private:has(> .htmxo-pdf-panel)) {
-    left: 0; right: 0; bottom: 0; height: var(--htmxo-pdf-rise);
+    left: 0; right: 0; bottom: var(--htmxo-pdf-below); height: var(--htmxo-pdf-rise);
     border-radius: var(--pico-border-radius, .25rem) var(--pico-border-radius, .25rem) 0 0;
     box-shadow: 0 -6px 18px rgba(0, 0, 0, .2);
 }
@@ -682,13 +703,14 @@ pdf_panel_styles() = h.style(Raw(raw"""
 [data-htmxo-pdf-placements]:not([data-htmxo-pdf-open]) > .htmxo-pdf-resize { display: none; }
 [data-htmxo-pdf-placement="beside"] > .htmxo-pdf-resize {
     grid-column: 2; grid-row: 1; position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + .5rem); cursor: col-resize;
-    height: calc(100vh - var(--htmxo-sticky-top, 0px) - 1rem); height: calc(100dvh - var(--htmxo-sticky-top, 0px) - 1rem);
+    height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-pdf-below) - 1rem);
+    height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-pdf-below) - 1rem);
 }
 [data-htmxo-pdf-placement="right"] > .htmxo-pdf-resize {
-    position: fixed; top: var(--htmxo-sticky-top, 0px); bottom: 0; width: 1rem; right: calc(var(--htmxo-pdf-span) - .5rem); cursor: col-resize;
+    position: fixed; top: var(--htmxo-sticky-top, 0px); bottom: var(--htmxo-pdf-below); width: 1rem; right: calc(var(--htmxo-pdf-span) - .5rem); cursor: col-resize;
 }
 [data-htmxo-pdf-placement="bottom"] > .htmxo-pdf-resize {
-    position: fixed; left: 0; right: 0; height: 1rem; bottom: calc(var(--htmxo-pdf-rise) - .5rem); cursor: row-resize;
+    position: fixed; left: 0; right: 0; height: 1rem; bottom: calc(var(--htmxo-pdf-below) + var(--htmxo-pdf-rise) - .5rem); cursor: row-resize;
 }
 :is([data-htmxo-pdf-placement="beside"], [data-htmxo-pdf-placement="right"]) > .htmxo-pdf-resize::before { width: 4px; height: 2.5rem; }
 [data-htmxo-pdf-placement="bottom"] > .htmxo-pdf-resize::before { width: 2.5rem; height: 4px; }
@@ -698,8 +720,10 @@ pdf_panel_styles() = h.style(Raw(raw"""
 [data-htmxo-pdf-placement="beside"] > .htmxo-pdf-tab {
     grid-column: 2; grid-row: 1; position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + 40vh);
 }
-[data-htmxo-pdf-placement="right"] > .htmxo-pdf-tab { position: fixed; right: 0; top: 50%; transform: translateY(-50%); }
-[data-htmxo-pdf-placement="bottom"] > .htmxo-pdf-tab { position: fixed; right: 1.5rem; bottom: 0; }
+[data-htmxo-pdf-placement="right"] > .htmxo-pdf-tab {
+    position: fixed; right: 0; top: calc(50% + (var(--htmxo-sticky-top, 0px) - var(--htmxo-pdf-below)) / 2); transform: translateY(-50%);
+}
+[data-htmxo-pdf-placement="bottom"] > .htmxo-pdf-tab { position: fixed; right: 1.5rem; bottom: var(--htmxo-pdf-below); }
 /* Room below the page's end, so a reference there can stand above the panel below. */
 .htmxo-pdf-room { pointer-events: none; }
 }
@@ -918,9 +942,17 @@ pdf_panel_script() = h.script(Raw(raw"""
   // --- Opening and closing. The content beside the panel narrows or widens
   // and wraps anew; the reference clicked (else the content at the top of the
   // window) is scrolled back to where it was on screen.
-  function stickyTop() {
-    var v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--htmxo-sticky-top'));
-    return isNaN(v) ? 0 : v;
+  // The band of the window that a page's own sticky header and a bar fixed
+  // along its bottom leave free, as the stylesheet draws it: a probe fixed to
+  // it is measured, so a length in any unit counts (and the window, without
+  // the stylesheet).
+  var probe = null;
+  function band() {
+    if (!probe) probe = make('div', {'class': 'htmxo-pdf-probe', 'aria-hidden': 'true'});
+    if (probe.parentNode !== document.body) document.body.appendChild(probe);
+    if (getComputedStyle(probe).position !== 'fixed') return {top: 0, bottom: window.innerHeight};
+    var r = probe.getBoundingClientRect();
+    return {top: r.top, bottom: r.bottom};
   }
   function onScreen(el) {
     if (!el || !el.isConnected || !visible(el)) return false;
@@ -942,7 +974,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     var box = content(aside);
     if (!box) return null;
     if (ref && box.contains(ref) && onScreen(ref)) return ref;
-    var r = box.getBoundingClientRect(), x = r.left + Math.min(24, r.width / 2), y = Math.max(r.top, stickyTop()) + 4;
+    var r = box.getBoundingClientRect(), x = r.left + Math.min(24, r.width / 2), y = Math.max(r.top, band().top) + 4;
     for (var i = 0; i < 8 && y < Math.min(r.bottom, window.innerHeight); i++) {
       var at = document.elementFromPoint(x, y);
       if (!at || at === box || !box.contains(at)) return null;
@@ -1085,7 +1117,7 @@ pdf_panel_script() = h.script(Raw(raw"""
   // The panel's size: its width beside the content and on the right, its
   // height below, within bounds that leave the page usable.
   function bounds(wrap, at) {
-    if (at === 'bottom') return [120, Math.max(120, window.innerHeight - stickyTop() - 40)];
+    if (at === 'bottom') { var free = band(); return [120, Math.max(120, free.bottom - free.top - 40)]; }
     var room = at === 'beside' ? wrap.getBoundingClientRect().width - 16 : window.innerWidth, least = Math.min(240, room);
     return [least, Math.max(least, room - (at === 'beside' ? 240 : 160))];
   }
@@ -1211,7 +1243,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     room(aside);
     var edgeTop = cellOf(aside).getBoundingClientRect().top - 8, r = ref.getBoundingClientRect();
     if (r.bottom <= edgeTop || r.top >= window.innerHeight) return;
-    var by = Math.min(r.bottom - edgeTop, r.top - stickyTop() - 8);
+    var by = Math.min(r.bottom - edgeTop, r.top - band().top - 8);
     for (var box = ref.parentElement; box && by > 0.5 && box !== document.body && box !== document.documentElement; box = box.parentElement) {
       if (box.scrollHeight <= box.clientHeight || !/auto|scroll/.test(getComputedStyle(box).overflowY)) continue;
       var before = box.scrollTop;
@@ -1862,7 +1894,8 @@ pdf_panel_script() = h.script(Raw(raw"""
   // inside every scroll box around it.
   function whole(el) {
     var r = el.getBoundingClientRect();
-    if (r.top < stickyTop() || r.bottom > window.innerHeight) return false;
+    var free = band();
+    if (r.top < free.top || r.bottom > free.bottom) return false;
     for (var box = el.parentElement; box && box !== document.body; box = box.parentElement) {
       if (box.scrollHeight <= box.clientHeight || !/auto|scroll/.test(getComputedStyle(box).overflowY)) continue;
       var b = box.getBoundingClientRect();
