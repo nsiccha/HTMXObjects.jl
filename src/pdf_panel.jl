@@ -2089,6 +2089,9 @@ pdf_panel_script() = h.script(Raw(raw"""
 Style and script for [`pdf_panel`](@ref), [`pdf_ref`](@ref),
 [`pdf_toggle`](@ref), [`pdf_beside`](@ref) and [`pdf_overlay`](@ref). A `pdf_panel` carries them
 itself unless built with `assets=false`; put them in the head of a page that
-builds its panel so.
+builds its panel so. In the `extra_head` of an [`htmx`](@ref) shell with
+`runtime=:linked`, they become two browser-cached files on the vendor mount
+([`vendorfiles`](@ref)), `<mount>/htmxo/pdf_panel_styles.css?v=…` and
+`…/pdf_panel_script.js?v=…`, for a page that mounts a panel on every page.
 """
 pdf_panel_assets() = (pdf_panel_styles(), pdf_panel_script())

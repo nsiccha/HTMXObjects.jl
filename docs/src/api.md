@@ -541,12 +541,12 @@ head = h.head(h.meta(charset="utf-8"),
 # or: htmx(content; assets="assets/vendor", pico_version=HTMXObjects._PICO_VERSION)
 ```
 
-### Cacheable page runtime — `runtime=:linked`
+### Cacheable page runtime — `runtime=:linked` {#linked-runtime}
 
 Besides the libraries, every shell inlines HTMXObjects' own CSS and JS
 runtime (request feedback, live threads, tabs, comparison/master-detail,
 the tables, the stream probe, live regions, and the Treebars poll assets
-while that extension is loaded) — about 280 KB (80 KB gzipped) on every
+while that extension is loaded) — about 460 KB (130 KB gzipped) on every
 full-page load, more with Treebars loaded. With a vendor
 mount, `runtime=:linked` moves each of those blocks into its own file on that
 mount, `<mount>/htmxo/<name>.css|js?v=<content version>`, and the library
@@ -564,10 +564,13 @@ a Revise edit) is a new URL. Other requests revalidate against an `ETag`.
 Each block keeps its own element in its old position, so load order and
 script isolation are unchanged. The page helpers an app puts into
 `extra_head` — `sortable_table_js()`, `sortable_table_styles()`,
-`caption_style()`, `master_detail_js()` and `download_table_js()`, exactly as
-they return — are linked the same way, in place, unless the shell already
-carries them ([Tables on every page](#page-tables)); any other `extra_head`
-element stays as given. A static export or recording puts the runtime back
+`caption_style()`, `master_detail_js()`, `download_table_js()`,
+`htmxo_gallery_styles()`, and the components' `pdf_panel_assets()` and
+`card_deck_assets()` (for a page that mounts them with `assets=false`, such
+as one `pdf_overlay` panel on every page), exactly as they return — are
+linked the same way, in place, unless the shell already carries them
+([Tables on every page](#page-tables)); any other `extra_head` element stays
+as given. A static export or recording puts the runtime back
 inline, so exported pages stay standalone. A many-page bundle can keep it
 linked instead: copy the files once with `copy_vendorfiles` and export with
 `StaticExport(; runtime=:linked)`
