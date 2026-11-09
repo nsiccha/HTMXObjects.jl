@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.89
+## 0.1.90
 
 - `ColumnSpec(label; align = :left | :center | :right)` aligns a column: its sortable
   header (label, `ⓘ`, `▾` sort menu and caret, still sorting) and every cell the table
@@ -33,6 +33,20 @@ failing at render with a `MethodError`.
   `sortable_table_styles()` (every `htmx()` / `pico_page` page) show their number
   columns at the right with no change; `align = :left` keeps a column at the left.
   Markdown, CSV and search are unchanged.
+
+## 0.1.89
+
+- `copy_vendorfiles(dir; packages, runtime, pages)` takes the rendered HTML of a
+  bundle's pages and writes only the vendor files they name (snag
+  `static-export-ve-d88dbadd`): the Pico build a page links instead of all twenty,
+  the runtime blocks its shell links instead of every block, page helper and
+  component asset, and the libraries of `packages` it loads, with what those load
+  in turn (KaTeX's fonts, every PrismJS grammar the autoloader can fetch). A page
+  names a file through an element's `href` or `src` whose address ends in the
+  file's path below `dir`, so pages of any folder and `assets` prefix count. On
+  Portfolio's one-page site this leaves out 27 files, 1.83 MB. `pages` is one string
+  or byte vector or a collection of them; a string without markup (a file name) is
+  an `ArgumentError`. Without `pages` nothing changes.
 
 ## 0.1.88
 

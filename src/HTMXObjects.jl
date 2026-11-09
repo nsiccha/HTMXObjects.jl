@@ -3095,7 +3095,7 @@ _prism_languages(dir=_vendor_file(:prism)) = sort!(filter(
     readdir(joinpath(dir, "components"))))
 
 """
-    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex, :prism), runtime=true) -> Vector{String}
+    copy_vendorfiles(dir; packages=(:htmx, :sse, :ws, :preload, :hyperscript, :pico, :katex, :prism), runtime=true, pages=nothing) -> Vector{String}
 
 Copy the vendored head assets — the same files [`vendorfiles`](@ref)
 serves — into `dir` (created if missing), for a static bundle that has no
@@ -3116,6 +3116,23 @@ and the copies are ordinary writable files (the artifact store is
 read-only). Like `vendorfiles`, the first call downloads the pinned npm
 tarballs.
 
+**Only what the pages use.** Without `pages` every file of `packages` (and
+of the runtime) is written, whichever the bundle's pages link: all twenty
+Pico builds, and every runtime block, the page helpers and component assets
+included. Pass the rendered HTML of the bundle's pages and fragments as
+`pages` (one string or byte vector, or a collection of them; a generator
+reads a large export one page at a time), and only the files they name are
+written: the Pico build a `<link>` names, each runtime file a linked page
+links, and so on. A page names a file through an element's `href` or `src`
+(an inert `<template>`'s too, such as the shell's KaTeX and PrismJS ones; not
+text inside a `<script>`, a `<style>` or a comment) whose address, without
+its `?query` and `#id`, is the file's path below `dir` or ends in `/` and
+that path (`pico.jade.min.css`, `htmxo/theme.css`, `katex/katex.min.css`), so
+pages of any folder and any `assets` prefix count. A named file brings what
+it loads in turn: KaTeX's stylesheet its fonts, PrismJS's autoloader every
+language's grammar. A file outside `packages` (or the runtime, with
+`runtime=false`) stays unwritten, named or not.
+
 Pair it with [`vendor_head`](@ref) (or `htmx(...; assets=<same relative
 prefix>)`) for head tags that address the copies relative to the page:
 
@@ -3125,23 +3142,95 @@ page = HTMLDocument(h.html(
     h.head(h.meta(charset="utf-8"), vendor_head("assets/vendor"; packages=(:htmx, :pico))...),
     h.body(content)))
 ```
+
+A bundle of exported pages renders them first, then copies what they link:
+
+```julia
+resp = dispatch(:GET, "/"; static=StaticExport(; runtime=:linked))
+write(joinpath(bundle, "index.html"), resp.body)
+copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico), pages=resp.body)
+```
 """
-function copy_vendorfiles(dir::AbstractString; packages=keys(_VENDOR_ASSETS), runtime::Bool=true)
-    pkgs = _vendor_packages(packages)
+function copy_vendorfiles(dir::AbstractString; packages=keys(_VENDOR_ASSETS), runtime::Bool=true,
+                          pages=nothing)
+    libraries = [pair for pkg in _vendor_packages(packages) for pair in _vendor_files(pkg)]
+    names = runtime ? collect(_available_runtime_names()) : Symbol[]
+    if !isnothing(pages)
+        named = _vendor_named(pages)
+        libraries = _vendor_selected(libraries, named)
+        filter!(name -> "htmxo/" * _runtime_file(name) in named, names)
+    end
     mkpath(dir)
-    libraries = String[]
-    for pkg in pkgs, (file, path) in _vendor_files(pkg)
+    written = String[]
+    for (file, path) in libraries
         dest = joinpath(dir, split(file, '/')...)
         mkpath(dirname(dest))
         write(dest, read(path))
-        push!(libraries, dest)
+        push!(written, dest)
     end
-    runtime || return libraries
+    isempty(names) && return written
     mkpath(joinpath(dir, "htmxo"))
-    [libraries; [let dest = joinpath(dir, "htmxo", _runtime_file(name))
-                     write(dest, _runtime_text(name))
-                     dest
-                 end for name in _available_runtime_names()]]
+    [written; [let dest = joinpath(dir, "htmxo", _runtime_file(name))
+                   write(dest, _runtime_text(name))
+                   dest
+               end for name in names]]
+end
+
+# Every path an element of `pages` names, with each tail of it after a `/`:
+# for each address of this site an element's `href` or `src` holds
+# (`_site_references`), without its query or `#id`, its `%` escapes decoded.
+# So a page in any folder that links `../assets/vendor/htmxo/theme.css?v=…`
+# names `htmxo/theme.css`, as a page of the root that links
+# `assets/vendor/htmxo/theme.css` does.
+function _vendor_named(pages)
+    named = Set{String}()
+    for page in _vendor_pages(pages), address in _site_references(_vendor_page_text(page))
+        _site_internal(address) || continue
+        path = _static_unescape(first(split(address, r"[?#]"; limit=2)))
+        push!(named, path)
+        foreach(i -> push!(named, path[nextind(path, i):end]), findall('/', path))
+    end
+    named
+end
+
+# One rendered page (a string, or a body's bytes), or a collection of them.
+_vendor_pages(page::Union{AbstractString,AbstractVector{UInt8}}) = (page,)
+_vendor_pages(pages) = pages
+
+# A page's HTML. A string without any markup is refused rather than read as a
+# page that names nothing, which would leave every file out: it is most
+# likely a file name passed in place of the file's contents.
+function _vendor_page_text(page::AbstractString)
+    occursin('<', page) || throw(ArgumentError(
+        "copy_vendorfiles: pages holds each page's rendered HTML, not a file name; " *
+        "$(repr(first(page, 80))) has no markup"))
+    page
+end
+_vendor_page_text(page::AbstractVector{UInt8}) = _vendor_page_text(String(copy(page)))
+_vendor_page_text(page) = throw(ArgumentError(
+    "copy_vendorfiles: pages holds each page's rendered HTML (a string or bytes), got $(typeof(page))"))
+
+# The library files (`served path => file`) that `named` names, with what each
+# loads in turn, the way `export_site`'s crawl follows them: the files a
+# stylesheet loads through `url(...)` (KaTeX's fonts), and every grammar the
+# PrismJS autoloader can fetch from the `components/` beside its `plugins/`.
+function _vendor_selected(files, named)
+    kept = Set{String}(file for (file, _) in files if file in named)
+    for (file, path) in files
+        file in kept || continue
+        if endswith(file, ".css")
+            for m in eachmatch(_CSS_URL, read(path, String))
+                url = first(split(m.captures[1], r"[?#]"; limit=2))
+                _site_internal(url) && !startswith(url, '/') || continue
+                push!(kept, lstrip(_site_resolve("/" * file, url), '/'))
+            end
+        elseif endswith(file, "/" * _PRISM_AUTOLOADER)
+            root = chopsuffix(file, _PRISM_AUTOLOADER)
+            union!(kept, (f for (f, _) in files
+                          if startswith(f, root * "components/") && f != root * _PRISM_CORE))
+        end
+    end
+    filter(p -> first(p) in kept, files)
 end
 
 """
@@ -8547,12 +8636,15 @@ function _site_stale(crawl::_SiteCrawl, written::_SiteWritten)
                   _site_markers(crawl, read(written.paths[k], String)))])
 end
 
+# The address in each `url(...)` of a stylesheet.
+const _CSS_URL = r"url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)"
+
 # A stylesheet's `url(...)`s resolve against the stylesheet itself, and its
 # file keeps its path, so each file it loads (KaTeX's fonts) is queued and
 # keeps its own path, and the stylesheet is written as it answers.
 function _site_follow_stylesheet!(crawl::_SiteCrawl, address::AbstractString, body)
     css = body isa AbstractString ? body : String(copy(body))
-    for m in eachmatch(r"url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)", css)
+    for m in eachmatch(_CSS_URL, css)
         url = m.captures[1]
         _site_internal(url) || continue
         loaded = _site_resolve(first(_split_once(address, '?')), first(_split_once(url, '#')))

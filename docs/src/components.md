@@ -331,7 +331,7 @@ through `columns = ["name" => ColumnSpec(...)]`.
 #### Column alignment {#column-alignment}
 
 A column's alignment is one fact about the column, stated on its header:
-`ColumnSpec(label; align = :left | :center | :right)` (HTMXObjects ≥ 0.1.89).
+`ColumnSpec(label; align = :left | :center | :right)` (HTMXObjects ≥ 0.1.90).
 The table aligns the header (its label, the `ⓘ`, the `▾` sort menu and the
 caret, still sorting on click and keyboard) and every cell it renders in that
 column, so a reader matches each number to its heading:
