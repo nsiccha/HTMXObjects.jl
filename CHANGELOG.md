@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.90
+
+- `ColumnSpec(label; align = :left | :center | :right)` aligns a column: its sortable
+  header (label, `ⓘ`, `▾` sort menu and caret, still sorting) and every cell the table
+  renders in it, as `data-htmxo-align` in the HTML the server sends (snag
+  `sortable-table-h-6312a3b4`). It works in `sortable_table` (hand-built rows are
+  copied, never changed; a cell that sets its own alignment keeps it), in
+  `render_table(columns = [... => ColumnSpec(...)])` and in `master_detail_table`,
+  including group rows and their summaries, row updates, lazy rows and the row the
+  browser regroups from. Before, a sortable header could carry no alignment, so a
+  right-aligned column's heading sat at the left edge, far from its numbers (the KB's
+  Markdown tables with `---:`). Any other `align` throws an `ArgumentError`.
+- Number columns are right-aligned by default: a number cell (`number_cell`, floats in
+  `render_table` and `master` cells, `IntervalEstimate` / `interval_cell`, group
+  summaries, any `<td>` with `data-htmxo-number`) sits at the right of its column, and
+  a column whose cells are all number cells right-aligns its header. Pages built on
+  `sortable_table_styles()` (every `htmx()` / `pico_page` page) show their number
+  columns at the right with no change; `align = :left` keeps a column at the left.
+  Markdown, CSV and search are unchanged.
+
 ## 0.1.89
 
 - `copy_vendorfiles(dir; packages, runtime, pages)` takes the rendered HTML of a
