@@ -1926,7 +1926,11 @@ place as the address's `#anchor` instead of a page:
   click goes to its reference).
 
 The panel carries its own style and script (`assets=false` and
-`pdf_panel_assets()` in the head for a page that wants them there). It is
+`pdf_panel_assets()` in the head for a page that wants them there). A page
+that mounts a panel on every page puts `pdf_panel_assets()` in the
+`extra_head` of a `runtime=:linked` shell, where they become two
+browser-cached files, about 79 KB that each navigation no longer carries
+([Cacheable page runtime](api.md#linked-runtime)). It is
 HTML only, so a Markdown answer leaves it out. A runnable demo is
 [`examples/pdf_panel.jl`](examples.md#pdf-panel).
 
@@ -2103,8 +2107,9 @@ card_deck(cards; id="karten", view_param=nothing, card_param=nothing)
   event `htmxo:deck-change` (`{view, card}`) when the reader changes either.
 
 The deck carries its own style and script (`assets=false` and
-`card_deck_assets()` once in the page for a page with several decks), so it
-needs no route of its own, and everything runs in the browser, so a static
+`card_deck_assets()` once in the page for a page with several decks; in the
+`extra_head` of a `runtime=:linked` shell they become browser-cached files),
+so it needs no route of its own, and everything runs in the browser, so a static
 export works as the live page does. In Markdown (`?plain`) the controls are
 left out: the group headings and the cards remain. A runnable demo is
 [`examples/card_deck.jl`](examples.md#card-deck).

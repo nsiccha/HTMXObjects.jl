@@ -3242,6 +3242,12 @@ _runtime_blocks() = (
     master_detail = (:js, master_detail_js),
     download_table = (:js, download_table_js),
     gallery_styles = (:css, htmxo_gallery_styles),
+    # Component assets: what `pdf_panel_assets()` and `card_deck_assets()`
+    # return, for a page that mounts the component with `assets=false`.
+    pdf_panel_styles = (:css, pdf_panel_styles),
+    pdf_panel_script = (:js, pdf_panel_script),
+    card_deck_styles = (:css, card_deck_styles),
+    card_deck_script = (:js, card_deck_script),
 )
 
 # The blocks whose text exists in this process: the Treebars poll assets only
@@ -3440,9 +3446,11 @@ block keeps its place and its own element, so load order and script
 isolation are unchanged. The page helpers an app adds through `extra_head` —
 [`sortable_table_js`](@ref), [`sortable_table_styles`](@ref),
 [`caption_style`](@ref), [`master_detail_js`](@ref),
-[`download_table_js`](@ref) and [`htmxo_gallery_styles`](@ref), exactly as
-they return — are linked the same way, in place, unless the shell already
-carries them; any other `extra_head` element stays as given. A static export
+[`download_table_js`](@ref), [`htmxo_gallery_styles`](@ref), and the
+components' [`pdf_panel_assets`](@ref) and [`card_deck_assets`](@ref) (for a
+page that mounts them with `assets=false`), exactly as they return — are
+linked the same way, in place, unless the shell already carries them; any
+other `extra_head` element stays as given. A static export
 or recording ([`static_transform`](@ref)) puts the runtime back inline, so
 exported pages stay standalone; `StaticExport(; runtime=:linked)` keeps the
 links instead, for a bundle that carries the files once

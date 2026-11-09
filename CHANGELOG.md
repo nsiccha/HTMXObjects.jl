@@ -14,6 +14,21 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.87
+
+- `pdf_panel_assets()` and `card_deck_assets()` join the page runtime that
+  `htmx(...; runtime=:linked)` links (snag `pdf-panel-assets-69b95c16`). Placed in
+  `extra_head` exactly as they return, for a page that mounts the component with
+  `assets=false` (one `pdf_overlay` panel on every page, say), they become
+  browser-cached files on the vendor mount instead of about 79 KB (pdf_panel) and
+  15 KB (card_deck) of inline style and script on every navigation:
+  `<mount>/htmxo/pdf_panel_styles.css`, `pdf_panel_script.js`,
+  `card_deck_styles.css` and `card_deck_script.js`, each with its `?v=` content
+  version. `vendorfiles()` serves them (immutable at the current version),
+  `copy_vendorfiles` writes them into a bundle, and a default static export puts them
+  back inline. An inline shell, and a component that carries its own assets, are
+  unchanged.
+
 ## 0.1.86
 
 - `pdf_overlay(panel; placements=(:right, :bottom), placement)` floats a `pdf_panel` over

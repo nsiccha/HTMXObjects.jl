@@ -218,6 +218,61 @@ end
     @test !contains(exported, "data-htmxo-runtime")
 end
 
+@testitem "a linked shell links pdf_panel_assets() and card_deck_assets() from extra_head" setup=[HTMXOTestImports] tags=[:unit] begin
+    # A page that mounts one panel on every page (`pdf_overlay`, htmxo-use §8w)
+    # carries the component's assets once in the head; linked, the browser
+    # keeps them instead of every navigation re-sending ~79 KB
+    # (snag pdf-panel-assets-69b95c16).
+    using Treebars
+    import HTMXObjects: _runtime_text, _runtime_version
+    names = (:pdf_panel_styles, :pdf_panel_script, :card_deck_styles, :card_deck_script)
+    assets = (pdf_panel_assets()..., card_deck_assets()...)
+    page(; kw...) = htmx(pdf_overlay(pdf_panel(Any[]; id="page-pdf", assets=false)),
+        card_deck([("a", h.p("A")), ("b", h.p("B"))]; id="deck", assets=false);
+        assets=:vendor, pico_version=HTMXObjects._PICO_VERSION, kw...)
+
+    # Inline (the default): the head carries them as given.
+    inline = repr("text/html", page(extra_head=assets))
+    @test all(name -> contains(inline, _runtime_text(name)), names)
+
+    # Linked: each becomes its versioned file, in place and in order, and the
+    # page grows by four tags, not by the assets.
+    linked = repr("text/html", page(runtime=:linked, extra_head=assets))
+    without = repr("text/html", page(runtime=:linked))
+    linked_names = Symbol.(m.captures[1] for m in eachmatch(r"data-htmxo-runtime=\"([a-z_]+)\"", linked))
+    @test linked_names[end-length(names)+1:end] == collect(names)
+    for name in names
+        ext = first(getfield(HTMXObjects._runtime_blocks(), name))
+        @test contains(linked, "/vendor/htmxo/$name.$ext?v=$(_runtime_version(_runtime_text(name)))")
+        @test !contains(linked, _runtime_text(name))
+    end
+    @test sum(ncodeunits ∘ _runtime_text, names) > 90_000                # positive control: what moved out
+    @test ncodeunits(linked) - ncodeunits(without) < 1_000
+
+    # vendorfiles serves each one, cacheable for good at its version.
+    vendorfiles()
+    urls = [m.captures[1] for m in eachmatch(r"(?:src|href)=\"(/vendor/htmxo/(?:pdf_panel|card_deck)_[a-z]+\.(?:css|js)\?v=[^\"]+)\"", linked)]
+    @test length(urls) == length(names)
+    for url in urls
+        name = Symbol(match(r"/htmxo/([a-z_]+)\.", url).captures[1])
+        r = dispatch(:GET, url)
+        @test r.status == 200 && String(r.body) == _runtime_text(name)
+        @test HTTP.header(r, "Cache-Control") == "public, max-age=31536000, immutable"
+    end
+
+    # A default export puts them back inline; a linked bundle carries the files.
+    exported = repr("text/html", static_transform(page(runtime=:linked, extra_head=assets)))
+    @test all(name -> contains(exported, _runtime_text(name)), names)
+    @test !contains(exported, "data-htmxo-runtime")
+    mktempdir() do dir
+        copy_vendorfiles(dir)
+        for name in names
+            ext = first(getfield(HTMXObjects._runtime_blocks(), name))
+            @test read(joinpath(dir, "htmxo", "$name.$ext"), String) == _runtime_text(name)
+        end
+    end
+end
+
 @testitem "a linked runtime runs and stays cached across page loads in a browser" setup=[HTMXOTestImports] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
@@ -241,13 +296,30 @@ end
             typeof window.htmxoThread === 'object',
             window.__htmxoMutationPolls === true,
             getComputedStyle(document.documentElement).getPropertyValue('--htmxo-accent').trim() !== '',
+            // The components' linked assets (extra_head). The deck's script set
+            // it up as it parsed, and its stylesheet hides the carousel's other
+            // card (the server already marks the first card current, so that
+            // mark proves nothing). The panel's script opens it, and its
+            // stylesheet floats it.
+            document.getElementById('linked-deck').htmxoDeckObserved === true &&
+              getComputedStyle(document.getElementById('b')).display === 'none',
+            typeof window.htmxoPdf === 'object' && (window.htmxoPdf.toggle('linked-pdf', true),
+              !document.getElementById('linked-pdf').hidden &&
+              getComputedStyle(document.getElementById('linked-pdf')).position === 'fixed'),
           ].map(function(ok) { return ok ? '1' : '0'; }).join('');
           fetch('/report?n=' + n + '&checks=' + checks + '&errors=' + encodeURIComponent(htmxoErrors.join('|')))
             .then(function() { if (n === '1') location.href = '/?n=2'; });
         });
         """))
-        page = repr("text/html", htmx(h.main(h.p("linked")), driver; assets=:vendor,
-            runtime=:linked, pico_version=HTMXObjects._PICO_VERSION))
+        page = repr("text/html", htmx(h.main(h.p("linked"),
+                card_deck([("a", h.p("A")), ("b", h.p("B"))]; id="linked-deck", view=:carousel, assets=false)),
+            pdf_overlay(pdf_panel(Any[]; id="linked-pdf", assets=false)), driver; assets=:vendor,
+            runtime=:linked, pico_version=HTMXObjects._PICO_VERSION,
+            extra_head=(pdf_panel_assets()..., card_deck_assets()...)))
+        # The components' code reaches the browser only through the links.
+        @test !any(name -> contains(page, HTMXObjects._runtime_text(name)),
+                   (:pdf_panel_styles, :pdf_panel_script, :card_deck_styles, :card_deck_script))
+        @test count(r"data-htmxo-runtime=\"(?:pdf_panel|card_deck)_", page) == 4
         vendorfiles()
         runtime_requests = Threads.Atomic{Int}(0)
         vendor_requests = Threads.Atomic{Int}(0)
@@ -283,11 +355,11 @@ end
                 try
                     @test timedwait(() -> Base.n_avail(reports) == 2 || process_exited(process), 90; pollint=0.05) === :ok
                     first_load = take!(reports)
-                    @test first_load[1] == "1:1111111:"
+                    @test first_load[1] == "1:111111111:"
                     linked_files = count("data-htmxo-runtime", page)
                     @test first_load[2] == linked_files
                     second_load = take!(reports)
-                    @test second_load[1] == "2:1111111:"
+                    @test second_load[1] == "2:111111111:"
                     # Nothing linked is fetched again: neither the runtime nor
                     # the pinned libraries.
                     @test second_load[2] == first_load[2]

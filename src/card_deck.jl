@@ -573,6 +573,9 @@ card_deck_script() = h.script(Raw(raw"""
 The style and script of [`card_deck`](@ref) ([`card_deck_styles`](@ref),
 [`card_deck_script`](@ref)), for a page that carries them once itself and
 passes `assets=false` to its decks. Both are inline elements, so a deck needs
-no route of its own.
+no route of its own. In the `extra_head` of an [`htmx`](@ref) shell with
+`runtime=:linked`, they become two browser-cached files on the vendor mount
+([`vendorfiles`](@ref)), `<mount>/htmxo/card_deck_styles.css?v=…` and
+`…/card_deck_script.js?v=…`.
 """
 card_deck_assets() = (card_deck_styles(), card_deck_script())
