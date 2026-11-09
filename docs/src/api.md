@@ -519,6 +519,18 @@ its extensions) for a hand-built `HTMLDocument`. `base` is used as given, so
 a relative prefix addresses the copies relative to the page. The `htmx()`
 shell accepts the same relative string as `assets=`.
 
+By itself `copy_vendorfiles` writes everything `packages` and the runtime
+hold — every Pico colour build and every runtime block, the page helpers and
+component assets included — since it does not know which ones the pages
+link. Pass the rendered pages as `pages` and it writes only the files they
+name (with what those load in turn: KaTeX's fonts, PrismJS's grammars):
+
+```julia
+resp = dispatch(:GET, "/"; static=StaticExport(; runtime=:linked))
+write(joinpath(bundle, "index.html"), resp.body)
+copy_vendorfiles(joinpath(bundle, "assets", "vendor"); packages=(:htmx, :pico), pages=resp.body)
+```
+
 KaTeX, which typesets [Markdown math](#markdown-math), is a directory:
 `vendorfiles()` serves `/vendor/katex/katex.min.css`, `…/katex.min.js` and the
 `…/katex/fonts/` its stylesheet loads, and `copy_vendorfiles` writes them to

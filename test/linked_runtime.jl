@@ -273,6 +273,81 @@ end
     end
 end
 
+@testitem "copy_vendorfiles(...; pages) writes only the files the pages name" setup=[HTMXOTestImports] tags=[:unit] begin
+    # Every Pico build and every runtime block made Portfolio's one-page site
+    # carry 1.8 MB its page never loads (snag static-export-ve-d88dbadd).
+    import HTMXObjects: _runtime_text, _vendor_files, _available_runtime_names, _PICO_COLORS
+    files_below(dir, written) = Set(replace(relpath(f, dir), '\\' => '/') for f in written)
+    # A linked page one folder down, with a Pico colour and a page helper.
+    page = repr("text/html", static_transform(
+        htmx(h.p("x"); assets="../assets/vendor", runtime=:linked, pico_version=HTMXObjects._PICO_VERSION,
+             pico_color=:jade, extra_head=(htmxo_gallery_styles(),)),
+        StaticExport(; runtime=:linked)))
+    named = Set(m.captures[1] for m in eachmatch(r"(?:src|href)=\"\.\./assets/vendor/([^\"?]+)", page))
+    # Positive controls: the page names these, and libraries `packages` leaves
+    # out below (the htmx extensions, the KaTeX template).
+    @test "pico.jade.min.css" in named && "htmxo/gallery_styles.css" in named && "htmx.min.js" in named
+    @test "sse.min.js" in named && "katex/katex.min.css" in named && !("pico.min.css" in named)
+    @test length(named) > 20
+
+    mktempdir() do bundle
+        vendor = joinpath(bundle, "assets", "vendor")
+        written = copy_vendorfiles(vendor; packages=(:htmx, :pico), pages=page)
+        # Exactly what the page links of htmx, Pico and the runtime; what it
+        # names outside `packages` stays unwritten.
+        @test files_below(vendor, written) ==
+            Set(filter(p -> p in ("htmx.min.js", "pico.jade.min.css") || startswith(p, "htmxo/"), named))
+        @test !isfile(joinpath(vendor, "sse.min.js"))
+        @test !isfile(joinpath(vendor, "pico.min.css")) && !isdir(joinpath(vendor, "katex"))
+        @test !isfile(joinpath(vendor, "htmxo", "pdf_panel_script.js"))
+        @test read(joinpath(vendor, "htmxo", "gallery_styles.css"), String) == _runtime_text(:gallery_styles)
+        @test first(written) == joinpath(vendor, "htmx.min.js")  # libraries first, as without pages
+
+        # Without pages: everything, as before.
+        full = copy_vendorfiles(joinpath(bundle, "all"); packages=(:htmx, :pico))
+        @test length(full) == 1 + length(_PICO_COLORS) + length(_available_runtime_names())
+        @test length(full) > length(written) + length(_PICO_COLORS)
+
+        # Bytes (left as they were), a collection, a generator: the union of the pages.
+        body = Vector{UInt8}(page)
+        @test files_below(joinpath(bundle, "b"), copy_vendorfiles(joinpath(bundle, "b");
+            packages=(:htmx, :pico), pages=body)) == files_below(vendor, written)
+        @test length(body) == ncodeunits(page)
+        other = """<link rel="stylesheet" href="/vendor/pico.min.css?v=2.1.1">"""
+        for pages in ([page, other], (p for p in (page, other)))
+            dir = mktempdir()
+            got = files_below(dir, copy_vendorfiles(dir; packages=(:htmx, :pico), pages))
+            @test got == files_below(vendor, written) ∪ Set(["pico.min.css"])
+        end
+    end
+
+    mktempdir() do dir
+        # A named stylesheet brings the files it loads (KaTeX's fonts), and the
+        # PrismJS autoloader every grammar it can fetch.
+        written = files_below(dir, copy_vendorfiles(dir; packages=(:katex, :prism), runtime=false, pages=page))
+        @test written == Set(first.(_vendor_files(:katex))) ∪ Set(first.(_vendor_files(:prism)))
+        @test count(startswith("katex/fonts/"), written) > 10
+        core = """<template><script src="v/prism/components/prism-core.min.js"></script></template>"""
+        @test files_below(dir, copy_vendorfiles(dir; packages=(:prism,), runtime=false, pages=core)) ==
+            Set(["prism/components/prism-core.min.js"])
+    end
+
+    # Not a reference: another site's address, an `#id`, the text of a script,
+    # a style or a comment.
+    elsewhere = """<script src="https://cdn.example/npm/htmx.min.js"></script>
+        <link rel="stylesheet" href="//cdn.example/pico.min.css"><a href="#htmx.min.js">top</a>
+        <script>var s = "assets/vendor/pico.min.css";</script><style>/* href="pico.min.css" */</style>
+        <!-- <script src="htmx.min.js"></script> --><p>no vendor file</p>"""
+    mktempdir() do dir
+        @test isempty(copy_vendorfiles(dir; packages=(:htmx, :pico), pages=elsewhere))
+        @test !isdir(joinpath(dir, "htmxo"))
+        # A file name in place of the page's HTML would name nothing and leave
+        # every file out, so it is refused (and so is anything but text).
+        @test_throws ArgumentError copy_vendorfiles(dir; pages="site/index.html")
+        @test_throws ArgumentError copy_vendorfiles(dir; pages=[1])
+    end
+end
+
 @testitem "a linked runtime runs and stays cached across page loads in a browser" setup=[HTMXOTestImports] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
