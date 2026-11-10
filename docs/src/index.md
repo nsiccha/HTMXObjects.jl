@@ -880,8 +880,13 @@ exception; `CallerFault` refuses a status outside `4xx`.
 end
 ```
 
+A fault about one input names it, `CallerFault(400, "the regimen does not
+parse"; param=:regimen)` (from 0.1.94): an htmx answer then carries
+`X-HTMXO-Error-Param: regimen`, and a generated app page shows the message at
+that input's field (see [An app page](api.md#semantic-tabs)).
+
 The hook receives the exception wrapped like any route error, so read it with
-`unwrap_error(err)`: a `CallerFault` carries `status` and `message`. A
+`unwrap_error(err)`: a `CallerFault` carries `status`, `message` and `param`. A
 `CallerFault` raised in a `@queued` computation answers the same with
 `configure_job_queue!(; workers=1)`.
 

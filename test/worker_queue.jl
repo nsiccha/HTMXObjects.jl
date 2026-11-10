@@ -350,6 +350,11 @@ end
                     # printout up to its backtrace stands for it.
                     held = cause(body_text(dispatch(:GET, "/held"; headers=["HX-Request" => "true"],
                                                     operation_policy=:blocking)))
+                    # A caller fault that names its input names it across the process boundary.
+                    named = dispatch(:GET, "/param_fault"; headers=["HX-Request" => "true"],
+                                     operation_policy=:blocking)
+                    @test HTTP.header(named, "X-HTMXO-Error-Param") == "regimen"
+                    @test contains(body_text(named), "data-htmxo-param=\"regimen\"")
                     if workers == 0
                         @test held == ["HeldFault", "the held fault's message"]
                     else

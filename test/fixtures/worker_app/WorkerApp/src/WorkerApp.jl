@@ -106,6 +106,8 @@ Base.showerror(io::IO, ::HeldFault) = print(io, "HeldFault: the held fault's mes
     @queued @fresh @get boom() = error("server fault shown\nits second line")
     "A server fault that cannot cross"
     @queued @fresh @get held() = throw(HeldFault(__self__))
+    "A caller fault about one input"
+    @queued @fresh @get param_fault() = throw(CallerFault(400, "the regimen does not parse"; param=:regimen))
 end
 
 # An `__error__` hook reads the fault through `unwrap_error`, as the docs say.

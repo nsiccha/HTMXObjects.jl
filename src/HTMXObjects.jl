@@ -2158,6 +2158,11 @@ function _convert_params!(struct_expr)
     length(relevant_names) == length(relevance) || throw(ArgumentError(string(
         "@htmx: a `@param` has two `@relevant` declarations: ",
         join(unique(n for n in first.(relevance) if count(==(n), first.(relevance)) > 1), ", "))))
+    helps = Symbol[first(declared) for declared in
+                   (_help_declaration(arg) for arg in body.args) if declared !== nothing]
+    allunique(helps) || throw(ArgumentError(string(
+        "@htmx: a `@param` has two `@help` declarations: ",
+        join(unique(n for n in helps if count(==(n), helps) > 1), ", "))))
     names = Symbol[]
     new_args = Any[]
     process_line! = inner -> begin
@@ -2183,6 +2188,13 @@ function _convert_params!(struct_expr)
             # The condition, as a property of its own: DynamicObjects reads its
             # dependencies, and a page renders the control as it evaluates.
             push!(new_args, Expr(:(=), _relevance_property(first(declared)), last(declared)))
+            continue
+        end
+        declared = _help_declaration(arg)
+        if declared !== nothing
+            # The help text, likewise a property: a generated form draws it
+            # under the control and draws it again when what it reads changes.
+            push!(new_args, Expr(:(=), _help_property(first(declared)), last(declared)))
             continue
         end
         if !(arg isa Expr)
@@ -2238,6 +2250,11 @@ function _convert_params!(struct_expr)
             "@htmx: `@relevant($name)` names no `@param` of this struct; ",
             "declare `@param $name = <default>` next to it")))
     end
+    for name in helps
+        name in names || throw(ArgumentError(string(
+            "@htmx: `@help($name)` names no `@param` of this struct; ",
+            "declare `@param $name = <default>` next to it")))
+    end
     names, relevance
 end
 
@@ -2266,6 +2283,30 @@ function _relevance_declaration(arg)
 end
 
 _relevance_property(name::Symbol) = Symbol("__relevant_", name, "__")
+
+# `@help(name) = text` (and `@help name = text`), as `name => text`; `nothing`
+# for any other line. The text may read other properties and inputs.
+function _help_declaration(arg)
+    if Meta.isexpr(arg, :(=), 2) && Meta.isexpr(arg.args[1], :macrocall)
+        lhs = arg.args[1]
+        mname = lhs.args[1]
+        (mname isa GlobalRef ? mname.name : mname) === Symbol("@help") || return nothing
+        payload = Any[x for x in lhs.args[2:end] if !(x isa LineNumberNode)]
+        length(payload) == 1 && only(payload) isa Symbol || throw(ArgumentError(
+            "@htmx: write `@help(name) = text` with the name of one `@param`"))
+        return only(payload) => arg.args[2]
+    end
+    Meta.isexpr(arg, :macrocall) || return nothing
+    mname = arg.args[1]
+    (mname isa GlobalRef ? mname.name : mname) === Symbol("@help") || return nothing
+    payload = Any[x for x in arg.args[2:end] if !(x isa LineNumberNode)]
+    length(payload) == 1 && Meta.isexpr(only(payload), :(=), 2) &&
+        only(payload).args[1] isa Symbol || throw(ArgumentError(
+            "@htmx: write `@help(name) = text` with the name of one `@param`"))
+    only(payload).args[1] => only(payload).args[2]
+end
+
+_help_property(name::Symbol) = Symbol("__help_", name, "__")
 
 # Default: no `@relevant` declarations.
 _param_relevance(::Type) = (;)
@@ -13118,7 +13159,7 @@ Base.showerror(io::IO, e::UnreadableBody) = print(io, _caller_fault_message(e, _
 const _SubmittedValueFault = Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue,UndeclaredParams,UnreadableBody}
 
 """
-    CallerFault(status, message)
+    CallerFault(status, message; param=nothing)
 
 Throw from a route body when the request itself is at fault: an unknown
 resource id (`404`), an argument out of range (`400`), a refused operation
@@ -13138,17 +13179,35 @@ answer it is recorded: an error log whose header names `status`, the
     probe_view(PROBES[kenn])
 end
 ```
+
+`param` names the input at fault, a `@param` or a route argument:
+`throw(CallerFault(400, "the regimen does not parse"; param=:regimen))`. An
+htmx answer then carries `X-HTMXO-Error-Param: regimen` and its article
+`data-htmxo-param="regimen"`, and a generated app page
+([`semantic_app`](@ref)`(…; presentation=:tabs)`) shows the message at that
+input's field instead of in place of a result it already shows. A missing or
+rejected submitted value names its parameter the same way. Other answers are
+unchanged.
 """
 struct CallerFault <: Exception
     status::Int
     message::String
-    function CallerFault(status::Integer, message::AbstractString)
+    param::Union{Nothing,Symbol}
+    function CallerFault(status::Integer, message::AbstractString; param=nothing)
         400 <= status <= 499 || throw(ArgumentError(string(
             "CallerFault needs a 4xx status, got ", status,
             "; a server fault is an ordinary exception")))
-        new(status, message)
+        param === nothing || param isa Union{Symbol,AbstractString} || throw(ArgumentError(
+            "CallerFault param must name an input (a Symbol), got $(repr(param))"))
+        new(status, message, param === nothing ? nothing : Symbol(param))
     end
 end
+
+# The input a caller fault is about, or `nothing`: a `CallerFault`'s `param`,
+# or the parameter a missing or rejected submitted value names.
+_fault_param(_err) = nothing
+_fault_param(e::CallerFault) = e.param
+_fault_param(e::Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue}) = e.name
 Base.showerror(io::IO, e::CallerFault) = print(io, e.message)
 
 # Standard reason phrases (RFC 9110, plus 429), the `reasons` of the English
@@ -13815,11 +13874,13 @@ function _invoke_error_handler(obj, err, uid, path)
     inner = unwrap_error(err)
     title = _caller_fault_title(inner, texts)
     if title !== nothing
+        param = _fault_param(inner)
         return h.article(
             h.header(title),
             h.p(_caller_fault_message(inner, texts)),
             _error_id_line(texts.error_id, uid);
             aria_invalid="true",
+            (param === nothing ? (;) : (; data_htmxo_param=string(param)))...,
         )
     end
     _default_error_render(uid, path, texts; cause=_show_error_cause(obj) ? inner : nothing)
@@ -13908,8 +13969,12 @@ _error_answer_status(req, resp::HTTP.Response, err) =
 # scraping the rendered error body. Framework-namespaced (not `HX-*`) to stay
 # clear of htmx's reserved response-header namespace; same-origin so JS reads it
 # via `xhr.getResponseHeader('X-HTMXO-Error-Id')` with no CORS expose-list.
-function _stamp_error_id(resp::HTTP.Response, uid)
+function _stamp_error_id(resp::HTTP.Response, uid, err=nothing)
     HTTP.setheader(resp, "X-HTMXO-Error-Id" => uid)
+    # A fault about one input names it, so a generated page can show the
+    # message at that input's field (`semantic_follow_script`).
+    param = err === nothing ? nothing : _fault_param(unwrap_error(err))
+    param === nothing || HTTP.setheader(resp, "X-HTMXO-Error-Param" => string(param))
     resp
 end
 
@@ -13940,7 +14005,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
             isnothing(wrapper) || (err_val = _apply_page(obj, wrapper, err_val))
         end
     end
-    _stamp_error_id(_error_answer_status(req, to_response(err_val), err), uid)
+    _stamp_error_id(_error_answer_status(req, to_response(err_val), err), uid, err)
 end
 
 """
@@ -16205,7 +16270,7 @@ _stamp_operation_headers(req::HTTP.Request, resp::HTTP.Response, running::Bool) 
 function _stamp_operation_failure(req::HTTP.Request, resp::HTTP.Response)
     failure = get(req.context, :htmxo_operation_failure, nothing)
     failure === nothing && return resp
-    _stamp_error_id(_with_error_status(req, resp, failure.err), failure.uid)
+    _stamp_error_id(_with_error_status(req, resp, failure.err), failure.uid, failure.err)
 end
 
 # A preload response that finished in time becomes reusable by the browser,
@@ -29240,13 +29305,102 @@ end
 function _semantic_control(obj, owner, param, values;
         radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
     value = get(values, param.name, nothing)
-    label = isnothing(param.doc) ? Long(param.name) : param.doc
+    doc_label, doc_help = _doc_label_help(param.doc)
+    label = isnothing(doc_label) ? Long(param.name) : doc_label
+    help = _param_help(obj, param, doc_help)
     control_obj, ControlT = _semantic_control_owner(obj, owner, param)
-    default = _semantic_default_control(control_obj, ControlT, param, label, value, values;
-                                        radio_max, presentation)
+    default = _with_help_text(_semantic_default_control(control_obj, ControlT, param, label,
+                                  value, values; radio_max, presentation), help)
     control = semantic_control(control_obj, Val(param.name),
-                               (; name=param.name, label, value, param, default))
+                               (; name=param.name, label, value, param, default, help))
     _relevance_wrapped(control, obj, param)
+end
+
+# --- Help text under a generated control (`@help`, docstring paragraphs) ---
+
+# A `@param`'s docstring: its first paragraph is the control's label, and the
+# paragraphs after a blank line are its help text. A one-paragraph docstring
+# is the label as written.
+function _doc_label_help(doc)
+    doc isa AbstractString || return (doc, nothing)
+    parts = split(strip(doc), r"\n[ \t]*\n"; limit=2)
+    length(parts) == 1 && return (doc, nothing)
+    (String(strip(parts[1])), _help_line(parts[2]))
+end
+_help_line(text) = join(split(strip(text)), " ")
+
+# The help text of `param`'s control on `obj`: what its `@help` declares for
+# the request `obj` answers, else the docstring's (`doc_help`); `nothing` for
+# none. A `@help` that cannot be computed because an input is at fault (a
+# caller fault, which that input's own field shows) gives the docstring's.
+function _param_help(obj, param, doc_help)
+    get(param, :help, nothing) === nothing && return doc_help
+    source = _param_declaring_object(obj, param.name)
+    source === nothing && return doc_help
+    text = try
+        getproperty(source, _help_property(param.name))
+    catch err
+        _caller_fault_title(unwrap_error(err), _EN_ERROR_TEXTS) === nothing && rethrow()
+        nothing
+    end
+    text === nothing ? doc_help : _help_line(string(text))
+end
+
+# `param` with its `@help` declaration, if the struct extracting it has one:
+# the struct, and the inputs whose change draws the control again (a help
+# text may read its own input).
+function _with_help(obj, param)
+    param.source === :path && return param
+    source = _param_declaring_object(obj, param.name)
+    source === nothing && return param
+    hasproperty(source, _help_property(param.name)) || return param
+    T = typeof(source)
+    merge(param, (; help=(; type=T, dependencies=_help_dependencies(T, param.name))))
+end
+
+function _help_dependencies(T::Type, name::Symbol)
+    closure = _dependency_closure(T, _help_property(name))
+    params = Set{Symbol}(Base.invokelatest(_param_names, T))
+    isnothing(closure) && return sort!(collect(params))
+    Symbol[n for n in closure if n in params]
+end
+
+# The control with its help text under it: inside its `<label>` after the
+# field, or at the end of its `<fieldset>`, else after it, as a `<small>` the
+# field names in `aria-describedby`. Pico styles a `<small>` after a field as
+# its help.
+const _HELP_SERIAL = Base.Threads.Atomic{UInt}(0)
+_with_help_text(control, ::Nothing) = control
+function _with_help_text(control, help::AbstractString)
+    id = "htmxo-help-" * string(Base.Threads.atomic_add!(_HELP_SERIAL, UInt(1)) + UInt(1))
+    note = h.small(_help_nodes(help)...; id, class="htmxo-help")
+    control isa Node || return h.div(control, note; class="htmxo-helped")
+    tag = Symbol(lowercase(string(HTMX.tag(control))))
+    if tag === :label
+        children = Any[_described_field(child, id) for child in HTMX.children(control)]
+        return Node(HTMX.tag(control), copy(HTMX.attrs(control)), Any[children..., note])
+    elseif tag === :fieldset
+        attrs = copy(HTMX.attrs(control))
+        attrs[Symbol("aria-describedby")] = id
+        return Node(HTMX.tag(control), attrs, Any[HTMX.children(control)..., note])
+    end
+    h.div(control, note; class="htmxo-helped")
+end
+# Help text as nodes: a span between backticks is code (`100% q 24 x 14`).
+function _help_nodes(help::AbstractString)
+    parts = split(help, '`')
+    iseven(length(parts)) && return Any[help]   # an unpaired backtick: as written
+    Any[isodd(i) ? String(part) : h.code(String(part))
+        for (i, part) in enumerate(parts) if !(isodd(i) && isempty(part))]
+end
+
+# A form field among a label's children names its help text.
+_described_field(child, id) = child
+function _described_field(child::Node, id)
+    Symbol(lowercase(string(HTMX.tag(child)))) in (:input, :textarea, :select) || return child
+    attrs = copy(HTMX.attrs(child))
+    attrs[Symbol("aria-describedby")] = id
+    Node(HTMX.tag(child), attrs, copy(HTMX.children(child)))
 end
 
 function _semantic_default_control(control_obj, ControlT, param, label, value, values;
@@ -29302,9 +29456,11 @@ end
 
 The control a generated form ([`semantic_app`](@ref), [`operation_form`](@ref))
 renders for the input `name` of `obj`, the struct that declares it. `control`
-carries `name`, `label` (the docstring, else the humanized name), `value` (the
-current value), `param` (the input's descriptor) and `default`, the control the
-form would render. The default method returns `default`.
+carries `name`, `label` (the docstring's first paragraph, else the humanized
+name), `value` (the current value), `param` (the input's descriptor), `help`
+(the help text: what `@help(name)` gives, else the docstring's later
+paragraphs, else `nothing`) and `default`, the control the form would render,
+with the help text under it. The default method returns `default`.
 
 Define a method for one input of your own struct to render it your way. Every
 generated form uses it, also when it re-renders the control after a change it
@@ -29669,7 +29825,8 @@ function _semantic_runtime_route(obj, route)
         end
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
-    merge(route, (params=NamedTuple[_with_relevance(obj, param) for param in params],))
+    merge(route, (params=NamedTuple[_with_help(obj, _with_relevance(obj, param))
+                                    for param in params],))
 end
 
 # A mounted `@include` child resolves parent-supplied params through `__parent__`
@@ -29741,12 +29898,17 @@ end
 # condition reads when the browser cannot evaluate that condition.
 function _semantic_param_dependencies(param)
     domain = _semantic_domain_dependencies(param)
-    # A hidden input (no kind) renders no control to show or hide.
-    relevance = get(param, :kind, nothing) === nothing ? nothing :
-                get(param, :relevance, nothing)
+    # A hidden input (no kind) renders no control to show, hide or explain.
+    shown = get(param, :kind, nothing) !== nothing
+    relevance = shown ? get(param, :relevance, nothing) : nothing
     read = isnothing(relevance) || isempty(relevance.dependencies) ? nothing :
            Set{Symbol}(relevance.dependencies)
-    isnothing(domain) ? read : isnothing(read) ? domain : union(domain, read)
+    # What its `@help` text reads draws it again too.
+    help = shown ? get(param, :help, nothing) : nothing
+    explained = isnothing(help) || isempty(help.dependencies) ? nothing :
+                Set{Symbol}(help.dependencies)
+    found = filter(!isnothing, Any[domain, read, explained])
+    isempty(found) ? nothing : union(found...)
 end
 
 # What one input's declared domain reads, or `nothing` when its options cannot
@@ -33491,6 +33653,101 @@ semantic_follow_script() = h.script(Raw(raw"""
       r.removeAttribute('data-htmxo-shown');
     });
   });
+  // A fault about one input (`X-HTMXO-Error-Param`: a `CallerFault` with
+  // `param`, or a submitted value its parameter refuses) is shown at that
+  // input's field: marked invalid, with the message under it. A result the
+  // region already shows stays, marked stale, instead of being replaced by the
+  // fault; a region with nothing to keep shows it. The next answer to the
+  // region that is not such a fault clears the marks of the inputs it reads.
+  var STALE = 'data-htmxo-stale', ERROR_FOR = 'data-htmxo-error-for', serial = 0;
+  function regionOf(el) { return el && el.closest ? el.closest('[data-htmxo-follow]') : null; }
+  function parsed(html) {
+    var t = document.createElement('template');
+    t.innerHTML = typeof html === 'string' ? html : '';
+    return t.content;
+  }
+  function faultMessage(html) {
+    var a = parsed(html).querySelector('article[data-htmxo-param]');
+    var p = a && a.querySelector('p');
+    return p ? p.textContent : '';
+  }
+  // A running operation's answer (its poller) is no result yet.
+  function running(html) {
+    var first = parsed(html).firstElementChild;
+    return !!first && !first.classList.contains('treebar-terminal-content') &&
+      !first.querySelector('.treebar-terminal-content') &&
+      (first.classList.contains('treebar-poller') || first.classList.contains('treebar-poller-inner'));
+  }
+  function holdsResult(region) {
+    return Array.prototype.some.call(region.children, function(c) {
+      return !c.matches('progress, .treebar-poller, .treebar-poller-inner, article[aria-invalid]');
+    });
+  }
+  function controlsNamed(region, name) {
+    var found = [];
+    formsOf(region).forEach(function(form) {
+      Array.prototype.forEach.call(form.elements, function(c) {
+        if (c.name === name && !PRESSED.test(c.type)) found.push(c);
+      });
+    });
+    return found;
+  }
+  function clearField(name) {
+    document.querySelectorAll('[' + ERROR_FOR + '="' + CSS.escape(name) + '"]').forEach(function(n) {
+      var described = document.querySelectorAll('[aria-describedby~="' + n.id + '"]');
+      described.forEach(function(c) {
+        var rest = c.getAttribute('aria-describedby').split(' ').filter(function(i) { return i && i !== n.id; });
+        if (rest.length) c.setAttribute('aria-describedby', rest.join(' '));
+        else c.removeAttribute('aria-describedby');
+      });
+      n.remove();
+    });
+    document.querySelectorAll('[data-htmxo-invalid="' + CSS.escape(name) + '"]').forEach(function(c) {
+      c.removeAttribute('aria-invalid');
+      c.removeAttribute('data-htmxo-invalid');
+    });
+  }
+  function markField(region, name, message) {
+    var controls = controlsNamed(region, name);
+    if (!controls.length) return false;
+    clearField(name);
+    var note = document.createElement('small');
+    note.className = 'htmxo-field-error';
+    note.id = 'htmxo-field-error-' + (++serial);
+    note.setAttribute(ERROR_FOR, name);
+    note.setAttribute('role', 'alert');
+    note.textContent = message;
+    controls.forEach(function(c) {
+      c.setAttribute('aria-invalid', 'true');
+      c.setAttribute('data-htmxo-invalid', name);
+      c.setAttribute('aria-describedby', (note.id + ' ' + (c.getAttribute('aria-describedby') || '')).trim());
+    });
+    // Right after a field (where Pico colours it), or at the end of a group of
+    // choices.
+    var first = controls[0], group = first.closest('fieldset');
+    if (group && (first.type === 'radio' || first.type === 'checkbox')) group.appendChild(note);
+    else first.insertAdjacentElement('afterend', note);
+    return true;
+  }
+  document.addEventListener('htmx:beforeSwap', function(e) {
+    var d = e.detail, region = regionOf(d && d.target);
+    if (!region) return;
+    var name = d.xhr && d.xhr.getResponseHeader && d.xhr.getResponseHeader('X-HTMXO-Error-Param');
+    if (name) {
+      if (!markField(region, name, faultMessage(d.serverResponse))) return;
+      if (holdsResult(region)) { d.shouldSwap = false; region.setAttribute(STALE, ''); }
+      return;
+    }
+    if (!region.hasAttribute(STALE) && !document.querySelector('[' + ERROR_FOR + ']')) return;
+    if (!d.shouldSwap || running(d.serverResponse)) return;
+    region.removeAttribute(STALE);
+    var reads = region.getAttribute('data-htmxo-reads');
+    var names = reads === null ? null : reads.split(' ');
+    document.querySelectorAll('[' + ERROR_FOR + ']').forEach(function(n) {
+      var field = n.getAttribute(ERROR_FOR);
+      if (names === null || names.indexOf(field) >= 0) clearField(field);
+    });
+  });
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function() { arm(document.body); });
   } else {
@@ -34070,6 +34327,14 @@ htmxo_utility_styles() = h.style(Raw("""
 /* A server fault's cause (`__show_error_cause__`): the message wraps; the log
    entry scrolls in its own box. */
 .htmxo-error-cause { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A control's help text (`@help`, a docstring's later paragraphs) and the
+   message of a fault about its input, under it; a result whose inputs are at
+   fault stays, faded, until an answer for corrected inputs replaces it
+   (`semantic_follow_script`). Pico styles a `<small>` right after a field. */
+.htmxo-help, .htmxo-field-error { display: block; }
+.htmxo-help { color: var(--pico-muted-color, inherit); }
+.htmxo-field-error { color: var(--pico-del-color, #b71c1c); }
+[data-htmxo-follow][data-htmxo-stale] { opacity: 0.45; }
 .htmxo-error-log { max-height: 30rem; overflow: auto; font-size: 0.8em; }
 .htmxo-semantic-card[data-rich="true"] > label {
     position: absolute;
