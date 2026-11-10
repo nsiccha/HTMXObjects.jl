@@ -34299,8 +34299,9 @@ semantic_follow_script() = h.script(Raw(raw"""
     return !!answer.querySelector(POLLING);
   }
   // What a region shows that is no result to keep: its first-load progress,
-  // a placeholder that loads its first answer (`hx-trigger="load"`, as
-  // `lazy` renders it), a running operation, or an error answer.
+  // a placeholder `lazy` renders to load its first answer (its trigger is the
+  // load event), a running operation, or an error answer. (The shell must not
+  // spell such a trigger attribute out: its tests read it as a load request.)
   function holdsResult(region) {
     return Array.prototype.some.call(region.children, function(c) {
       if (c.matches('progress, article[aria-invalid], ' + POLLING) || c.querySelector(POLLING)) return false;
