@@ -14,7 +14,7 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
-## 0.1.98
+## 0.1.99
 
 - A group summary over values known only within bounds shows the range it lies in.
   A `ColumnSummary(:sum | :mean | :min | :max, …)` function, or a `:ratio`'s
@@ -32,6 +32,24 @@ failing at render with a `MethodError`.
   (a group of unfinished steps read `100`) or counted as 0 (`9`, an unmarked
   understatement). Snag `columnsummary-ra-702fd9be` (ProjectPlans' work-package
   progress).
+
+## 0.1.98
+
+- `prewarm_routes!` and `prewarm_workload!`: `timeout` bounds a hang, not a
+  compile. It now limits the time a request (and the follow-ups of one
+  transport) takes outside compilation: the elapsed time minus the time the
+  process spent compiling meanwhile. Before, it was a plain HTTP read timeout,
+  so a slow or busy machine's cold first request failed an app's
+  `@compile_workload` although the server answered (snag
+  `precompile-bruno-329ff905`: 44 s for one page on two busy CPUs, against the
+  45 s default). A route that hangs or computes past `timeout` still fails. A
+  dependant that raised `timeout` only to cover compile time can drop that.
+- `timeout` accepts any positive number of seconds, `Inf` for no limit; a
+  fractional value used to fail every request with an `InexactError`. A
+  non-positive one is an `ArgumentError`.
+- `prewarm_workload!` closes its server at once (`HTTP.forceclose`) after a
+  failure, so a request the server never finishes cannot hold precompilation
+  open.
 
 ## 0.1.97
 
