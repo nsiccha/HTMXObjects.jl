@@ -1747,6 +1747,41 @@ and button.
   arguments of two tabs that share a name share one address parameter. A
   mutation's own inputs, a fixed field and a file are not kept.
   `url_state=false` leaves the address to the tab alone.
+- **Help text** (from 0.1.94). A `@param`'s docstring is its label, and the
+  paragraphs after a blank line are help text, drawn in a `<small>` under the
+  control that the field names in `aria-describedby` (a span between backticks
+  is code):
+
+  ```julia
+  """
+  Regimen
+
+  Doses as `percent% q hours x count`: `100% q 24 x 14` is 14 doses, one every 24 h.
+  """
+  @param regimen::String = "100% q 24 x 14"
+  ```
+
+  `@help(name) = text` computes it instead, from any input or property, for
+  the request the page answers: `@help(dose_mg) = describe(schedule, dose_mg)`
+  reads "14 doses of 60.0 mg every 24 h". The control is drawn again when what
+  the text reads changes, its own input included. A `@help` that gives
+  `nothing` falls back to the docstring's; one that cannot be computed because
+  an input is at fault (a caller fault) shows none, and that input's field
+  says why. A [`semantic_control`](@ref) method receives the text as
+  `c.help`. Help text is part of the generated form, so the page's Markdown
+  does not carry it.
+- **A fault at its input's field** (from 0.1.94). A route that refuses an
+  input names it: `throw(CallerFault(400, "the regimen does not parse";
+  param=:regimen))`; a missing or rejected submitted value (`?days=soon` for
+  `days::Int`) names its parameter by itself. The page then shows the message
+  under that input's field, marked `aria-invalid`, and a result its tab
+  already shows stays, faded (`data-htmxo-stale`), instead of being replaced
+  by the error; a result asked for the first time shows the error article.
+  The page address keeps the value the reader typed, so they can correct it,
+  and the next answer for corrected inputs clears both marks. This holds for
+  inline, polled and worker-process answers alike. The htmx answer carries
+  `X-HTMXO-Error-Param: regimen` and its article `data-htmxo-param`; the
+  `?plain` / Markdown answer is unchanged (the 400 and its message).
 - **Sections** (from 0.1.93). `sections=` groups inputs under headings,
   wherever the page places them, in the sidebar or a tab:
 
@@ -2592,10 +2627,12 @@ target. An option-backed `@param` is also `kind=:context`, with
 shared-control identity, while submission continues through `@param` request
 extraction rather than remaking fixed object state.
 
-So, to answer the obvious question directly: help text, units and ordering are
-**not** declarable, and there is no effect/side-effect policy key at all. A
-control's label is the argument's documentation, not a separate declaration:
-write it in the route docstring's `# Arguments` section, as below.
+So, to answer the obvious question directly: units and ordering are **not**
+declarable, and there is no effect/side-effect policy key at all. A control's
+label is the argument's documentation, not a separate declaration: write it in
+the route docstring's `# Arguments` section, as below. A `@param`'s help text
+is its docstring's later paragraphs, or `@help(name) = text` (from 0.1.94; see
+[An app page](@ref semantic-tabs), *Help text*).
 
 #### Injected inputs — the `internal` flag
 

@@ -14,6 +14,24 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.94
+
+- A generated form draws help text under a `@param`'s control. A docstring's first
+  paragraph stays the label; the paragraphs after a blank line are the help text, in a
+  `<small class="htmxo-help">` the field names in `aria-describedby` (a span between
+  backticks is code). The new `@help(name) = text` declaration computes it from any input
+  or property for the request (`"14 doses of 60.0 mg every 24 h"`), and the control is
+  drawn again when what it reads changes. `semantic_control` receives it as `c.help`.
+  A one-paragraph docstring is a label as before.
+- `CallerFault(status, message; param=:name)` names the input at fault; a missing or
+  rejected submitted value names its parameter by itself. An htmx answer carries
+  `X-HTMXO-Error-Param: <name>` and its article `data-htmxo-param`. On an app page
+  (`semantic_app(…; presentation=:tabs)`) the message appears under that input's field,
+  marked `aria-invalid`, and a result its tab already shows stays, faded
+  (`data-htmxo-stale`), until an answer for corrected inputs replaces it. Inline, polled
+  and worker answers alike; the Markdown answer is unchanged. `CallerFault` has a new
+  field, `param` (todo `1tixesk`, for Bruno's web-sim; decision `04rngh7`).
+
 ## 0.1.93
 
 - An app page groups its inputs under headings: `semantic_app(…; presentation=:tabs,

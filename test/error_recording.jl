@@ -539,7 +539,8 @@ end
             @test String(english.body) == "<article aria-invalid=\"true\"><header>Error</header>" *
                 "<p>Something went wrong. Error ID: <code>$english_uid</code></p></article>"
             en_needs = quiet("/en_needs")
-            @test String(en_needs.body) == "<article aria-invalid=\"true\"><header>Bad Request</header>" *
+            # The article names the missing parameter (0.1.93), for a page to mark its field.
+            @test String(en_needs.body) == "<article aria-invalid=\"true\" data-htmxo-param=\"n\"><header>Bad Request</header>" *
                 "<p>Missing required parameter: n</p>" *
                 "<p>Error ID: <code>$(HTTP.header(en_needs, "X-HTMXO-Error-Id", ""))</code></p></article>"
         finally
