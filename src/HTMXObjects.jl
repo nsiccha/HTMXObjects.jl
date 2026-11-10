@@ -1244,12 +1244,17 @@ _mp_append(existing, v) = Any[existing, v]
 Parse a `multipart/form-data` body into a field-name → value map: a file part
 (one carrying a filename) becomes an [`Upload`](@ref); a plain text part becomes
 a `String`. Repeated field names collect into a `Vector`. Returns an empty dict
-when the body isn't valid multipart. Non-destructive — `HTTP.parse_multipart_form`
-reads `req.body` through its own buffer, leaving the request body intact.
+when the request's `Content-Type` names no multipart boundary. A body that does
+not parse under its boundary throws [`HTMXObjects.UnreadableBody`](@ref), a
+caller fault answered `400 Bad Request`, whose `reason` says what was wrong
+(`boundary delimiter not found`, `a part has no form-data name`, …). That is
+also what a route answers when it binds a keyword from such a body.
+Non-destructive — `HTTP.parse_multipart_form` reads `req.body` through its own
+buffer, leaving the request body intact.
 """
 function multipartparams(req::HTTP.Request)
     d = Dict{String, Any}()
-    parts = HTTP.parse_multipart_form(req)
+    parts = _parse_multipart_form(req)
     parts === nothing && return d
     for p in parts
         fname = p.filename === nothing ? "" : p.filename
@@ -1259,6 +1264,32 @@ function multipartparams(req::HTTP.Request)
     d
 end
 
+# HTTP.jl's multipart parser rejects a malformed body with `error(...)`
+# (`boundary delimiter not found`, `no delimiter found separating header from
+# multipart body`, …). HTTP 1.x also has two steps that return `nothing` for a
+# malformed part and then fail on it: a part with no form-data name cannot be
+# stored in its `Vector{Multipart}` (a `MethodError` from `convert`), and a part
+# too short to hold a header cannot be split into one (from `iterate`). Each is
+# the caller's body, answered 400 as `UnreadableBody`; any other exception
+# raised while parsing is a defect and propagates.
+function _parse_multipart_form(req::HTTP.Request)
+    try
+        HTTP.parse_multipart_form(req)
+    catch err
+        reason = _multipart_rejection(err)
+        reason === nothing && rethrow()
+        throw(UnreadableBody("multipart/form-data", reason))
+    end
+end
+_multipart_rejection(err::ErrorException) = err.msg
+function _multipart_rejection(err::MethodError)
+    any(isnothing, err.args) || return nothing
+    err.f === convert && return "a part has no form-data name"
+    err.f === iterate && return "no delimiter found separating header from multipart body"
+    nothing
+end
+_multipart_rejection(err) = nothing
+
 """
     bodyparams(req::HTTP.Request) -> AbstractDict
 
@@ -1267,6 +1298,8 @@ a `multipart/form-data` body routes to [`multipartparams`](@ref) (text fields as
 `String`, file fields as [`Upload`](@ref)); everything else routes to
 [`formparams`](@ref) (which itself only parses an
 `application/x-www-form-urlencoded` body and returns an empty dict otherwise).
+A multipart body that does not parse throws [`HTMXObjects.UnreadableBody`](@ref),
+which a route answers 400; a urlencoded body never throws.
 This is what lets a declared kwarg bind from either body shape through the one
 shared `_lookup_param` path — `@post f(; x)` for a urlencoded field and
 `@post upload(; file)` for a file both Just Work.
@@ -10449,19 +10482,29 @@ _reads_query_only(::Verb) = false
 # so with its Content-Type (urlencoded or multipart); a body without one is a
 # form only for a route that reads form fields (`reads_form`), as
 # `_generate_extract_args` builds its sources only then. A JSON or other raw
-# body submits no names.
+# body submits no names, and neither does a form body that does not parse: its
+# `UnreadableBody` is returned beside the names, and the route then reads that
+# body as it would without the check (snag `undeclared-param-65ddfd9b`: the
+# parse error escaped the check, so a policy that only warns answered 500 before
+# a route that parses its own body could answer it).
 function _submitted_param_names(req::HTTP.Request, verb::Verb, reads_form::Bool)
     names = String[String(k) for k in keys(queryparams(req))]
-    _reads_query_only(verb) && return names
+    _reads_query_only(verb) && return names, nothing
     ct = lowercase(HTTP.header(req, "Content-Type", ""))
     form = occursin("application/x-www-form-urlencoded", ct) ||
         occursin("multipart/form-data", ct) || (isempty(ct) && reads_form)
-    form || return names
-    for key in keys(bodyparams(req))
+    form || return names, nothing
+    fields = try
+        bodyparams(req)
+    catch err
+        err isa UnreadableBody || rethrow()
+        return names, err
+    end
+    for key in keys(fields)
         key = String(key)
         key in names || push!(names, key)
     end
-    names
+    names, nothing
 end
 
 _push_unique!(names::Vector{String}, name) =
@@ -10479,8 +10522,12 @@ with what the route takes: its keywords, the `@param`s of every struct in
 `target.objects` (inline and external mounts alike), its semantic context
 inputs, the policy's `allow`, and the framework's own names
 (`_framework_param_name`). Any other name is undeclared: `:warn` logs it,
-`:refuse` throws `UndeclaredParams`. A mutation's result poll and a semantic
-form refresh never get here (`_run_operation` answers them first).
+`:refuse` throws `UndeclaredParams`. A form body that does not parse submits no
+names under either action: one warning says its names were not checked, and the
+route answers it as it would without a declaration (its own reply, or the
+`UnreadableBody` 400 when it binds a field from it). A mutation's result poll
+and a semantic form refresh never get here (`_run_operation` answers them
+first).
 """
 function _check_undeclared_params(target, LeafT, name::Symbol, verb::Verb, req::HTTP.Request)
     objects = get(target, :objects, Any[target.leaf])
@@ -10493,7 +10540,9 @@ function _check_undeclared_params(target, LeafT, name::Symbol, verb::Verb, req::
     for obj in objects, param in Base.invokelatest(_param_names, typeof(obj))
         _push_unique!(params, param)
     end
-    submitted = _submitted_param_names(req, verb, !isempty(keywords) || !isempty(params))
+    submitted, unreadable = _submitted_param_names(req, verb, !isempty(keywords) || !isempty(params))
+    unreadable === nothing ||
+        @warn string(sprint(showerror, unreadable), "; its parameter names were not checked") method=req.method path=first(split(req.target, '?')) _group=:undeclared_params
     isempty(submitted) && return nothing
     accepted = String[String(k) for k in keywords]
     foreach(p -> _push_unique!(accepted, p), params)
@@ -13045,9 +13094,28 @@ struct UndeclaredParams <: Exception
 end
 Base.showerror(io::IO, e::UndeclaredParams) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
 
+"""
+    HTMXObjects.UnreadableBody(format, reason)
+
+A request body whose `Content-Type` says it is `format` (`"multipart/form-data"`)
+does not parse as one; `reason` is what the parser found wrong (`"boundary
+delimiter not found"`, `"a part has no form-data name"`, …). [`multipartparams`](@ref)
+and [`bodyparams`](@ref) throw it, so it is what a route answers when it binds a
+keyword or `@param` from such a body, or reads the body with `multipartparams`
+without catching: `400 Bad Request` like a missing required parameter, worded by
+the app's `ErrorTexts`. A route that reads its own body catches it to answer in
+its own words. Under `__undeclared_params__` such a body submits no parameter
+names, so the check leaves it to the route.
+"""
+struct UnreadableBody <: Exception
+    format::String
+    reason::String
+end
+Base.showerror(io::IO, e::UnreadableBody) = print(io, _caller_fault_message(e, _EN_ERROR_TEXTS))
+
 # Every submitted-value fault: answered 400, titled with the app's 400 reason
 # phrase (`Bad Request` in English).
-const _SubmittedValueFault = Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue,UndeclaredParams}
+const _SubmittedValueFault = Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue,UndeclaredParams,UnreadableBody}
 
 """
     CallerFault(status, message)
@@ -13223,7 +13291,9 @@ or when its declared type rejected the value by `"; "` and `expected_type` with
 `{type}` (then the parser's own reason, as Julia writes it, in parentheses);
 `unknown_params` takes `{names}`, the parameters a route does not take (under
 `__undeclared_params__ = :refuse`), followed by `"; "` and `accepted_params`
-with `{accepted}`, or `no_params` when the route takes none;
+with `{accepted}`, or `no_params` when the route takes none; `unreadable_body`
+takes `{format}`, the body's declared format, followed by the parser's reason,
+as it writes it, in parentheses;
 `result_unavailable_detail` takes `{verb}` and `{route}`; `stalled_detail` takes
 `{label}`, `{elapsed}` and `{bound}`, followed by `stalled_rerun` for a read or
 `stalled_not_repeated` (`{verb}`) for a mutation; `loading_named` takes
@@ -13243,6 +13313,7 @@ struct ErrorTexts
     unknown_params::String             # parameters a route does not take
     accepted_params::String            # ... and the parameters it does take
     no_params::String                  # ... or that it takes none
+    unreadable_body::String            # a body that does not parse as its Content-Type
     result_unavailable::String         # heading: a mutation's result is gone
     result_unavailable_detail::String
     stalled::String                    # heading: an operation passed its stall bound
@@ -13265,7 +13336,7 @@ end
 const _ERROR_TEXT_PLACEHOLDERS = (
     server_fault = (:id,), error_id = (:id,), missing_param = (:name,), invalid_value = (:name, :value),
     allowed_values = (:allowed,), expected_type = (:type,),
-    unknown_params = (:names,), accepted_params = (:accepted,),
+    unknown_params = (:names,), accepted_params = (:accepted,), unreadable_body = (:format,),
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
     loading_named = (:label,),
@@ -13284,6 +13355,7 @@ const _ERROR_TEXT_LOCALES = (
         unknown_params = "Unknown parameter: {names}",
         accepted_params = "accepted parameters: {accepted}",
         no_params = "no parameters accepted",
+        unreadable_body = "Unreadable request body: not valid {format}",
         result_unavailable = "Result unavailable",
         result_unavailable_detail = "The result of this {verb} {route} submission is no longer available. It ran at most once and was not repeated; reload to see the current state.",
         stalled = "Operation stalled",
@@ -13314,6 +13386,7 @@ const _ERROR_TEXT_LOCALES = (
         unknown_params = "Unbekannte Angabe: {names}",
         accepted_params = "zulässige Angaben: {accepted}",
         no_params = "keine Angaben zulässig",
+        unreadable_body = "Unlesbarer Inhalt der Anfrage: kein gültiges {format}",
         result_unavailable = "Ergebnis nicht mehr verfügbar",
         result_unavailable_detail = "Das Ergebnis dieser Übermittlung ({verb} {route}) ist nicht mehr verfügbar. Sie wurde höchstens einmal ausgeführt und nicht wiederholt; laden Sie die Seite neu, um den aktuellen Stand zu sehen.",
         stalled = "Vorgang hängt",
@@ -13432,6 +13505,10 @@ _caller_fault_message(e::UndeclaredParams, texts::ErrorTexts) =
     string(_fill_text(texts.unknown_params; names=join(e.names, ", ")), "; ",
         isempty(e.accepted) ? texts.no_params :
             _fill_text(texts.accepted_params; accepted=join(e.accepted, ", ")))
+function _caller_fault_message(e::UnreadableBody, texts::ErrorTexts)
+    message = _fill_text(texts.unreadable_body; format=e.format)
+    isempty(e.reason) ? message : string(message, " (", e.reason, ")")
+end
 _caller_fault_message(e::CallerFault, ::ErrorTexts) = e.message
 _caller_fault_message(e::OperationResultUnavailable, texts::ErrorTexts) =
     _fill_text(texts.result_unavailable_detail; verb=e.verb, route=e.route)

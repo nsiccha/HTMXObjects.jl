@@ -201,3 +201,128 @@ using TestItemRunner
     @test r.status == 200
     @test body(r) == "marked moot note=\"dup\""
 end
+
+# A multipart body that does not parse used to escape the check as HTTP.jl's
+# parse error, so an app that only warned answered 500 before a route that
+# reads its own body could answer it, and a route binding a field from such a
+# body answered 500 with no declaration at all (snag `undeclared-param-65ddfd9b`:
+# the KB's `/code/upload` refusal turned into a 500 once it declared `:warn`).
+@testitem "a multipart body that does not parse is the caller's 400, and the undeclared-parameter check leaves it to the route" tags=[:unit] begin
+    using HTMXObjects, HTTP, Logging
+    using Test
+
+    @htmx struct UBRows
+        "Upload"
+        @post upload() = begin
+            fields = try
+                multipartparams(__req__)
+            catch err
+                err isa HTMXObjects.UnreadableBody || rethrow()
+                return HTTP.Response(400, "refused by the route: " * err.reason)
+            end
+            "stored " * join(sort!(collect(keys(fields))), ",")
+        end
+        "Take a file"
+        @post take(; file::Upload) = "took $(file.filename)"
+    end
+    @htmx struct UBWarn
+        __undeclared_params__ = (; action=:warn, allow=("ext",))
+        @include rows = UBRows()
+    end
+    @htmx struct UBRefuse
+        __undeclared_params__ = (; action=:refuse, allow=("ext",))
+        @include rows = UBRows()
+    end
+    @htmx struct UBGerman
+        __undeclared_params__ = :refuse
+        __error_texts__ = error_texts(:de)
+        @include rows = UBRows()
+    end
+    @htmx struct UBHost
+        @include ub_lenient = begin
+            @include rows = UBRows()
+        end
+        @include ub_warn = UBWarn()
+        @include ub_refuse = UBRefuse()
+        @include ub_german = UBGerman()
+    end
+    app = UBHost()
+    route!(app; operation_policy=:blocking)
+    body(r) = String(r.body)
+
+    file = "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n" *
+           "Content-Type: image/png\r\n\r\nPNG\r\n--b--\r\n"
+    good = ["Content-Type" => "multipart/form-data; boundary=b"]
+    other = ["Content-Type" => "multipart/form-data; boundary=other"]
+    post(path, headers, payload) = with_logger(NullLogger()) do
+        dispatch(:POST, path; headers, body=payload)
+    end
+
+    # `multipartparams` throws the caller fault, naming what was wrong; a request
+    # that names no boundary still yields an empty dict.
+    req(headers, payload) = HTTP.Request("POST", "/", headers, Vector{UInt8}(payload))
+    err = try
+        multipartparams(req(other, file)); nothing
+    catch e
+        e
+    end
+    @test err isa HTMXObjects.UnreadableBody
+    @test err.format == "multipart/form-data"
+    @test err.reason == "boundary delimiter not found"
+    @test sprint(showerror, err) ==
+        "Unreadable request body: not valid multipart/form-data (boundary delimiter not found)"
+    @test_throws HTMXObjects.UnreadableBody bodyparams(req(other, file))
+    @test isempty(multipartparams(req(["Content-Type" => "multipart/form-data"], file)))
+    @test multipartparams(req(good, file))["file"].filename == "a.png"
+
+    # HTTP 1.x reports two malformed parts as a `MethodError` on a `nothing`
+    # its parser returned; any other exception is a defect and is not a caller
+    # fault.
+    rejection = HTMXObjects._multipart_rejection
+    @test rejection(MethodError(convert, (HTTP.Multipart, nothing))) == "a part has no form-data name"
+    @test rejection(MethodError(iterate, (nothing,))) ==
+        "no delimiter found separating header from multipart body"
+    @test rejection(ErrorException("boundary delimiter not found")) == "boundary delimiter not found"
+    @test rejection(MethodError(convert, (HTTP.Multipart, 1))) === nothing
+    @test rejection(MethodError(HTTP.parse_multipart_form, (1,))) === nothing
+    @test rejection(BoundsError([1], 2)) === nothing
+
+    # Without a declaration: a route that reads its own body answers it, and a
+    # route that binds a field from it answers 400, never 500.
+    r = post("/ub_lenient/rows/upload?plain=1&ext=png", other, file)
+    @test r.status == 400
+    @test body(r) == "refused by the route: boundary delimiter not found"
+    r = post("/ub_lenient/rows/take?plain=1", other, file)
+    @test r.status == 400
+    @test occursin("Unreadable request body: not valid multipart/form-data (boundary delimiter not found)", body(r))
+    @test post("/ub_lenient/rows/take?plain=1", good, file).status == 200
+
+    # `:warn` and `:refuse` read no names from such a body, say so once, and
+    # leave it to the route: the same answers as without a declaration.
+    for mount in ("ub_warn", "ub_refuse")
+        local r
+        r = @test_logs (:warn, "Unreadable request body: not valid multipart/form-data (boundary delimiter not found); its parameter names were not checked") match_mode=:any dispatch(
+            :POST, "/$mount/rows/upload?plain=1&ext=png"; headers=other, body=file)
+        @test r.status == 400
+        @test body(r) == "refused by the route: boundary delimiter not found"
+        r = post("/$mount/rows/take?plain=1", other, file)
+        @test r.status == 400
+        @test occursin("Unreadable request body: not valid multipart/form-data", body(r))
+    end
+    # A body that is not an envelope at all, too.
+    @test body(post("/ub_refuse/rows/upload?plain=1&ext=png", good, "%PDF-1.4 not an envelope")) ==
+        "refused by the route: boundary delimiter not found"
+    # The check still reads the query string of such a request.
+    r = post("/ub_refuse/rows/upload?plain=1&ext=png&bogus=1", other, file)
+    @test r.status == 400
+    @test occursin("Unknown parameter: bogus; accepted parameters: ext", body(r))
+    # And a body that parses is checked as before.
+    r = post("/ub_refuse/rows/take?plain=1", good, file)
+    @test r.status == 200
+    @test body(r) == "took a.png"
+
+    # The app's error texts word the fault.
+    r = post("/ub_german/rows/take?plain=1", other, file)
+    @test r.status == 400
+    @test occursin("Unlesbarer Inhalt der Anfrage: kein gültiges multipart/form-data (boundary delimiter not found)", body(r))
+end

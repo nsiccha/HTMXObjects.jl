@@ -1418,6 +1418,11 @@ What is checked:
   `Content-Type` is urlencoded or multipart, or one without a `Content-Type`
   sent to a route that reads form fields. A JSON or other raw body sends no
   parameters. A name counts even with an empty value.
+- Not a multipart body that does not parse (`HTMXObjects.UnreadableBody`): it
+  sends no names the check can read, so one warning says they were not
+  checked, and the route answers it as it would without a declaration. A
+  route that reads its own body gives its own answer; one that binds a field
+  from it answers 400.
 - Not a route with a keyword splat (`@post create(; template, fields...)`):
   it takes every field, so it is how one route accepts what the app refuses.
 - Not a page load: a `GET` that asks for HTML (a browser opening the page) or
@@ -2696,6 +2701,13 @@ also has a dependent-refresh control, file inputs sit after the refreshed
 region and are left out of the refresh request: changing the dependency neither
 clears nor re-uploads the chosen file.
 
+A multipart body that does not parse (a wrong boundary, a part with no
+form-data name) is the caller's fault: the route answers `400 Bad Request`
+with `Unreadable request body: not valid multipart/form-data (boundary
+delimiter not found)`, never a 500. A route that reads its own body with
+`multipartparams` catches `HTMXObjects.UnreadableBody` to answer in its own
+words.
+
 ```@docs
 Upload
 ```
@@ -2767,9 +2779,13 @@ wherever the value is converted: a route keyword or path parameter, `@param`,
 (raised under `__undeclared_params__ = :refuse` when a request sends a
 parameter its route does not take; see
 [Parameters a route does not take](#undeclared-params)) is answered the same
-way. Like every error answer they are
+way, and so is `HTMXObjects.UnreadableBody` (raised when a `multipart/form-data`
+body does not parse, by `multipartparams` and by a route keyword or `@param`
+read from that body; its message names what the parser found wrong:
+`Unreadable request body: not valid multipart/form-data (boundary delimiter not found)`).
+Like every error answer they are
 recorded: an error log whose header says `status:    400`, the error id in the
-article and in `X-HTMXO-Error-Id`, and `__on_error__`. None of the four is
+article and in `X-HTMXO-Error-Id`, and `__on_error__`. None of the five is
 exported, so catching one needs the qualified name. A declared type with no
 `parse` method at all is not a caller fault but a declaration bug, and stays a
 500. A route body raises its own
