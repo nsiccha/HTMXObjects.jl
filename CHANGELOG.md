@@ -14,6 +14,22 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.95
+
+- A single choice among options that carry `columns` (an option record's field, a
+  `NamedTuple` or `name => value` pairs) is drawn as a table of its options: a
+  `sortable_table` with the option's label (a radio button) first and its columns after
+  it. A click on a row, or Enter on a focused row, chooses it; the chosen row is marked;
+  more than `radio_max` options get the search field. Results follow it and the page
+  address keeps it, as for pills.
+- `semantic_app(…; presentation=:tabs, place=(fit = :upload,))` draws a sidebar input's
+  control in an operation's tab instead of the sidebar, still an input of the sidebar's
+  form (`form=`): web-sim's table of fits beside the form that adds one.
+  `render_operation` receives the placed controls as `entry.placed`.
+- `set_inputs(; inputs...)` (exported): in a mutation's answer, sets inputs of the app
+  page once a control offers the value, so the fit an upload added becomes the choice
+  (todo `0we4wfo`, for Bruno's web-sim; decision `04rngh7`).
+
 ## 0.1.94
 
 - A generated form draws help text under a `@param`'s control. A docstring's first

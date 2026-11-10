@@ -67,7 +67,7 @@ export OperationContext, RootProvider, RootRetention, OperationPolicy, send_ahea
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
-export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection
+export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs
 
 using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
@@ -29237,6 +29237,51 @@ function _choice_list(name, label, options, selected; required=false,
         class="htmxo-choice-list", data_htmxo_choice_list="", attrs...)
 end
 
+# --- A single choice drawn as a table of its options ---
+
+# Options whose records carry `columns` (a `NamedTuple`, or pairs of a column
+# name and a value): `(value="fit-a", label="Fit A", columns=(Model="emax", Draws=400))`.
+_option_columns(option) = something(get(option, :columns, nothing), (;))
+_has_option_columns(domain) =
+    any(option -> get(option, :columns, nothing) !== nothing, get(domain, :options, NamedTuple[]))
+_column_pairs(columns::NamedTuple) = [string(k) => v for (k, v) in pairs(columns)]
+_column_pairs(columns::AbstractDict) = [string(k) => v for (k, v) in columns]
+_column_pairs(columns) = [string(first(p)) => last(p) for p in columns]
+
+"""
+    _semantic_choice_table(name, label, domain, selected; required, radio_max)
+
+A single choice among options that carry `columns`: a [`sortable_table`](@ref)
+with one row per option, its label (a radio button) first and then its
+columns. A click on a row, or Enter on it, chooses it (`choice_list_script`);
+the radio buttons keep the keyboard of a radio group, and the chosen row is
+marked. A table of more than `radio_max` options can be searched.
+"""
+function _semantic_choice_table(name, label, domain, selected; required=false,
+        radio_max::Int=_RADIO_MAX)
+    options = get(domain, :options, NamedTuple[])
+    columns = String[]
+    for option in options, (column, _) in _column_pairs(_option_columns(option))
+        column in columns || push!(columns, column)
+    end
+    required_attrs = required ? (; required="true") : (;)
+    rows = map(options) do option
+        values = Dict(_column_pairs(_option_columns(option)))
+        cells = Any[h.td(_radio_option(name, option, _is_selected(option.value, selected);
+                                       required_attrs...))]
+        for column in columns
+            value = get(values, column, nothing)
+            push!(cells, value isa Real && !(value isa Bool) ? number_cell(value) :
+                         h.td(value === nothing ? "" : string(value)))
+        end
+        h.tr(cells...; data_htmxo_choice_row="", tabindex="-1")
+    end
+    h.fieldset(h.legend(label),
+               sortable_table(Any[string(label), columns...], rows;
+                              searchable=length(options) > radio_max, sticky=false);
+               class="htmxo-choice-table", data_htmxo_choice_table="")
+end
+
 _semantic_choice_list(name, label, domain, selected; required=false, texts=_EN_ERROR_TEXTS) =
     _choice_list(name, label, get(domain, :options, NamedTuple[]), selected; required, texts)
 
@@ -29417,6 +29462,9 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
         elseif presentation === :cards && !get(domain, :multiple, false)
             return _semantic_cards(param.name, label, domain, value;
                                    required=param.required)
+        elseif !get(domain, :multiple, false) && _has_option_columns(domain)
+            return _semantic_choice_table(param.name, label, domain, value;
+                                          required=param.required, radio_max)
         elseif !get(domain, :multiple, false) && length(options) <= radio_max
             return _semantic_radio(param.name, label, domain, value;
                                    required=param.required)
@@ -29444,6 +29492,7 @@ function _semantic_short_field(obj, owner, param, values;
     domain = _resolved_input_domain(control_obj, ControlT, input, values)
     if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
         presentation === :cards && return false
+        _has_option_columns(domain) && return false
         get(domain, :allow_custom, false) && return false
         get(domain, :multiple, false) && return false
         return length(get(domain, :options, NamedTuple[])) <= min(2, radio_max)
@@ -29962,8 +30011,11 @@ whole group, and the operation's hidden request context rides the URL, so the
 domain is evaluated exactly as the operation's own form would evaluate it.
 """
 function _semantic_context_control(obj, route, param, current, action, shared_names;
-        radio_max::Int=_RADIO_MAX)
+        radio_max::Int=_RADIO_MAX, placed=nothing)
     control = _semantic_control(obj, route.owner, param, current; radio_max)
+    # A control placed outside the group's form (`semantic_app(…; place)`)
+    # still belongs to it: its fields name the form (`form=`).
+    isnothing(placed) || (control = _with_form_owner(control, placed, param.name))
     _semantic_context_refreshable(route, param) || return control
     dependencies = _semantic_param_dependencies(param)
     lifted = get(route, :lifted, nothing)
@@ -29972,13 +30024,28 @@ function _semantic_context_control(obj, route, param, current, action, shared_na
         __htmxo_shared_context=_semantic_names_attr(shared_names, ','),
         (isnothing(lifted) ? (;) : (; __htmxo_lifted=_semantic_names_attr(lifted, ',')))...,
         (radio_max == _RADIO_MAX ? (;) : (; __htmxo_radio_max=radio_max))...,
+        (isnothing(placed) ? (;) : (; __htmxo_placed=placed))...,
         _semantic_hidden_values(route, current)...)
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     h.div(control; class="htmxo-semantic-context-control",
           data_htmxo_depends=_semantic_names_attr(intersect(dependencies, shared_names)),
           NamedTuple{(method_key,)}((refresh_url,))..., hx_trigger="htmxo-refresh",
-          hx_include="closest .htmxo-semantic-context", hx_target="this",
-          hx_swap="outerHTML")
+          hx_include=isnothing(placed) ? "closest .htmxo-semantic-context" : "#" * placed,
+          (isnothing(placed) ? (;) : (; data_htmxo_context=placed))...,
+          hx_target="this", hx_swap="outerHTML")
+end
+
+# `node` with each field named `name` owned by the form `form_id` (`form=`),
+# wherever the field sits on the page.
+_with_form_owner(node, form_id, name) = node
+function _with_form_owner(node::Node, form_id, name)
+    attrs = copy(HTMX.attrs(node))
+    if Symbol(lowercase(string(HTMX.tag(node)))) in (:input, :select, :textarea) &&
+            string(get(attrs, :name, "")) == string(name)
+        attrs[:form] = form_id
+    end
+    Node(HTMX.tag(node), attrs, Any[_with_form_owner(child, form_id, name)
+                                    for child in HTMX.children(node)])
 end
 
 _semantic_context_refreshable(route, param) =
@@ -30061,7 +30128,8 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
             "$(LeafT).$(name) carries no shared context input $(repr(name)) to refresh"))
         current = _semantic_form_values(target.leaf, route, extracted.values)
         _semantic_context_control(target.leaf, route, route.params[index], current,
-                                  request_path, shared_context; radio_max)
+                                  request_path, shared_context; radio_max,
+                                  placed=_operation_form_setting(req, :__htmxo_placed))
     elseif controls_only
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
@@ -30916,13 +30984,14 @@ function _semantic_context_entries(items; names=nothing)
 end
 
 _semantic_context_controls(entries, shared_context; radio_max::Int=_RADIO_MAX) = Any[
+    _semantic_entry_control(entry, shared_context; radio_max) for entry in entries]
+_semantic_entry_control(entry, shared_context; radio_max::Int=_RADIO_MAX, placed=nothing) =
     _semantic_context_control(entry.object, entry.route, entry.param, entry.current,
         _semantic_context_refreshable(entry.route, entry.param) ?
             _operation_form_action(entry.route, entry.current,
                 _operation_form_target(entry.object, entry.route)) :
             nothing,
-        shared_context; radio_max)
-    for entry in entries]
+        shared_context; radio_max, placed)
 
 # --- Input sections (`semantic_app(…; presentation=:tabs, sections)`) ---
 
@@ -31182,7 +31251,7 @@ shows the values it names, and the script writes the inputs into it.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
-        sections=InputSection[])
+        sections=InputSection[], place=nothing)
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places.
@@ -31243,13 +31312,25 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         [(spec.mounted, routes[i], currents[i]) for (i, spec) in enumerate(specs)];
         names=sidebar)
     shared_names = Set{Symbol}(entry.param.name for entry in context_entries)
-    sidebar_controls = _semantic_context_controls(context_entries, shared_names; radio_max)
-    sidebar_sections = _input_sections_for(sections, shared_names)
+    names = _semantic_tab_names(specs)
+    # Shared inputs the app places in an operation's tab (`place`): their
+    # controls belong to the sidebar's form, drawn in that tab.
+    placements = _semantic_placements(place, shared_names, names, specs)
+    placed_entries = [entry for entry in context_entries if haskey(placements, entry.param.name)]
+    sidebar_entries = [entry for entry in context_entries if !haskey(placements, entry.param.name)]
+    sidebar_controls = _semantic_context_controls(sidebar_entries, shared_names; radio_max)
+    sidebar_sections = _input_sections_for(sections,
+        Set{Symbol}(entry.param.name for entry in sidebar_entries))
     sidebar_fields = [(; name=entry.param.name, control,
                          short=!isempty(sidebar_sections) && _semantic_short_field(
                              entry.object, entry.route.owner, entry.param, entry.current;
                              radio_max))
-                      for (entry, control) in zip(context_entries, sidebar_controls)]
+                      for (entry, control) in zip(sidebar_entries, sidebar_controls)]
+    placed_controls = Dict{String,Vector{Any}}()
+    for entry in placed_entries
+        push!(get!(placed_controls, placements[entry.param.name], Any[]),
+              _semantic_entry_control(entry, shared_names; radio_max, placed=context_id))
+    end
     sidebar_form = isempty(context_entries) ? nothing :
         h.form(_sectioned_controls(sidebar_fields, sidebar_sections)...;
                id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
@@ -31260,7 +31341,6 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     refreshes = any(entry -> _semantic_context_refreshable(entry.route, entry.param),
                     context_entries)
 
-    names = _semantic_tab_names(specs)
     open = _semantic_open_tab(obj, names, active)
     operations = map(enumerate(specs)) do (i, spec)
         base = spec.base_entry
@@ -31306,26 +31386,50 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 aria_live="polite",
                 (refreshes ? (; data_htmxo_refreshes=context_id) : (;))...)
         end
-        merge(base, (; form, result, tab=names[i], follows=follows[i]))
+        merge(base, (; form, result, tab=names[i], follows=follows[i],
+                      placed=get(placed_controls, names[i], Any[])))
     end
 
     _activate_semantic_root_provider!(obj)
     page_id = replace(context_id, "htmxo-semantic-context" => "htmxo-semantic-page"; count=1)
-    parts = (; object=obj, title, id=page_id, sidebar=sidebar_form, context=sidebar_form,
+    # The sidebar is shown when it holds a control; a form whose controls are
+    # all placed in tabs stays on the page as their owner (`parts.context`).
+    parts = (; object=obj, title, id=page_id,
+               sidebar=isempty(sidebar_entries) ? nothing : sidebar_form, context=sidebar_form,
                tabs=Pair[entry.title => render_operation(entry) for entry in operations],
                tab_names=names, active=open, operations)
     layout(parts)
 end
 
-# A tab: the operation's own inputs, then its result.
+# The inputs `place` puts in an operation's tab, as `input => tab name`: each
+# a shared input (one the sidebar would hold), each tab one of the page's.
+function _semantic_placements(place, shared_names, names, specs)
+    placements = Dict{Symbol,String}()
+    isnothing(place) && return placements
+    for (input, operation) in pairs(place)
+        input = Symbol(input)
+        input in shared_names || throw(ArgumentError(string(
+            "semantic_app place= moves a sidebar input into a tab; ", repr(input),
+            " is not one. The sidebar's inputs are ",
+            join(repr.(sort!(collect(shared_names))), ", "))))
+        tab = string(operation)
+        tab in names || throw(ArgumentError(string(
+            "semantic_app place= names ", repr(operation), ", which is no tab of the page; ",
+            "its tabs are ", join(repr.(names), ", "))))
+        placements[input] = tab
+    end
+    placements
+end
+
+# A tab: the inputs placed in it, the operation's own inputs, then its result.
 function _default_semantic_tab(entry)
     entry.form === nothing && entry.verb in (:WEBSOCKET, :SSE) && throw(ArgumentError(string(
         "semantic_app has no default control for ",
         entry.verb === :SSE ? "SSE" : "WebSocket", " operation ",
         "$(entry.verb) $(entry.path); pass `render_operation` and render this ",
         "entry explicitly")))
-    h.div((isnothing(entry.form) ? () : (entry.form,))..., entry.result;
-          class="htmxo-semantic-tab", data_operation=entry.name,
+    h.div(get(entry, :placed, Any[])..., (isnothing(entry.form) ? () : (entry.form,))...,
+          entry.result; class="htmxo-semantic-tab", data_operation=entry.name,
           data_verb=entry.verb, data_path=entry.path)
 end
 
@@ -31335,8 +31439,9 @@ function _default_semantic_tabs_layout(parts)
     heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
     tabs = tabset(parts.tabs...; id=parts.id * "-tabs", names=parts.tab_names,
                   active=parts.active)
-    body = isnothing(parts.sidebar) ? tabs :
-        app_layout(h.aside(parts.sidebar), tabs; content_id=parts.id * "-content")
+    body = !isnothing(parts.sidebar) ?
+        app_layout(h.aside(parts.sidebar), tabs; content_id=parts.id * "-content") :
+        isnothing(parts.context) ? tabs : h.div(parts.context, tabs)
     h.section(heading..., body; id=parts.id, class="htmxo-semantic-app htmxo-semantic-page")
 end
 
@@ -31345,7 +31450,8 @@ end
                  render_operation=_default_semantic_operation, compact=false,
                  results=:each, layout=_default_semantic_layout,
                  select=entry -> true, presentation=:stacked, radio_max=8,
-                 shared=nothing, active=nothing, url_state=true, sections=nothing)
+                 shared=nothing, active=nothing, url_state=true, sections=nothing,
+                 place=nothing)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -31380,8 +31486,10 @@ keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
 reopens the same page; `url_state=false` keeps only the tab. `sections=`
 groups its inputs under headings wherever they are placed, a list of
-[`InputSection`](@ref)s or `heading => names` pairs. The contract is the API
-reference's *An app page*.
+[`InputSection`](@ref)s or `heading => names` pairs. `place=(fit = :upload,)`
+draws a sidebar input's control in an operation's tab instead, still an
+input of the sidebar's form. The contract is the API reference's *An app
+page*.
 
 A single choice among at most `radio_max` options (default 8) is a row of
 pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
@@ -31505,7 +31613,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
-        sections=nothing)
+        sections=nothing, place=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -31525,6 +31633,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app url_state= keeps the inputs of presentation=:tabs in the page address"))
         isnothing(sections) || throw(ArgumentError(
             "semantic_app sections= groups the inputs of presentation=:tabs"))
+        isnothing(place) || throw(ArgumentError(
+            "semantic_app place= puts inputs of presentation=:tabs into its tabs"))
     end
     input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
@@ -31576,7 +31686,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
-        sections=input_sections,
+        sections=input_sections, place,
         render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
@@ -32000,6 +32110,26 @@ choice_list_script() = h.script(Raw(raw"""
   // A page restored from the back/forward cache keeps its checked radios.
   window.addEventListener('pageshow', function() {
     document.querySelectorAll('.htmxo-choice-list').forEach(sync);
+  });
+  // A choice drawn as a table (an option record's `columns`): a click on a
+  // row, or Enter or Space on a focused row, chooses its option. The radio
+  // buttons keep the keyboard of a radio group; a click on a control or a
+  // link inside the row stays its own.
+  function chooseRow(row) {
+    var radio = row.querySelector('input[type="radio"]');
+    if (radio && !radio.disabled && !radio.checked) radio.click();
+  }
+  document.addEventListener('click', function(e) {
+    var t = e.target, row = t && t.closest && t.closest('[data-htmxo-choice-row]');
+    if (!row || t.closest('input, label, a, button, select, textarea, summary')) return;
+    chooseRow(row);
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('[data-htmxo-choice-row]')) return;
+    e.preventDefault();
+    chooseRow(t);
   });
 })();
 """))
@@ -33395,7 +33525,9 @@ semantic_refresh_script() = h.script(Raw(raw"""
   document.addEventListener('change', function(e) {
     var t = e.target, name = t && t.name;
     if (!name || !t.closest) return;
-    var group = t.closest('.htmxo-semantic-context[id]');
+    // A control placed in a tab (`place`) belongs to the group by `form=`.
+    var group = t.closest('.htmxo-semantic-context[id]') ||
+      (t.form && t.form.matches('.htmxo-semantic-context[id]') ? t.form : null);
     if (!group) return;
     var reads = '[data-htmxo-depends~=' + quoted(name) + ']';
     group.querySelectorAll('.htmxo-semantic-context-control' + reads).forEach(function(el) {
@@ -33428,10 +33560,35 @@ semantic_refresh_script() = h.script(Raw(raw"""
       if (!host.isConnected || host.querySelector('[hx-get*="__htmxo_poll"]')) return;
       var group = document.getElementById(id);
       if (group) group.querySelectorAll('.htmxo-semantic-context-control').forEach(send);
+      document.querySelectorAll('.htmxo-semantic-context-control[data-htmxo-context=' +
+        quoted(id) + ']').forEach(send);
     }, 0);
   }, true);
 })();
 """))
+
+"""
+    set_inputs(; inputs...)
+
+Set inputs of the [`semantic_app`](@ref) page an answer lands on: include it in
+a mutation's answer to make, say, the fit it just added the page's choice.
+
+    @post upload(; bundle::Upload) = begin
+        name = add_fit(bundle)
+        h.div(h.p("Added ", name), set_inputs(fit = name))
+    end
+
+Each keyword names an input of the page's forms (the sidebar, a tab's inputs)
+and the value to give it, as the input's control sends it (a vector for a
+multiple choice). The page sets it once a control offers that value, so an
+option that the mutation's refresh of the controls brings is chosen when it
+arrives; then the page follows the change as if the reader had made it
+(results, the page address). It is an empty `<template>`, so it shows nothing
+and Markdown carries nothing of it. A value no control offers within 30 s is
+dropped.
+"""
+set_inputs(; inputs...) = h.template(; data_htmxo_set_inputs=_schema_json(
+    Dict{String,Any}(string(name) => _semantic_address_wire(value) for (name, value) in pairs(inputs))))
 
 """
     semantic_follow_script()
@@ -33748,6 +33905,66 @@ semantic_follow_script() = h.script(Raw(raw"""
       if (names === null || names.indexOf(field) >= 0) clearField(field);
     });
   });
+  // `set_inputs(…)` in an answer (a mutation that added a fit makes it the
+  // choice): each input it names takes its value once a control of the
+  // page's forms offers that value. A refreshed control may bring the option
+  // only after the answer, so a setting waits for later settles, and one no
+  // control offers within 30 s is dropped.
+  var wanted = [];
+  function pageControls(name) {
+    var found = [];
+    Array.prototype.forEach.call(document.forms, function(form) {
+      if (!form.matches('.htmxo-semantic-context, [data-htmxo-address]')) return;
+      Array.prototype.forEach.call(form.elements, function(c) {
+        if (c.name === name && !PRESSED.test(c.type)) found.push(c);
+      });
+    });
+    return found;
+  }
+  function setInput(name, values) {
+    var controls = pageControls(name), first = controls[0], value = values[0];
+    if (!first) return false;
+    if (first.type === 'radio') {
+      var radio = controls.filter(function(c) { return c.value === value; })[0];
+      if (!radio) return false;
+      if (!radio.checked) radio.click();
+      return true;
+    }
+    if (first.type === 'checkbox') {
+      var on = value === 'true';
+      if (first.checked !== on) first.click();
+      return true;
+    }
+    if (first.tagName === 'SELECT') {
+      var options = Array.prototype.slice.call(first.options);
+      if (!options.some(function(o) { return values.indexOf(o.value) >= 0; })) return false;
+      options.forEach(function(o) { o.selected = values.indexOf(o.value) >= 0; });
+    } else {
+      first.value = value === undefined ? '' : value;
+    }
+    first.dispatchEvent(new Event('change', {bubbles: true}));
+    return true;
+  }
+  function settleWanted() {
+    var now = Date.now();
+    wanted = wanted.filter(function(w) { return now < w.until && !setInput(w.name, w.values); });
+  }
+  function collectWanted(root) {
+    var found = root.matches && root.matches('template[data-htmxo-set-inputs]') ? [root] : [];
+    if (root.querySelectorAll) found = found.concat(Array.prototype.slice.call(
+      root.querySelectorAll('template[data-htmxo-set-inputs]')));
+    found.forEach(function(t) {
+      var map = {};
+      try { map = JSON.parse(t.getAttribute('data-htmxo-set-inputs')); } catch (_) {}
+      t.remove();
+      Object.keys(map).forEach(function(name) {
+        wanted.push({name: name, values: map[name], until: Date.now() + 30000});
+      });
+    });
+    if (found.length) settleWanted();
+  }
+  document.addEventListener('htmx:load', function(e) { collectWanted(e.target); });
+  document.addEventListener('htmx:afterSettle', function() { if (wanted.length) settleWanted(); });
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function() { arm(document.body); });
   } else {
@@ -34335,6 +34552,28 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-help { color: var(--pico-muted-color, inherit); }
 .htmxo-field-error { color: var(--pico-del-color, #b71c1c); }
 [data-htmxo-follow][data-htmxo-stale] { opacity: 0.45; }
+/* A choice drawn as a table: the legend is the first column's header, so it
+   is read but not shown twice; a row is chosen by a click, and the chosen
+   row is marked along its left edge and in bold. */
+.htmxo-choice-table { min-width: 0; }
+.htmxo-choice-table > legend {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.htmxo-choice-table [data-htmxo-choice-row] { cursor: pointer; }
+.htmxo-choice-table [data-htmxo-choice-row] label { margin: 0; cursor: pointer; }
+/* Pico's unlayered cell rule reads these variables. */
+.htmxo-choice-table [data-htmxo-choice-row]:has(input[type="radio"]:checked) {
+    --pico-font-weight: 600;
+    --pico-background-color: color-mix(in srgb, var(--pico-primary, #0172ad) 12%, transparent);
+    --pico-table-row-stripped-background-color: color-mix(in srgb, var(--pico-primary, #0172ad) 12%, transparent);
+}
+.htmxo-choice-table [data-htmxo-choice-row]:has(input[type="radio"]:checked) > td {
+    font-weight: 600;
+}
+.htmxo-choice-table [data-htmxo-choice-row]:has(input[type="radio"]:checked) > td:first-child {
+    box-shadow: inset 3px 0 0 var(--pico-primary, currentColor);
+}
 .htmxo-error-log { max-height: 30rem; overflow: auto; font-size: 0.8em; }
 .htmxo-semantic-card[data-rich="true"] > label {
     position: absolute;
