@@ -5,8 +5,8 @@ using TestItemRunner
 # `1tixesk`, for Bruno's web-sim; user decision `04rngh7`).
 
 @testmodule FieldHelpFixtures begin
-    using HTMXObjects
-    export HelpPage, schedule_of, sidebar_of, tab_of, attrs_of
+    using HTMXObjects, HTTP, Sockets
+    export HelpPage, GlossedPage, schedule_of, sidebar_of, tab_of, attrs_of, browser_outcome
 
     function schedule_of(regimen)
         m = match(r"^(\d+)% q (\d+) x (\d+)$", strip(regimen))
@@ -40,6 +40,73 @@ using TestItemRunner
         @get summary() = h.p("summary:", plan.doses, ":", days, ":", seed; class="result")
         @get index() = semantic_app(__self__; presentation=:tabs, title="Simulator",
             select=entry -> entry.name !== :index)
+    end
+
+    # The same inputs under a root with a glossary whose term the fault's
+    # message uses (snag `on-web-sim-s-gen-fa2a5324`: web-sim's "regimen").
+    const DOSING = Glossary([GlossaryTerm("regimen",
+        "The dosing schedule: 100% q 24 x 14 is the dose once a day for 14 days.";
+        forms=["Regimen", "regimens"])])
+
+    @htmx struct GlossedPage
+        __glossary__ = DOSING
+        """
+        Regimen
+
+        Doses as `percent% q hours x count`.
+        """
+        @param regimen::String = "100% q 24 x 14"
+        plan = schedule_of(regimen)
+        "Course"
+        @get course() = h.p("course:", plan.doses; class="result")
+        "Totals"
+        @get totals() = h.p("totals:", plan.doses; class="result")
+        @get index() = semantic_app(__self__; presentation=:tabs, title="Simulator",
+            select=entry -> entry.name !== :index)
+    end
+
+    # The app page at "/" with `driver` appended, served with the vendored htmx
+    # to headless Chrome; the page's requests go to the routes registered last.
+    # What the driver reported to `/complete`, or `nothing` if it never did.
+    function browser_outcome(driver)
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        receipt = Channel{String}(1)
+        assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
+            "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
+        page = repr("text/html", htmx(Raw(String(dispatch(:GET, "/"; headers=["HX-Request" => "true"]).body)), driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing, preload_version=nothing, pico_version=nothing,
+            feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            haskey(assets, path) &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            dispatch(req.method, req.target; headers=collect(req.headers),
+                     body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05)
+                    isready(receipt) ? Dict(HTTP.URIs.queryparams(HTTP.URI(take!(receipt)))) : nothing
+                finally
+                    process_exited(process) || kill(process)
+                end
+            end
+        finally
+            close(server)
+        end
     end
 
     sidebar_of(html) = match(r"<form id=\"htmxo-semantic-context-[^\"]*\" class=\"htmxo-semantic-context htmxo-semantic-sidebar\".*?</form>"s, html).match
@@ -166,12 +233,9 @@ end
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
-        using HTMXObjects, HTTP, Sockets
+        using HTMXObjects
 
-        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
-        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
         route!(HelpPage(); operation_policy=:blocking)
-        receipt = Channel{String}(1)
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function() {
           const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -214,44 +278,113 @@ end
           fetch('/complete?' + new URLSearchParams(Object.entries(out).map(([k, v]) => [k, String(v)])));
         });
         """))
-        assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
-            "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
-        page = repr("text/html", htmx(Raw(String(dispatch(:GET, "/"; headers=["HX-Request" => "true"]).body)), driver;
-            assets="/test-assets", sse_version=nothing, ws_version=nothing, preload_version=nothing, pico_version=nothing,
-            feedback=false, compose=false, overlay=false))
-        socket = listen(Sockets.localhost, 0)
-        port = Int(getsockname(socket)[2])
-        close(socket)
-        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
-            path = HTTP.URI(req.target).path
-            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
-            haskey(assets, path) &&
-                return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
-            path == "/favicon.ico" && return HTTP.Response(204)
-            if path == "/complete"
-                isready(receipt) || put!(receipt, String(req.target))
-                return HTTP.Response(204)
-            end
-            dispatch(req.method, req.target; headers=collect(req.headers),
-                     body=HTMXObjects._request_body_bytes(req))
+        outcome = browser_outcome(driver)
+        @test outcome !== nothing
+        outcome = something(outcome, Dict{String,String}())
+        @test !haskey(outcome, "error") || outcome["error"] == ""
+        for key in ("field", "kept", "address", "cleared", "help")
+            @test get(outcome, key, "missing") == "true"
         end
-        try
-            mktempdir() do profile
-                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
-                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
-                try
-                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
-                    outcome = isready(receipt) ? Dict(HTTP.URIs.queryparams(HTTP.URI(take!(receipt)))) : Dict{String,String}()
-                    @test !haskey(outcome, "error") || outcome["error"] == ""
-                    for key in ("field", "kept", "address", "cleared", "help")
-                        @test get(outcome, key, "missing") == "true"
-                    end
-                finally
-                    process_exited(process) || kill(process)
-                end
-            end
-        finally
-            close(server)
+    end
+end
+
+# Snag `on-web-sim-s-gen-fa2a5324` (reporter Bruno:simulator:ux): under a root
+# with a glossary, the fault's message links its terms, and the field's copy of
+# it read the hidden definition out as part of the sentence.
+@testitem "a fault's message under a glossary links its terms" setup=[FieldHelpFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    import HTMXObjects: _clear_operation_polls!
+
+    _clear_operation_polls!()
+    route!(GlossedPage())
+    answer = dispatch(:GET, "/course?regimen=nope"; headers=["HX-Request" => "true"])
+    text = String(HTMXObjects._message_body_bytes(answer))
+    # The paragraph the page copies under the field: the term is a link that
+    # names its definition, which sits beside it in a box the page hides.
+    @test HTTP.header(answer, "X-HTMXO-Error-Param") == "regimen"
+    m = match(r"<article aria-invalid=\"true\" data-htmxo-param=\"regimen\"><header>Bad Request</header><p>the <span class=\"htmxo-term\"><a href=\"#term-regimen\" aria-describedby=\"([^\"]+)\">regimen</a><span class=\"htmxo-term-def\"><span id=\"([^\"]+)\" role=\"tooltip\">The dosing schedule: [^<]*</span>", text)
+    @test m !== nothing
+    @test m !== nothing && m.captures[1] == m.captures[2]
+    @test contains(text, "</span></span> &quot;nope&quot; does not parse: write it as 100% q 24 x 14</p>")
+end
+
+@testitem "a fault's message under its field reads as a sentence, its terms linked, in a browser" setup=[FieldHelpFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+        import HTMXObjects: _clear_operation_polls!
+
+        _clear_operation_polls!()
+        route!(GlossedPage())
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + label); await sleep(25); }
+          }
+          const region = name => document.querySelector('[data-htmxo-follow="/' + name + '"]');
+          const regimen = () => document.querySelector('input[name="regimen"]');
+          const note = () => document.querySelector('.htmxo-field-error');
+          const shown = el => getComputedStyle(el).display !== 'none';
+          const unique = () => {
+            const ids = Array.from(document.querySelectorAll('[id]'), el => el.id);
+            return new Set(ids).size === ids.length;
+          };
+          // A term's link in `within`, the definition it names, and that definition's box.
+          function term(within) {
+            const a = within.querySelector('.htmxo-term > a');
+            const tip = a && document.getElementById(a.getAttribute('aria-describedby'));
+            return {a, tip, box: tip && tip.closest('.htmxo-term-def')};
+          }
+          function set(value) {
+            regimen().value = value;
+            regimen().dispatchEvent(new Event('change', {bubbles: true}));
+          }
+          const out = {};
+          try {
+            await until(() => region('course').textContent.includes('course:14'), 'first result');
+            set('nope');
+            await until(() => note(), 'field error');
+            const t = term(note());
+            // The message reads as the sentence; its term is a link whose
+            // definition, in the note itself, stays hidden.
+            out.sentence = note().innerText.trim() ===
+              'the regimen "nope" does not parse: write it as 100% q 24 x 14';
+            out.linked = !!t.a && t.a.textContent === 'regimen' && t.a.getAttribute('href') === '#term-regimen' &&
+              !!t.tip && note().contains(t.tip) && t.tip.textContent.startsWith('The dosing schedule');
+            out.hidden = !!t.box && !shown(t.box);
+            // Focus opens the definition, in the page's text colour, not the fault's.
+            t.a.focus();
+            await until(() => shown(t.box), 'definition opens');
+            out.opens = getComputedStyle(t.box).color !== getComputedStyle(note()).color;
+            t.a.blur();
+            await until(() => !shown(t.box), 'definition closes');
+            // A region with nothing to keep shows the fault's article too: each
+            // copy's link names its own definition, and no id is repeated.
+            document.querySelector('[role="tab"][data-tab-name="totals"]').click();
+            await until(() => region('totals').querySelector('article[data-htmxo-param]'), 'article in totals');
+            await until(() => note(), 'field error again');
+            const article = region('totals').querySelector('article[data-htmxo-param]');
+            const inArticle = term(article), inNote = term(note());
+            out.both = !!inArticle.tip && article.contains(inArticle.tip) &&
+              !!inNote.tip && note().contains(inNote.tip) && unique();
+            // A good regimen clears the note and shows its result.
+            set('100% q 12 x 3');
+            await until(() => region('totals').textContent.includes('totals:3'), 'corrected result');
+            await sleep(50);
+            out.cleared = !note() && !(regimen().getAttribute('aria-describedby') || '').includes('field-error') && unique();
+          } catch (e) { out.error = String(e); }
+          fetch('/complete?' + new URLSearchParams(Object.entries(out).map(([k, v]) => [k, String(v)])));
+        });
+        """))
+        outcome = browser_outcome(driver)
+        @test outcome !== nothing
+        outcome = something(outcome, Dict{String,String}())
+        @test !haskey(outcome, "error") || outcome["error"] == ""
+        for key in ("sentence", "linked", "hidden", "opens", "both", "cleared")
+            @test get(outcome, key, "missing") == "true"
         end
     end
 end

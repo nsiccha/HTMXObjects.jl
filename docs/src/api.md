@@ -1777,7 +1777,9 @@ and button.
   input names it: `throw(CallerFault(400, "the regimen does not parse";
   param=:regimen))`; a missing or rejected submitted value (`?days=soon` for
   `days::Int`) names its parameter by itself. The page then shows the message
-  under that input's field, marked `aria-invalid`, and a result its tab
+  under that input's field, marked `aria-invalid`, as the answer wrote it: a
+  glossary term in it stays a link whose definition opens only on hover or
+  focus. A result its tab
   already shows stays, faded (`data-htmxo-stale`), instead of being replaced
   by the error; a result asked for the first time shows the error article.
   The page address keeps the value the reader typed, so they can correct it,
