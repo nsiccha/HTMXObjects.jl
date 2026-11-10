@@ -93,6 +93,9 @@ import MIMEs
 # inherits its starter's, and DynamicObjects carries them into deferred and
 # `@queued` work. `Base.ScopedValues` from Julia 1.11, a backport on 1.10.
 import ScopedValues
+# A group summary's leaf value known only within bounds, `lo .. hi`
+# (`ColumnSummary`): the group row shows the range its summary lies in.
+import IntervalSets
 import DynamicObjects: @persist, fetchindex, getstatus, _nested_struct_type
 using HTMX
 import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
@@ -23458,7 +23461,10 @@ function htmxoRescope(rows, from, to) {
 }
 function htmxoJsonList(xs) { return JSON.stringify(xs.map(String)); }
 // A group summary over its leaves' inputs (`_md_summary_value`), folded left
-// to right, and written as the table writes numbers (`_md_summary_cell`).
+// to right, and written as the table writes numbers (`_md_summary_cell`). A
+// leaf known only within bounds comes as `[lo, hi]` (for a :ratio, in the
+// numerator's place); the group's summary is then the range `{lo, hi}`, its
+// low ends and its high ends folded apart.
 function htmxoSummaryValue(reduce, inputs) {
     if (reduce === 'count') return inputs.length;
     if (reduce === 'tally') {
@@ -23467,17 +23473,55 @@ function htmxoSummaryValue(reduce, inputs) {
         inputs.forEach(parts => (parts || []).forEach(([c, n]) => counts.set(c, (counts.get(c) || 0) + n)));
         return counts.size ? counts : null;
     }
+    const lo = v => Array.isArray(v) ? v[0] : v, hi = v => Array.isArray(v) ? v[1] : v;
     if (reduce === 'ratio') {
-        let num = 0, den = 0, any = false;
-        inputs.forEach(v => { if (v && v[0] !== null && v[1] !== null) { num += v[0]; den += v[1]; any = true; } });
-        return any && den !== 0 ? num / den : null;
+        let num = 0, top = 0, den = 0, any = false, ranged = false;
+        inputs.forEach(v => {
+            if (!v || v[0] === null || v[1] === null) return;
+            num += lo(v[0]); top += hi(v[0]); den += v[1]; any = true;
+            ranged = ranged || Array.isArray(v[0]);
+        });
+        if (!any || den === 0) return null;
+        if (!ranged) return num / den;
+        // A negative denominator turns the ends round.
+        return den > 0 ? {lo: num / den, hi: top / den} : {lo: top / den, hi: num / den};
     }
     const xs = inputs.filter(v => v !== null && v !== undefined);
     if (!xs.length) return null;
-    if (reduce === 'min') return Math.min(...xs);
-    if (reduce === 'max') return Math.max(...xs);
-    const sum = xs.reduce((a, b) => a + b);
-    return reduce === 'mean' ? sum / xs.length : sum;
+    const fold = xs => {
+        if (reduce === 'min') return Math.min(...xs);
+        if (reduce === 'max') return Math.max(...xs);
+        const sum = xs.reduce((a, b) => a + b);
+        return reduce === 'mean' ? sum / xs.length : sum;
+    };
+    return xs.some(Array.isArray) ? {lo: fold(xs.map(lo)), hi: fold(xs.map(hi))} : fold(xs);
+}
+// `_md_number_cell`: a group summary's number `x` in `cell` (its text in
+// `target`), and the number the ⬇ CSV writes; a range `{lo, hi}` as both ends
+// joined by the `range` text (`range_signed` with a negative end), sorting by
+// its low end, or as one number when both ends round alike.
+function htmxoSummaryFill(cell, target, x, s, table) {
+    const decimal = htmxoText(table, 'decimal'), thousands = htmxoText(table, 'thousands'), minus = htmxoText(table, 'minus');
+    const text = v => htmxoSummaryText(v, s, decimal, thousands, false, minus), key = v => htmxoSummaryText(v, s, '.', '', true);
+    delete cell.dataset.sortValue;
+    if (x === null) {
+        target.textContent = '';
+        cell.removeAttribute('data-htmxo-number');
+        return;
+    }
+    if (typeof x === 'object') {
+        const lower = text(x.lo), upper = text(x.hi);
+        if (lower !== upper) {
+            const signed = minus !== '' && (lower.startsWith(minus) || upper.startsWith(minus));
+            target.textContent = htmxoText(table, signed ? 'range_signed' : 'range', {lower, upper});
+            cell.dataset.sortValue = key(x.lo);
+            cell.dataset.htmxoNumber = key(x.lo) + '–' + key(x.hi);
+            return;
+        }
+        x = x.lo;
+    }
+    target.textContent = text(x);
+    cell.dataset.htmxoNumber = key(x);
 }
 // `_format_fixed`; `minus` is the sign (a machine-read key keeps `-`).
 function htmxoFixed(x, digits, decimal, thousands, minus = '-') {
@@ -23720,16 +23764,9 @@ function htmxoRegroup(wrapper, levels) {
         cfg.summary.forEach((s, i) => {
             const cell = row.querySelector('[data-htmxo-group-summary="' + i + '"]');
             const x = htmxoSummaryValue(s.reduce, list.map(m => m.values[i]));
-            const decimal = htmxoText(table, 'decimal'), thousands = htmxoText(table, 'thousands'), minus = htmxoText(table, 'minus');
             const target = cell.querySelector('[data-htmxo-summary-value]') || cell;
-            if (s.reduce === 'tally') htmxoTallyFill(cell, x, s, decimal, thousands, level, minus);
-            else if (x === null) {
-                target.textContent = '';
-                cell.removeAttribute('data-htmxo-number');
-            } else {
-                target.textContent = htmxoSummaryText(x, s, decimal, thousands, false, minus);
-                cell.dataset.htmxoNumber = htmxoSummaryText(x, s, '.', '', true);
-            }
+            if (s.reduce === 'tally') htmxoTallyFill(cell, x, s, htmxoText(table, 'decimal'), htmxoText(table, 'thousands'), level, htmxoText(table, 'minus'));
+            else htmxoSummaryFill(cell, target, x, s, table);
         });
         fresh.add(row);
         return id;
@@ -24350,7 +24387,9 @@ names [`interval_sort_keys`](@ref) gives its five orders (`sort_estimate`,
 also names an interval column's bounds with `sort_lower` and `sort_upper`) and
 the text of an estimate with its interval ([`format_interval`](@ref):
 `interval`, `22 (13–34)`, and `interval_signed` for a negative bound,
-`-5 (-8 to -2)`, German `−5 (−8 bis −2)`). Build one with
+`-5 (-8 to -2)`, German `−5 (−8 bis −2)`) and the range a group summary lies
+in when a leaf gives its value as bounds ([`ColumnSummary`](@ref): `range`,
+`9–100`, and `range_signed` for a negative end, `-8 to -2`). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -24363,7 +24402,8 @@ texts take `{name}` (the grouping), `group_level` also `{level}`;
 `rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
 `linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
 take `{name}` (the sort key); `interval` and `interval_signed` take
-`{estimate}`, `{lower}` and `{upper}`. A number in a text is written with
+`{estimate}`, `{lower}` and `{upper}`; `range` and `range_signed` take
+`{lower}` and `{upper}`. A number in a text is written with
 `thousands`, like a group row's own count: `"1.672 von 1.672 Messstellen"`
 under `table_texts(:de)`, `"1,672 of 1,672 rows shown"` under `table_texts(:en)`.
 """
@@ -24411,6 +24451,8 @@ struct TableTexts
     sort_relative_width::String
     interval::String            # an estimate with its interval (`format_interval`)
     interval_signed::String     #   the same with a negative bound, where a dash would read as a minus
+    range::String               # a group summary's range (`ColumnSummary` over a leaf's bounds)
+    range_signed::String        #   the same with a negative end
 end
 
 const _TABLE_TEXT_PLACEHOLDERS = (
@@ -24421,6 +24463,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     rows_failed = (:status,), linked_deep = (:levels,), linked_inside_many = (:count,),
     sort_ascending = (:name,), sort_descending = (:name,),
     interval = (:estimate, :lower, :upper), interval_signed = (:estimate, :lower, :upper),
+    range = (:lower, :upper), range_signed = (:lower, :upper),
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -24468,6 +24511,8 @@ const _TABLE_TEXT_LOCALES = (
         sort_relative_width = "Relative width",
         interval = "{estimate} ({lower}–{upper})",
         interval_signed = "{estimate} ({lower} to {upper})",
+        range = "{lower}–{upper}",
+        range_signed = "{lower} to {upper}",
     ),
     de = (
         search = "Suche",
@@ -24513,6 +24558,8 @@ const _TABLE_TEXT_LOCALES = (
         sort_relative_width = "Relative Breite",
         interval = "{estimate} ({lower}–{upper})",
         interval_signed = "{estimate} ({lower} bis {upper})",
+        range = "{lower}–{upper}",
+        range_signed = "{lower} bis {upper}",
     ),
 )
 
@@ -27103,6 +27150,28 @@ A function may return `nothing` or `missing` for a leaf without a value: that
 leaf is left out (both parts of a `:ratio`). A group without any value, or a
 `:ratio` whose denominators sum to zero, shows an empty cell.
 
+A leaf whose value is known only within bounds returns them as an interval,
+`lo .. hi` (IntervalSets.jl; any of its intervals), from the function of a
+`:sum`, `:mean`, `:min` or `:max`, or from a `:ratio`'s numerator. The group
+row then shows the range its summary must lie in, `9–100`: the low ends and the
+high ends are summed (averaged, …) apart, Σ low / Σ denominator to Σ high /
+Σ denominator for a `:ratio`. Both ends are rounded as below and joined by the
+table's `range` text (`range_signed` when an end is negative: `-8 to -2`,
+German `−8 bis −2`); when they round to the same number, the cell shows that
+number alone. A range sorts by its low end, and the ⬇ CSV writes both ends,
+`9–100`. A progress share whose unknown steps may be anywhere from not started
+to done:
+
+```julia
+using IntervalSets
+ColumnSummary(:ratio, s -> isnothing(s.share) ? 0 .. s.months : s.share * s.months, s -> s.months)
+```
+
+An interval as a `:ratio`'s denominator or as the number of a `:tally`
+category (`category => number`) throws, as does an empty one (`lo > hi`); an
+interval with an end that is not finite leaves its leaf out, like a number that
+is not finite.
+
 A `:tally` cell shows the group's total, then a small stacked bar: one
 segment per category, as long as its count, and the whole bar as long as the
 total on a scale the group rows of one level share, so groups compare at a
@@ -27157,18 +27226,44 @@ const _SUMMARY_ARITY = (sum=1, mean=1, min=1, max=1, count=0, ratio=2, tally=1)
 # A leaf's number for a summary: `nothing` when it has none.
 _md_summary_number(::Union{Nothing,Missing}) = nothing
 _md_summary_number(x::Real) = isfinite(x) ? Float64(x) : nothing
+_md_summary_number(x::IntervalSets.AbstractInterval) = throw(ArgumentError(string(
+    "ColumnSummary: an interval lo .. hi is a value only of a :sum, :mean, :min or :max, ",
+    "or a :ratio's numerator; got ", repr(x))))
 _md_summary_number(x) = throw(ArgumentError(string(
     "ColumnSummary: a value must be a real number, nothing or missing; got ", repr(x))))
 
-# What one leaf contributes to a summary: nothing for :count, a number, a
-# (numerator, denominator) pair for :ratio, or its categories with their
-# numbers for :tally. The browser reads the same values from the leaf's
-# `data-htmxo-leaf-values`.
+# The bounds a leaf's value is known within (`lo .. hi`), and a group's range
+# folded from them: its low end and its high end.
+struct _SummaryRange
+    lo::Float64
+    hi::Float64
+end
+_md_lo(x::Float64) = x
+_md_lo(r::_SummaryRange) = r.lo
+_md_hi(x::Float64) = x
+_md_hi(r::_SummaryRange) = r.hi
+# A leaf's value for a :sum, :mean, :min, :max or a :ratio's numerator: a
+# number, the bounds it lies within, or `nothing` when it has none (an end
+# that is not finite, like a number that is not finite).
+_md_summary_bounded(x::Union{Nothing,Missing,Real}) = _md_summary_number(x)
+function _md_summary_bounded(x::IntervalSets.AbstractInterval)
+    isempty(x) && throw(ArgumentError(string("ColumnSummary: the interval ", repr(x),
+        " is empty; give the bounds as lo .. hi with lo <= hi")))
+    lo, hi = map(_md_summary_number, IntervalSets.endpoints(x))
+    isnothing(lo) || isnothing(hi) ? nothing : _SummaryRange(lo, hi)
+end
+_md_summary_bounded(x) = throw(ArgumentError(string(
+    "ColumnSummary: a value must be a real number, an interval lo .. hi, nothing or missing; got ", repr(x))))
+
+# What one leaf contributes to a summary: nothing for :count, a number (or
+# its bounds), a (numerator, denominator) pair for :ratio, or its categories
+# with their numbers for :tally. The browser reads the same values from the
+# leaf's `data-htmxo-leaf-values`.
 _md_summary_input(s::ColumnSummary, item) = _md_summary_input(Val(s.reduce), s, item)
 _md_summary_input(::Val{:count}, s, item) = nothing
-_md_summary_input(::Val{:ratio}, s, item) = (_md_summary_number(s.values[1](item)), _md_summary_number(s.values[2](item)))
+_md_summary_input(::Val{:ratio}, s, item) = (_md_summary_bounded(s.values[1](item)), _md_summary_number(s.values[2](item)))
 _md_summary_input(::Val{:tally}, s, item) = _md_tally_parts(only(s.values)(item))
-_md_summary_input(::Val, s, item) = _md_summary_number(only(s.values)(item))
+_md_summary_input(::Val, s, item) = _md_summary_bounded(only(s.values)(item))
 
 # A leaf's categories for a :tally, each with its number: a category counts
 # one, `category => number` adds that number, a collection holds several;
@@ -27190,24 +27285,36 @@ _md_tally_part!(parts, (c, n)::Pair) = let x = _md_summary_number(n)
 end
 _md_tally_part!(parts, c) = push!(parts, c => 1.0)
 
+# Bounds go to the browser as `[lo, hi]`; for a :ratio, in the numerator's place.
 _md_summary_wire(x) = x
+_md_summary_wire(r::_SummaryRange) = [r.lo, r.hi]
+_md_summary_wire((a, b)::Tuple{Any,Any}) = (_md_summary_wire(a), b)
 _md_summary_wire(parts::Vector{Pair{Any,Float64}}) = [(string(c), n) for (c, n) in parts]
 
 # A group's summary over its leaves' inputs, folded left to right as the
-# browser does (`htmxoSummaryValue`), so both round the same number.
+# browser does (`htmxoSummaryValue`), so both round the same number. With a
+# leaf known only within bounds, the group's summary is a range: each reduce
+# moves the same way as every leaf's value, so the low ends fold to its low
+# end and the high ends to its high end.
 _md_summary_value(s::ColumnSummary, inputs) = _md_summary_value(Val(s.reduce), inputs)
 _md_summary_value(::Val{:count}, inputs) = Float64(length(inputs))
 function _md_summary_value(::Val{:ratio}, inputs)
-    num, den, any = 0.0, 0.0, false
+    num, top, den, any, ranged = 0.0, 0.0, 0.0, false, false
     for (a, b) in inputs
         (isnothing(a) || isnothing(b)) && continue
-        num += a; den += b; any = true
+        num += _md_lo(a); top += _md_hi(a); den += b; any = true
+        ranged |= a isa _SummaryRange
     end
-    any && den != 0 ? num / den : nothing
+    any && den != 0 || return nothing
+    ranged || return num / den
+    # A negative denominator turns the ends round.
+    den > 0 ? _SummaryRange(num / den, top / den) : _SummaryRange(top / den, num / den)
 end
 function _md_summary_value(v::Val, inputs)
-    xs = Float64[x for x in inputs if !isnothing(x)]
-    isempty(xs) ? nothing : _md_reduce(v, xs)
+    xs = Any[x for x in inputs if !isnothing(x)]
+    isempty(xs) && return nothing
+    any(x -> x isa _SummaryRange, xs) || return _md_reduce(v, Float64[x for x in xs])
+    _SummaryRange(_md_reduce(v, Float64[_md_lo(x) for x in xs]), _md_reduce(v, Float64[_md_hi(x) for x in xs]))
 end
 # A group's :tally: each category's number added up over its leaves, keyed
 # by the category's text (as the browser keys it), in first-appearance order.
@@ -27291,8 +27398,11 @@ end
 # (`data-htmxo-number`: the same rounded number with a `.`, no grouping and no
 # power of ten). `attrs` mark a group row's cell for the browser's regroup;
 # `wrap` puts the value in an element of its own, which a cell whose row adds
-# controls to it (a group row's first cell) needs. `htmxoSummaryText` and
-# `htmxoTallyFill` fill the cells of the rows `htmxoRegroup` builds the same way.
+# controls to it (a group row's first cell) needs. A range (a leaf known only
+# within bounds) writes both ends with the `range` text, `9–100`, sorts by its
+# low end (`data-sort-value`) and goes to the CSV as `9–100`; it is one number
+# when both ends round alike. `htmxoSummaryFill` and `htmxoTallyFill` fill the
+# cells of the rows `htmxoRegroup` builds the same way.
 _md_summary_cell(s::ColumnSummary, x, texts::TableTexts, attrs; kw...) =
     _md_summary_cell(Val(s.reduce), s, x, texts, attrs; kw...)
 _md_summary_cell(::Val, s, x, texts, attrs; wrap=false, kw...) = _md_number_cell(s, x, texts, attrs, wrap)
@@ -27300,6 +27410,19 @@ _md_number_cell(s, ::Nothing, texts, attrs, wrap) = h.td(wrap ? h.span(; data_ht
 _md_number_cell(s, x::Float64, texts, attrs, wrap) = let text = _format_finite(x, texts, s.rounding)
     h.td(wrap ? h.span(text; data_htmxo_summary_value="") : text; attrs..., data_htmxo_number=_summary_key(x, s.rounding))
 end
+function _md_number_cell(s, r::_SummaryRange, texts, attrs, wrap)
+    lower, upper = _format_finite(r.lo, texts, s.rounding), _format_finite(r.hi, texts, s.rounding)
+    lower == upper && return _md_number_cell(s, r.lo, texts, attrs, wrap)
+    text = _range_text(texts, lower, upper)
+    low = _summary_key(r.lo, s.rounding)
+    h.td(wrap ? h.span(text; data_htmxo_summary_value="") : text; attrs..., data_sort_value=low,
+         data_htmxo_number=string(low, "–", _summary_key(r.hi, s.rounding)))
+end
+# Two written ends of a range, joined as `format_interval` joins an interval's
+# bounds: a word where an end's minus would make a dash read as a minus.
+_range_text(texts::TableTexts, lower, upper) = _table_text(texts,
+    !isempty(texts.minus) && (startswith(lower, texts.minus) || startswith(upper, texts.minus)) ? :range_signed : :range;
+    lower, upper)
 # A :tally cell: the total, then a bar of one segment per category with a
 # count. The bar is as long as the total on the scale of the column's rows of
 # its level: `scale` ("<column>-<level>", from 0 and 1) names the custom

@@ -1116,6 +1116,29 @@ transactions_table(group_by=["Counterparty"]) = master_detail_table(
   that with `ColumnSummary(:sum, r -> r.estimate; sigdigits = 2)`: `29.000`,
   not `29.210`. Group rows sort among themselves by the same columns; leaves
   sort within their group.
+- **A value known only within bounds: an interval `lo .. hi`.** A leaf whose
+  value is not known exactly (an unfinished step's reached months, a cost
+  between two quotes) returns its bounds as an interval from IntervalSets.jl,
+  from the function of a `:sum`, `:mean`, `:min` or `:max` or from a
+  `:ratio`'s numerator. The group row then shows the range its summary must
+  lie in: the low ends and the high ends are folded apart, Σ low / Σ
+  denominator to Σ high / Σ denominator for a `:ratio`, and both ends are
+  rounded and written as above, joined by the table's `range` text (`9–100`;
+  `range_signed` when an end is negative, `-8 to -2`, German `−8 bis −2`).
+  When both ends round to the same number, the cell shows that number, so a
+  group whose leaves are all known reads as before. The range sorts by its
+  low end, and the CSV download writes both ends, `9–100`. Never leave such a
+  leaf out (its group overstates) or count it as 0 (it understates, unmarked):
+
+  ```julia
+  using IntervalSets
+  group_summary = ["Progress (%)" => ColumnSummary(:ratio,
+      s -> isnothing(s.share) ? 0 .. 100s.months : 100s.share * s.months,  # unknown: 0 to done
+      s -> s.months)]
+  ```
+
+  An interval as a `:ratio`'s denominator or as a `:tally` category's number
+  throws, as does an empty one (`lo > hi`).
 - **A column of categories: `ColumnSummary(:tally, …)`.** For a status, a
   class or any other category, `ColumnSummary(:tally, item -> category;
   order = [...], label = c -> "…", color = c -> "…")` counts the group's leaves

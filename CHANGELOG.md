@@ -14,6 +14,25 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.98
+
+- A group summary over values known only within bounds shows the range it lies in.
+  A `ColumnSummary(:sum | :mean | :min | :max, …)` function, or a `:ratio`'s
+  numerator, may return an interval `lo .. hi` (IntervalSets.jl, a new dependency) for
+  a leaf whose value is not known exactly. The group row then shows `9–100`: the low
+  ends and the high ends folded apart (Σ low / Σ denominator to Σ high / Σ denominator
+  for a `:ratio`), each rounded by `digits`/`sigdigits`, or one number when both ends
+  round alike. The server render, Markdown and PDF, `summary_cell` and the browser's
+  regroup write the same text. A range sorts by its low end, and the ⬇ CSV writes
+  `9–100`. Two new `TableTexts` texts join the ends: `range` (`{lower}–{upper}`) and
+  `range_signed` for a negative end (`{lower} to {upper}`, German `{lower} bis
+  {upper}`). An interval as a `:ratio` denominator or a `:tally` number throws, as does
+  an empty interval. Before, any non-number threw `ColumnSummary: a value must be a
+  real number, nothing or missing`, so a leaf of unknown value could only be left out
+  (a group of unfinished steps read `100`) or counted as 0 (`9`, an unmarked
+  understatement). Snag `columnsummary-ra-702fd9be` (ProjectPlans' work-package
+  progress).
+
 ## 0.1.97
 
 - With `configure_job_queue!(; workers=1)`, a worker-bound body can build links and forms

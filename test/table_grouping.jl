@@ -2200,6 +2200,75 @@ end
         detail=t -> "", group_summary=["B" => ColumnSummary(:count)])
 end
 
+@testitem "bounded group summaries: a leaf known within lo .. hi gives its group a range" setup=[GroupingFixtures] tags=[:unit] begin
+    using HTMXObjects, IntervalSets
+    import HTMXObjects: h, to_markdown_string
+    html(x) = repr("text/html", x)
+    row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
+    # ProjectPlans' toy plan (snag columnsummary-ra-702fd9be): AP 1 is one done
+    # step of 2 months and seven in-progress steps of 3 months each without a
+    # known share; AP 2 is done, half done and not started, 4 months each.
+    steps = [(; id="a1", wp="AP 1", months=2.0, share=1.0);
+             [(; id="a$(i + 1)", wp="AP 1", months=3.0, share=nothing) for i in 1:7];
+             (; id="b1", wp="AP 2", months=4.0, share=1.0); (; id="b2", wp="AP 2", months=4.0, share=0.5);
+             (; id="b3", wp="AP 2", months=4.0, share=0.0)]
+    progress = ColumnSummary(:ratio, s -> isnothing(s.share) ? 0 .. 100s.months : 100s.share * s.months, s -> s.months)
+    ap(wp) = filter(s -> s.wp == wp, steps)
+    # Unknown steps count as nothing reached at the low end (2/23) and as done
+    # at the high end (23/23): the range, sorting by its low end, both ends to
+    # the CSV. A group of known shares reads as before.
+    @test html(summary_cell(progress, ap("AP 1"))) == "<td data-sort-value=\"9\" data-htmxo-number=\"9–100\">9–100</td>"
+    @test html(summary_cell(progress, ap("AP 2"))) == "<td data-htmxo-number=\"50\">50</td>"
+    # Each reduce folds the low ends and the high ends apart; ends that round
+    # alike are one number.
+    mixed = Any[1.0, 2 .. 5, 3.0]
+    cell(reduce, xs=mixed; texts=table_texts(), kw...) = html(summary_cell(ColumnSummary(reduce, identity; kw...), xs; texts))
+    @test cell(:sum) == "<td data-sort-value=\"6\" data-htmxo-number=\"6–9\">6–9</td>"
+    @test contains(cell(:mean), ">2–3</td>") && contains(cell(:max), ">3–5</td>")
+    @test cell(:min) == "<td data-htmxo-number=\"1\">1</td>"
+    @test cell(:sum, [10.2 .. 10.4]) == "<td data-htmxo-number=\"10\">10</td>"
+    @test cell(:sum, Any[3 .. 3, 1.0]) == "<td data-htmxo-number=\"4\">4</td>"
+    # A negative end turns the dash into a word, as in an interval cell;
+    # German writes its decimals, minus sign and word, the CSV `.` and `-`.
+    @test cell(:sum, [-8 .. -2]) == "<td data-sort-value=\"-8\" data-htmxo-number=\"-8–-2\">-8 to -2</td>"
+    @test cell(:sum, [-8.25 .. -1.75]; digits=1, texts=table_texts(:de)) ==
+        "<td data-sort-value=\"-8.3\" data-htmxo-number=\"-8.3–-1.8\">−8,3 bis −1,8</td>"
+    @test cell(:sum, [0.25 .. 1.75]; digits=1, texts=table_texts(:de)) ==
+        "<td data-sort-value=\"0.3\" data-htmxo-number=\"0.3–1.8\">0,3–1,8</td>"
+    @test contains(cell(:sum, [29_210 .. 41_870]; sigdigits=2), ">29,000–42,000</td>")
+    # A negative denominator turns the ends round; an end that is not finite
+    # leaves its leaf out, like a number that is not finite.
+    @test contains(html(summary_cell(ColumnSummary(:ratio, first, last; digits=1), [(0 .. 3, -3.0)])), ">-1.0 to 0.0</td>")
+    @test cell(:sum, Any[0 .. Inf, 2.0]) == "<td data-htmxo-number=\"2\">2</td>"
+    # In a regroupable table: the group row's cell, the leaves' wire (bounds in
+    # the numerator's place), Markdown, and groups sorted by the low end.
+    plan(; kw...) = master_detail_table(["Step", "Progress (%)"], steps; key=s -> s.id,
+        master=s -> (h.td(s.id), h.td(isnothing(s.share) ? "–" : string(round(Int, 100s.share)))),
+        groupings=["Work package" => s -> s.wp, "None" => nothing], group_by=["Work package"],
+        group_summary=["Progress (%)" => progress], id="plan", kw...)
+    page = html(plan())
+    @test contains(row(page, group_row(page, "AP 1")),
+        "<td data-htmxo-group-summary=\"0\" data-sort-value=\"9\" data-htmxo-number=\"9–100\">9–100</td>")
+    @test contains(row(page, group_row(page, "AP 2")), "<td data-htmxo-group-summary=\"0\" data-htmxo-number=\"50\">50</td>")
+    @test contains(page, "data-htmxo-leaf-values=\"[[[0.0,300.0],3.0]]\"") && contains(page, "data-htmxo-leaf-values=\"[[200.0,2.0]]\"")
+    @test contains(html(master_detail_table(["Step", "Months"], steps; key=s -> s.id, master=s -> (h.td(s.id), h.td("")),
+        groupings=["Work package" => s -> s.wp, "None" => nothing],
+        group_summary=["Months" => ColumnSummary(:sum, s -> isnothing(s.share) ? 0 .. s.months : s.months)])),
+        "data-htmxo-leaf-values=\"[[0.0,3.0]]\"")
+    @test contains(to_markdown_string(plan()), "9–100")
+    groups(page) = [m[1] for m in eachmatch(r"<tr id=\"row-plan--group--([^\"]*)\"", table_rows(page))]
+    # By the low end, AP 1 (9) comes after AP 2 (50) when descending; its high
+    # end (100) or middle (54.5) would put it first.
+    @test groups(html(plan(default_sort="Progress (%)" => :desc))) == ["AP--2", "AP--1"]
+    @test groups(html(plan(default_sort="Progress (%)" => :asc))) == ["AP--1", "AP--2"]
+    # Refused: an empty interval, an interval as a denominator or as a tally's
+    # number, and a value that is neither a number nor an interval.
+    @test_throws "is empty" summary_cell(ColumnSummary(:sum, identity), [3 .. 1])
+    @test_throws "numerator" summary_cell(ColumnSummary(:ratio, first, last), [(1.0, 0 .. 2)])
+    @test_throws "numerator" summary_cell(ColumnSummary(:tally, x -> ["a" => x]), [0 .. 1])
+    @test_throws "an interval lo .. hi" summary_cell(ColumnSummary(:sum, identity), ["3"])
+end
+
 @testitem "tally group summaries: a categorical column counted per category" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h, to_markdown_string
@@ -2751,6 +2820,69 @@ end
                                HTMXObjects._summary_key(x, HTMXObjects._SigDigits(k)) for (x, k) in cases]
                 @test length(browser) == length(cases)
                 @test [(cases[i], browser[i], server_side[i]) for i in eachindex(cases, browser) if browser[i] != server_side[i]] == []
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
+@testitem "bounded group summaries regroup in the browser browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets, IntervalSets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # p1's and p5's amounts are known within 5 either way. p3's share lies
+        # anywhere from 0 to 100, p6's from 49.6 to 50.4 (both ends round to 50).
+        amount(t) = t.id in ("p1", "p5") ? (t.amount - 5) .. (t.amount + 5) : t.amount
+        share(t) = t.id == "p3" ? 0 .. 100 : t.id == "p6" ? 49.6 .. 50.4 : 50.0
+        table(group_by) = regroup_table(; group_by, id="r", texts=table_texts(:de), group_summary=[
+            "Amount" => ColumnSummary(:sum, amount; digits=1),
+            "IBAN" => ColumnSummary(:ratio, share, _ -> 1.0)])
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            const s = () => document.getElementById('r').closest('[data-htmxo-grouped]');
+            const levels = v => v === 'none' ? [] : [v];
+            const regroup = v => htmxoGroupRequest(s().querySelector('.htmxo-group-pills'), levels(v), null);
+            for (const v of ['iban', 'rule', 'media', 'none', 'party'])
+                (regroup(v), check('parity-' + v, await parity(s(), '/r?group_by=' + v)));
+            const cell = (id, i) => document.getElementById('row-' + id).querySelector('[data-htmxo-group-summary="' + i + '"]');
+            const acme = cell('r--group--Acme', 0), prime = cell('r--group--Acme--Prime', 1), bakery = cell('r--group--Bakery', 1);
+            check('range', acme.textContent === '−105,0 bis −95,0' && acme.dataset.htmxoNumber === '-105.0–-95.0' &&
+                acme.dataset.sortValue === '-105.0' || acme.outerHTML);
+            check('share', prime.textContent === '0–100' && prime.dataset.htmxoNumber === '0–100' && prime.dataset.sortValue === '0' || prime.outerHTML);
+            check('alike', bakery.textContent === '50' && bakery.dataset.htmxoNumber === '50' && !('sortValue' in bakery.dataset) || bakery.outerHTML);
+            // Sorting by Amount orders the groups by their low ends: Acme
+            // (−105), Bakery (−100), Prime Video (−55), Acme Prime (−30).
+            s().querySelectorAll('thead th')[2].click();
+            const groups = Array.from(s().querySelector('table').tBodies[0].rows).filter(r => r.getAttribute('aria-level') === '1').map(r => r.id).join(',');
+            check('sorted', groups === 'row-r--group--Acme,row-r--group--Bakery,row-r--group--Prime--Video,row-r--group--Acme--Prime' || groups);
+            finish();
+        });
+        """))
+        page = repr("text/html", htmx(table(["party"]), driver;
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            levels = [String(last(p)) for p in HTTP.queryparampairs(uri) if first(p) == "group_by"]
+            uri.path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html"], page) :
+            uri.path == "/r" ? HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", table(levels))) :
+            HTTP.Response(404)
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 9
             end
         finally
             close(server)
