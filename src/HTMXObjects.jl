@@ -1341,6 +1341,23 @@ function _param_request_of(obj, snapshot)
     req === nothing ? snapshot : req
 end
 
+# The request input `obj` answers: its live request, or in DynamicObjects'
+# worker process the snapshot it carries (`__param_request__`); `nothing`
+# outside any request. A helper that reads what the request submitted
+# (`query_url(path, obj)`, `hidden_inputs(obj)`, `record_view`) reads it here,
+# so a worker-bound body gets the same answer as one in this process.
+_request_input_of(obj) = _param_request_of(obj,
+    hasproperty(obj, :__param_request__) ? getproperty(obj, :__param_request__) : nothing)
+
+# Whether the request `obj` answers set query parameter `name`. Outside any
+# request nothing was set.
+function _query_param_set(obj)
+    req = _request_input_of(obj)
+    req === nothing ? (_ -> false) : let present = queryparams(req)
+        name -> haskey(present, String(name))
+    end
+end
+
 # Streaming route macros and the handle variable their bodies receive.
 const _STREAM_BODY_VARS = Dict(Symbol("@ws") => :__ws__, Symbol("@sse") => :__sse__)
 
@@ -10837,8 +10854,7 @@ end
 # `obj` as it answers a request that carries `values` for its `@param`s (raw
 # wire strings or typed values) in place of its request's own.
 function _record_view(obj, values::AbstractDict)
-    snapshot = hasproperty(obj, :__param_request__) ? getproperty(obj, :__param_request__) : nothing
-    req = _param_request_of(obj, snapshot)
+    req = _request_input_of(obj)
     names = Set{String}(string(key) for key in keys(values))
     pairs = Pair{String,String}[p for p in _request_param_pairs(req) if !(first(p) in names)]
     for (field, value) in values
@@ -28474,8 +28490,9 @@ hidden_inputs(; kwargs...) = mapreduce(((k, v),) -> _hidden_input(k, v), vcat, k
 
 Object-form of [`hidden_inputs`](@ref) — the GET-form hop symmetric to
 [`query_url(path, obj)`](@ref). Emit a hidden `<input>` for every `@param`
-declared on `obj`'s type that is actually present in the inbound request
-(`_req_of(obj)`) — exactly the set `query_url(path, obj)` forwards into a URL.
+declared on `obj`'s type that is actually present in the inbound request's
+query — exactly the set `query_url(path, obj)` forwards into a URL, in a
+worker-bound body as in this process.
 **Zero consumer burden:** pass the route object and the framework collects the
 params the user set; there is no hand-listed set of hidden inputs to drift out
 of sync with the `@param` block.
@@ -28499,11 +28516,11 @@ function hidden_inputs(obj; skip=(), overrides...)
     names = _param_names(typeof(obj))
     skipset = Set{Symbol}(Symbol(s) for s in skip)
     override_keys = Set(keys(overrides))
-    present = queryparams(_req_of(obj))
+    is_set = _query_param_set(obj)
     kws = Pair{Symbol,Any}[]
     for n in names
         (n in skipset || n in override_keys) && continue
-        haskey(present, String(n)) || continue
+        is_set(n) || continue
         push!(kws, n => getproperty(obj, n))
     end
     for (k, v) in pairs(overrides)
@@ -28787,23 +28804,26 @@ end
     query_url(path, obj; overrides...) -> String
 
 Build a URL from `path`, auto-collecting every `@param` declared on `obj`'s type
-that is actually present in the inbound request (`_req_of(obj)`). Params with
+that is actually present in the inbound request's query. Params with
 no declared `@param` are ignored; params not present in the request are omitted
 (so the URL only carries what the user explicitly set, and defaults remain
 implicit). Explicit `overrides` always win and are emitted even if absent from
 the request.
 
-Presence is checked against `queryparams(_req_of(obj))` regardless of the
-inbound request method — `query_url` always builds GET-style URLs.
+Presence is checked against the request's query regardless of the inbound
+request method — `query_url` always builds GET-style URLs. In a worker-bound
+body (`configure_job_queue!(; workers=1)`) that is the query the object's
+request snapshot carries, so the URL is the one this process would build.
+Outside any request nothing was set, and only the `overrides` are emitted.
 """
 function query_url(path, obj; overrides...)
     names = _param_names(typeof(obj))
     override_keys = Set(keys(overrides))
-    present = queryparams(_req_of(obj))
+    is_set = _query_param_set(obj)
     kws = Pair{Symbol,Any}[]
     for n in names
         n in override_keys && continue
-        haskey(present, String(n)) || continue
+        is_set(n) || continue
         push!(kws, n => getproperty(obj, n))
     end
     for (k, v) in pairs(overrides)

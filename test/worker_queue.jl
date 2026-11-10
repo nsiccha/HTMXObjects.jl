@@ -404,3 +404,69 @@ end
         end
     end
 end
+
+# Snag `query-url-in-a-w-b1bfa0bb`: `query_url(path, obj)`, `query_url(obj; …)`,
+# `hidden_inputs(obj)` and `get_form(…; obj)` forward the `@param`s the request
+# set. In the worker an object has no live request, only its snapshot
+# (`__param_request__`); before, each raised `MethodError: queryparams(::Nothing)`.
+@testitem "links and forms built from an object forward the request's parameters in the worker as in this process" setup=[FreshTransportFixtures, WorkerAppFixtures] tags=[:integration, :workers] begin
+    using HTMXObjects, HTTP, Test
+    import HTMXObjects: _clear_operation_polls!
+
+    if !HTMXObjects._has_queue_workers()
+        @test_skip "DynamicObjects before 0.5.7: no worker executor"
+    else
+        try
+            seen = Dict{Int,String}()
+            for workers in (0, 1)
+                configure_job_queue!(; workers)
+                _clear_operation_polls!()
+                route!(WorkerApp.LinkApp(); root_provider=RootProvider())
+                answer = body_text(dispatch(:GET, "/sweep/links?dataset=tiny&cursor=2&band=high";
+                    operation_policy=:blocking))
+                m = match(r"links pid=(\d+)", answer)
+                m === nothing && error("workers=$workers answered no links:\n$answer")
+                @test (parse(Int, only(m.captures)) == getpid()) == (workers == 0)
+                seen[workers] = replace(answer, r"pid=\d+" => "pid")
+            end
+            @test seen[0] == seen[1]
+            answer = seen[1]
+            # What the request set travels; `level`, left at its default, stays implicit.
+            # A URL's parameters, in whatever order `query_url` writes them.
+            href(id) = replace(only(match(Regex("id=\"$id\" href=\"([^\"]*)\""), answer).captures), "&amp;" => "&")
+            query(url) = (split(url, '?')[1], Set(split(split(url, '?')[2], '&')))
+            @test query(href("report")) == ("/sweep/report/high", Set(["dataset=tiny", "cursor=2", "force=false"]))
+            @test query(href("next")) == ("/sweep/links", Set(["dataset=tiny", "cursor=3"]))
+            @test contains(answer, r"name=\"dataset\"[^>]*value=\"tiny\"|value=\"tiny\"[^>]*name=\"dataset\"")
+            @test contains(answer, r"name=\"cursor\"[^>]*value=\"2\"|value=\"2\"[^>]*name=\"cursor\"")
+            @test contains(answer, r"name=\"cursor\"[^>]*value=\"1\"|value=\"1\"[^>]*name=\"cursor\"")
+            @test !contains(answer, "name=\"level\"")
+            @test !contains(answer, "MethodError")
+        finally
+            configure_job_queue!(; workers=0, worker_stall=Inf)
+            _clear_operation_polls!()
+        end
+    end
+end
+
+@testitem "an object with only its request snapshot forwards what that request set; one with no request forwards nothing" setup=[WorkerAppFixtures] tags=[:unit] begin
+    using HTMXObjects, Test, HTTP
+    import HTMXObjects: _param_request
+    req = HTTP.Request("GET", "/sweep/links?dataset=tiny&cursor=2")
+    # As DynamicObjects' worker rebuilds it: the snapshot, no live request.
+    snapshot_only = WorkerApp.LinkApp(; __param_request__=_param_request(req))
+    @test snapshot_only.__req__ === nothing
+    child = snapshot_only.sweep
+    query(url) = (split(url, '?')[1], Set(split(split(url, '?')[2], '&')))
+    @test query(query_url("/r", child; force=false)) == ("/r", Set(["dataset=tiny", "cursor=2", "force=false"]))
+    html(nodes) = join(repr(MIME"text/html"(), n) for n in nodes)
+    @test html(hidden_inputs(child)) == html(hidden_inputs(; dataset="tiny", cursor=2))
+    # The live request wins over a snapshot, as for the `@param` values themselves.
+    live = HTTP.Request("GET", "/sweep/links?level=2")
+    remounted = DynamicObjects.remount(snapshot_only; __req__=live)
+    @test query_url("/r", remounted.sweep) == "/r?level=2"
+    # Outside any request nothing was set: only the overrides travel.
+    plain = WorkerApp.LinkApp()
+    @test query_url("/r", plain.sweep; cursor=4) == "/r?cursor=4"
+    @test isempty(hidden_inputs(plain.sweep))
+end

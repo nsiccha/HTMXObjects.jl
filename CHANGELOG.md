@@ -14,6 +14,17 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.97
+
+- With `configure_job_queue!(; workers=1)`, a worker-bound body can build links and forms
+  from its object as a body in this process does. `query_url(path, obj)`,
+  `query_url(obj; …)`, `hidden_inputs(obj)` and `get_form`/`post_form(…; obj)` forward
+  the `@param`s the request set. In the worker an object has no live request, only the
+  request's `@param` input (0.1.68), and these read that input now. Before, each raised
+  `MethodError: no method matching queryparams(::Nothing)` and the route answered 500.
+  Outside any request they forward only their overrides; they raised that `MethodError`
+  too. Snag `query-url-in-a-w-b1bfa0bb` (Bruno's QT memo routes).
+
 ## 0.1.96
 
 - A list of records: `@param scenarios::Records = Records(:regimen, :age, :weight;
