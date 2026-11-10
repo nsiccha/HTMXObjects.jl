@@ -704,7 +704,10 @@ end
                     try
                         @test timedwait(() -> isready(receipt) || process_exited(browser), 60; pollint=0.05) === :ok
                         @test isready(receipt)
-                        isready(receipt) && @test take!(receipt) == "ready=true"
+                        # _hyperscript initialized the content. While the
+                        # control loops, the probe may catch it mid-replacement.
+                        ready = isready(receipt) ? take!(receipt) : ""
+                        guard && @test ready == "ready=true"
                     finally
                         process_exited(browser) || kill(browser)
                         wait(browser)
