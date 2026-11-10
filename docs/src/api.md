@@ -1622,9 +1622,10 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select, presentation, shared, active, url_state, sections)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface. `presentation=:tabs` makes it an app page: shared inputs in a sidebar, one tab per operation, results that follow their inputs, inputs kept in the page address, inputs grouped under headings with `sections=[InputSection(heading, names), …]` (see [An app page](@ref semantic-tabs)) |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select, presentation, shared, active, url_state, sections, place)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface. `presentation=:tabs` makes it an app page: shared inputs in a sidebar, one tab per operation, results that follow their inputs, inputs kept in the page address, inputs grouped under headings with `sections=[InputSection(heading, names), …]` (see [An app page](@ref semantic-tabs)) |
 | `semantic_control(obj, ::Val{name}, control)` | Hook: define a method to render one input of your struct your own way in every generated form |
 | `InputSection(heading, names; settings=false)` | A headed group of inputs on an app page (`semantic_app(…; presentation=:tabs, sections)`); `settings=true` sections come after the others |
+| `set_inputs(; inputs...)` | In a mutation's answer: set inputs of the app page it lands on (`set_inputs(fit = name)` chooses the fit it added) |
 | `semantic_follow_script()` | The page runtime that keeps a `presentation=:tabs` page's results on their inputs and its inputs in the page address (the `htmx()` shell installs it) |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
@@ -1782,6 +1783,39 @@ and button.
   inline, polled and worker-process answers alike. The htmx answer carries
   `X-HTMXO-Error-Param: regimen` and its article `data-htmxo-param`; the
   `?plain` / Markdown answer is unchanged (the 400 and its message).
+- **A choice made in a table** (from 0.1.95). An `@options` domain whose
+  records carry `columns` is drawn as a table of its options, one row each,
+  the option's label first and its columns after it:
+
+  ```julia
+  @options(fit) = option_domain([(value = name, label = summary(name).label,
+      columns = (Model = summary(name).model, Subjects = summary(name).n,
+                 Draws = summary(name).draws)) for name in fits])
+  ```
+
+  A click on a row, or Enter on a focused row, chooses it; its radio button
+  keeps the keyboard of a radio group (Tab, the arrow keys). The chosen row is
+  marked. It is a [`sortable_table`](@ref): its headers sort, numbers sort by
+  value and align right, and a table of more than `radio_max` options gets
+  the search field. Everything else is as for pills: results follow it, the
+  page address keeps it, `@relevant` hides it. `columns` may be a
+  `NamedTuple` or `name => value` pairs; an option without one leaves its
+  cells empty.
+- **An input in an operation's tab** (from 0.1.95). `place=(fit = :upload,)`
+  draws the control of the sidebar input `fit` in the `upload` operation's
+  tab, above its form, instead of in the sidebar: a table of fits beside the
+  form that adds one. It stays an input of the sidebar's form (its fields
+  name it with `form=`), so every result that reads it follows it, the
+  address keeps it and its control refreshes as before. Only a sidebar input
+  can be placed, and only in a tab of the page; `render_operation` receives
+  the placed controls as `entry.placed`. A sidebar whose inputs are all
+  placed is not drawn, and its form stays on the page as their owner
+  (`parts.context`).
+- **A mutation that chooses what it added** (from 0.1.95). Its answer
+  carries [`set_inputs`](@ref): `h.div(h.p("Added ", name), set_inputs(fit
+  = name))`. The page sets the input once its control offers the value, which
+  the refresh after a mutation brings, and follows the change as if the
+  reader had made it.
 - **Sections** (from 0.1.93). `sections=` groups inputs under headings,
   wherever the page places them, in the sidebar or a tab:
 
@@ -2227,6 +2261,7 @@ application_explorer_styles
 ReflectionRoutes
 semantic_app
 InputSection
+set_inputs
 operation_form
 semantic_control
 semantic_follow_script
