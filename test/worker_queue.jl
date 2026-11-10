@@ -321,3 +321,48 @@ end
         _clear_operation_polls!()
     end
 end
+
+@testitem "a server fault raised in a worker shows its cause where the app shows causes" setup=[FreshTransportFixtures, WorkerAppFixtures] tags=[:integration, :workers] begin
+    using HTMXObjects, HTTP, Test
+    import HTMXObjects: _clear_operation_polls!
+
+    if !HTMXObjects._has_queue_workers()
+        @test_skip "DynamicObjects before 0.5.7: no worker executor"
+    else
+        unescaped(s) = replace(s, "&#39;" => "'", "&quot;" => "\"", "&lt;" => "<", "&gt;" => ">", "&amp;" => "&")
+        function cause(body)
+            m = match(r"<p><strong>(\w+)</strong></p><pre class=\"htmxo-error-cause\">(.*?)</pre>"s, body)
+            m === nothing ? nothing : [unescaped(String(c)) for c in m.captures]
+        end
+        old_dir = HTMXObjects.ERROR_DIR[]
+        try
+            mktempdir() do dir
+                HTMXObjects.ERROR_DIR[] = dir
+                for workers in (0, 1)
+                    configure_job_queue!(; workers)
+                    _clear_operation_polls!()
+                    route!(WorkerApp.ShownFaultApp(); root_provider=RootProvider())
+                    # A cold worker loads HTMXObjects and the fixture package first.
+                    boom = dispatch(:GET, "/boom"; headers=["HX-Request" => "true"], operation_policy=:blocking)
+                    @test cause(body_text(boom)) == ["ErrorException", "server fault shown\nits second line"]
+                    @test contains(body_text(boom), "<summary>Log entry <code>")
+                    # An exception that holds the app cannot cross: the worker's
+                    # printout up to its backtrace stands for it.
+                    held = cause(body_text(dispatch(:GET, "/held"; headers=["HX-Request" => "true"],
+                                                    operation_policy=:blocking)))
+                    if workers == 0
+                        @test held == ["HeldFault", "the held fault's message"]
+                    else
+                        @test held[1] == "RemoteComputationError"
+                        @test contains(held[2], "HeldFault: the held fault's message")
+                        @test !contains(held[2], "Stacktrace:")
+                    end
+                end
+            end
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+            configure_job_queue!(; workers=0, worker_stall=Inf)
+            _clear_operation_polls!()
+        end
+    end
+end

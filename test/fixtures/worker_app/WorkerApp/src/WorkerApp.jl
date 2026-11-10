@@ -92,6 +92,22 @@ Base.parse(::Type{Millis}, text::AbstractString) = Millis(parse(Int, text))
     @queued @fresh @get boom() = error("server fault in the body")
 end
 
+# A server fault whose cause the page shows (`__show_error_cause__`): one whose
+# exception crosses to the requesting process, and one that holds the app, so
+# it cannot.
+struct HeldFault <: Exception
+    app::Any
+end
+Base.showerror(io::IO, ::HeldFault) = print(io, "HeldFault: the held fault's message")
+
+@htmx struct ShownFaultApp
+    __show_error_cause__ = true
+    "A server fault"
+    @queued @fresh @get boom() = error("server fault shown\nits second line")
+    "A server fault that cannot cross"
+    @queued @fresh @get held() = throw(HeldFault(__self__))
+end
+
 # An `__error__` hook reads the fault through `unwrap_error`, as the docs say.
 @htmx struct FaultHookApp
     __error__(err) = begin

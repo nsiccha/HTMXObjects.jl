@@ -1375,6 +1375,43 @@ ErrorTexts
 error_texts
 ```
 
+### A server fault's cause on the page {#error-cause}
+
+By default a server fault's article says only that something went wrong and
+names the error id; the cause stays in the error log, so a public app shows a
+caller nothing of the server's internals. An app whose readers may see them,
+such as one a person runs locally for themselves, sets (from 0.1.92):
+
+```julia
+@htmx struct SimApp
+    __show_error_cause__ = true
+    # ...
+end
+```
+
+Its server faults' articles then also show, after the error-id line:
+
+- the exception's type, bold, and its message as `showerror` prints it, in a
+  wrapping block, not folded away (`SurfaceLoweringError` /
+  `unknown distribution :Normal_ …`);
+- a disclosure *Log entry `/tmp/htmxo_errors/<id>.log`* that holds the whole
+  log entry: the request line, the message and its backtrace.
+
+The setting is read along the `__parent__` chain, so the root's applies to
+every `@include`d struct, `safely` panel and polled operation. A failure in
+DynamicObjects' worker process (`configure_job_queue!(; workers=1)`) shows the
+worker's exception the same way; one that could not cross to this process
+shows as `RemoteComputationError` with the worker's printout up to its
+backtrace. A caller fault's article is unchanged, since it already shows its
+message. Nothing beyond what the log holds is shown: of the request, the log
+keeps its method and URL, htmx's page URL, trigger and target, and its body
+parameters' names, never their values, cookies or other headers. A message over
+16 KiB, or a log entry over 256 KiB, is left out whole and the article says
+how long it is (`message_omitted`, `log_omitted` in [`ErrorTexts`](@ref),
+which also words the disclosure, `log_entry`). The `?plain` answer carries the
+same article as Markdown. Leave the setting out (or `false`) for any app whose
+callers should not see server internals.
+
 ### Parameters a route does not take {#undeclared-params}
 
 A route binds the parameters it declares. By default a query or form
@@ -1585,8 +1622,9 @@ provider lock. Applications construct no executor/store and call no GC.
 | `application_observations(obj, descriptor; calls)` | Separate noncomputing live-state overlay keyed by declaration node IDs |
 | `application_explorer_view(descriptor; …)` | Server-rendered Map, Inspector and searchable Reference for an application descriptor |
 | `ReflectionRoutes` | Opt-in architecture explorer plus descriptor/observation JSON endpoints |
-| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select, presentation, shared, active, url_state)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface. `presentation=:tabs` makes it an app page: shared inputs in a sidebar, one tab per operation, results that follow their inputs, inputs kept in the page address (see [An app page](@ref semantic-tabs)) |
+| `semantic_app(obj; values, title, submit, submit_attrs, render_operation, compact, results, layout, select, presentation, shared, active, url_state, sections)` | Compile a mounted graph into operation cards/forms and result targets; `compact=true` renders control-free operations as action buttons, `results=:shared` sends every result to one host per surface, `layout(parts)` places the compiled parts, and `select(entry)` keeps only some operations on this surface. `presentation=:tabs` makes it an app page: shared inputs in a sidebar, one tab per operation, results that follow their inputs, inputs kept in the page address, inputs grouped under headings with `sections=[InputSection(heading, names), …]` (see [An app page](@ref semantic-tabs)) |
 | `semantic_control(obj, ::Val{name}, control)` | Hook: define a method to render one input of your struct your own way in every generated form |
+| `InputSection(heading, names; settings=false)` | A headed group of inputs on an app page (`semantic_app(…; presentation=:tabs, sections)`); `settings=true` sections come after the others |
 | `semantic_follow_script()` | The page runtime that keeps a `presentation=:tabs` page's results on their inputs and its inputs in the page address (the `htmx()` shell installs it) |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
@@ -1709,6 +1747,33 @@ and button.
   arguments of two tabs that share a name share one address parameter. A
   mutation's own inputs, a fixed field and a file are not kept.
   `url_state=false` leaves the address to the tab alone.
+- **Sections** (from 0.1.92). `sections=` groups inputs under headings,
+  wherever the page places them, in the sidebar or a tab:
+
+  ```julia
+  semantic_app(__self__; presentation=:tabs,
+      sections = ["Fit" => [:fit],
+                  "Subjects" => [:basis, :subjects, :age, :weight],
+                  "Dosing" => [:regimen, :dose_mg],
+                  InputSection("Simulation settings", [:follow_up_days, :draws, :seed]; settings=true),
+                  InputSection("View settings", [:doses_mg, :output]; settings=true)])
+  ```
+
+  Each [`InputSection`](@ref) is a `<fieldset>` whose `<legend>` is its
+  heading, its inputs in the order it names them; `heading => names` is
+  `InputSection(heading, names)`. Sections come in the order given, those
+  marked `settings=true` after the others, and inputs no section names keep
+  their place, first and without a heading. A section holding none of a
+  form's inputs is not drawn there. Inside a section, short fields (a number,
+  a checkbox, a choice between two pills) share a row as far as the column
+  allows, and other fields take the whole width. A section is never
+  collapsed: a field whose `@relevant` condition is false is hidden, and a
+  section none of whose fields applies is hidden with them, also as the reader
+  changes inputs. An input that no operation takes, or one named in two
+  sections, is an `ArgumentError`, and `sections` belongs to `:tabs` only.
+  Sections change no input's placement (`shared=` does), no request, address
+  or result; the page's Markdown, which leaves generated forms out, is
+  unchanged.
 
 Everything is overridable: `layout(parts)` composes the page (`parts` carries
 `object`, `title`, `id`, `sidebar`, the sidebar form or `nothing`; `tabs`,
@@ -2126,6 +2191,7 @@ application_explorer_view
 application_explorer_styles
 ReflectionRoutes
 semantic_app
+InputSection
 operation_form
 semantic_control
 semantic_follow_script

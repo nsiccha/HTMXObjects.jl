@@ -67,7 +67,7 @@ export OperationContext, RootProvider, RootRetention, OperationPolicy, send_ahea
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
-export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input
+export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection
 
 using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
@@ -13297,9 +13297,11 @@ as it writes it, in parentheses;
 `result_unavailable_detail` takes `{verb}` and `{route}`; `stalled_detail` takes
 `{label}`, `{elapsed}` and `{bound}`, followed by `stalled_rerun` for a read or
 `stalled_not_repeated` (`{verb}`) for a mutation; `loading_named` takes
-`{label}`, the option, radio button or link the reader chose. An app's own
-[`CallerFault`](@ref) message is shown as written. Error logs, `@error` lines
-and `showerror` stay English.
+`{label}`, the option, radio button or link the reader chose; on a page that
+shows a server fault's cause (`__show_error_cause__ = true`), `log_entry` takes
+`{path}`, the log file, and `message_omitted` and `log_omitted` take `{size}`.
+An app's own [`CallerFault`](@ref) message is shown as written. Error logs,
+`@error` lines and `showerror` stay English.
 """
 struct ErrorTexts
     error::String                      # heading of a recorded server fault
@@ -13330,6 +13332,9 @@ struct ErrorTexts
     loading_named::String              # ... by the option or link the reader chose
     choice_search::String              # a long choice list's search field
     choice_no_match::String            # ... when no option matches the search
+    log_entry::String                  # a shown cause's log entry (`__show_error_cause__`)
+    message_omitted::String            # ... a message too long for the page
+    log_omitted::String                # ... a log entry too long for the page
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -13339,7 +13344,8 @@ const _ERROR_TEXT_PLACEHOLDERS = (
     unknown_params = (:names,), accepted_params = (:accepted,), unreadable_body = (:format,),
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
-    loading_named = (:label,),
+    loading_named = (:label,), log_entry = (:path,), message_omitted = (:size,),
+    log_omitted = (:size,),
 )
 
 const _ERROR_TEXT_LOCALES = (
@@ -13372,6 +13378,9 @@ const _ERROR_TEXT_LOCALES = (
         loading_named = "Loading {label}…",
         choice_search = "Search…",
         choice_no_match = "No matching option",
+        log_entry = "Log entry {path}",
+        message_omitted = "The message is {size} long, too long for this page; the log entry holds it.",
+        log_omitted = "The log entry is {size} long, too long for this page; open the file to read it.",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -13403,6 +13412,9 @@ const _ERROR_TEXT_LOCALES = (
         loading_named = "{label} wird geladen…",
         choice_search = "Suchen…",
         choice_no_match = "Keine passende Auswahl",
+        log_entry = "Protokolleintrag {path}",
+        message_omitted = "Die Meldung ist {size} lang, zu lang für diese Seite; der Protokolleintrag enthält sie.",
+        log_omitted = "Der Protokolleintrag ist {size} lang, zu lang für diese Seite; öffnen Sie die Datei, um ihn zu lesen.",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -13689,33 +13701,89 @@ the `@error` line on stderr (`HTMXObjects caught an error: <path>`) — the
 same string is already in the server log, including it here lets the
 developer / agent open the file in one step from the in-browser article.
 In prod (Revise not loaded), keep just the uid.
+
+With `cause`, the exception of an app that shows its errors' causes
+(`__show_error_cause__ = true`), the article also shows it and its log entry
+(`_error_cause_parts`).
 """
-function _default_error_render(uid, path, texts::ErrorTexts=_EN_ERROR_TEXTS)
-    if _revise_module() !== nothing
-        h.article(
-            h.header(texts.error),
-            h.p("HTMXObjects caught an error: ", h.code(path));
-            aria_invalid="true",
-        )
-    else
-        h.article(
-            h.header(texts.error),
-            _error_id_line(texts.server_fault, uid);
-            aria_invalid="true",
-        )
-    end
+function _default_error_render(uid, path, texts::ErrorTexts=_EN_ERROR_TEXTS; cause=nothing)
+    line = _revise_module() !== nothing ?
+        h.p("HTMXObjects caught an error: ", h.code(path)) :
+        _error_id_line(texts.server_fault, uid)
+    h.article(
+        h.header(texts.error),
+        line,
+        _error_cause_parts(cause, path, texts)...;
+        aria_invalid="true",
+    )
 end
 
 # The `server_fault` (or `error_id`) line, its `{id}` a code span holding the
 # error id.
-function _error_id_line(template::AbstractString, uid)
-    parts = split(template, "{id}")
+_error_id_line(template::AbstractString, uid) = h.p(_placeholder_parts(template, "{id}", h.code(uid))...)
+
+# `template` split at `placeholder`, with `node` in its place.
+function _placeholder_parts(template::AbstractString, placeholder::AbstractString, node)
+    parts = split(template, placeholder)
     line = Any[]
     for (i, part) in enumerate(parts)
         isempty(part) || push!(line, String(part))
-        i < length(parts) && push!(line, h.code(uid))
+        i < length(parts) && push!(line, node)
     end
-    h.p(line...)
+    line
+end
+
+# --- A server fault's cause on the page (`__show_error_cause__`) ---
+
+# The most of a cause's message, and of its log entry, a page shows; a longer
+# one is left out whole, and the page says how long it is.
+const _ERROR_CAUSE_MAX_BYTES = 16 * 1024
+const _ERROR_LOG_MAX_BYTES = 256 * 1024
+
+# Whether `obj`'s app shows its server faults' causes: the first
+# `__show_error_cause__` along its `__parent__` chain, else `false`.
+function _show_error_cause(obj)
+    current = obj
+    while current !== nothing
+        if hasproperty(current, :__show_error_cause__)
+            shown = getproperty(current, :__show_error_cause__)
+            shown isa Bool || throw(ArgumentError(string(
+                "__show_error_cause__ must be true or false, got ", repr(shown))))
+            return shown
+        end
+        current = hasproperty(current, :__parent__) ? getproperty(current, :__parent__) : nothing
+    end
+    false
+end
+
+# The exception's type, and its message as `showerror` prints it, without the
+# type when the message starts with it. A worker's printout carries the
+# worker's backtrace after the message, up to a blank line (DynamicObjects then
+# says why the exception itself did not cross); the log entry holds it.
+function _error_cause_text(err)
+    type = string(nameof(typeof(err)))
+    text = sprint(showerror, err)
+    startswith(text, type * ": ") && (text = text[nextind(text, 0, length(type) + 3):end])
+    message = replace(text, r"\nStacktrace:\n.*?(?=\n\n|\z)"s => "")
+    (; type, message=rstrip(message))
+end
+
+# What an article shows of a server fault's cause: the exception's type and
+# message, plainly, and its log entry under a disclosure that names the file.
+_error_cause_parts(::Nothing, path, texts) = ()
+function _error_cause_parts(err, path, texts)
+    cause = _error_cause_text(err)
+    message = sizeof(cause.message) <= _ERROR_CAUSE_MAX_BYTES ?
+        h.pre(cause.message; class="htmxo-error-cause") :
+        h.p(_fill_text(texts.message_omitted; size=Base.format_bytes(sizeof(cause.message))))
+    shown = (h.p(h.strong(cause.type)), message)
+    path isa AbstractString || return shown
+    log = isfile(path) ? read(path, String) : nothing
+    entry = log === nothing ? Any[] : Any[sizeof(log) <= _ERROR_LOG_MAX_BYTES ?
+        h.pre(log; class="htmxo-error-log") :
+        h.p(_fill_text(texts.log_omitted; size=Base.format_bytes(sizeof(log))))]
+    (shown..., h.details(h.summary(_placeholder_parts(texts.log_entry, "{path}", h.code(path))...),
+                         entry...; class="htmxo-error-log-entry"))
 end
 
 # `__on_error__` is auto-injected into every `@htmx` struct (default `nothing`,
@@ -13754,7 +13822,7 @@ function _invoke_error_handler(obj, err, uid, path)
             aria_invalid="true",
         )
     end
-    _default_error_render(uid, path, texts)
+    _default_error_render(uid, path, texts; cause=_show_error_cause(obj) ? inner : nothing)
 end
 
 # Whether `obj`'s `__error__` hook takes the recorded error id as a second
@@ -29125,16 +29193,19 @@ function _semantic_cards(name, label, domain, selected; required=false)
     )
 end
 
+# The object a control of `param` reads its domain on, and its type: a context
+# input's mounted source, else the form's object.
+function _semantic_control_owner(obj, owner, param)
+    get(param, :kind, nothing) === :context || return (obj, owner)
+    source_obj = _semantic_source_object(obj, param.context_source)
+    (source_obj, typeof(source_obj))
+end
+
 function _semantic_control(obj, owner, param, values;
         radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
     value = get(values, param.name, nothing)
     label = isnothing(param.doc) ? Long(param.name) : param.doc
-    control_obj, ControlT = if get(param, :kind, nothing) === :context
-        source_obj = _semantic_source_object(obj, param.context_source)
-        (source_obj, typeof(source_obj))
-    else
-        (obj, owner)
-    end
+    control_obj, ControlT = _semantic_control_owner(obj, owner, param)
     default = _semantic_default_control(control_obj, ControlT, param, label, value, values;
                                         radio_max, presentation)
     control = semantic_control(control_obj, Val(param.name),
@@ -29171,6 +29242,23 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
 
     _typed_control(param.type, string(param.name), label, value,
                    param.required ? (; required="true") : (;))
+end
+
+# Whether the generated control of `param` is a short field: a number, a
+# checkbox, or a choice between two pills. In an input section short fields
+# share a row (`_input_section_node`).
+function _semantic_short_field(obj, owner, param, values;
+        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
+    control_obj, ControlT = _semantic_control_owner(obj, owner, param)
+    input = (name=param.name, domain=get(param, :domain, nothing))
+    domain = _resolved_input_domain(control_obj, ControlT, input, values)
+    if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
+        presentation === :cards && return false
+        get(domain, :allow_custom, false) && return false
+        get(domain, :multiple, false) && return false
+        return length(get(domain, :options, NamedTuple[])) <= min(2, radio_max)
+    end
+    param.type isa Type && param.type <: Number
 end
 
 """
@@ -29762,6 +29850,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
     presentation = Symbol(_operation_form_setting(req, :__htmxo_presentation, "auto"))
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
+    sections = _input_sections_unwire(_operation_form_setting(req, :__htmxo_sections))
     controls_only = _operation_poll_marker(get(queryparams(req), "__htmxo_controls", nothing))
     context_control = _operation_form_setting(req, :__htmxo_context_control)
     value = if !isnothing(context_control)
@@ -29779,7 +29868,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
             radio_max, presentation, shared_names=shared_context, context_selector,
-            fragment=true, lifted))
+            fragment=true, lifted, sections))
     else
         # Accept full-form refresh requests from pages rendered before the
         # controls-only protocol; new pages keep the form and button in place.
@@ -29787,7 +29876,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
                            target=request_path, target_id, swap, submit,
                            form_class, radio_max, navigate, presentation,
                            context_selector,
-                           shared_context, lifted)
+                           shared_context, lifted, sections)
     end
     kw_pairs = Pair{Symbol,Any}[
         param.name => extracted.values[param.name] for param in route.params
@@ -29833,10 +29922,15 @@ _operation_control_params(route, shared_names) = [param for param in route.param
 
 function _operation_form_controls(obj, route, current, action;
         radio_max=_RADIO_MAX, presentation=:auto, shared_names=Set{Symbol}(),
-        context_selector=nothing, fragment=false, lifted=nothing)
+        context_selector=nothing, fragment=false, lifted=nothing,
+        sections=InputSection[])
     presentation in (:auto, :cards) || throw(ArgumentError(
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
     refresh_dependencies = _semantic_refresh_dependencies(route)
+    control_params = _operation_control_params(route, shared_names)
+    # The sections this form's controls fall in; a refresh draws them again.
+    sections = _input_sections_for(sections,
+        Set{Symbol}(param.name for param in control_params))
     settings = (; __htmxo_controls=1)
     radio_max == _RADIO_MAX || (settings = merge(settings, (; __htmxo_radio_max=radio_max)))
     presentation === :auto || (settings = merge(settings, (; __htmxo_presentation=presentation)))
@@ -29848,6 +29942,8 @@ function _operation_form_controls(obj, route, current, action;
         __htmxo_lifted=join(string.(sort!(collect(lifted))), ','))))
     isnothing(context_selector) || (settings = merge(settings, (;
         __htmxo_context_selector=context_selector)))
+    isempty(sections) || (settings = merge(settings, (;
+        __htmxo_sections=_input_sections_wire(sections))))
     # Static forms keep their existing layout, including a button-only form.
     # Dependent forms need a region that can swap without replacing the form.
     refreshable = fragment || !isempty(refresh_dependencies)
@@ -29856,7 +29952,7 @@ function _operation_form_controls(obj, route, current, action;
     # A swap would clear a chosen file, and a page cannot restore one, so a
     # refreshable form keeps its file controls after the swapped region.
     file_controls = Any[]
-    for param in _operation_control_params(route, shared_names)
+    for param in control_params
         control = _semantic_control(obj, route.owner, param, current; radio_max, presentation)
         if param.name in refresh_dependencies
             control = h.div(control;
@@ -29865,17 +29961,24 @@ function _operation_form_controls(obj, route, current, action;
         if refreshable && _is_upload_type(param.type)
             push!(file_controls, control)
         else
-            push!(get(param, :kind, nothing) === :context ? context_controls : controls, control)
+            short = !isempty(sections) && _semantic_short_field(obj, route.owner, param,
+                current; radio_max, presentation)
+            push!(get(param, :kind, nothing) === :context ? context_controls : controls,
+                  (; name=param.name, control, short))
         end
     end
     # A form whose `@param`s were lifted into it (the `:tabs` presentation)
-    # shows them as its own inputs, next to the others.
-    local_context = isempty(context_controls) ? Any[] :
-        !isnothing(lifted) ? context_controls : Any[
-        h.fieldset(h.legend("Model inputs"), context_controls...;
-                   class="htmxo-semantic-context")
-    ]
-    children = Any[local_context..., controls...]
+    # shows them as its own inputs, next to the others, grouped by any sections.
+    children = if !isnothing(lifted)
+        _sectioned_controls(Any[context_controls..., controls...], sections)
+    else
+        local_context = isempty(context_controls) ? Any[] : Any[
+            h.fieldset(h.legend("Model inputs"),
+                       (field.control for field in context_controls)...;
+                       class="htmxo-semantic-context")
+        ]
+        Any[local_context..., _sectioned_controls(controls, sections)...]
+    end
     refreshable || return children
     region = h.div(children...; class="htmxo-semantic-controls",
         _semantic_lifted_refresh_attrs(route, action, settings, shared_names,
@@ -30017,7 +30120,7 @@ function operation_form(obj, route::NamedTuple; values=(;),
         target=_operation_form_target(obj, route),
         submit="Run", submit_attrs=(;), target_id=nothing, swap="innerHTML", radio_max::Int=_RADIO_MAX,
         form_class="", navigate::Bool=false, presentation::Symbol=:auto,
-        shared_context=(), lifted=nothing,
+        shared_context=(), lifted=nothing, sections=nothing,
         context_selector=nothing, kwargs...)
     route.verb === :WEBSOCKET && throw(ArgumentError(
         "operation_form does not submit WebSocket routes"))
@@ -30053,8 +30156,10 @@ function operation_form(obj, route::NamedTuple; values=(;),
         isempty(shared_names) || throw(ArgumentError(
             "operation_form navigate=true does not support shared external context"))
     end
+    # `sections` (internal): the input sections of a `:tabs` page.
     controls = _operation_form_controls(obj, route, current, action;
-        radio_max, presentation, shared_names, context_selector, lifted=lifted_names)
+        radio_max, presentation, shared_names, context_selector, lifted=lifted_names,
+        sections=_input_sections(sections))
     context_inputs = _semantic_context_inputs(route, current)
     form_attrs = if navigate
         merge((; class=form_class), (; kwargs...), (; method="get", action))
@@ -30621,6 +30726,101 @@ _semantic_context_controls(entries, shared_context; radio_max::Int=_RADIO_MAX) =
         shared_context; radio_max)
     for entry in entries]
 
+# --- Input sections (`semantic_app(…; presentation=:tabs, sections)`) ---
+
+"""
+    InputSection(heading, names; settings=false)
+
+A headed group of inputs on an app page
+([`semantic_app`](@ref)`(…; presentation=:tabs, sections)`): the inputs
+`names`, in that order, under `heading`, wherever the page places them, in the
+sidebar or in a tab. A section marked `settings=true` is drawn after the
+sections that are not. `heading => names` in `sections` is
+`InputSection(heading, names)`.
+
+    semantic_app(app; presentation=:tabs, sections=[
+        "Subjects" => [:basis, :subjects, :age, :weight],
+        "Dosing" => [:regimen, :dose_mg],
+        InputSection("Simulation settings", [:draws, :seed]; settings=true),
+    ])
+"""
+struct InputSection
+    heading::String
+    names::Vector{Symbol}
+    settings::Bool
+    function InputSection(heading::AbstractString, names; settings::Bool=false)
+        isempty(strip(heading)) && throw(ArgumentError("InputSection needs a heading"))
+        list = Symbol[Symbol(name) for name in
+                      (names isa Union{Symbol,AbstractString} ? (names,) : names)]
+        isempty(list) && throw(ArgumentError(
+            "InputSection $(repr(String(heading))) names no input"))
+        allunique(list) || throw(ArgumentError(
+            "InputSection $(repr(String(heading))) names an input twice"))
+        new(String(heading), list, settings)
+    end
+end
+
+_input_section(section::InputSection) = section
+_input_section(pair::Pair) = InputSection(pair.first, pair.second)
+_input_section(other) = throw(ArgumentError(string(
+    "semantic_app sections= takes InputSection(heading, names) or heading => names, got ",
+    repr(other))))
+
+# The sections as a page draws them: those without `settings` first, then the
+# settings, each in the order given. An input is in one section at most.
+function _input_sections(sections)
+    isnothing(sections) && return InputSection[]
+    list = InputSection[_input_section(section) for section in sections]
+    seen = Dict{Symbol,String}()
+    for section in list, name in section.names
+        haskey(seen, name) && throw(ArgumentError(string(
+            "semantic_app sections= puts ", repr(name), " in both ", repr(seen[name]),
+            " and ", repr(section.heading))))
+        seen[name] = section.heading
+    end
+    InputSection[filter(section -> !section.settings, list);
+                 filter(section -> section.settings, list)]
+end
+
+# The sections that hold one of `names`: what a form's refresh needs to draw
+# its controls as the page did. A refresh URL carries them (`__htmxo_sections`).
+_input_sections_for(sections, names) =
+    InputSection[section for section in sections if any(in(names), section.names)]
+_input_sections_wire(sections) =
+    JSON.json([Any[section.heading, string.(section.names), section.settings]
+               for section in sections])
+_input_sections_unwire(::Nothing) = InputSection[]
+_input_sections_unwire(text::AbstractString) =
+    InputSection[InputSection(String(entry[1]), String.(entry[2]); settings=entry[3] === true)
+                 for entry in JSON.parse(text)]
+
+# `fields`, each `(; name, control, short)`, grouped by `sections`: the inputs
+# no section names first, as they come, then each section that holds one, its
+# inputs in the order it names them.
+function _sectioned_controls(fields, sections)
+    isempty(sections) && return Any[field.control for field in fields]
+    named = Set{Symbol}(name for section in sections for name in section.names)
+    out = Any[field.control for field in fields if !(field.name in named)]
+    by_name = Dict(field.name => field for field in fields)
+    for section in sections
+        held = [by_name[name] for name in section.names if haskey(by_name, name)]
+        isempty(held) || push!(out, _input_section_node(section, held))
+    end
+    out
+end
+
+# One section: a `<fieldset>` whose `<legend>` is its heading. Its fields
+# stack, and short ones (a number, a checkbox, two pills) share a row
+# (`htmxo_utility_styles`); a field whose input does not apply is hidden, and
+# so is the section when none of its fields applies.
+_input_section_node(section, fields) = h.fieldset(
+    h.legend(section.heading),
+    h.div([h.div(field.control; class="htmxo-input-field",
+                 (field.short ? (; data_htmxo_width="short") : (;))...)
+           for field in fields]...; class="htmxo-input-section-fields");
+    class="htmxo-input-section",
+    (section.settings ? (; data_htmxo_settings="") : (;))...)
+
 # --- The `:tabs` presentation ---
 
 # The inputs a `:tabs` page places in its sidebar or a tab: request `@param`s
@@ -30783,7 +30983,8 @@ and every read's result following its inputs (`semantic_follow_script`). With
 shows the values it names, and the script writes the inputs into it.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
-        render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true)
+        render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
+        sections=InputSection[])
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places.
@@ -30815,6 +31016,16 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
             join(repr.(placed), ", "))))
         wanted
     end
+    # A section names inputs of the page: placed ones, or an operation's own.
+    inputs = Set{Symbol}(placed)
+    for spec in specs, param in spec.runtime_route.params
+        param.source === :path || push!(inputs, param.name)
+    end
+    unknown = [name for section in sections for name in section.names if !(name in inputs)]
+    isempty(unknown) || throw(ArgumentError(string(
+        "semantic_app sections= names ", join(repr.(unknown), ", "),
+        ", which no operation of the surface takes; its inputs are ",
+        join(repr.(sort!(collect(inputs))), ", "))))
     own = [setdiff(read, sidebar) for read in reads]
     routes = [_semantic_tabs_route(spec.mounted, spec.runtime_route, sidebar, own[i])
               for (i, spec) in enumerate(specs)]
@@ -30834,8 +31045,15 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         [(spec.mounted, routes[i], currents[i]) for (i, spec) in enumerate(specs)];
         names=sidebar)
     shared_names = Set{Symbol}(entry.param.name for entry in context_entries)
+    sidebar_controls = _semantic_context_controls(context_entries, shared_names; radio_max)
+    sidebar_sections = _input_sections_for(sections, shared_names)
+    sidebar_fields = [(; name=entry.param.name, control,
+                         short=!isempty(sidebar_sections) && _semantic_short_field(
+                             entry.object, entry.route.owner, entry.param, entry.current;
+                             radio_max))
+                      for (entry, control) in zip(context_entries, sidebar_controls)]
     sidebar_form = isempty(context_entries) ? nothing :
-        h.form(_semantic_context_controls(context_entries, shared_names; radio_max)...;
+        h.form(_sectioned_controls(sidebar_fields, sidebar_sections)...;
                id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
                autocomplete="off", onsubmit="return false",
                _semantic_address_attrs(defaults,
@@ -30854,7 +31072,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
             target = _operation_form_target(spec.mounted, spec.local_route)
             controls = _operation_form_controls(spec.mounted, route, current,
                 string(target); shared_names, context_selector=selector, lifted=own[i],
-                radio_max)
+                radio_max, sections)
             inputs_id = base.target_id * "-inputs"
             own_params = _operation_control_params(route, shared_names)
             form = isempty(own_params) ? nothing :
@@ -30885,7 +31103,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 submit_attrs=spec.operation_submit_attrs,
                 form_class="htmxo-semantic-operation-form",
                 shared_context=shared_names, lifted=own[i], context_selector=selector,
-                radio_max)
+                radio_max, sections)
             form, h.div(; id=base.target_id, class="htmxo-semantic-operation-result",
                 aria_live="polite",
                 (refreshes ? (; data_htmxo_refreshes=context_id) : (;))...)
@@ -30929,7 +31147,7 @@ end
                  render_operation=_default_semantic_operation, compact=false,
                  results=:each, layout=_default_semantic_layout,
                  select=entry -> true, presentation=:stacked, radio_max=8,
-                 shared=nothing, active=nothing, url_state=true)
+                 shared=nothing, active=nothing, url_state=true, sections=nothing)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -30962,8 +31180,10 @@ read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
 the one it opens on), and results that follow their inputs. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
-reopens the same page; `url_state=false` keeps only the tab. The contract is
-the API reference's *An app page*.
+reopens the same page; `url_state=false` keeps only the tab. `sections=`
+groups its inputs under headings wherever they are placed, a list of
+[`InputSection`](@ref)s or `heading => names` pairs. The contract is the API
+reference's *An app page*.
 
 A single choice among at most `radio_max` options (default 8) is a row of
 pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
@@ -31086,7 +31306,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         render_operation=_default_semantic_operation, compact::Bool=false,
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
-        shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing)
+        shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
+        sections=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -31104,7 +31325,10 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app active= chooses the open tab of presentation=:tabs"))
         isnothing(url_state) || throw(ArgumentError(
             "semantic_app url_state= keeps the inputs of presentation=:tabs in the page address"))
+        isnothing(sections) || throw(ArgumentError(
+            "semantic_app sections= groups the inputs of presentation=:tabs"))
     end
+    input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
         "semantic_app url_state must be true or false, got $(repr(url_state))"))
     descriptor = _shared_semantic_descriptor(typeof(obj))
@@ -31154,6 +31378,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
+        sections=input_sections,
         render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
@@ -33775,6 +34000,41 @@ htmxo_utility_styles() = h.style(Raw("""
 /* A long choice list is one field wide, as the select it replaces was. */
 .htmxo-semantic-inputs .htmxo-choice-list,
 .htmxo-semantic-inputs .htmxo-relevant:has(> .htmxo-choice-list) { flex-basis: 16rem; }
+/* Declared input sections (`semantic_app(…; sections)`): a heading over its
+   fields, which stack; short fields (a number, a checkbox, two pills) share a
+   row. A field whose input does not apply (`@relevant`) is hidden, and so is
+   a section none of whose fields applies. The input's own wrapper carries
+   `hidden`, directly in the field or one refreshing region (`[hx-trigger]`)
+   down. In a tab the sections take the full width, their fields a field's. */
+.htmxo-input-section { margin: 0 0 var(--pico-spacing, 1rem); padding: 0; border: 0; min-width: 0; }
+/* Pico's unlayered `legend` rule reads its weight from this variable. */
+.htmxo-input-section > legend { --pico-form-label-font-weight: 700; font-weight: 700; }
+.htmxo-input-section-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 1rem;
+    align-items: flex-end;
+}
+.htmxo-input-section-fields > .htmxo-input-field { flex: 1 1 100%; min-width: 0; }
+.htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex: 1 1 8rem; }
+.htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
+.htmxo-input-field:has(> .htmxo-relevant[hidden], > [hx-trigger] > .htmxo-relevant[hidden]) { display: none; }
+.htmxo-input-section:not(:has(
+    > .htmxo-input-section-fields > .htmxo-input-field > :not(.htmxo-relevant, [hx-trigger]),
+    > .htmxo-input-section-fields > .htmxo-input-field > .htmxo-relevant:not([hidden]),
+    > .htmxo-input-section-fields > .htmxo-input-field > [hx-trigger] > :not(.htmxo-relevant),
+    > .htmxo-input-section-fields > .htmxo-input-field > [hx-trigger] > .htmxo-relevant:not([hidden]))) {
+    display: none;
+}
+.htmxo-semantic-inputs > .htmxo-input-section,
+.htmxo-semantic-inputs > .htmxo-semantic-controls > .htmxo-input-section { flex: 1 1 100%; }
+.htmxo-semantic-inputs .htmxo-input-section-fields > .htmxo-input-field { flex: 0 1 16rem; }
+.htmxo-semantic-inputs .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex: 0 1 8rem; }
+.htmxo-semantic-inputs .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
+/* A server fault's cause (`__show_error_cause__`): the message wraps; the log
+   entry scrolls in its own box. */
+.htmxo-error-cause { white-space: pre-wrap; overflow-wrap: anywhere; }
+.htmxo-error-log { max-height: 30rem; overflow: auto; font-size: 0.8em; }
 .htmxo-semantic-card[data-rich="true"] > label {
     position: absolute;
     inset: 0;
