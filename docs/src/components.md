@@ -1836,6 +1836,12 @@ emits `htmxo:thread-updated` after each change. Size the scroll box with
 `height="40vh"` or `--htmxo-thread-height`. A runnable demo is
 [`examples/chat.jl`](examples.md#chat).
 
+The thread's own words (the older-items control, "Start of thread", the
+"↓ N new" pill, the status line) follow the page's language
+(`live_thread_texts(:de)` under `__lang__ = "de"`: "Anfang des Verlaufs",
+"↓ 3 neue", "Aktualisieren fehlgeschlagen: …"); pass any of them yourself with
+`texts=live_thread_texts(:de; start="Anfang des Chats")`.
+
 ### `pdf_panel` — a PDF or an HTML document beside the text or over the page, its quoted passages marked {#pdf-panel}
 
 A side panel for a document the page quotes. A PDF is every page of the file

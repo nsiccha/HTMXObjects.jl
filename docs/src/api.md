@@ -1380,7 +1380,7 @@ error_texts
 By default a server fault's article says only that something went wrong and
 names the error id; the cause stays in the error log, so a public app shows a
 caller nothing of the server's internals. An app whose readers may see them,
-such as one a person runs locally for themselves, sets (from 0.1.92):
+such as one a person runs locally for themselves, sets (from 0.1.93):
 
 ```julia
 @htmx struct SimApp
@@ -1747,7 +1747,7 @@ and button.
   arguments of two tabs that share a name share one address parameter. A
   mutation's own inputs, a fixed field and a file are not kept.
   `url_state=false` leaves the address to the tab alone.
-- **Sections** (from 0.1.92). `sections=` groups inputs under headings,
+- **Sections** (from 0.1.93). `sections=` groups inputs under headings,
   wherever the page places them, in the sidebar or a tab:
 
   ```julia
