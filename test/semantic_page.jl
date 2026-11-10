@@ -3,7 +3,7 @@ using TestItemRunner
 @testmodule SemanticPageFixtures begin
     using HTMXObjects
     using HTMXObjects.DynamicObjects: option_domain
-    export SimPage, FitsPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
+    export SimPage, FitsPage, CriterionPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
 
     const UPLOADS = String[]
 
@@ -63,6 +63,35 @@ using TestItemRunner
         @get profile() = h.p("profile:", fit, ":", n)
         "Summary"
         @get summary() = h.p("summary:", fit, ":", n)
+    end
+
+    # Defaults computed from another input, as Bruno's web-sim starts Fraction
+    # responding from each output's standard response criterion.
+    const CRITERIA = Dict("pk" => (; quantity="cmin", direction="above", threshold=-50.0),
+                          "pbmc" => (; quantity="min_change", direction="below", threshold=-30.0))
+    @htmx struct CriterionPage
+        "Output"
+        @param output::String = "pk"
+        @options(output) = option_domain(["pk" => "PK", "pbmc" => "PBMC"])
+        criterion = CRITERIA[output]
+        "Response quantity"
+        @param response_quantity::String = criterion.quantity
+        @options(response_quantity) = option_domain(
+            ["cmin" => "Cmin", "min_change" => "Maximal decrease", "auc" => "AUC"])
+        "Direction"
+        @param direction::String = criterion.direction
+        @options(direction) = option_domain(["above" => "Above", "below" => "Below"])
+        "Threshold"
+        @param threshold::Float64 = criterion.threshold
+        "Profile"
+        @get criterion_profile() = h.p("profile:", output; class="result")
+        "Fraction responding"
+        @get responding() = h.p("responding:", output, ":", response_quantity, ":",
+                                direction, ":", threshold; class="result")
+        "Add a fit"
+        @post add_fit(; name::String) = h.p("added:", name; class="result")
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            title="Criterion", select=entry -> entry.name !== :index)
     end
 
     # The sidebar form, and one tab's content, of a rendered page.
@@ -502,6 +531,173 @@ end
     @test_throws "url_state= keeps the inputs of presentation=:tabs" semantic_app(app; url_state=true)
     @test_throws "url_state must be true or false" semantic_app(app; presentation=:tabs, url_state=1,
         select=entry -> entry.name !== :index)
+end
+
+@testitem "a default computed from other inputs shows its value and follows them" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    route!(CriterionPage(); operation_policy=:blocking)
+    page(url) = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
+    result(url) = result_text(dispatch(:GET, url; headers=["HX-Request" => "true"]))
+    fields(html) = [m.match for m in
+        eachmatch(r"<input[^>]*name=\"(response_quantity|direction|threshold)\"[^>]*>", html)]
+    html = page("/?tab=responding")
+    tab = tab_of(html, "responding")
+    # Each control shows the value its default computes, never the default's
+    # source text, which a number field sent back as `threshold=criterion.threshold`
+    # (snag computed-param-d-28e49790).
+    @test !contains(html, "criterion.")
+    @test contains(tab, r"<input name=\"threshold\" type=\"number\" value=\"-50\"[^>]* data-htmxo-follows=\"\">")
+    @test contains(tab, "<input type=\"radio\" name=\"response_quantity\" value=\"cmin\" checked=\"true\" data-htmxo-follows=\"\">")
+    @test contains(tab, "<input type=\"radio\" name=\"direction\" value=\"above\" checked=\"true\" data-htmxo-follows=\"\">")
+    # Every field of an input the reader has not set is marked, and no hidden
+    # input carries its value: the server computes it for the inputs sent.
+    @test length(fields(html)) == 6 && all(f -> contains(f, "data-htmxo-follows"), fields(html))
+    @test !contains(html, r"<input type=\"hidden\" name=\"(response_quantity|direction|threshold)\"")
+    first_load = tag_attrs(html, r"<div hx-get=\"/responding[^\"]*\" hx-trigger=\"load\"[^>]*>")
+    @test first_load["hx-get"] == "/responding?output=pk"
+    @test result(first_load["hx-get"]) == "responding:pk:cmin:above:-50.0"
+    @test result("/responding?output=pbmc") == "responding:pbmc:min_change:below:-30.0"
+    # The tab's controls are drawn again when the output changes, showing the
+    # default computed for the output sent; a value the reader set stays.
+    region = tag_attrs(tab, r"<div class=\"htmxo-semantic-controls\"[^>]*>")
+    @test region["data-htmxo-depends"] == "output"
+    pbmc = page(region["hx-get"] * "&output=pbmc")
+    @test contains(pbmc, r"<input name=\"threshold\" type=\"number\" value=\"-30\"[^>]* data-htmxo-follows=\"\">")
+    @test contains(pbmc, "<input type=\"radio\" name=\"direction\" value=\"below\" checked=\"true\" data-htmxo-follows=\"\">")
+    set = page(region["hx-get"] * "&output=pbmc&threshold=-10&direction=above")
+    @test contains(set, "<input name=\"threshold\" type=\"number\" value=\"-10\" step=\"any\">")
+    @test contains(set, "<input type=\"radio\" name=\"direction\" value=\"above\" checked=\"true\">")
+    @test contains(set, "<input type=\"radio\" name=\"response_quantity\" value=\"min_change\" checked=\"true\" data-htmxo-follows=\"\">")
+    # The address keeps such an input once the reader sets it, whatever its
+    # value: its default changes with the output.
+    @test tag_attrs(tab, r"<form[^>]*>")["data-htmxo-address"] ==
+          """{"direction":null,"response_quantity":null,"threshold":null}"""
+    # A value the address names is the reader's: shown, sent, not following.
+    named = tab_of(page("/?tab=responding&output=pbmc&threshold=-10"), "responding")
+    @test contains(named, "<input name=\"threshold\" type=\"number\" value=\"-10\" step=\"any\">")
+    @test contains(named, "<input type=\"radio\" name=\"direction\" value=\"below\" checked=\"true\" data-htmxo-follows=\"\">")
+    # A default that reads no input follows too; its address default stays
+    # the value it computes ("a tabs page keeps its inputs in the page address").
+    @test contains(repr("text/html", semantic_app(FitsPage(); presentation=:tabs)),
+                   "<input type=\"radio\" name=\"fit\" value=\"x\" checked=\"true\" data-htmxo-follows=\"\">")
+end
+
+@testitem "a default computed from other inputs follows them in a browser" setup=[SemanticPageFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(CriterionPage(); operation_policy=:blocking)
+        assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
+            "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
+        receipt = Channel{String}(1)
+        asked = String[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label + ' at ' + location.search +
+                ' showing ' + shown());
+              await sleep(25);
+            }
+          }
+          const shown = () => document.querySelector('[id$="-get-responding-result"]').textContent;
+          const address = () => Array.from(new URLSearchParams(location.search))
+            .map(p => p.join('=')).sort().join('&');
+          const checked = name => document.querySelector('input[name="' + name + '"]:checked').value;
+          const field = name => document.querySelector('input[name="' + name + '"]');
+          const choose = (name, value) => document.querySelector('input[name="' + name + '"][value="' + value + '"]').click();
+          function type(name, value) {
+            const input = field(name);
+            input.value = value;
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+          try {
+            await until(() => shown() === 'responding:pk:cmin:above:-50.0', 'first');
+            // The inputs the reader has not set follow the output's criterion.
+            choose('output', 'pbmc');
+            await until(() => shown() === 'responding:pbmc:min_change:below:-30.0', 'pbmc');
+            await until(() => field('threshold').value === '-30' && checked('direction') === 'below' &&
+                              checked('response_quantity') === 'min_change', 'pbmc controls');
+            // The address keeps what the reader set, not what follows it.
+            await until(() => address() === 'output=pbmc&tab=responding', 'pbmc address');
+            // A value the reader sets stays when the output changes again.
+            type('threshold', '-10');
+            await until(() => shown() === 'responding:pbmc:min_change:below:-10.0', 'typed');
+            choose('output', 'pk');
+            await until(() => shown() === 'responding:pk:cmin:above:-10.0', 'pk');
+            await until(() => checked('direction') === 'above' && field('threshold').value === '-10', 'pk controls');
+            choose('direction', 'below');
+            await until(() => shown() === 'responding:pk:cmin:below:-10.0', 'direction');
+            choose('output', 'pbmc');
+            await until(() => shown() === 'responding:pbmc:min_change:below:-10.0', 'pbmc again');
+            await until(() => checked('response_quantity') === 'min_change', 'quantity follows');
+            await until(() => address() === 'direction=below&output=pbmc&tab=responding&threshold=-10',
+                        'final address');
+            await fetch('/complete?status=passed&search=' + encodeURIComponent(address()));
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        render(target) = repr("text/html", htmx(Raw(String(dispatch(:GET, target;
+                headers=["HX-Request" => "true"]).body)), driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, pico_version=nothing,
+            feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], render(req.target))
+            haskey(assets, path) &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            path == "/responding" && push!(asked, String(req.target))
+            dispatch(req.method, req.target; headers=collect(req.headers),
+                     body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            mktempdir() do profile
+                url = "http://127.0.0.1:$port/?tab=responding"
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $url`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                    @test startswith(outcome, "/complete?status=passed")
+                    # The reader set the output, the threshold and the
+                    # direction; the response quantity follows the output.
+                    @test HTTP.URIs.unescapeuri(outcome) ==
+                          "/complete?status=passed&search=direction=below&output=pbmc&tab=responding&threshold=-10"
+                    # No request sent the default's source text, and none sent
+                    # an input before the reader set it.
+                    @test !any(contains("criterion."), asked)
+                    typed = findfirst(contains("threshold=-10"), asked)
+                    @test typed !== nothing
+                    @test !any(contains(r"[?&](threshold|direction|response_quantity)="), asked[1:typed-1])
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+        finally
+            close(server)
+        end
+    end
 end
 
 @testitem "a tabs page writes its inputs into the page address in a browser" setup=[SemanticPageFixtures] tags=[:browser, :semantic] begin

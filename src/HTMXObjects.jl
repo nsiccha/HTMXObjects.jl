@@ -29587,10 +29587,85 @@ function _semantic_context_value(obj, param)
     end
 end
 
+# --- Computed defaults (`@param threshold::Float64 = criterion.threshold`) ---
+#
+# A descriptor's `default` is the source expression of a computed default,
+# never a value to show or send. Where the request names no value and
+# `values=` gives none, the input is its default computed for the request's
+# other inputs (the declaring struct's property), and its control follows that
+# default until the reader sets it: the generated form marks its fields
+# `data-htmxo-follows`, the page leaves a marked field out of what it sends
+# (`semantic_refresh_script`, `semantic_follow_script`), and no hidden input
+# carries it, so the server computes the default for the inputs sent with it.
+# `_semantic_form_values` records the names that follow under this key.
+const _SEMANTIC_FOLLOWS = :__htmxo_follows__
+const _FOLLOWS_ATTR = Symbol("data-htmxo-follows")
+
+_semantic_follows(values) = get(values, _SEMANTIC_FOLLOWS, ())
+
+# Whether `param`'s declared default is computed: an expression, which only
+# the declaring struct's property evaluates. A list of records is not a value
+# of its own (`Records`).
+_computed_default(param) = !param.required && param.default isa Expr &&
+    param.source !== :path && !(param.type isa Type && param.type <: Records)
+
+# Whether the request `obj` answers names `name`. A blank value names nothing:
+# the input then takes its default, as `_lookup_param` reads it.
+function _semantic_request_names(obj, name)
+    req = _req_of(obj)
+    req isa HTTP.Request || return false
+    src = _kwargs_source(req, req.method)
+    fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
+    _submitted_raw(src, fallback, name) !== _NO_DEFAULT
+end
+
+# Whether `param`'s control follows its computed default: a request `@param`
+# (an operation argument's default is no property) the request does not name.
+_semantic_follows_default(obj, param) = _computed_default(param) &&
+    !_semantic_fixed_context(param) &&
+    _param_declaring_object(obj, param.name) !== nothing &&
+    !_semantic_request_names(obj, param.name)
+
+# The value a computed default takes for the request `obj` answers, or
+# `_NO_DEFAULT` when an input it reads is at fault (a caller fault, which that
+# input's field shows): the control then shows no value, and still sends none.
+function _computed_default_value(obj, param)
+    source = _param_declaring_object(obj, param.name)
+    try
+        getproperty(source, param.name)
+    catch err
+        _caller_fault_title(unwrap_error(err), _EN_ERROR_TEXTS) === nothing && rethrow()
+        _NO_DEFAULT
+    end
+end
+
+# A computed default is drawn again when an input it reads changes
+# (`_semantic_param_dependencies`), so a control that follows it shows the
+# value the server computes for the inputs the page sends.
+function _with_default_reads(obj, param)
+    _computed_default(param) || return param
+    source = _param_declaring_object(obj, param.name)
+    source === nothing && return param
+    T = typeof(source)
+    closure = _dependency_closure(T, param.name)
+    isnothing(closure) && return param
+    params = Set{Symbol}(Base.invokelatest(_param_names, T))
+    reads = Symbol[name for name in closure if name in params && name !== param.name]
+    isempty(reads) ? param : merge(param, (; default_reads=sort!(reads)))
+end
+
 function _semantic_form_values(obj, route, provided)
     values = _semantic_values(provided)
+    follows = Set{Symbol}()
+    values[_SEMANTIC_FOLLOWS] = follows
     for param in route.params
         haskey(values, param.name) && continue
+        if _semantic_follows_default(obj, param)
+            push!(follows, param.name)
+            value = _computed_default_value(obj, param)
+            value === _NO_DEFAULT || (values[param.name] = value)
+            continue
+        end
         if get(param, :kind, nothing) === :context
             context_value = _semantic_context_value(obj, param)
             if context_value !== _NO_DEFAULT
@@ -29962,6 +30037,9 @@ function _semantic_control(obj, owner, param, values;
                                   value, values; radio_max, presentation), help)
     control = semantic_control(control_obj, Val(param.name),
                                (; name=param.name, label, value, param, default, help))
+    # Shows its computed default until the reader sets it.
+    param.name in _semantic_follows(values) &&
+        (control = _with_field_attr(control, param.name, _FOLLOWS_ATTR, ""))
     _relevance_wrapped(control, obj, param)
 end
 
@@ -30413,13 +30491,16 @@ _is_multiline_text_ref(callee) = callee === :MultilineText ||
     Meta.isexpr(callee, :.) && callee.args[end] == QuoteNode(:MultilineText)
 
 # The request context a generated submission carries as hidden inputs: values
-# of inputs that have no semantic control (inherited request `@param`s).
+# of inputs that have no semantic control (inherited request `@param`s). One
+# that follows its computed default is left out, so the server computes it for
+# the inputs the submission sends.
 function _semantic_hidden_values(route, values)
     hidden = Pair{Symbol,Any}[]
+    follows = _semantic_follows(values)
     for param in route.params
         param.source === :path && continue
         get(param, :kind, nothing) === nothing || continue
-        haskey(values, param.name) || continue
+        haskey(values, param.name) && !(param.name in follows) || continue
         value = values[param.name]
         value === nothing && continue
         push!(hidden, param.name => value)
@@ -30480,8 +30561,9 @@ function _semantic_runtime_route(obj, route)
         end
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
-    merge(route, (params=NamedTuple[_with_help(obj, _with_relevance(obj, param))
-                                    for param in params],))
+    merge(route, (params=NamedTuple[
+        _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param)))
+        for param in params],))
 end
 
 # A mounted `@include` child resolves parent-supplied params through `__parent__`
@@ -30562,7 +30644,11 @@ function _semantic_param_dependencies(param)
     help = shown ? get(param, :help, nothing) : nothing
     explained = isnothing(help) || isempty(help.dependencies) ? nothing :
                 Set{Symbol}(help.dependencies)
-    found = filter(!isnothing, Any[domain, read, explained])
+    # So does what its computed default reads, which a control showing that
+    # default follows (`_with_default_reads`).
+    defaulted = shown ? get(param, :default_reads, nothing) : nothing
+    defaulted = isnothing(defaulted) ? nothing : Set{Symbol}(defaulted)
+    found = filter(!isnothing, Any[domain, read, explained, defaulted])
     isempty(found) ? nothing : union(found...)
 end
 
@@ -30643,14 +30729,18 @@ end
 
 # `node` with each field named `name` owned by the form `form_id` (`form=`),
 # wherever the field sits on the page.
-_with_form_owner(node, form_id, name) = node
-function _with_form_owner(node::Node, form_id, name)
+_with_form_owner(node, form_id, name) = _with_field_attr(node, name, :form, form_id)
+
+# `node` with the attribute `key => value` on each field (input, select,
+# textarea) named `name`.
+_with_field_attr(node, name, key, value) = node
+function _with_field_attr(node::Node, name, key, value)
     attrs = copy(HTMX.attrs(node))
     if Symbol(lowercase(string(HTMX.tag(node)))) in (:input, :select, :textarea) &&
             string(get(attrs, :name, "")) == string(name)
-        attrs[:form] = form_id
+        attrs[key] = value
     end
-    Node(HTMX.tag(node), attrs, Any[_with_form_owner(child, form_id, name)
+    Node(HTMX.tag(node), attrs, Any[_with_field_attr(child, name, key, value)
                                     for child in HTMX.children(node)])
 end
 
@@ -30690,7 +30780,9 @@ function _operation_refresh_values(req, route, base::Int, n_params::Int)
             value = _lookup_param(src, fallback, param.name, param.type)
             if value !== _NO_DEFAULT
                 values[param.name] = value
-            elseif !param.required
+            elseif !param.required && !_computed_default(param)
+                # A computed default is left to `_semantic_form_values`, which
+                # computes it for the inputs this refresh sends.
                 values[param.name] = param.default
             end
         end
@@ -31752,6 +31844,9 @@ function _semantic_follow_url(target, obj, route, current, names)
             continue
         end
         _param_relevant(obj, param.name) || continue
+        # An input that follows its computed default is not sent, as the page
+        # sends it (`semantic_follow_script`).
+        param.name in _semantic_follows(current) && continue
         value = get(current, param.name, nothing)
         value === nothing && continue
         for v in (value isa AbstractVector ? value : (value,))
@@ -31808,7 +31903,9 @@ end
 
 # What an input shows when the address names nothing: its `values=` entry,
 # else its default, as its control sends it; `nothing` when there is none to
-# leave out (a required input, an argument whose default is an expression).
+# leave out (a required input, an argument whose default is an expression, a
+# default computed from other inputs, which changes with them: such an input
+# is kept once the reader sets it, and left out while it follows its default).
 # The first operation that takes an input defines it.
 function _semantic_address_defaults(specs, routes)
     defaults = Dict{Symbol,Any}()
@@ -31831,6 +31928,7 @@ end
 # properties (`@param fit = first(fits)`) is evaluated, and the work it reads
 # stays shared. An operation argument's is its declared default value.
 function _semantic_input_default(obj, param, bare)
+    isnothing(get(param, :default_reads, nothing)) || return _NO_DEFAULT
     source = _param_declaring_object(obj, param.name)
     if source !== nothing && isdefined(DynamicObjects, :remount)
         unbound = get!(bare, source) do
@@ -34124,9 +34222,16 @@ receives `htmxo-refresh`. This script sends that event:
   final answer, so a slow `:auto` mutation's progress polls do not repeat it.
 
 A region keeps the current choice when it is still offered, so a value an
-import just made valid appears without a page reload. Automatic — no consumer
-wiring. The `htmx()` shell installs it; include it once per page when building
-a `<head>` by hand.
+import just made valid appears without a page reload.
+
+It also keeps a field that shows a default computed from other inputs
+(`@param threshold = criterion.threshold`, marked `data-htmxo-follows` by the
+generated form) on that default until the reader sets it: no request sends
+such a field, so the server computes the default for the inputs the request
+sends, and the region that draws the field again (its default reads the input
+that changed) shows the new value. A field the reader typed in or chose is
+sent like any other from then on. Automatic — no consumer wiring. The `htmx()`
+shell installs it; include it once per page when building a `<head>` by hand.
 """
 semantic_refresh_script() = h.script(Raw(raw"""
 (function() {
@@ -34143,6 +34248,55 @@ semantic_refresh_script() = h.script(Raw(raw"""
   function quoted(value) {
     return '"' + String(value).replace(/["\\]/g, '\\$&') + '"';
   }
+  // A field marked `data-htmxo-follows` shows its default computed from other
+  // inputs, which the reader has not set: no request sends it, so the server
+  // computes the default for the inputs sent with it, and a refresh draws the
+  // value it computes now. Once the reader sets it (before any other listener
+  // sees the change), it is sent like any other field.
+  var FOLLOWS = 'data-htmxo-follows';
+  function setByReader(e) {
+    var t = e.target;
+    if (!t || !t.hasAttribute || !t.hasAttribute(FOLLOWS)) return;
+    Array.prototype.forEach.call(t.form ? t.form.elements : [t], function(c) {
+      if (c.name === t.name) c.removeAttribute(FOLLOWS);
+    });
+    t.removeAttribute(FOLLOWS);
+  }
+  document.addEventListener('input', setByReader, true);
+  document.addEventListener('change', setByReader, true);
+  // The forms a request sends: the requesting element's own, and those its
+  // `hx-include` names (a generated form names `closest …` and `#id`).
+  function sentForms(elt) {
+    var found = [], form = elt.tagName === 'FORM' ? elt : elt.closest('form');
+    if (form) found.push(form);
+    var host = elt.closest('[hx-include]');
+    (host ? host.getAttribute('hx-include') : '').split(',').forEach(function(s) {
+      s = s.trim();
+      if (!s || s === 'unset') return;
+      if (s === 'this') { found.push(host); return; }
+      if (s.indexOf('closest ') === 0) {
+        var c = elt.closest(s.slice(8));
+        if (c) found.push(c);
+        return;
+      }
+      try { Array.prototype.push.apply(found, document.querySelectorAll(s)); } catch (_) {}
+    });
+    return found;
+  }
+  document.addEventListener('htmx:configRequest', function(e) {
+    var d = e.detail, elt = d && d.elt;
+    if (!elt || !elt.closest || !d.parameters) return;
+    var follows = {}, set = {};
+    sentForms(elt).forEach(function(root) {
+      var fields = root.elements || root.querySelectorAll('input, select, textarea');
+      Array.prototype.forEach.call(fields, function(c) {
+        if (c.name) (c.hasAttribute(FOLLOWS) ? follows : set)[c.name] = true;
+      });
+    });
+    Object.keys(follows).forEach(function(name) {
+      if (!set[name]) delete d.parameters[name];
+    });
+  });
   document.addEventListener('change', function(e) {
     var t = e.target, name = t && t.name;
     if (!name || !t.closest) return;
@@ -34229,7 +34383,9 @@ last change:
   (its control is hidden), requests nothing either;
 - only while the forms are valid, so an empty required input waits.
 
-A hidden input is not sent, and an unchecked checkbox sends `false`. A new
+A hidden input is not sent, nor is one that shows its computed default until
+the reader sets it (`data-htmxo-follows`, see [`semantic_refresh_script`](@ref)),
+and an unchecked checkbox sends `false`. A new
 request replaces one still running (`hx-sync`), and the shown result stays on
 screen while the next one computes (`data-htmxo-live`); a result asked for the
 first time shows a `<progress>` until it arrives. After a mutation of
@@ -34240,8 +34396,8 @@ url_state=true)`, the default). Each form marked `data-htmxo-address` names
 the inputs it keeps, with what each shows when the address names nothing.
 After the reader changes an input, each kept input whose value differs from
 that is written into the address (`history.replaceState`, no new history
-entry); one back at it, an empty one, and one that does not apply (its
-control is hidden) are left out. Other parameters, such as the tab's `?tab=`,
+entry); one back at it, an empty one, one that does not apply (its
+control is hidden) and one that shows its computed default are left out. Other parameters, such as the tab's `?tab=`,
 stay. The page shows the values its address names, so a reload or a shared
 link reopens the same inputs and results.
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
@@ -34267,13 +34423,16 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   // The values a region's request carries: every named control of its forms,
   // as the form would submit it, but a hidden one (a `@relevant` input that
-  // does not apply), and an unchecked checkbox as `false`.
+  // does not apply) and one that shows its computed default (`data-htmxo-follows`,
+  // which the server computes for the inputs sent), and an unchecked checkbox
+  // as `false`.
+  var FOLLOWS = 'data-htmxo-follows';
   function pairsOf(region) {
     var pairs = [];
     formsOf(region).forEach(function(form) {
       Array.prototype.forEach.call(form.elements, function(c) {
         if (!c.name || c.disabled || PRESSED.test(c.type)) return;
-        if (c.closest('[hidden]')) return;
+        if (c.closest('[hidden]') || c.hasAttribute(FOLLOWS)) return;
         if (c.type === 'radio') { if (c.checked) pairs.push([c.name, c.value]); return; }
         if (c.type === 'checkbox') {
           pairs.push([c.name, c.checked ? c.value : (c.value === 'true' ? 'false' : null)]);
@@ -34358,6 +34517,7 @@ semantic_follow_script() = h.script(Raw(raw"""
     var values = null;
     Array.prototype.forEach.call(form.elements, function(c) {
       if (c.name !== name || c.disabled || PRESSED.test(c.type) || c.closest('[hidden]')) return;
+      if (c.hasAttribute(FOLLOWS)) return;
       values = values || [];
       if (c.type === 'radio') { if (c.checked) values.push(c.value); return; }
       if (c.type === 'checkbox') {
@@ -34682,22 +34842,29 @@ semantic_follow_script() = h.script(Raw(raw"""
   function setInput(name, values) {
     var controls = pageControls(name), first = controls[0], value = values[0];
     if (!first) return false;
+    // A setting is the reader's choice, even of the value a field already
+    // shows as its computed default.
+    function chosen() { controls.forEach(function(c) { c.removeAttribute(FOLLOWS); }); }
     if (first.type === 'radio') {
       var radio = controls.filter(function(c) { return c.value === value; })[0];
       if (!radio) return false;
+      chosen();
       if (!radio.checked) radio.click();
       return true;
     }
     if (first.type === 'checkbox') {
       var on = value === 'true';
+      chosen();
       if (first.checked !== on) first.click();
       return true;
     }
     if (first.tagName === 'SELECT') {
       var options = Array.prototype.slice.call(first.options);
       if (!options.some(function(o) { return values.indexOf(o.value) >= 0; })) return false;
+      chosen();
       options.forEach(function(o) { o.selected = values.indexOf(o.value) >= 0; });
     } else {
+      chosen();
       first.value = value === undefined ? '' : value;
     }
     first.dispatchEvent(new Event('change', {bubbles: true}));
