@@ -388,3 +388,79 @@ end
         end
     end
 end
+
+@testitem "a page opened with an input at fault shows the fault in its result and at its field in a browser" setup=[FieldHelpFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(HelpPage(); operation_policy=:blocking)
+        receipt = Channel{String}(1)
+        # The page's first answer for the open tab is a fault about the regimen:
+        # its load placeholder is no result to keep, so the article replaces it.
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + label); await sleep(25); }
+          }
+          const region = () => document.querySelector('[data-htmxo-follow="/timecourse"]');
+          const out = {};
+          try {
+            await until(() => region().querySelector('article[aria-invalid]'), 'the fault in the result');
+            out.article = region().textContent.includes('does not parse') &&
+              !region().querySelector('progress, [hx-trigger="load"]') &&
+              !region().hasAttribute('data-htmxo-stale');
+            const note = document.querySelector('.htmxo-field-error');
+            out.field = !!note && note.textContent.includes('does not parse') &&
+              document.querySelector('input[name="regimen"]').getAttribute('aria-invalid') === 'true';
+          } catch (e) { out.error = String(e); }
+          fetch('/complete?' + new URLSearchParams(Object.entries(out).map(([k, v]) => [k, String(v)])));
+        });
+        """))
+        assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
+            "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
+        page = repr("text/html", htmx(Raw(String(dispatch(:GET, "/?regimen=nope"; headers=["HX-Request" => "true"]).body)), driver;
+            assets="/test-assets", sse_version=nothing, ws_version=nothing, preload_version=nothing,
+            pico_version=nothing, feedback=false, compose=false, overlay=false))
+        @test contains(page, r"<div hx-get=\"/timecourse\?[^\"]*regimen=nope[^\"]*\" hx-trigger=\"load\"")
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            haskey(assets, path) &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
+            path == "/favicon.ico" && return HTTP.Response(204)
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            dispatch(req.method, req.target; headers=collect(req.headers),
+                     body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? Dict(HTTP.URIs.queryparams(HTTP.URI(take!(receipt)))) : Dict{String,String}()
+                    @test get(outcome, "error", "") == ""
+                    for key in ("article", "field")
+                        @test (key => get(outcome, key, "missing")) == (key => "true")
+                    end
+                finally
+                    process_exited(process) || kill(process)
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
