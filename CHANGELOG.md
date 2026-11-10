@@ -14,6 +14,16 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.92
+
+- `live_thread(items; texts)` and `live_thread_texts(locale; texts...)` /
+  `LiveThreadTexts`: the words the thread writes itself (the older-items
+  control, "Start of thread", the "↓ N new" / "↓ Latest" pill, the status
+  line's "… failed: …", "request timed out", "network error" and the
+  `response` disclosure) follow the page's language, German under
+  `__lang__ = "de"`, and any of them can be replaced. An English thread renders
+  byte-identically to 0.1.91 (snag `rendered-the-kb-38730db8`).
+
 ## 0.1.91
 
 - A `multipart/form-data` body that does not parse is the caller's fault, answered
