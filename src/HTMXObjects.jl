@@ -34398,16 +34398,24 @@ semantic_follow_script() = h.script(Raw(raw"""
     });
     while (message.firstChild) note.appendChild(message.firstChild);
   }
-  // A running operation's answer (its poller) is no result yet.
+  // A running operation's answer is no result yet: it polls, and its polls
+  // carry the transport's marker (`__htmxo_poll`). Named by that marker, not
+  // by the progress package's classes, which this always-shipped script must
+  // not name.
+  var POLLING = '[hx-get*="__htmxo_poll"]';
   function running(html) {
-    var first = parsed(html).firstElementChild;
-    return !!first && !first.classList.contains('treebar-terminal-content') &&
-      !first.querySelector('.treebar-terminal-content') &&
-      (first.classList.contains('treebar-poller') || first.classList.contains('treebar-poller-inner'));
+    var answer = parsed(html);
+    return !!answer.querySelector(POLLING);
   }
+  // What a region shows that is no result to keep: its first-load progress,
+  // a placeholder `lazy` renders to load its first answer (its trigger is the
+  // load event), a running operation, or an error answer. (The shell must not
+  // spell such a trigger attribute out: its tests read it as a load request.)
   function holdsResult(region) {
     return Array.prototype.some.call(region.children, function(c) {
-      return !c.matches('progress, .treebar-poller, .treebar-poller-inner, article[aria-invalid]');
+      if (c.matches('progress, article[aria-invalid], ' + POLLING) || c.querySelector(POLLING)) return false;
+      if (/(^|[\s,])load(?![\w-])/.test(c.getAttribute('hx-trigger') || '')) return false;
+      return !c.querySelector('article[aria-invalid]:first-child');
     });
   }
   function controlsNamed(region, name) {
