@@ -396,9 +396,11 @@ end
 ```
 
 `query_url(path, obj)` iterates `_param_names(typeof(obj))` and emits only
-the params that were **actually present** in `obj.__req__`. Explicit kwarg
-overrides always win. Defaults stay implicit — the URL only carries what the
-user set.
+the params that were **actually present** in the query of the request `obj`
+answers. Explicit kwarg overrides always win. Defaults stay implicit — the URL
+only carries what the user set. A body computed in a worker process
+(`configure_job_queue!(; workers=1)`) builds the same URL from the request
+input its object carries.
 
 `query_url(path; kwargs...)` (single argument) just builds a plain URL with
 escaped query parameters.

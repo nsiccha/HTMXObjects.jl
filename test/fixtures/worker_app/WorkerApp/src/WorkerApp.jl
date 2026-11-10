@@ -121,6 +121,27 @@ end
     @queued @fresh @get ages() = h.p("ages pid=$(getpid()) ", join((string(s.label, "=", s.age) for s in scenarios), ","))
 end
 
+# Links and a form a body builds from its own object, which carry what the
+# request set (snag `query-url-in-a-w-b1bfa0bb`): mounted, as an app mounts a
+# view of its fit, with parameters of its own and its parent's.
+@htmx struct LinkChild
+    @param (; dataset, level) = __parent__
+    @param cursor::Int = 1
+    @queued @get links(; band::String="low") = h.div(
+        h.p("links pid=$(getpid())"),
+        h.a("report"; id="report", href=query_url(__self__/"report/$band", __self__; force=false)),
+        h.a("next"; id="next", href=query_url(__self__; cursor=cursor + 1)),
+        h.form(; id="form")(hidden_inputs(__self__; skip=[:level])...),
+        get_form(__self__/"links"; obj=__self__, cursor=1),
+    )
+end
+
+@htmx struct LinkApp
+    @param dataset::String = "default"
+    @param level::Int = 1
+    @include sweep = LinkChild()
+end
+
 # An `__error__` hook reads the fault through `unwrap_error`, as the docs say.
 @htmx struct FaultHookApp
     __error__(err) = begin
