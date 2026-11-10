@@ -1,58 +1,51 @@
 using Documenter, DocumenterVitepress, HTMXObjects
+include("support.jl")
 
-# Sync the canonical `htmxo-embed.ts` into our theme dir before
-# DocumenterVitepress runs. The theme's `index.ts` imports from it.
-HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
+pages = [
+    "Start" => ["HTMXObjects.jl" => "index.md"],
+    "Guides" => [
+        "Objects and routes" => "guides/objects.md",
+        "Forms" => "guides/forms.md",
+        "Response views" => "guides/views.md",
+        "Operations" => "guides/operations.md",
+        "Testing" => "guides/testing.md",
+    ],
+    "Examples" => ["Sample browser" => "examples/sample-browser.md"],
+    "Reference" => [
+        "Routes and requests" => "reference/routes.md",
+        "Response values" => "reference/responses.md",
+        "Forms and URLs" => "reference/forms.md",
+        "Tables and captions" => "reference/tables.md",
+        "Layout and navigation" => "reference/layout.md",
+        "Runtime and operations" => "reference/runtime.md",
+        "Files and exports" => "reference/files.md",
+        "Testing" => "reference/testing.md",
+        "Re-exported interfaces" => "reference/objects.md",
+    ],
+]
+DocSupport.lint(pages)
 
 makedocs(
     sitename = "HTMXObjects.jl",
-    modules  = [HTMXObjects],
-    format   = DocumenterVitepress.MarkdownVitepress(
+    modules = [HTMXObjects],
+    format = DocumenterVitepress.MarkdownVitepress(
         repo = "github.com/nsiccha/HTMXObjects.jl",
         devurl = "dev",
-        devbranch = "dev",
+        devbranch = "devibe",
     ),
-    pages = [
-        "Home"       => "index.md",
-        "Examples"   => "examples.md",
-        "Components" => "components.md",
-        "Testing"    => "testing.md",
-        "API"        => "api.md",
-    ],
-    checkdocs = :none,
-    warnonly = true,
+    pages = pages,
+    checkdocs = :exports,
+    warnonly = false,
 )
 
-# Copy recorded examples into the built output so they're served as static files.
-# DocumenterVitepress puts the final site in build/<devurl>/ (e.g. build/1/).
-let public_src = joinpath(@__DIR__, "public")
-    # Find the actual output directory
-    build_dir = joinpath(@__DIR__, "build")
-    if isdir(public_src) && isdir(build_dir)
-        for entry in readdir(build_dir)
-            out = joinpath(build_dir, entry)
-            isdir(out) || continue
-            isfile(joinpath(out, "index.html")) || continue
-            dst = joinpath(out, "examples")
-            isdir(dst) && rm(dst; recursive=true)
-            cp(joinpath(public_src, "examples"), dst)
-            @info "Copied recorded examples to $dst"
-        end
-    end
-end
-
-# Root redirect for when no stable version exists
-let redirect = joinpath(@__DIR__, "build", "index.html")
-    isfile(redirect) || write(redirect, """
-    <!DOCTYPE html>
-    <html><head>
-    <meta http-equiv="refresh" content="0; url=dev/">
-    </head><body>Redirecting to <a href="dev/">dev</a>...</body></html>
-    """)
-end
+write(joinpath(@__DIR__, "build", "index.html"), """
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=dev/"><title>HTMXObjects.jl</title>
+</head><body><a href="dev/">HTMXObjects documentation</a></body></html>
+""")
 
 DocumenterVitepress.deploydocs(
     repo = "github.com/nsiccha/HTMXObjects.jl",
-    devbranch = "dev",
+    devbranch = "devibe",
     push_preview = true,
 )
