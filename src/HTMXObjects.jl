@@ -25285,6 +25285,31 @@ if (!window.htmxoMoveBeforeGuarded) {
 }
 """
 
+# htmx sends an `hx-trigger="load"` request once, when it first processes the
+# element. Processed again after an attribute changed, htmx 2.0.8 de-initializes
+# the element and, on re-initializing it, listens for DOM events named `load` on
+# it instead (`addTriggerHandler` past `firstInitCompleted`). An element is
+# processed twice whenever a script binds swapped content before htmx's settle
+# step does, as `htmxoMdReady` does for a lazy detail: the element sends its
+# request at the first pass, the request's `htmx-request` class changes it, and
+# the settle pass re-initializes it. _hyperscript dispatches a bubbling `load` on
+# every element it initializes (a tabset's tab links), so each answer swapped
+# into the element sent its request again, 8 to 15 times a second for as long as
+# the page stayed open, on a live server and a static export alike (snag
+# `data-htmxo-insta-645ebb35`). A `load` trigger never sends its request with an
+# event: one sent with a DOM `load` event is refused before htmx queues it.
+_load_once_guard_js() = """
+if (!window.htmxoLoadOnceGuarded) {
+    window.htmxoLoadOnceGuarded = true;
+    document.addEventListener('htmx:confirm', function (event) {
+        var d = event.detail, cause = d && d.triggeringEvent, elt = d && d.elt;
+        if (!cause || cause.type !== 'load' || !elt || !elt.getAttribute) return;
+        var trigger = elt.getAttribute('hx-trigger') || elt.getAttribute('data-hx-trigger') || '';
+        if (/(^|,)\\s*load(?![\\w:-])/.test(trigger)) event.preventDefault();
+    }, true);
+}
+"""
+
 # The master/detail client runtime: the toggle and the lazy slot's
 # readiness/latch/retry handlers, defined ONCE per page. Every row `master_detail_pair`
 # renders carries only a short call into it (ids as arguments), so a table
@@ -25315,14 +25340,16 @@ if (!window.htmxoMoveBeforeGuarded) {
 #
 # The runtime starts with the page's `moveBefore` guard
 # (`_move_before_guard_js`), so every page carrying it moves preserved
-# elements safely.
+# elements safely, and with the `load` trigger guard (`_load_once_guard_js`),
+# so a `load` element that the early binding of a lazy detail, or any other
+# second processing, re-initialized still sends its request only once.
 # The elements that are controls of their own inside a master row: a click on
 # one keeps its own behaviour (`htmxoRowControl`, which also counts editable
 # text), and a first-cell label holding one is never wrapped in the row's
 # native button (`_md_interactive_label`).
 const _MD_ROW_CONTROLS = (:a, :button, :input, :textarea, :select, :label, :form, :details)
 
-_md_runtime_js() = _move_before_guard_js() * """
+_md_runtime_js() = _move_before_guard_js() * _load_once_guard_js() * """
 // A table text (`TableTexts`) with its {placeholders} filled in: from the
 // nearest `data-htmxo-texts` the table's `texts=` wrote, else English.
 var htmxoTableTextsDefault = $(_table_texts_json(_EN_TABLE_TEXTS));
@@ -25505,6 +25532,15 @@ It also wraps the page's native `moveBefore` once: Chrome stops the tab when
 naming it, which a row update or an htmx swap does to every kept
 `hx-preserve` element. The wrapper detaches those inputs' `list` for the move,
 so such a subtree still moves with its focus and selection.
+
+And it keeps an `hx-trigger="load"` element to its one request. A lazy detail's
+content is bound when it is swapped in and again when htmx settles it; htmx
+2.0.8 then re-initializes a `load` element whose request had already started,
+and from there sends its request again on every DOM `load` event that reaches
+it, such as the bubbling one _hyperscript dispatches for each element it
+initializes (a tabset's tab links). Such a request is refused, so a fragment
+that loads its content with `hx-trigger="load"` loads it once inside a lazy
+detail too.
 """
 master_detail_js() = h.script(Raw(_md_runtime_js()))
 

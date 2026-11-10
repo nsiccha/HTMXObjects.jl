@@ -6077,9 +6077,12 @@ end
     end
     @test contains(runtime, "htmx.trigger(s, 'htmxo-md-load')")
     @test contains(runtime, "if (htmxoRowControl(row, event.target)) return;")
-    # The page's moveBefore guard rides along wherever the runtime does.
+    # The page's moveBefore guard rides along wherever the runtime does, and so
+    # does the guard that keeps a re-initialized `load` element from sending its
+    # request again (snag `data-htmxo-insta-645ebb35`).
     for page in (runtime, repr("text/html", htmx(h.p("body"))), repr("text/html", sortable_table_js()))
         @test contains(page, "C.prototype.moveBefore = function (node, child)")
+        @test contains(page, "window.htmxoLoadOnceGuarded = true;")
     end
 end
 
