@@ -4458,6 +4458,19 @@ throw escapes `@compile_workload` and fails package precompilation. Use
 `include_post=true` only with deliberately safe mutation routes; those may
 run repeatedly when `operations=true`.
 
+`timeout` (seconds, default 45; `Inf` for no limit) bounds a hang, not a
+compile: it limits the time a request, and the follow-ups of one transport,
+take **outside compilation**. That is the elapsed time minus the time this
+Julia process spent compiling meanwhile (type inference and code generation,
+as `Base.cumulative_compile_time_ns` counts them). A cold first request can
+compile for minutes on a slow or busy machine, such as a laptop installing the
+app while Pkg precompiles other packages, so it never fails the workload. A
+route that hangs or computes past the limit still fails it after `timeout`
+seconds. After a failure the helper closes its server at once
+(`HTTP.forceclose`), so a request still running cannot hold precompilation
+open. For a server in another process, which this clock cannot see, the limit
+is elapsed time.
+
 Rows then also carry `transport` (`:plain`, `:htmx` or `:page`) and
 `requests`, the round trips of the two runs: `2` means the route answered at
 once (`@direct`, `:blocking`, a declared final response, or a server in

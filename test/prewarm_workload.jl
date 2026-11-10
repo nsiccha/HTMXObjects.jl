@@ -129,3 +129,63 @@ end
         routes=[:change])
     @test !isopen(HTMXObjects._SERVER[])
 end
+
+@testitem "a prewarm timeout bounds a hang, not a compile" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    # Snag precompile-bruno-329ff905: an app page's cold first request compiled
+    # for 44 s on two busy CPUs, the 45 s timeout cut it off although the
+    # server answered 200, and the app failed to precompile. Here the page's
+    # first render compiles six fresh 800-statement methods, with a short wait
+    # between them as a real page has (I/O, locks, tasks): a few seconds of
+    # compilation, several times the 0.5 s timeout below. Those waits are what
+    # let the old elapsed-time limit fire on one thread. A handler waiting on
+    # an event is the hang.
+    chunk(k) = Expr(:block, (:(x = muladd(x, 1.0001, $(Float64(i + 1000k))) +
+                               (x > $(Float64(i)) ? sin(x) : cos(x))) for i in 1:800)...)
+    prewarm_cold = Function[(@eval $(Symbol(:prewarm_cold, k))(x) = ($(chunk(k)); x))
+                            for k in 1:6]
+    cold_page() = sum(f -> (sleep(0.01); Base.invokelatest(f, 1.0)), prewarm_cold)
+    prewarm_release = Base.Event()
+    @htmx struct PrewarmTimeoutApp
+        @direct @get cold() = h.p(string(cold_page()))
+        @direct @get stuck() = (wait(prewarm_release); h.p("late"))
+        @direct @get health() = h.p("healthy")
+    end
+    route!(PrewarmTimeoutApp())
+
+    started = time()
+    cold = prewarm_workload!(PrewarmTimeoutApp; routes=[:cold],
+        operations=false, timeout=0.5)
+    elapsed = time() - started
+    @test only(cold.routes).status == 200
+    # Control: the request took several timeouts of elapsed time, which a
+    # limit on elapsed time would have failed.
+    @test elapsed > 1.5
+
+    started = time()
+    failure = try
+        prewarm_workload!(PrewarmTimeoutApp; routes=[:stuck],
+            operations=false, timeout=1)
+        nothing
+    catch err
+        err
+    end
+    elapsed = time() - started
+    notify(prewarm_release)
+    @test failure isa ErrorException
+    @test contains(sprint(showerror, failure),
+        "no answer within 1 s outside compilation")
+    # Neither the request nor closing the server waited for the handler.
+    @test elapsed < 20
+    @test !isopen(HTMXObjects._SERVER[])
+
+    # A fractional or unlimited timeout works (it was `Int(timeout)`); a
+    # non-positive one is refused before any request.
+    @test only(prewarm_workload!(PrewarmTimeoutApp; routes=[:health],
+        operations=false, timeout=2.5).routes).status == 200
+    @test only(prewarm_workload!(PrewarmTimeoutApp; routes=[:health],
+        operations=false, timeout=Inf).routes).status == 200
+    @test_throws ArgumentError prewarm_workload!(PrewarmTimeoutApp;
+        routes=[:health], timeout=0)
+    @test_throws ArgumentError prewarm_routes!("http://127.0.0.1:1", ["/"];
+        timeout=-1)
+end
