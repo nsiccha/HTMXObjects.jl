@@ -1626,6 +1626,8 @@ provider lock. Applications construct no executor/store and call no GC.
 | `semantic_control(obj, ::Val{name}, control)` | Hook: define a method to render one input of your struct your own way in every generated form |
 | `InputSection(heading, names; settings=false)` | A headed group of inputs on an app page (`semantic_app(…; presentation=:tabs, sections)`); `settings=true` sections come after the others |
 | `set_inputs(; inputs...)` | In a mutation's answer: set inputs of the app page it lands on (`set_inputs(fit = name)` chooses the fit it added) |
+| `@param name::Records = Records(fields...; label)` | A list of records of the struct's `@param`s `fields`: a card per record on an app page; a route reads the records switched on as typed `NamedTuple`s |
+| `record_view(obj, record)` / `all_records(records)` | The struct as it answers one record; every record, switched off ones included |
 | `semantic_follow_script()` | The page runtime that keeps a `presentation=:tabs` page's results on their inputs and its inputs in the page address (the `htmx()` shell installs it) |
 | `operation_form(obj, name; …)` | Low-level generated form for one operation |
 | `SemanticNode` and its sixteen elements | Reusable above-markup presentation values with peer format projections — see [The semantic element vocabulary](@ref) |
@@ -1816,6 +1818,36 @@ and button.
   = name))`. The page sets the input once its control offers the value, which
   the refresh after a mutation brings, and follows the change as if the
   reader had made it.
+- **A list of records** (from 0.1.96). A `@param` of type
+  [`Records`](@ref) is a list of records, each with a value for some of the
+  struct's other `@param`s, its fields:
+
+  ```julia
+  "Scenarios"
+  @param scenarios::Records = Records(:regimen, :vessel, :male, :age, :weight;
+                                      label = "Scenario")
+  ```
+
+  Each field keeps everything declared for it (its docstring label and help,
+  `@options`, `@relevant`, `@help`, its default), evaluated for each record.
+  The page draws one card per record wherever the list is placed, its fields
+  laid out as a section's: an *Include* box, an editable label, Duplicate
+  (the copy follows the card) and Remove on each card, and *Add Scenario*,
+  which copies the last card. A route reads the list as the records switched
+  on, each a `NamedTuple` of its `label` and typed field values
+  (`for s in scenarios … s.age … end`), so the app can memoize per record;
+  [`record_view`](@ref)`(__self__, s)` is the struct as it answers that one
+  record, for properties computed from the fields (`record_view(__self__,
+  s).scenario`), and [`all_records`](@ref) includes those switched off. A
+  request names a record's values `scenarios.<i>.<field>`, `.label` and
+  `.on`; one naming none has one record, `"Scenario 1"`, of the fields' own
+  values. The fields themselves are not drawn as inputs of the page. Results
+  follow every change, adding and removing cards included. The page address
+  keeps the list once it differs from that one record: each record's label,
+  `on=false` for one switched off and each field away from its default, so a
+  reload or a shared link reopens the cards. A value a field refuses names
+  `scenarios.<i>.<field>`, so its card's field shows the message. A
+  `@param ...::Records` takes no `@options` or `@relevant` of its own.
 - **Sections** (from 0.1.93). `sections=` groups inputs under headings,
   wherever the page places them, in the sidebar or a tab:
 
@@ -2262,6 +2294,9 @@ ReflectionRoutes
 semantic_app
 InputSection
 set_inputs
+Records
+record_view
+all_records
 operation_form
 semantic_control
 semantic_follow_script

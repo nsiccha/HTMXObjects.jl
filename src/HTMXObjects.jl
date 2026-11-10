@@ -67,7 +67,7 @@ export OperationContext, RootProvider, RootRetention, OperationPolicy, send_ahea
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
-export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs
+export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs, Records, record_view, all_records
 
 using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
@@ -2379,6 +2379,17 @@ function _rewrite_param_line(expr, option_names=Set{Symbol}(), relevant_names=Se
         "the default it takes where it does not apply (`@param $name_sym::T = default`)")))
     # A `@relevant` parameter's extractor takes its condition first; the
     # extractor stays the outermost call, which `_reflect_local_param` reads.
+    if _is_records_type_expr(type_expr)
+        (relevant || name_sym in option_names) && throw(ArgumentError(string(
+            "@htmx: `@param $name_sym::Records` is a list of records; declare `@options` ",
+            "and `@relevant` for its fields, not for the list")))
+        default_expr === nothing && throw(ArgumentError(string(
+            "@htmx: `@param $name_sym::Records` needs its fields as its default: ",
+            "`@param $name_sym::Records = Records(:field, …)`")))
+        rhs = Expr(:call, _extract_records_param, :__self__, req_expr, QuoteNode(name_sym), t,
+                   default_expr)
+        return (name_sym, Expr(:(=), name_sym, rhs))
+    end
     extractor, args = if name_sym in option_names
         relevant ? (_extract_relevant_option_param,
                     Any[_relevance_property(name_sym), :(__self__.__options__), req_expr]) :
@@ -2392,6 +2403,10 @@ function _rewrite_param_line(expr, option_names=Set{Symbol}(), relevant_names=Se
     rhs = Expr(:call, extractor, args...)
     (name_sym, Expr(:(=), name_sym, rhs))
 end
+
+# `Records` or `HTMXObjects.Records` as a `@param`'s declared type.
+_is_records_type_expr(t) = t === :Records ||
+    (Meta.isexpr(t, :., 2) && t.args[2] == QuoteNode(:Records))
 
 # Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
 # and return `(name_sym, rewritten_assignment)` for @header, or `nothing` if unrecognized.
@@ -10681,6 +10696,173 @@ _extract_relevant_option_param(relevant, options, req, name, T, default) =
     _checked_relevance(relevant, name) ?
         _extract_option_param(options, req, name, T, default) : default
 _checked_relevance(relevant::Bool, _name) = relevant
+
+# --- A list of records (`@param name::Records = Records(fields...)`) ---
+
+"""
+    Records(fields::Symbol...; label="Record")
+
+A list of records, declared as one `@param` of an `@htmx` struct whose other
+`@param`s `fields` each record has a value for:
+
+    "Scenarios"
+    @param scenarios::Records = Records(:regimen, :vessel, :age, :weight; label="Scenario")
+
+A record's fields are those `@param`s, with everything declared for them: the
+docstring label and help text, `@options`, `@relevant`, `@help` and the
+default. A route reads the value as the list of the records the reader
+switched on, in order, each a `NamedTuple` of its `label` and its typed field
+values (`for s in scenarios; simulate(s.regimen, s.age); end`), so the app can
+memoize per record. [`record_view`](@ref) gives the struct as it answers one
+record, for the properties computed from those fields. [`all_records`](@ref)
+returns every record, those switched off included, with their `on` field.
+
+A request names a record's values `scenarios.<i>.<field>` (and
+`scenarios.<i>.label`, `scenarios.<i>.on`); one that names none has a single
+record, `"<label> 1"`, with the fields' own values. Each record's values are
+converted, checked against their domains and read under their `@relevant`
+conditions as the fields' own are; a refused value names
+`scenarios.<i>.<field>`. On an app page
+([`semantic_app`](@ref)`(…; presentation=:tabs)`) the list is a card per record
+with an on/off box, an editable label, Duplicate and Remove, and Add, which
+copies the last record; see the API reference's *An app page*.
+"""
+struct Records <: AbstractVector{NamedTuple}
+    fields::Vector{Symbol}
+    label::String
+    entries::Vector{NamedTuple}
+    function Records(fields::Vector{Symbol}, label::AbstractString, entries::Vector{NamedTuple})
+        isempty(fields) && throw(ArgumentError("Records needs at least one field"))
+        allunique(fields) || throw(ArgumentError("Records names a field twice"))
+        any(in((:label, :on)), fields) && throw(ArgumentError(
+            "Records fields cannot be named `label` or `on`, which each record has"))
+        new(fields, String(label), entries)
+    end
+end
+Records(fields::Symbol...; label::AbstractString="Record") =
+    Records(collect(fields), label, NamedTuple[])
+_enabled_records(r::Records) =
+    NamedTuple[Base.structdiff(entry, NamedTuple{(:on,)}) for entry in r.entries if entry.on]
+Base.size(r::Records) = (count(entry -> entry.on, r.entries),)
+Base.getindex(r::Records, i::Int) = _enabled_records(r)[i]
+Base.IndexStyle(::Type{Records}) = IndexLinear()
+
+"""
+    all_records(records::Records) -> Vector{NamedTuple}
+
+Every record of a [`Records`](@ref) list, those switched off included, each with
+its `label`, `on` and field values.
+"""
+all_records(r::Records) = copy(r.entries)
+
+_record_entry(r::Records, label, on, values) =
+    NamedTuple{(:label, :on, r.fields...)}((String(label), on, values...))
+
+# The records a request submits for `name` (`name.<i>.<key>`), in the order
+# of `i`, as raw values by key. A repeated key keeps its last value.
+function _submitted_records(src, fallback, name::Symbol)
+    prefix = string(name, ".")
+    found = Dict{Int,Dict{String,String}}()
+    for source in (fallback, src)
+        source === nothing && continue
+        for (key, value) in source
+            key = String(key)
+            startswith(key, prefix) || continue
+            m = match(r"^(\d+)\.(.+)$", key[length(prefix)+1:end])
+            m === nothing && continue
+            raw = value isa AbstractVector && !(value isa AbstractString) ?
+                (isempty(value) ? "" : last(value)) : value
+            raw isa AbstractString || continue
+            get!(found, parse(Int, m[1]), Dict{String,String}())[String(m[2])] = String(raw)
+        end
+    end
+    [found[i] for i in sort!(collect(keys(found)))]
+end
+
+# The `@param name::Records` extractor: the submitted records, typed by `obj`
+# as it answers each, else one record of the fields' own values.
+function _extract_records_param(obj, req, name::Symbol, _T, declared::Records)
+    req === nothing && return _default_records(obj, declared)
+    method = req.method
+    src = _kwargs_source(req, method)
+    fallback = method in _queryparams_verbs ? nothing : queryparams(req)
+    raw = _submitted_records(src, fallback, name)
+    isempty(raw) && return _default_records(obj, declared)
+    Records(declared.fields, declared.label,
+            NamedTuple[_typed_record(obj, name, declared, i, entry) for (i, entry) in enumerate(raw)])
+end
+_extract_records_param(_obj, _req, name::Symbol, _T, declared) = throw(ArgumentError(string(
+    "@param ", name, "::Records needs its fields as its default: ",
+    "`@param ", name, "::Records = Records(:field, …)`, got ", repr(declared))))
+
+_default_records(obj, declared::Records) = Records(declared.fields, declared.label,
+    NamedTuple[_record_entry(declared, string(declared.label, " 1"), true,
+                             [getproperty(obj, field) for field in declared.fields])])
+
+function _typed_record(obj, name::Symbol, declared::Records, i::Int, raw)
+    label = strip(get(raw, "label", ""))
+    isempty(label) && (label = string(declared.label, " ", i))
+    on = get(raw, "on", "true") != "false"
+    view = _record_view(obj, Dict{Symbol,Any}(field => raw[string(field)]
+        for field in declared.fields if haskey(raw, string(field))))
+    values = map(declared.fields) do field
+        try
+            getproperty(view, field)
+        catch err
+            throw(_record_fault(unwrap_error(err), Symbol(name, ".", i, ".", field), err))
+        end
+    end
+    _record_entry(declared, label, on, values)
+end
+
+
+# The request parameters `obj` answers, as name => raw value pairs: its query,
+# and a urlencoded body's fields. In DynamicObjects' worker process an object
+# carries only its request's snapshot (`__param_request__`).
+_request_param_pairs(::Nothing) = Pair{String,String}[]
+function _request_param_pairs(req::Union{HTTP.Request,_ParamRequest})
+    pairs = Pair{String,String}[]
+    form = req.method in _queryparams_verbs ? nothing : bodyparams(req)
+    for source in (queryparams(req), form)
+        source === nothing && continue
+        for (key, value) in source
+            for v in (value isa AbstractVector && !(value isa AbstractString) ? value : (value,))
+                v isa AbstractString && push!(pairs, String(key) => String(v))
+            end
+        end
+    end
+    pairs
+end
+
+# `obj` as it answers a request that carries `values` for its `@param`s (raw
+# wire strings or typed values) in place of its request's own.
+function _record_view(obj, values::AbstractDict)
+    snapshot = hasproperty(obj, :__param_request__) ? getproperty(obj, :__param_request__) : nothing
+    req = _param_request_of(obj, snapshot)
+    names = Set{String}(string(key) for key in keys(values))
+    pairs = Pair{String,String}[p for p in _request_param_pairs(req) if !(first(p) in names)]
+    for (field, value) in values
+        for v in (value isa AbstractVector && !(value isa AbstractString) ? value : (value,))
+            push!(pairs, string(field) => (v isa AbstractString ? String(v) : _option_wire_string(v)))
+        end
+    end
+    query = join((HTTP.URIs.escapeuri(k) * "=" * HTTP.URIs.escapeuri(v) for (k, v) in pairs), "&")
+    synth = HTTP.Request("GET", "/?" * query)
+    Base.invokelatest(getproperty(DynamicObjects, :remount), obj;
+                      __req__=synth, __param_request__=_param_request(synth))
+end
+
+"""
+    record_view(obj, record) -> obj
+
+`obj` as it answers the one record `record` of a [`Records`](@ref) list: its
+properties read that record's field values in place of the request's. For a
+property computed from the fields, per record:
+
+    @get timecourse() = [simulate(record_view(__self__, s).scenario) for s in scenarios]
+"""
+record_view(obj, record::NamedTuple) = _record_view(obj, Dict{Symbol,Any}(
+    key => value for (key, value) in pairs(record) if !(key in (:label, :on))))
 _checked_relevance(relevant, name) = throw(ArgumentError(string(
     "`@relevant($name)` must be true or false, got ", repr(relevant), " (",
     typeof(relevant), ")")))
@@ -13208,6 +13390,15 @@ end
 _fault_param(_err) = nothing
 _fault_param(e::CallerFault) = e.param
 _fault_param(e::Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue}) = e.name
+
+# A fault about a field of a record (`Records`) names the field as the page
+# sends it, `name.<i>.<field>`.
+_record_fault(e::MissingRequiredParam, name, _err) = MissingRequiredParam(name)
+_record_fault(e::InvalidDomainValue, name, _err) = InvalidDomainValue(name, e.value, e.allowed)
+_record_fault(e::InvalidParamValue, name, _err) = InvalidParamValue(name, e.value, e.type, e.reason)
+_record_fault(e::CallerFault, name, err) =
+    e.param === nothing ? err : CallerFault(e.status, e.message; param=name)
+_record_fault(_e, _name, err) = err
 Base.showerror(io::IO, e::CallerFault) = print(io, e.message)
 
 # Standard reason phrases (RFC 9110, plus 429), the `reasons` of the English
@@ -13394,6 +13585,12 @@ struct ErrorTexts
     log_entry::String                  # a shown cause's log entry (`__show_error_cause__`)
     message_omitted::String            # ... a message too long for the page
     log_omitted::String                # ... a log entry too long for the page
+    record_add::String                 # a list of records (`Records`): add one
+    record_copy::String                # ... a duplicated record's label
+    record_duplicate::String           # ... duplicate this one
+    record_remove::String              # ... remove this one
+    record_include::String             # ... its on/off box
+    record_label::String               # ... the accessible name of its label field
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -13404,7 +13601,7 @@ const _ERROR_TEXT_PLACEHOLDERS = (
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
     loading_named = (:label,), log_entry = (:path,), message_omitted = (:size,),
-    log_omitted = (:size,),
+    log_omitted = (:size,), record_add = (:label,), record_copy = (:label,),
 )
 
 const _ERROR_TEXT_LOCALES = (
@@ -13440,6 +13637,12 @@ const _ERROR_TEXT_LOCALES = (
         log_entry = "Log entry {path}",
         message_omitted = "The message is {size} long, too long for this page; the log entry holds it.",
         log_omitted = "The log entry is {size} long, too long for this page; open the file to read it.",
+        record_add = "Add {label}",
+        record_copy = "{label} (copy)",
+        record_duplicate = "Duplicate",
+        record_remove = "Remove",
+        record_include = "Include",
+        record_label = "Label",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -13474,6 +13677,12 @@ const _ERROR_TEXT_LOCALES = (
         log_entry = "Protokolleintrag {path}",
         message_omitted = "Die Meldung ist {size} lang, zu lang für diese Seite; der Protokolleintrag enthält sie.",
         log_omitted = "Der Protokolleintrag ist {size} lang, zu lang für diese Seite; öffnen Sie die Datei, um ihn zu lesen.",
+        record_add = "{label} hinzufügen",
+        record_copy = "{label} (Kopie)",
+        record_duplicate = "Duplizieren",
+        record_remove = "Entfernen",
+        record_include = "Einbeziehen",
+        record_label = "Bezeichnung",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -18228,6 +18437,7 @@ function _reflect_local_param(T, nm)
     type_index = extractor === _extract_param ? 4 :
                  extractor === _extract_option_param ? 5 :
                  extractor === _extract_relevant_param ? 5 :
+                 extractor === _extract_records_param ? 5 :
                  extractor === _extract_relevant_option_param ? 6 : nothing
     type_index === nothing && return nothing
     length(rhs.args) >= type_index || return nothing
@@ -29237,6 +29447,146 @@ function _choice_list(name, label, options, selected; required=false,
         class="htmxo-choice-list", data_htmxo_choice_list="", attrs...)
 end
 
+# --- A list of records drawn as cards (`@param name::Records`) ---
+
+"""
+    _records_control(obj, T, param, label, value; radio_max)
+
+The control of a [`Records`](@ref) list: a `<fieldset>` with a card per record
+and an Add button. A card has an on/off box, its label, Duplicate and Remove,
+and a control per field, drawn as the field's own control is (its `@options`,
+`@relevant` and help text evaluated for that record: [`record_view`](@ref)),
+named `name.<i>.<field>`. The page runtime (`semantic_follow_script`) adds,
+duplicates and removes cards and numbers them again.
+"""
+function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX)
+    records = value isa Records ? value : getproperty(obj, param.name)
+    name = string(param.name)
+    texts = _error_texts(obj)
+    fields = NamedTuple[_record_field_param(obj, T, field) for field in records.fields]
+    cards = Any[_record_card(obj, T, name, records, fields, i, entry, texts; radio_max)
+                for (i, entry) in enumerate(records.entries)]
+    h.fieldset(h.legend(label), cards...,
+        h.button(_fill_text(texts.record_add; label=records.label); type="button",
+                 class="outline secondary htmxo-record-add", data_htmxo_record_action="add");
+        class="htmxo-records", data_htmxo_records=name, data_htmxo_record_label=records.label,
+        data_htmxo_record_copy=texts.record_copy)
+end
+
+# A record's field as a visible request input of `T`, with what its control
+# needs of its `@options`, `@relevant` and `@help`.
+function _record_field_param(obj, T, field::Symbol)
+    info = _reflect_local_param(T, field)
+    info === nothing && throw(ArgumentError(string(
+        "Records field ", repr(field), " is no @param of ", T)))
+    base = (name=field, source=:query, type=info.type, required=info.required,
+            default=info.default, doc=info.doc, inherited=false, kind=nothing, domain=nothing)
+    promoted = _semantic_request_context_param(base, T)
+    param = promoted === nothing ?
+        merge(base, (; kind=:context, context_source=(type=T, property=field),
+                       context_scope=:request)) : promoted
+    _with_help(obj, _with_relevance(obj, param))
+end
+
+function _record_card(obj, T, name, records, fields, i, entry, texts; radio_max::Int=_RADIO_MAX)
+    values = Dict{Symbol,Any}(field => getfield(entry, field) for field in records.fields)
+    view = _record_view(obj, values)
+    prefix = string(name, ".", i, ".")
+    head = h.div(
+        h.input(; type="hidden", name=prefix * "on", value="false"),
+        h.label(h.input(; type="checkbox", name=prefix * "on", value="true",
+                        (entry.on ? (; checked="true") : (;))...), texts.record_include;
+                class="htmxo-record-on"),
+        h.input(; name=prefix * "label", value=entry.label, aria_label=texts.record_label,
+                class="htmxo-record-label"),
+        h.button(texts.record_duplicate; type="button", class="outline secondary",
+                 data_htmxo_record_action="duplicate"),
+        h.button(texts.record_remove; type="button", class="outline secondary",
+                 data_htmxo_record_action="remove");
+        class="htmxo-record-head")
+    # Its fields are laid out as a section's are: short ones share a row.
+    controls = Any[h.div(_record_scoped(_semantic_control(view, T, field, values; radio_max),
+                                        name, i, records.fields);
+                         class="htmxo-input-field",
+                         (_semantic_short_field(view, T, field, values; radio_max) ?
+                             (; data_htmxo_width="short") : (;))...)
+                   for field in fields]
+    h.div(head, h.div(controls...; class="htmxo-input-section-fields");
+          class="htmxo-record", data_htmxo_record=string(i))
+end
+
+# A field's control as the record `i` of the list `name` shows it: its fields
+# named `name.<i>.<field>`, the conditions the browser evaluates reading those
+# names, and every id (and what names one) suffixed `--name-<i>`, so cards
+# never share an id; the page runtime renumbers both when cards move.
+_record_scoped(node, name, i, fields) = node
+function _record_scoped(node::Node, name, i, fields)
+    field_names = Set(string.(fields))
+    attrs = copy(HTMX.attrs(node))
+    rename(v) = string(v) in field_names ? string(name, ".", i, ".", v) : v
+    for key in (:name, Symbol("data-htmxo-relevant"))
+        haskey(attrs, key) && (attrs[key] = rename(attrs[key]))
+    end
+    if haskey(attrs, Symbol("data-show-when"))
+        condition = JSON.parse(string(attrs[Symbol("data-show-when")]))
+        attrs[Symbol("data-show-when")] = _schema_json(_record_condition(condition, rename))
+    end
+    suffix = string("--", name, "-", i)
+    haskey(attrs, :id) && (attrs[:id] = string(attrs[:id], suffix))
+    for key in (:for, Symbol("aria-describedby"), Symbol("aria-controls"),
+                Symbol("aria-labelledby"), :popovertarget, :list)
+        haskey(attrs, key) || continue
+        attrs[key] = join((token * suffix for token in split(string(attrs[key]))), " ")
+    end
+    Node(HTMX.tag(node), attrs, Any[_record_scoped(child, name, i, fields)
+                                    for child in HTMX.children(node)])
+end
+_record_condition(c::AbstractDict, rename) = Dict{String,Any}(
+    k => (k == "field" ? rename(v) : _record_condition(v, rename)) for (k, v) in c)
+_record_condition(c::AbstractVector, rename) = Any[_record_condition(x, rename) for x in c]
+_record_condition(c, _rename) = c
+
+# The fields a `@param name::Records = Records(:a, :b; …)` declaration names,
+# read from the declaration, else from the list's value.
+function _records_declared_fields(obj, name::Symbol)
+    source = something(_param_declaring_object(obj, name), obj)
+    info = _reflect_local_param(typeof(source), name)
+    declared = info === nothing ? nothing : info.default
+    if Meta.isexpr(declared, :call)
+        fields = Symbol[arg.value for arg in declared.args[2:end]
+                        if arg isa QuoteNode && arg.value isa Symbol]
+        isempty(fields) || return fields
+    end
+    getproperty(source, name).fields
+end
+
+# The page address and a result's first address carry a list of records as
+# its fields: `name.<i>.label`, `name.<i>.on` and `name.<i>.<field>`.
+function _records_wire_pairs(name, records::Records)
+    pairs = Pair{String,String}[]
+    for (i, entry) in enumerate(records.entries)
+        prefix = string(name, ".", i, ".")
+        push!(pairs, prefix * "label" => entry.label)
+        push!(pairs, prefix * "on" => entry.on ? "true" : "false")
+        for field in records.fields
+            value = getfield(entry, field)
+            for v in (value isa AbstractVector && !(value isa AbstractString) ? value : (value,))
+                push!(pairs, prefix * string(field) => _option_wire_string(v))
+            end
+        end
+    end
+    pairs
+end
+# What the page address leaves out of a list: the one record a request that
+# names none would have (`semantic_follow_script` compares it).
+function _semantic_address_wire(records::Records)
+    entry = first(records.entries)
+    Dict{String,Any}("records" => Dict{String,Any}(
+        "label" => records.label,
+        "fields" => Dict{String,Any}(string(field) => _semantic_address_wire(getfield(entry, field))
+                                     for field in records.fields)))
+end
+
 # --- A single choice drawn as a table of its options ---
 
 # Options whose records carry `columns` (a `NamedTuple`, or pairs of a column
@@ -29450,6 +29800,8 @@ end
 
 function _semantic_default_control(control_obj, ControlT, param, label, value, values;
         radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
+    param.type isa Type && param.type <: Records &&
+        return _records_control(control_obj, ControlT, param, label, value; radio_max)
     input = (name=param.name, domain=get(param, :domain, nothing))
     domain = _resolved_input_domain(control_obj, ControlT, input, values)
 
@@ -31136,6 +31488,15 @@ function _semantic_follow_url(target, obj, route, current, names)
     for param in route.params
         param.source === :path && continue
         param.name in names || continue
+        if param.type isa Type && param.type <: Records
+            records = get(current, param.name, nothing)
+            records isa Records || (records = getproperty(
+                something(_param_declaring_object(obj, param.name), obj), param.name))
+            for (k, v) in _records_wire_pairs(param.name, records)
+                push!(query, HTTP.URIs.escapeuri(k) * "=" * HTTP.URIs.escapeuri(v))
+            end
+            continue
+        end
         _param_relevant(obj, param.name) || continue
         value = get(current, param.name, nothing)
         value === nothing && continue
@@ -31254,13 +31615,19 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         sections=InputSection[], place=nothing)
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
-    # What each operation reads of the inputs the page places.
+    # What each operation reads of the inputs the page places. The fields of
+    # a list of records are inputs of its cards, not of the page.
+    record_fields = Set{Symbol}()
+    for spec in specs, param in spec.runtime_route.params
+        param.type isa Type && param.type <: Records || continue
+        union!(record_fields, _records_declared_fields(spec.mounted, param.name))
+    end
     placed = Symbol[]
     reads = Set{Symbol}[]
     complete = Bool[]
     for spec in specs
         candidates = [param for param in spec.runtime_route.params
-                      if _semantic_placed_input(param)]
+                      if _semantic_placed_input(param) && !(param.name in record_fields)]
         foreach(param -> param.name in placed || push!(placed, param.name), candidates)
         found = _operation_reads(typeof(spec.mounted), spec.base_entry.name)
         push!(reads, Set{Symbol}(param.name for param in candidates
@@ -33670,11 +34037,17 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   // What the region's result depends on: the values of the inputs it reads,
   // or of every input sent when the reads are not known.
+  // A list of records (`Records`) sends its fields as `name.<i>.<field>`.
+  function readsName(wanted, name) {
+    if (wanted.indexOf(name) >= 0) return true;
+    var dot = name.indexOf('.');
+    return dot > 0 && wanted.indexOf(name.slice(0, dot)) >= 0;
+  }
   function keyOf(region, pairs) {
     var reads = region.getAttribute('data-htmxo-reads');
     var wanted = reads === null ? null : reads.split(' ');
     return JSON.stringify(pairs.filter(function(p) {
-      return wanted === null || wanted.indexOf(p[0]) >= 0;
+      return wanted === null || readsName(wanted, p[0]);
     }).sort());
   }
   function valid(region) {
@@ -33756,6 +34129,46 @@ semantic_follow_script() = h.script(Raw(raw"""
       return number ? Number(v) === Number(y[i]) : v === y[i];
     });
   }
+  // A list of records is kept as `name.<i>.label`, `name.<i>.on` (only when
+  // off) and each field that differs from its default; nothing at all while
+  // the list is the one record a request that names none has.
+  function writeRecords(url, form, name, spec) {
+    var prefix = name + '.';
+    Array.from(url.searchParams.keys()).forEach(function(k) {
+      if (k.indexOf(prefix) === 0) url.searchParams.delete(k);
+    });
+    var records = [];
+    Array.prototype.forEach.call(form.elements, function(c) {
+      if (!c.name || c.name.indexOf(prefix) !== 0 || PRESSED.test(c.type)) return;
+      var m = /^(\d+)\.(.+)$/.exec(c.name.slice(prefix.length));
+      if (!m) return;
+      var i = Number(m[1]), key = m[2], rec = records[i] = records[i] || {fields: {}};
+      if (key === 'on') { if (c.type === 'checkbox') rec.on = c.checked; return; }
+      if (key === 'label') { rec.label = c.value; return; }
+      if (c.closest('[hidden]')) return;
+      if (c.type === 'radio') { if (c.checked) rec.fields[key] = [c.value]; return; }
+      if (c.type === 'checkbox') { rec.fields[key] = [c.checked ? c.value : 'false']; return; }
+      rec.fields[key] = [c.value];
+      rec.numeric = rec.numeric || {};
+      if (c.type === 'number') rec.numeric[key] = true;
+    });
+    records = records.filter(Boolean);
+    function atDefault(rec, key) {
+      return same(rec.fields[key] || [], spec.fields[key], rec.numeric && rec.numeric[key]);
+    }
+    if (records.length === 1 && records[0].on !== false &&
+        records[0].label === spec.label + ' 1' &&
+        Object.keys(records[0].fields).every(function(k) { return atDefault(records[0], k); })) return;
+    records.forEach(function(rec, j) {
+      var p = prefix + (j + 1) + '.';
+      url.searchParams.append(p + 'label', rec.label || '');
+      if (rec.on === false) url.searchParams.append(p + 'on', 'false');
+      Object.keys(rec.fields).forEach(function(k) {
+        if (spec.fields[k] && atDefault(rec, k)) return;
+        rec.fields[k].forEach(function(v) { url.searchParams.append(p + k, v); });
+      });
+    });
+  }
   var touched = false;
   function writeAddress(last) {
     var forms = Array.prototype.slice.call(document.querySelectorAll('form[data-htmxo-address]'));
@@ -33767,6 +34180,10 @@ semantic_follow_script() = h.script(Raw(raw"""
       var defaults;
       try { defaults = JSON.parse(form.getAttribute('data-htmxo-address')); } catch (_) { return; }
       Object.keys(defaults).forEach(function(name) {
+        if (defaults[name] && defaults[name].records) {
+          writeRecords(url, form, name, defaults[name].records);
+          return;
+        }
         url.searchParams.delete(name);
         var values = valuesOf(form, name);
         if (!values || !values.length || same(values, defaults[name], numeric(form, name))) return;
@@ -33904,6 +34321,63 @@ semantic_follow_script() = h.script(Raw(raw"""
       var field = n.getAttribute(ERROR_FOR);
       if (names === null || names.indexOf(field) >= 0) clearField(field);
     });
+  });
+  // A list of records (`Records`): Add copies the last card, Duplicate the
+  // card after itself, Remove drops one (never the last). A copy is renamed
+  // and numbered before it joins the page, so its radio buttons never join
+  // another card's group; then every card is numbered again (`name.<i>.`
+  // and the ids' `--name-<i>` suffix) and the change reaches the results and
+  // the page address as one the reader made.
+  function renumber(card, name, from, to) {
+    var at = new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.\\d+\\.');
+    var id = new RegExp('--' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-\\d+$');
+    var fresh = name + '.' + to + '.', suffix = '--' + name + '-' + to;
+    card.setAttribute('data-htmxo-record', String(to));
+    [card].concat(Array.prototype.slice.call(card.querySelectorAll('*'))).forEach(function(el) {
+      ['name', 'data-htmxo-relevant'].forEach(function(a) {
+        var v = el.getAttribute(a);
+        if (v && at.test(v)) el.setAttribute(a, v.replace(at, fresh));
+      });
+      if (el.id && id.test(el.id)) el.id = el.id.replace(id, suffix);
+      ['for', 'aria-describedby', 'aria-controls', 'aria-labelledby', 'popovertarget', 'list'].forEach(function(a) {
+        var v = el.getAttribute(a);
+        if (!v) return;
+        el.setAttribute(a, v.split(' ').map(function(t) { return t.replace(id, suffix); }).join(' '));
+      });
+      var cond = el.getAttribute('data-show-when');
+      if (cond) el.setAttribute('data-show-when', cond.split('"' + name + '.' + from + '.').join('"' + fresh));
+    });
+  }
+  function cardsOf(group) {
+    return Array.prototype.filter.call(group.children, function(c) { return c.matches('.htmxo-record'); });
+  }
+  document.addEventListener('click', function(e) {
+    var button = e.target && e.target.closest && e.target.closest('[data-htmxo-record-action]');
+    if (!button) return;
+    var group = button.closest('[data-htmxo-records]');
+    if (!group) return;
+    e.preventDefault();
+    var name = group.getAttribute('data-htmxo-records'), action = button.getAttribute('data-htmxo-record-action');
+    var cards = cardsOf(group), card = button.closest('.htmxo-record');
+    if (action === 'remove') {
+      if (cards.length < 2) return;
+      card.remove();
+    } else {
+      var source = action === 'add' ? cards[cards.length - 1] : card;
+      if (!source) return;
+      var copy = source.cloneNode(true);
+      renumber(copy, name, source.getAttribute('data-htmxo-record'), cards.length + 1);
+      var label = copy.querySelector('.htmxo-record-label');
+      if (label) label.value = action === 'add' ?
+        group.getAttribute('data-htmxo-record-label') + ' ' + (cards.length + 1) :
+        (group.getAttribute('data-htmxo-record-copy') || '{label}').split('{label}').join(source.querySelector('.htmxo-record-label').value);
+      var on = copy.querySelector('.htmxo-record-on input');
+      if (on && action === 'add') on.checked = true;
+      source.insertAdjacentElement('afterend', copy);
+    }
+    cardsOf(group).forEach(function(c, i) { renumber(c, name, c.getAttribute('data-htmxo-record'), i + 1); });
+    if (window.htmx) window.htmx.process(group);
+    group.dispatchEvent(new Event('change', {bubbles: true}));
   });
   // `set_inputs(…)` in an answer (a mutation that added a fit makes it the
   // choice): each input it names takes its value once a control of the
@@ -34552,6 +35026,34 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-help { color: var(--pico-muted-color, inherit); }
 .htmxo-field-error { color: var(--pico-del-color, #b71c1c); }
 [data-htmxo-follow][data-htmxo-stale] { opacity: 0.45; }
+/* A list of records (`Records`): a bordered card per record; its head holds
+   the on/off box, the label, Duplicate and Remove on one row. Pico's
+   unlayered field and button rules read the spacing variables set here. A
+   record that is off is faded below its head. */
+.htmxo-records { min-width: 0; }
+.htmxo-record {
+    border: 1px solid var(--pico-muted-border-color, #d0d7de);
+    border-radius: var(--pico-border-radius, 0.25rem);
+    padding: 0.5rem 0.75rem 0;
+    margin-bottom: 0.75rem;
+}
+.htmxo-record-head {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.5rem;
+    margin-bottom: 0.5rem;
+    --pico-spacing: 0;
+    --pico-form-element-spacing-vertical: 0.25rem;
+    --pico-form-element-spacing-horizontal: 0.5rem;
+}
+.htmxo-record-head > .htmxo-record-label { flex: 1 1 6rem; min-width: 0; margin: 0; }
+.htmxo-record-head > .htmxo-record-on { flex: 0 0 auto; margin: 0; }
+.htmxo-record-head > button { flex: 0 0 auto; width: auto; margin: 0; font-size: 0.85em; }
+.htmxo-semantic-inputs .htmxo-records { flex: 1 1 100%; }
+.htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex-basis: 6rem; }
+.htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: 100%; }
+.htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > :not(.htmxo-record-head) {
+    opacity: 0.5;
+}
+.htmxo-record-add { width: auto; font-size: 0.85em; }
 /* A choice drawn as a table: the legend is the first column's header, so it
    is read but not shown twice; a row is chosen by a click, and the chosen
    row is marked along its left edge and in bold. */
