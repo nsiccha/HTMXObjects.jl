@@ -9,9 +9,97 @@
 # without native `overflow-anchor`).
 
 """
+    LiveThreadTexts
+
+The words a [`live_thread`](@ref) writes itself. The control above the items:
+`older` (it loads older items), `older_loading` (while a page loads),
+`older_retry` (after a page failed; a click retries) and `start` (nothing is
+older). The pill below: `unseen` (with `{count}`, the items that arrived since
+the reader scrolled up) and `latest` (the reader is far up and nothing new
+arrived). The status line: `older_failed` and `refresh_failed` (with
+`{error}`), whose error is `timed_out`, `network_error` or the server's answer
+(`HTTP 500 (error <id>)`), and `response`, the disclosure that holds a failed
+answer's body. Build one with [`live_thread_texts`](@ref).
+"""
+struct LiveThreadTexts
+    older::String           # the control that loads older items
+    older_loading::String   # ... while an older page loads
+    older_retry::String     # ... after an older page failed; a click retries
+    start::String           # ... once nothing is older
+    unseen::String          # the pill: "{count}" items arrived below
+    latest::String          # the pill: the reader is far up, nothing new arrived
+    older_failed::String    # status: an older page failed: "{error}"
+    refresh_failed::String  # status: a refresh of the newest items failed: "{error}"
+    timed_out::String       # the {error} of a request that got no answer in 30 s
+    network_error::String   # the {error} of a request that reached no server
+    response::String        # the disclosure that holds a failed answer's body
+end
+
+const _THREAD_TEXT_PLACEHOLDERS = (unseen = (:count,), older_failed = (:error,), refresh_failed = (:error,))
+
+const _THREAD_TEXT_LOCALES = (
+    en = (
+        older = "Earlier messages",
+        older_loading = "Loading earlier messages…",
+        older_retry = "Couldn’t load earlier messages — retry",
+        start = "Start of thread",
+        unseen = "↓ {count} new",
+        latest = "↓ Latest",
+        older_failed = "Loading earlier messages failed: {error}",
+        refresh_failed = "Refreshing failed: {error}",
+        timed_out = "request timed out",
+        network_error = "network error",
+        response = "response",
+    ),
+    de = (
+        older = "Ältere Nachrichten",
+        older_loading = "Ältere Nachrichten werden geladen…",
+        older_retry = "Ältere Nachrichten konnten nicht geladen werden – erneut versuchen",
+        start = "Anfang des Verlaufs",
+        unseen = "↓ {count} neue",
+        latest = "↓ Neueste",
+        older_failed = "Laden älterer Nachrichten fehlgeschlagen: {error}",
+        refresh_failed = "Aktualisieren fehlgeschlagen: {error}",
+        timed_out = "Zeitüberschreitung der Anfrage",
+        network_error = "Netzwerkfehler",
+        response = "Antwort",
+    ),
+)
+
+"""
+    live_thread_texts(locale::Symbol=:en; texts...)
+
+The [`LiveThreadTexts`](@ref) for `locale` (`:en` or `:de`), with any of its
+texts replaced by keyword:
+
+```julia
+live_thread(items; id="chat", texts=live_thread_texts(:de; start="Anfang des Chats"))
+```
+
+Without `texts=`, [`live_thread`](@ref) writes in the page's language
+([`HTMXObjects.page_lang`](@ref): German under `__lang__ = "de"`, English for
+any other and outside a route). An unknown locale or text name, or a
+placeholder the text does not take, throws an `ArgumentError`.
+"""
+live_thread_texts(locale::Symbol=:en; texts...) =
+    _locale_texts(LiveThreadTexts, :live_thread_texts, _THREAD_TEXT_LOCALES, _THREAD_TEXT_PLACEHOLDERS, locale; texts...)
+
+const _EN_THREAD_TEXTS = live_thread_texts(:en)
+
+_thread_texts(::Nothing) = live_thread_texts(_lang_locale(_THREAD_TEXT_LOCALES, page_lang()))
+_thread_texts(texts::LiveThreadTexts) = texts
+_thread_texts(texts) = throw(ArgumentError(
+    "live_thread: `texts` takes a LiveThreadTexts (live_thread_texts(…)), got $(repr(texts))"))
+
+# The texts reach the client as JSON on the root, only when they are not the
+# English ones the runtime already holds, so an English thread renders as it
+# always has.
+_thread_texts_attr(t::LiveThreadTexts) = t == _EN_THREAD_TEXTS ? nothing : JSON.json(t)
+
+"""
     live_thread(items; older_url=nothing, tail_url=nothing, cursor=nothing,
                 since="", version="", poll="10s", focus=nothing,
-                height=nothing, empty=nothing, id=nothing, class="")
+                height=nothing, empty=nothing, texts=nothing, id=nothing, class="")
 
 A chat-style, bottom-anchored list that loads older items as the viewer scrolls
 up and keeps its newest items live, without flicker or scroll jumps.
@@ -43,6 +131,10 @@ Keyword arguments:
 - `height`: CSS length for the scroll box's maximum height (default `60vh`, or
   set `--htmxo-thread-height` from a stylesheet).
 - `empty`: text shown while the list has no items.
+- `texts`: the words the thread writes itself (the older-items control, the
+  "↓ N new" pill, the status line), a [`live_thread_texts`](@ref). By default
+  those of the page's language: `live_thread_texts(:de)` under
+  `__lang__ = "de"`, English otherwise.
 
 # Tail contract
 
@@ -105,7 +197,8 @@ poller, which the thread client cannot reconcile.
 """
 function live_thread(items; older_url=nothing, tail_url=nothing, cursor=nothing,
                      since="", version="", poll="10s", focus=nothing,
-                     height=nothing, empty=nothing, id=nothing, class="")
+                     height=nothing, empty=nothing, texts=nothing, id=nothing, class="")
+    t = _thread_texts(texts)
     nodes = _thread_item_nodes(items)
     has_older = !isnothing(older_url) && !isnothing(cursor)
     h.div(; id,
@@ -115,6 +208,7 @@ function live_thread(items; older_url=nothing, tail_url=nothing, cursor=nothing,
           data_since=string(since), data_version=string(version),
           data_poll=_thread_poll_ms(poll),
           data_focus=isnothing(focus) ? nothing : string(focus),
+          data_htmxo_thread_texts=_thread_texts_attr(t),
           style=isnothing(height) ? nothing : "--htmxo-thread-height: $height")(
         h.div(class="htmxo-thread-viewport")(
             h.div(class="htmxo-thread-scroll")(
@@ -296,7 +390,11 @@ Client runtime for [`live_thread`](@ref): initializes every
 exposes `window.htmxoThread.refresh(target, {bottom})` /
 `window.htmxoThread.init(el)`. Safe to include more than once.
 """
-live_thread_script() = h.script(Raw(raw"""
+live_thread_script() = h.script(Raw(_LIVE_THREAD_JS))
+
+# The runtime's English words are `live_thread_texts()`, written in where the
+# script says `/*HTMXO_THREAD_TEXTS*/`, so English lives only in Julia.
+const _LIVE_THREAD_JS = replace(raw"""
 (function () {
   'use strict';
   if (window.htmxoThread) return;
@@ -305,6 +403,20 @@ live_thread_script() = h.script(Raw(raw"""
   var TIMEOUT_MS = 30000;
   var MAX_BACKOFF = 8;
   var ITEM = 'htmxo-thread-item';
+  var TEXTS = /*HTMXO_THREAD_TEXTS*/;
+
+  // A text with its {placeholders} filled in from `values`.
+  function fill(t, values) {
+    return values ? t.replace(/\{([A-Za-z_]+)\}/g, function (m, k) { return k in values ? String(values[k]) : m; }) : t;
+  }
+  // The thread's words: the `live_thread_texts` on its root
+  // (`data-htmxo-thread-texts`, there when they are not English), else English.
+  // Read again when the attribute changes, as when a morph swaps the language.
+  function text(s, name, values) {
+    var raw = s.root.getAttribute('data-htmxo-thread-texts') || '';
+    if (raw !== s.textsRaw) { s.textsRaw = raw; s.texts = raw ? JSON.parse(raw) : {}; }
+    return fill(typeof s.texts[name] === 'string' ? s.texts[name] : TEXTS[name], values);
+  }
   var MORPH = {
     morphStyle: 'outerHTML',
     ignoreActiveValue: true,
@@ -333,7 +445,8 @@ live_thread_script() = h.script(Raw(raw"""
         return { status: r.status, ok: r.ok, errorId: r.headers.get('X-HTMXO-Error-Id'), text: text };
       });
     }, function (err) {
-      throw { message: err && err.name === 'AbortError' ? 'request timed out' : 'network error' };
+      // No answer: the error is one of the thread's words.
+      throw { reason: err && err.name === 'AbortError' ? 'timed_out' : 'network_error' };
     }).finally(function () { clearTimeout(timer); });
   }
 
@@ -496,18 +609,20 @@ live_thread_script() = h.script(Raw(raw"""
   function updatePill(s) {
     var show = !s.stuck && (s.unseen > 0 || distance(s) > s.scroller.clientHeight);
     s.pill.hidden = !show;
-    if (show) s.pill.textContent = s.unseen > 0 ? '↓ ' + s.unseen + ' new' : '↓ Latest';
+    if (show) s.pill.textContent = s.unseen > 0 ? text(s, 'unseen', { count: s.unseen }) : text(s, 'latest');
   }
 
   // --- status -----------------------------------------------------------
+  // `what` names the status text (`older_failed`, `refresh_failed`). The
+  // console keeps English; the status line is in the thread's language.
   function report(s, what, err) {
-    console.error('htmxo thread: ' + what + ' failed: ' + err.message, err.html || '');
+    console.error('htmxo thread: ' + fill(TEXTS[what], { error: err.reason ? TEXTS[err.reason] : err.message }), err.html || '');
     var st = s.status;
     st.textContent = '';
-    st.appendChild(document.createTextNode(what + ' failed: ' + err.message));
+    st.appendChild(document.createTextNode(text(s, what, { error: err.reason ? text(s, err.reason) : err.message })));
     if (err.html) {
       var d = document.createElement('details'), sm = document.createElement('summary'), body = document.createElement('div');
-      sm.textContent = 'response';
+      sm.textContent = text(s, 'response');
       body.innerHTML = err.html;
       d.appendChild(sm); d.appendChild(body); st.appendChild(d);
     }
@@ -527,12 +642,12 @@ live_thread_script() = h.script(Raw(raw"""
     var o = s.older;
     o.textContent = '';
     if (!s.olderUrl) return;
-    if (s.olderBusy) { o.textContent = 'Loading earlier messages…'; return; }
-    if (s.olderDone) { o.textContent = 'Start of thread'; return; }
+    if (s.olderBusy) { o.textContent = text(s, 'older_loading'); return; }
+    if (s.olderDone) { o.textContent = text(s, 'start'); return; }
     var b = document.createElement('span');
     b.setAttribute('role', 'button');
     b.tabIndex = 0;
-    b.textContent = s.olderError ? 'Couldn’t load earlier messages — retry' : 'Earlier messages';
+    b.textContent = text(s, s.olderError ? 'older_retry' : 'older');
     o.appendChild(b);
   }
   function loadOlder(s) {
@@ -574,7 +689,7 @@ live_thread_script() = h.script(Raw(raw"""
       if (s.dead || stale()) return;
       s.olderError = true;
       olderLabel(s);
-      report(s, 'Loading earlier messages', err);
+      report(s, 'older_failed', err);
     });
   }
   // The observer only reports changes; after a page lands, keep filling while
@@ -630,7 +745,7 @@ live_thread_script() = h.script(Raw(raw"""
     }).catch(function (err) {
       if (s.dead) return;
       s.failures++;
-      report(s, 'Refreshing', err);
+      report(s, 'refresh_failed', err);
     }).then(function () {
       s.tailBusy = false;
       if (s.dead) return;
@@ -678,7 +793,7 @@ live_thread_script() = h.script(Raw(raw"""
       version: root.getAttribute('data-version') || '',
       stuck: true, unseen: 0, lastTop: 0, anchors: null, gen: 0, failures: 0,
       tailBusy: false, tailAgain: false, olderBusy: false, olderError: false,
-      timer: null, dead: false, hiddenPaused: false
+      timer: null, dead: false, hiddenPaused: false, textsRaw: '', texts: {}
     };
     root.__htmxoThread = s;
     setOlder(s, s.older.getAttribute('data-cursor'), s.older.hasAttribute('data-done'));
@@ -769,7 +884,7 @@ live_thread_script() = h.script(Raw(raw"""
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();
-"""))
+""", "/*HTMXO_THREAD_TEXTS*/" => JSON.json(_EN_THREAD_TEXTS))
 
 """
     live_thread_assets()

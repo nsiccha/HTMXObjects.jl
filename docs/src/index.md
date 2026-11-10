@@ -526,6 +526,7 @@ handler injects them — but route bodies may reference them.
 | `__page__`      | User                                 | `content -> full_page(content)`. Called by pipeline.  |
 | `__error__`     | User (optional)                      | `err -> renderable`, or `(err, uid) -> renderable` to also receive the recorded error id. Called on caught exceptions. |
 | `__error_texts__` | User (`= error_texts(:de)`) + `@include` | The language of the error articles; falls through the `__parent__` chain. |
+| `__show_error_cause__` | User (optional, `= true`) | A server fault's article also shows the exception and its log entry; read along the `__parent__` chain. See [A server fault's cause on the page](api.md#error-cause). |
 
 ## URL building — `__self__ / "path"`
 

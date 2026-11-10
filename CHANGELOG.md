@@ -14,6 +14,43 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.93
+
+- An app page groups its inputs under headings: `semantic_app(…; presentation=:tabs,
+  sections=[…])` takes `heading => names` pairs and the new exported
+  `InputSection(heading, names; settings=false)`. Each section is a `<fieldset>` whose
+  `<legend>` is its heading, drawn wherever its inputs are placed (the sidebar or a tab),
+  its inputs in the order it names them; sections marked `settings=true` come after the
+  others, and inputs no section names keep their place, first. Inside a section, short
+  fields (a number, a checkbox, a choice between two pills) share a row, so Age and
+  Weight sit side by side in a 19rem sidebar. A field whose `@relevant` condition is
+  false is hidden as before, and a section none of whose fields applies is hidden with
+  them, also live in the browser. Placement, requests, the page address, results and
+  the page's Markdown are unchanged. An input in two sections or one no operation
+  takes is an `ArgumentError` (todo `1r8adzh`, for Bruno's web-sim; user decision `076o1gn`).
+- An app can show a server fault's cause on the page: with `__show_error_cause__ = true`
+  on its root struct (read along the `__parent__` chain), the article under
+  `Something went wrong. Error ID: …` also shows the exception's type, bold, and its
+  message in a wrapping block, and a disclosure *Log entry `<path>`* holding the whole
+  log entry. Polled operations, `safely` panels and failures in DynamicObjects' worker
+  process show it the same way; an exception that could not cross from the worker shows
+  as `RemoteComputationError` with the worker's printout, its backtrace left to the log.
+  A message over 16 KiB or a log entry over 256 KiB is left out whole, saying its size.
+  Three new `ErrorTexts` texts word it (`log_entry`, `message_omitted`, `log_omitted`;
+  English and German). Without the setting every article is byte-identical to before;
+  a caller fault's article never changes (todo `02sz67d`, for Bruno's web-sim; user
+  decision `076o1gn`).
+
+## 0.1.92
+
+- `live_thread(items; texts)` and `live_thread_texts(locale; texts...)` /
+  `LiveThreadTexts`: the words the thread writes itself (the older-items
+  control, "Start of thread", the "↓ N new" / "↓ Latest" pill, the status
+  line's "… failed: …", "request timed out", "network error" and the
+  `response` disclosure) follow the page's language, German under
+  `__lang__ = "de"`, and any of them can be replaced. An English thread renders
+  byte-identically to 0.1.91 (snag `rendered-the-kb-38730db8`).
+
 ## 0.1.91
 
 - A `multipart/form-data` body that does not parse is the caller's fault, answered
