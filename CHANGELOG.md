@@ -14,6 +14,27 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.91
+
+- A `multipart/form-data` body that does not parse is the caller's fault, answered
+  `400 Bad Request`, never 500 (snag `undeclared-param-65ddfd9b`).
+  `multipartparams` and `bodyparams` throw the new caller fault
+  `HTMXObjects.UnreadableBody(format, reason)`, where `reason` is what HTTP.jl's parser
+  found wrong (`boundary delimiter not found`, `a part has no form-data name`, …).
+  A route that binds a keyword or `@param` from such a body answers
+  `Unreadable request body: not valid multipart/form-data (boundary delimiter not found)`,
+  worded by the app's `ErrorTexts` (new text `unreadable_body`, English and German).
+  Before, HTTP.jl's own error escaped as a 500.
+- `__undeclared_params__` leaves such a body to the route. Under `:warn` or `:refuse`
+  it submits no parameter names, one warning says its names were not checked, and the
+  route answers as it would without a declaration. Before, the parse error escaped
+  the check, so even `:warn` answered 500 before a route that reads its own body
+  could answer it (the KB's `/code/upload`).
+- **Breaking** for code that tells these failures apart by type: `multipartparams`
+  used to throw HTTP.jl's `ErrorException`, or on HTTP 1.x a `MethodError` for a part
+  with no form-data name or no header. Catch `HTMXObjects.UnreadableBody` and read its
+  `reason` instead. A request that names no boundary still yields an empty dict.
+
 ## 0.1.90
 
 - `ColumnSpec(label; align = :left | :center | :right)` aligns a column: its sortable
