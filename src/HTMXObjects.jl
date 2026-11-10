@@ -18901,17 +18901,87 @@ end
 
 _prewarm_base(base_url::AbstractString) = rstrip(String(base_url), '/')
 
-# One concrete request. Never throws: transport failures are data.
+# A prewarm `timeout` bounds a hang, not a compile. A cold first request can
+# compile for minutes on a slow or loaded machine (one app page took 44 s on two
+# busy CPUs, snag precompile-bruno-329ff905), and inside a precompile workload
+# that compilation is the point. So the limit counts only time this process
+# spends outside compilation: wall time minus Julia's cumulative compile time
+# (type inference and code generation, on every thread), which
+# `_with_compile_clock` switches on while a prewarm runs. A server in another
+# process compiles where this clock cannot see, so there it is wall time.
+function _prewarm_timeout(timeout)
+    timeout isa Real && timeout > 0 || throw(ArgumentError(
+        "prewarm timeout must be a positive number of seconds (Inf for no " *
+        "limit), got $(repr(timeout))"))
+    Float64(timeout)
+end
+
+_compile_clock_ns() = isdefined(Base, :cumulative_compile_time_ns) ?
+    UInt64(first(Base.cumulative_compile_time_ns())) : UInt64(0)
+
+# Run `f` with Julia's compile clock on. Enabling nests: each call adds one to a
+# counter that the matching disable takes away.
+function _with_compile_clock(f)
+    isdefined(Base, :cumulative_compile_timing) || return f()
+    Base.cumulative_compile_timing(true)
+    try
+        f()
+    finally
+        Base.cumulative_compile_timing(false)
+    end
+end
+
+_prewarm_clock() = (; wall=time_ns(), compile=_compile_clock_ns())
+
+# Seconds since `clock`: elapsed, compiling, and `busy`, the elapsed seconds not
+# spent compiling, which is what a prewarm `timeout` limits.
+function _prewarm_elapsed(clock)
+    wall = (time_ns() - clock.wall) / 1e9
+    compile = (_compile_clock_ns() - clock.compile) / 1e9
+    (; wall, compile, busy=max(0.0, wall - compile))
+end
+
+_prewarm_seconds(x::Real) =
+    isinteger(x) && abs(x) < 1e9 ? string(round(Int, x)) : string(round(x; digits=1))
+
+_prewarm_overrun(what::AbstractString, timeout::Real, spent) =
+    "$what within $(_prewarm_seconds(timeout)) s outside compilation " *
+    "($(_prewarm_seconds(spent.wall)) s elapsed, " *
+    "$(_prewarm_seconds(spent.compile)) s of it compiling)"
+
+# Wait until `task` is done (`nothing`) or has taken `timeout` seconds outside
+# compilation (its `_prewarm_elapsed` times).
+function _prewarm_await(task::Task, timeout::Float64)
+    clock = _prewarm_clock()
+    while !istaskdone(task)
+        isfinite(timeout) || (wait(task); break)
+        spent = _prewarm_elapsed(clock)
+        remaining = timeout - spent.busy
+        remaining > 0 || return spent
+        timedwait(() -> istaskdone(task), remaining; pollint=0.01)
+    end
+    nothing
+end
+
+# One concrete request. Never throws: transport failures are data. The request
+# runs in its own task with no read deadline; this one waits for it for
+# `timeout` seconds outside compilation. A request that overruns becomes an
+# error row and is left to end when the server answers or closes the connection
+# (`prewarm_workload!` closes its server at once on a failure): throwing into
+# its task could interrupt HTTP.jl in the middle of I/O.
 function _prewarm_request(verb::Symbol, url::AbstractString, timeout::Real;
         headers=Pair{String,String}[])
-    try
-        resp = HTTP.request(string(verb), url, headers; readtimeout=Int(timeout),
-                            connect_timeout=10, status_exception=false,
-                            retry=false)
+    request = @async try
+        resp = HTTP.request(string(verb), url, headers; connect_timeout=10,
+                            status_exception=false, retry=false)
         (; status=resp.status, error=nothing, body=resp.body)
     catch err
         (; status=nothing, error=sprint(showerror, err), body=nothing)
     end
+    spent = _prewarm_await(request, Float64(timeout))
+    spent === nothing && return fetch(request)
+    (; status=nothing, error=_prewarm_overrun("no answer", timeout, spent),
+       body=nothing)
 end
 
 # The transports a browser can receive a deferred answer through: an HTMX
@@ -18969,7 +19039,7 @@ _prewarm_ok(r) = r.error === nothing && r.status !== nothing && 200 <= r.status 
 
 function _prewarm_pass(verb::Symbol, url::AbstractString, transport::Symbol,
         timeout::Real, token::String, follow_token)
-    deadline = time() + timeout
+    clock = _prewarm_clock()
     r = _prewarm_request(verb, url, timeout;
                          headers=_prewarm_headers(Val(transport), Val(verb), token))
     requests = 1
@@ -18977,8 +19047,10 @@ function _prewarm_pass(verb::Symbol, url::AbstractString, transport::Symbol,
     while _prewarm_ok(r)
         next = _prewarm_next(String(r.body))
         next === nothing && break
-        time() < deadline || return (; status=r.status, requests,
-            error="no final answer within $(timeout)s after $requests requests")
+        spent = _prewarm_elapsed(clock)
+        spent.busy < timeout || return (; status=r.status, requests,
+            error=_prewarm_overrun("no final answer after $requests requests",
+                                   timeout, spent))
         sleep(pause)
         pause = min(1.0, 2pause)
         r = _prewarm_request(:GET, _prewarm_resolve(url, next), timeout;
@@ -19026,6 +19098,20 @@ Safety rules:
   `"prewarm"`); an id-lookup route may 404 on them while still warming
   dispatch. For an exact warm, pass concrete URLs.
 - A failed request never throws: it is reported as `(status=nothing, error)`.
+
+`timeout` (seconds, default 45; `Inf` for no limit) bounds a hang, not a
+compile. It limits how long one request, and with `operations=true` the
+follow-ups of one transport, may take **outside compilation**: the elapsed time
+minus the time this Julia process spent compiling meanwhile (type inference and
+code generation, on every thread, as `Base.cumulative_compile_time_ns` counts
+them). A cold first request can compile for minutes on a slow or busy machine,
+and inside a precompile workload that compilation is the point, so it never
+trips the limit. A handler that hangs or computes past it still fails after
+`timeout` seconds. A server in another process compiles where this clock cannot
+see, so for it the limit is elapsed time. A request that overruns is reported as
+`(status=nothing, error="no answer within 45 s outside compilation (… s elapsed,
+… s of it compiling)")` and is left to end when the server answers or closes the
+connection.
 
 `coll` takes the same ergonomic collection as [`precompile_routes!`](@ref)
 (descriptors, `\"/url\"` strings, `:names`, regexes) with two differences in
@@ -19075,7 +19161,15 @@ end
 """
 function prewarm_routes!(base_url::AbstractString, coll;
         include_post::Bool=false, timeout::Real=45, operations::Bool=false)
-    base = _prewarm_base(base_url)
+    limit = _prewarm_timeout(timeout)
+    _with_compile_clock() do
+        _prewarm_urls!(_prewarm_base(base_url), coll, include_post, limit,
+                       operations)
+    end
+end
+
+function _prewarm_urls!(base::AbstractString, coll, include_post::Bool,
+        timeout::Float64, operations::Bool)
     # Concrete entries need no inventory: plain descriptors and URL strings.
     # Anything else names the Type-taking form explicitly.
     out = NamedTuple[]
@@ -19107,14 +19201,17 @@ end
 function prewarm_routes!(::Type{T}, base_url::AbstractString, coll=nothing;
         include_post::Bool=false, timeout::Real=45,
         operations::Bool=false) where {T}
+    limit = _prewarm_timeout(timeout)
     base = _prewarm_base(base_url)
-    out = NamedTuple[]
-    for (_owner, route) in _resolve_collection(T, coll)
-        append!(out, _prewarm_rows(
-            _prewarm_descriptor(base, route, include_post, timeout),
-            operations, timeout))
+    _with_compile_clock() do
+        out = NamedTuple[]
+        for (_owner, route) in _resolve_collection(T, coll)
+            append!(out, _prewarm_rows(
+                _prewarm_descriptor(base, route, include_post, limit),
+                operations, limit))
+        end
+        out
     end
-    out
 end
 
 function _prewarm_descriptor(base::AbstractString, route::NamedTuple,
@@ -19159,8 +19256,10 @@ function _prewarm_workload!(root, streams; routes=nothing, urls=(),
     settings.host == "127.0.0.1" && settings.port == 0 &&
         settings.listenany === true && settings.async === true ||
         throw(ArgumentError("prewarm_workload! requires a loopback, ephemeral, asynchronous server (host=\"127.0.0.1\", port=0, listenany=true, async=true)"))
+    _prewarm_timeout(timeout)
 
     server = serve(; settings...)
+    finished = false
     try
         base = "http://127.0.0.1:$(HTTP.port(server))"
         route_rows = _require_prewarm_success(
@@ -19169,9 +19268,13 @@ function _prewarm_workload!(root, streams; routes=nothing, urls=(),
         url_rows = _require_prewarm_success(
             prewarm_routes!(base, checks; timeout), "URL")
         streams === nothing || streams(base)
+        finished = true
         (; routes=route_rows, urls=url_rows)
     finally
-        close(server)
+        # A failure may be a request the server never finished, and a graceful
+        # close waits for that request, so after a failure the server closes at
+        # once.
+        finished ? close(server) : HTTP.forceclose(server)
     end
 end
 
@@ -19200,6 +19303,12 @@ The result is `(; routes, urls)`, containing the successful prewarm rows.
 This function is suitable inside `PrecompileTools.@compile_workload`: a missing
 health asset or route then fails package precompilation instead of returning a
 failure row that a caller might overlook.
+
+`timeout` is [`prewarm_routes!`](@ref)'s: a limit on time spent outside
+compilation. A cold compile of a route therefore never fails the workload,
+however slow the machine that installs the app, while a route that hangs fails
+it after `timeout` seconds. After any failure the server is closed at once
+(`HTTP.forceclose`), so a request still running cannot hold the workload open.
 """
 prewarm_workload!(root; kwargs...) = _prewarm_workload!(root, nothing; kwargs...)
 prewarm_workload!(streams::Function, root; kwargs...) =
