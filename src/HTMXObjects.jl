@@ -13383,7 +13383,9 @@ end
 htmx answer then carries `X-HTMXO-Error-Param: regimen` and its article
 `data-htmxo-param="regimen"`, and a generated app page
 ([`semantic_app`](@ref)`(…; presentation=:tabs)`) shows the message at that
-input's field instead of in place of a result it already shows. A missing or
+input's field instead of in place of a result it already shows, as the answer
+wrote it: a glossary term in it stays a link whose definition opens only on
+hover or focus. A missing or
 rejected submitted value names its parameter the same way. Other answers are
 unchanged.
 """
@@ -34260,10 +34262,32 @@ semantic_follow_script() = h.script(Raw(raw"""
     t.innerHTML = typeof html === 'string' ? html : '';
     return t.content;
   }
+  // The message is the article's paragraph as the answer wrote it, markup
+  // included: a glossary term's use in it stays a link whose definition opens
+  // only on hover or focus, as everywhere else on the page (its text is not
+  // the paragraph's `textContent`, which would read the hidden definition out
+  // as part of the message).
   function faultMessage(html) {
     var a = parsed(html).querySelector('article[data-htmxo-param]');
-    var p = a && a.querySelector('p');
-    return p ? p.textContent : '';
+    return a && a.querySelector('p');
+  }
+  // The message's nodes move into the note. Their ids become the note's own,
+  // and the references to them (a term link's `aria-describedby`) follow, since
+  // a region with nothing to keep shows the fault's article too.
+  function fillNote(note, message) {
+    if (!message) return;
+    var ids = Object.create(null);
+    message.querySelectorAll('[id]').forEach(function(el) {
+      var id = note.id + '-' + el.id;
+      ids[el.id] = id;
+      el.id = id;
+    });
+    message.querySelectorAll('[aria-describedby]').forEach(function(el) {
+      el.setAttribute('aria-describedby', el.getAttribute('aria-describedby').split(/\s+/).map(function(i) {
+        return ids[i] || i;
+      }).join(' '));
+    });
+    while (message.firstChild) note.appendChild(message.firstChild);
   }
   // A running operation's answer (its poller) is no result yet.
   function running(html) {
@@ -34310,7 +34334,7 @@ semantic_follow_script() = h.script(Raw(raw"""
     note.id = 'htmxo-field-error-' + (++serial);
     note.setAttribute(ERROR_FOR, name);
     note.setAttribute('role', 'alert');
-    note.textContent = message;
+    fillNote(note, message);
     controls.forEach(function(c) {
       c.setAttribute('aria-invalid', 'true');
       c.setAttribute('data-htmxo-invalid', name);
@@ -35045,6 +35069,9 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-help, .htmxo-field-error { display: block; }
 .htmxo-help { color: var(--pico-muted-color, inherit); }
 .htmxo-field-error { color: var(--pico-del-color, #b71c1c); }
+/* A glossary term in the message keeps its link; its definition, when open,
+   reads as the page's text, not as part of the fault. */
+.htmxo-field-error .htmxo-term-def { color: var(--pico-color, CanvasText); }
 [data-htmxo-follow][data-htmxo-stale] { opacity: 0.45; }
 /* A list of records (`Records`): a bordered card per record; its head holds
    the on/off box, the label, Duplicate and Remove on one row. Pico's
