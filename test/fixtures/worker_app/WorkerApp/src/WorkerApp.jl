@@ -110,6 +110,17 @@ Base.showerror(io::IO, ::HeldFault) = print(io, "HeldFault: the held fault's mes
     @queued @fresh @get param_fault() = throw(CallerFault(400, "the regimen does not parse"; param=:regimen))
 end
 
+# A list of records read in the worker process: each record typed by the app
+# as it answers that record, under the request's other inputs.
+@htmx struct RecordsWorkerApp
+    @param basis::String = "typical"
+    @param age::Float64 = 50.0
+    @relevant(age) = basis == "typical"
+    @param scenarios::Records = Records(:age; label="Scenario")
+    "Ages"
+    @queued @fresh @get ages() = h.p("ages pid=$(getpid()) ", join((string(s.label, "=", s.age) for s in scenarios), ","))
+end
+
 # An `__error__` hook reads the fault through `unwrap_error`, as the docs say.
 @htmx struct FaultHookApp
     __error__(err) = begin

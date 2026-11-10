@@ -371,3 +371,36 @@ end
         end
     end
 end
+
+@testitem "a list of records is typed in the worker process as in this one" setup=[FreshTransportFixtures, WorkerAppFixtures] tags=[:integration, :workers] begin
+    using HTMXObjects, HTTP, Test
+    import HTMXObjects: _clear_operation_polls!
+
+    if !HTMXObjects._has_queue_workers()
+        @test_skip "DynamicObjects before 0.5.7: no worker executor"
+    else
+        try
+            seen = Dict{Int,String}()
+            for workers in (0, 1)
+                configure_job_queue!(; workers)
+                _clear_operation_polls!()
+                route!(WorkerApp.RecordsWorkerApp(); root_provider=RootProvider())
+                answer = body_text(dispatch(:GET, "/ages?scenarios.1.label=A&scenarios.1.age=40" *
+                    "&scenarios.2.label=B&scenarios.2.age=30&scenarios.2.on=false&scenarios.3.label=C";
+                    operation_policy=:blocking))
+                pid = parse(Int, only(match(r"pid=(\d+)", answer).captures))
+                @test (pid == getpid()) == (workers == 0)
+                seen[workers] = replace(answer, r"pid=\d+" => "pid")
+                # The request's other inputs reach each record: here, its age does not apply.
+                cohort = body_text(dispatch(:GET, "/ages?basis=cohort&scenarios.1.label=A&scenarios.1.age=40";
+                    operation_policy=:blocking))
+                @test contains(cohort, "A=50.0")
+            end
+            @test seen[0] == seen[1]
+            @test contains(seen[1], "A=40.0,C=50.0")
+        finally
+            configure_job_queue!(; workers=0, worker_stall=Inf)
+            _clear_operation_polls!()
+        end
+    end
+end
