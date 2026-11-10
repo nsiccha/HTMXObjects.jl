@@ -14,6 +14,21 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.96
+
+- A list of records: `@param scenarios::Records = Records(:regimen, :age, :weight;
+  label="Scenario")` (new exports `Records`, `record_view`, `all_records`). Each record
+  has a value for the named `@param`s, typed, checked and read under their `@options`,
+  `@relevant` and defaults as those `@param`s are, per record. A route reads the
+  records switched on as `NamedTuple`s of `label` and field values; `record_view(obj,
+  record)` is the struct as it answers one record. A request names them
+  `scenarios.<i>.<field>` (`.label`, `.on`); without any, one record of the fields' own
+  values. On an app page the list is a card per record (Include box, label, Duplicate,
+  Remove, and Add, which copies the last), its fields laid out as a section's; results
+  follow it and the page address keeps it. Six new `ErrorTexts` texts word the cards
+  (English and German). The follow script reads `name.<i>.<field>` as an input `name`
+  (todo `1w1bnkx`, for Bruno's web-sim; decision `1a5bx6n`).
+
 ## 0.1.95
 
 - A single choice among options that carry `columns` (an option record's field, a
