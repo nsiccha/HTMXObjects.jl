@@ -631,3 +631,93 @@ end
         end
     end
 end
+
+# A lazy detail's content is bound at the slot's afterSwap (`htmxoMdReady`) and
+# again in htmx's settle step. A `hx-trigger="load"` element in it sends its
+# request at the first pass, and the request's class makes the second pass
+# re-initialize it, after which htmx 2.0.8 listens for DOM `load` events on it.
+# _hyperscript dispatches a bubbling `load` on every element it initializes, so
+# a tabset in the loaded content sent the request again without end (snag
+# `data-htmxo-insta-645ebb35`: 8 requests a second in ODLPlaus's K-40 table).
+# The control phase turns the runtime's `load` guard off and must see the loop.
+@testitem "a load element in a lazy detail sends its request once" tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        table = master_detail_table(["Name"], ["probe"];
+            key=identity, master=x -> (h.td(x),), detail_url="/detail", initially_open=true)
+        # The fragment holds the loader, as ODLPlaus's probe view does.
+        detail_html = repr("text/html", h.article(
+            h.div(; id="loader", hx_get="/content", hx_trigger="load", hx_target="this",
+                  hx_swap="innerHTML")("loading")))
+        # What the loader brings in: an element _hyperscript initializes.
+        content_html = repr("text/html", h.section(
+            h.a(; href="#", id="tab", _="init add .hs-ready to me")("tab")))
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        hyperscript_js = read(HTMXObjects._vendor_file(:hyperscript), String)
+        requests = String[]
+        receipt = Channel{String}(1)
+        driver(guard) = h.script(Raw("""
+        $(guard ? "" : "window.htmxoLoadOnceGuarded = true;")
+        window.addEventListener('load', function() {
+          // Long enough for the loop to send many requests; the server counts them.
+          setTimeout(function() {
+            var tab = document.getElementById('tab');
+            fetch('/complete?ready=' + (tab ? tab.classList.contains('hs-ready') : 'none'));
+          }, 3000);
+        }, {once: true});
+        """))
+        page(guard) = "<!DOCTYPE html>" * repr("text/html", h.html(
+            h.head(h.meta(charset="UTF-8"), driver(guard), h.script(src="/htmx.js"),
+                   h.script(src="/hyperscript.js"), master_detail_js()),
+            h.body(table)))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            html(body) = HTTP.Response(200, ["Content-Type" => "text/html"], body)
+            js(body) = HTTP.Response(200, ["Content-Type" => "application/javascript"], body)
+            uri.path == "/" && return html(page(uri.query != "guard=off"))
+            uri.path == "/htmx.js" && return js(htmx_js)
+            uri.path == "/hyperscript.js" && return js(hyperscript_js)
+            uri.path == "/favicon.ico" && return HTTP.Response(204)
+            if uri.path == "/complete"
+                isready(receipt) || put!(receipt, uri.query)
+                return HTTP.Response(204)
+            end
+            push!(requests, uri.path)
+            uri.path == "/detail" && return html(detail_html)
+            uri.path == "/content" && return html(content_html)
+            HTTP.Response(404)
+        end
+        try
+            for guard in (false, true)
+                empty!(requests)
+                mktempdir() do profile
+                    url = "http://127.0.0.1:$port/?guard=$(guard ? "on" : "off")"
+                    browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $url`;
+                        stdout=devnull, stderr=devnull); wait=false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(browser), 60; pollint=0.05) === :ok
+                        @test isready(receipt)
+                        isready(receipt) && @test take!(receipt) == "ready=true"
+                    finally
+                        process_exited(browser) || kill(browser)
+                        wait(browser)
+                    end
+                end
+                content = count(==("/content"), requests)
+                @info "load element in a lazy detail" guard content requests=length(requests)
+                @test count(==("/detail"), requests) == 1
+                # Without the guard the request repeats; with it, it is sent once.
+                guard ? (@test content == 1) : (@test content > 3)
+            end
+        finally
+            close(server)
+        end
+    end
+end
