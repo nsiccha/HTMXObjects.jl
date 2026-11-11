@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.102
+## 0.1.103
 
 - Bind `application/json` object fields automatically to POST/PUT/PATCH keywords
   and `@param`, including worker requests and keyword splats. Native JSON values
@@ -11,6 +11,13 @@
 - Include JSON request bodies and nullable types in OpenAPI descriptions.
 - **Breaking:** JSON field names now participate in `__undeclared_params__`.
   Declare or allow intentionally accepted fields in apps using `:refuse`.
+
+## 0.1.102
+
+- `serve` flushes stderr after its readiness message, so Julia's default logger
+  exposes `Serving on` immediately when output is redirected to a regular file,
+  in both blocking and asynchronous modes. Custom loggers retain their own
+  filtering and output handling.
 
 ## 0.1.101
 
@@ -33,6 +40,12 @@
   records. Public exports are grouped by task and checked for reference coverage.
 - Documentation builds reject warnings and no longer depend on recorded app
   embeds. The docs workflow follows the development branch used by the package.
+
+- `JSONResponse{T,Status}` declares a JSON route's HTTP status and generated
+  OpenAPI response entry together, for example `JSONResponse{CreatedItem,201}`
+  for a POST that creates an item. Return the plain value; projection still
+  follows `T`. `JSONResponse{T}` and `JSONResponse(value)` keep their 200 defaults,
+  and finished responses returned by the body still pass through unchanged.
 
 ## 0.1.100
 

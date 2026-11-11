@@ -10,6 +10,7 @@ using TestItemRunner
     answer(value) = HTTP.Response(200, ["Content-Type" => "application/json"], JSON.json(value))
     @htmx struct JSONInputApi
         @post item(; name::String, value::Float64)::JSONResponse{Item} = (; name, value)
+        @post created(; name::String, value::Float64)::JSONResponse{Item,201} = (; name, value)
         @put item(; name::String, value::Float64)::JSONResponse{Item} = (; name, value)
         @patch item(; name::String, value::Float64)::JSONResponse{Item} = (; name, value)
         @get item(; name::String, value::Float64)::JSONResponse{Item} = (; name, value)
@@ -44,6 +45,9 @@ using TestItemRunner
         response = request("/item", "name=demo&value=3.0"; content_type="application/x-www-form-urlencoded")
         @test response.status == 200
         @test JSON.parse(response.body)["value"] == 3.0
+        response = request("/created", """{"name":"created","value":3.0}""")
+        @test response.status == 201
+        @test JSON.parse(response.body) == Dict("name" => "created", "value" => 3.0)
         response = request("/item?value=4&name=query", """{"name":"body"}""")
         @test response.status == 200
         @test JSON.parse(response.body) == Dict("name" => "body", "value" => 4.0)
@@ -99,6 +103,8 @@ using TestItemRunner
 
         doc = openapi(JSONInputApi)
         content = doc.paths["/item"]["post"].requestBody.content
+        @test haskey(doc.paths["/created"]["post"].responses, "201")
+        @test haskey(doc.paths["/created"]["post"].requestBody.content, "application/json")
         @test Set(keys(content)) == Set(["application/json", "application/x-www-form-urlencoded"])
         @test content["application/json"].schema.properties["value"].type == "number"
         record = doc.paths["/record"]["post"].requestBody.content["application/json"]

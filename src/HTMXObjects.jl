@@ -259,6 +259,11 @@ Start an HTTP server for the routes registered on `ROUTER`. When
   need `using Revise` before the app is loaded.
 - Remaining keyword arguments are passed to `HTTP.listen!`.
 
+After the listener starts, `serve` logs `Serving on http://<host>:<port>` and
+flushes `stderr` before waiting or returning. With Julia's default logger the
+message is therefore visible even when stderr is redirected to a regular file.
+A custom logger owns its output destination, filtering and buffering.
+
 A response whose body is held in memory (bytes or a string) is sent with a
 `Content-Length` computed after every middleware ran, unless it already carries
 `Content-Length` or `Transfer-Encoding`, answers a HEAD request, or has a status
@@ -392,6 +397,7 @@ function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false
     _SERVER[] = server
     revise === :eager && (_EAGER_REVISE_STOP[] = _start_eager_revise(Revise))
     @info "Serving on http://$host:$port"
+    flush(stderr) # A redirected file must expose readiness while the server runs.
     async && return server
     try
         wait(server)

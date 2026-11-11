@@ -8,6 +8,7 @@
 
 """
     JSONResponse{T}(value)
+    JSONResponse{T,Status}(value)
     JSONResponse(value)
 
 Encode a route value as an `application/json` response using its declared type. OpenAPI reflection uses that type as the response schema.
@@ -29,6 +30,24 @@ end
 @get alarms(; k::Float64 = 3.0)::JSONResponse{Vector{Alarm}} = alarm_table(k)
 ```
 
+The default status is `200`. Declare `JSONResponse{T,Status}` to use another
+status for both the HTTP answer and its OpenAPI response entry:
+
+```julia
+struct CreatedItem
+    id::Int
+end
+
+@htmx struct Items
+    @post items()::JSONResponse{CreatedItem,201} = (; id=1)
+end
+```
+
+The body still returns a plain value; `openapi(Items)` describes it under
+`responses."201"`. Direct construction, `JSONResponse{CreatedItem,201}((; id=1))`,
+uses the same projection and status. `Status` must be an integer from 200 to
+599 except 204, 205 and 304, whose responses cannot carry JSON content.
+
 The encoding follows `T`, not the value's own type:
 
 - A struct or `NamedTuple` type is an object of exactly its fields, each read
@@ -42,7 +61,7 @@ The encoding follows `T`, not the value's own type:
   is not finite (`NaN`, `±Inf`) is `null`.
 - `Date` and `DateTime` are ISO 8601 strings without an offset
   (`2026-10-24T02:00:00`); `Symbol`, `Char` and enums are strings.
-- `Any` (and `JSONResponse(value)`, which is `JSONResponse{Any}`) encodes the
+- `Any` (and `JSONResponse(value)`, which constructs `JSONResponse{Any,200}`) encodes the
   value by its own shape.
 
 A value that does not fit its declaration fails the request with an error
@@ -54,28 +73,43 @@ A body that returns a finished answer of its own on some branch (an
 `HTTP.Response`, a `MIMEResponse` or another `JSONResponse`, such as an untyped
 `JSONResponse((; error = "NotInSnapshot"))`) is answered as it is, with its own
 status and content type; it is not encoded through `T` and is not an error.
-`openapi` still describes only `T` as the route's `200` response, so name such
-an answer in the route's docstring:
+`openapi` still describes only `T` at the declared status (200 by default),
+so name such an alternative answer in the route's docstring:
 
 ```julia
 @get alarms(; k::Float64 = 3.0)::JSONResponse{Vector{Alarm}} =
     fitted() ? alarm_table(k) : JSONResponse((; error = "NotInSnapshot"))
 ```
 """
-struct JSONResponse{T}
+struct JSONResponse{T,Status}
     value::Any
+    function JSONResponse{T,Status}(value) where {T,Status}
+        _json_status(JSONResponse{T,Status})
+        new{T,Status}(value)
+    end
 end
+JSONResponse{T}(value) where {T} = JSONResponse{T,200}(value)
 JSONResponse(value) = JSONResponse{Any}(value)
 
 to_response(r::JSONResponse{T}) where {T} =
-    HTTP.Response(200, ["Content-Type" => "application/json; charset=utf-8"];
+    HTTP.Response(_json_status(typeof(r)), ["Content-Type" => "application/json; charset=utf-8"];
                   body=JSON.json(_response_value(T, r.value);
                                  allownan=true, nan="null", inf="null", ninf="null"))
 _finalized_response(r::JSONResponse) = to_response(r)
 
 # The payload type a `JSONResponse` declaration names.
-_json_payload_type(::Type{JSONResponse{T}}) where {T} = T
+_json_payload_type(::Type{<:JSONResponse{T}}) where {T} = T
 _json_payload_type(::Type{JSONResponse}) = Any
+
+# The default also covers the partial declarations `JSONResponse` and
+# `JSONResponse{T}`. Construction and OpenAPI share status validation.
+_json_status(::Type{<:JSONResponse}) = 200
+function _json_status(::Type{JSONResponse{T,Status}}) where {T,Status}
+    Status isa Integer && 200 <= Status <= 599 && Status ∉ (204, 205, 304) ||
+        throw(ArgumentError("JSONResponse status must be an integer from 200 to 599 " *
+                            "excluding 204, 205 and 304 (no JSON content); got $(repr(Status))"))
+    Int(Status)
+end
 
 # A route declared `::JSONResponse{T}` returns its plain value; the declaration
 # makes that value the JSON answer. A finished answer the route chose itself

@@ -80,6 +80,107 @@ using TestItemRunner
     end
 end
 
+@testmodule JSONStatusFixtures begin
+    using HTMXObjects
+    export CreatedItem, JRStatusApp, JRStatusRoot, JRNoContent
+
+    "An item created by the request."
+    struct CreatedItem
+        id::Int
+    end
+
+    @htmx struct JRStatusApp
+        @post items()::JSONResponse{CreatedItem,201} = (; id=1, ignored="not sent")
+        @post jobs()::JSONResponse{@NamedTuple{id::Int},202} = (; id=2)
+        @post default()::JSONResponse{CreatedItem} = (; id=3)
+        @get either(; kind::String="http")::JSONResponse{CreatedItem,201} =
+            kind == "json" ? JSONResponse((; note="untyped")) :
+            kind == "typed" ? JSONResponse{CreatedItem,202}((; id=4)) :
+            kind == "mime" ? MIMEResponse("text/plain", "a note") :
+            HTTP.Response(202, ["Content-Type" => "text/plain", "X-Own" => "yes"];
+                          body="accepted elsewhere")
+    end
+
+    @htmx struct JRStatusRoot
+        @include status_api = JRStatusApp()
+        @include status_openapi = OpenAPIRoutes(; root=JRStatusApp)
+    end
+
+    @htmx struct JRNoContent
+        @post items()::JSONResponse{CreatedItem,204} = (; id=1)
+    end
+end
+
+@testitem "typed JSON statuses keep the payload projection and 200 defaults" setup=[JSONStatusFixtures] tags=[:unit] begin
+    using HTMXObjects, JSON
+    for (value, status, payload) in (
+        (JSONResponse{CreatedItem,201}((; id=1, ignored=true)), 201, Dict("id" => 1)),
+        (JSONResponse{CreatedItem,202}(CreatedItem(2)), 202, Dict("id" => 2)),
+        (JSONResponse{CreatedItem}((; id=3)), 200, Dict("id" => 3)),
+        (JSONResponse((; note="untyped")), 200, Dict("note" => "untyped")),
+        (JSONResponse{Any,201}((; note="untyped")), 201, Dict("note" => "untyped")),
+    )
+        response = to_response(value)
+        @test response.status == status
+        @test HTTP.header(response, "Content-Type") == "application/json; charset=utf-8"
+        @test JSON.parse(response.body) == payload
+    end
+    @test_throws ArgumentError to_response(JSONResponse{CreatedItem,201}((; wrong=1)))
+    @test_throws ArgumentError to_response(JSONResponse{CreatedItem,201}((; id="wrong")))
+
+    # JSON always carries content, including `null`. RFC 9110 §§6.4.1, 15.3.6
+    # exclude interim/no-content statuses; §15 limits status codes to 100:599.
+    for status in (99, 100, 199, 204, 205, 304, 600, :created, 201.0)
+        @test_throws ArgumentError JSONResponse{CreatedItem,status}((; id=1))
+    end
+    @test_throws ArgumentError openapi(JRNoContent)
+end
+
+@testitem "typed JSON POST status and OpenAPI use the same declaration" setup=[JSONStatusFixtures] tags=[:unit] begin
+    using HTMXObjects, JSON
+    route!(JRStatusRoot())
+    drive(method, path, headers=Pair{String,String}[]) = begin
+        req = HTTP.Request(method, path, headers, UInt8[])
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
+    end
+    for (path, status, id) in (("items", 201, 1), ("jobs", 202, 2), ("default", 200, 3))
+        response = drive("POST", "/status_api/" * path)
+        @test response.status == status
+        @test HTTP.header(response, "Content-Type") == "application/json; charset=utf-8"
+        @test JSON.parse(response.body) == Dict("id" => id)
+    end
+    partial = drive("POST", "/status_api/items", ["HX-Request" => "true"])
+    @test partial.status == 201
+    @test JSON.parse(partial.body) == Dict("id" => 1)
+    @test HTMXObjects._declared_final_response(
+        HTMXObjects._property_descriptor(JRStatusApp, :items, :POST))
+
+    for (kind, status, body) in (("http", 202, "accepted elsewhere"),
+                               ("json", 200, "{\"note\":\"untyped\"}"),
+                               ("typed", 202, "{\"id\":4}"), ("mime", 200, "a note"))
+        response = drive("GET", "/status_api/either?kind=" * kind)
+        @test response.status == status
+        @test String(response.body) == body
+        @test isempty(HTTP.header(response, "X-HTMXO-Error-Id"))
+    end
+    @test HTTP.header(drive("GET", "/status_api/either"), "X-Own") == "yes"
+
+    served = drive("GET", "/status_openapi")
+    @test served.status == 200
+    for doc in (JSON.parse(HTMXObjects._schema_json(openapi(JRStatusApp))), JSON.parse(served.body))
+        responses = doc["paths"]["/items"]["post"]["responses"]
+        @test Set(keys(responses)) == Set(["201"])
+        @test responses["201"]["content"]["application/json"]["schema"]["\$ref"] ==
+            "#/components/schemas/CreatedItem"
+        schema = doc["components"]["schemas"]["CreatedItem"]
+        @test schema["required"] == ["id"]
+        @test schema["properties"] == Dict("id" => Dict("type" => "integer"))
+        @test Set(keys(doc["paths"]["/jobs"]["post"]["responses"])) == Set(["202"])
+        @test Set(keys(doc["paths"]["/default"]["post"]["responses"])) == Set(["200"])
+        @test Set(keys(doc["paths"]["/either"]["get"]["responses"])) == Set(["201"])
+    end
+end
+
 @testitem "JSONResponse encodes a value through its declared type" setup=[JSONResponseFixtures] tags=[:unit] begin
     using HTMXObjects, Dates
     body(T, x) = String(to_response(JSONResponse{T}(x)).body)
