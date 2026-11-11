@@ -29713,6 +29713,22 @@ _semantic_values(values::AbstractDict) =
     Dict{Symbol,Any}(Symbol(name) => value for (name, value) in pairs(values))
 _semantic_values(::Nothing) = Dict{Symbol,Any}()
 
+# A generated, closed single choice can recover when its live options change.
+# Keep its wire value until the domain is resolved, including object-valued
+# choices whose type has no parser. Repeated scalar inputs still fail parsing.
+function _semantic_single_choice(param)
+    domain = get(param, :domain, nothing)
+    param.source !== :path && !_semantic_fixed_context(param) &&
+        domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted &&
+        !get(domain, :multiple, false) && !get(domain, :allow_custom, false)
+end
+
+function _semantic_lookup_value(src, fallback, param)
+    raw = _submitted_raw(src, fallback, param.name)
+    _semantic_single_choice(param) && raw isa AbstractString && return raw
+    _lookup_param(src, fallback, param.name, param.type)
+end
+
 function _semantic_request_value(obj, param)
     req = _req_of(obj)
     # `operation_form` is also called outside a request (docs, gallery, a
@@ -29722,7 +29738,7 @@ function _semantic_request_value(obj, param)
     req === nothing && return _NO_DEFAULT
     src = _kwargs_source(req, req.method)
     fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
-    _lookup_param(src, fallback, param.name, param.type)
+    _semantic_lookup_value(src, fallback, param)
 end
 
 function _semantic_object_value(obj, param)
@@ -29759,8 +29775,11 @@ function _semantic_context_value(obj, param)
     try
         getproperty(source_obj, source.property)
     catch err
+        fault = unwrap_error(err)
+        _semantic_single_choice(param) && fault isa InvalidDomainValue &&
+            fault.name === param.name && return fault.value
         get(param, :context_scope, :object) === :request &&
-            unwrap_error(err) isa MissingRequiredParam && return _NO_DEFAULT
+            fault isa MissingRequiredParam && return _NO_DEFAULT
         rethrow()
     end
 end
@@ -29777,6 +29796,7 @@ end
 # carries it, so the server computes the default for the inputs sent with it.
 # `_semantic_form_values` records the names that follow under this key.
 const _SEMANTIC_FOLLOWS = :__htmxo_follows__
+const _SEMANTIC_DOMAINS = :__htmxo_domains__
 const _FOLLOWS_ATTR = Symbol("data-htmxo-follows")
 
 _semantic_follows(values) = get(values, _SEMANTIC_FOLLOWS, ())
@@ -29840,6 +29860,69 @@ function _with_default_reads(obj, param)
     isempty(reads) ? param : merge(param, (; default_reads=sort!(reads)))
 end
 
+# Evaluate the declared default with this choice omitted, keeping the other
+# request inputs. Supplied/resolved dependency values also apply to that view.
+function _semantic_choice_default(obj, param, values)
+    param.required && return _NO_DEFAULT
+    source = _param_declaring_object(obj, param.name)
+    source === nothing && return param.default isa Expr ? _NO_DEFAULT : param.default
+    view = _record_view(source, Dict(param.name => String[]))
+    closure = _dependency_closure(typeof(source), param.name)
+    if closure !== nothing
+        overrides = Pair{Symbol,Any}[name => value for (name, value) in values
+            if name !== param.name && name in closure && hasproperty(source, name)]
+        isempty(overrides) || (view = Base.invokelatest(DynamicObjects.remake, view; overrides...))
+    end
+    _computed_default_value(view, param)
+end
+
+function _semantic_choice_value(domain, value, param)
+    value === _NO_DEFAULT && return value
+    value isa Expr && return _NO_DEFAULT
+    wire = _option_wire_string(value)
+    for option in get(domain, :options, NamedTuple[])
+        get(option, :disabled, false) && continue
+        (isequal(option.value, value) || _option_wire_string(option.value) == wire) &&
+            return option.value
+    end
+    if value isa AbstractString
+        converted = try
+            _convert_param(value, param.type)
+        catch err
+            err isa Union{ArgumentError,MethodError} || rethrow()
+            return _NO_DEFAULT
+        end
+        for option in get(domain, :options, NamedTuple[])
+            !get(option, :disabled, false) && isequal(option.value, converted) && return option.value
+        end
+    end
+    _NO_DEFAULT
+end
+
+# Resolve once before controls, hidden inputs and initial result URLs consume
+# the values. A recovered computed default follows its dependencies again.
+function _semantic_normalize_choices!(obj, route, values)
+    follows = get!(values, _SEMANTIC_FOLLOWS, Set{Symbol}())
+    domains = Dict{Symbol,Any}()
+    values[_SEMANTIC_DOMAINS] = domains
+    for param in route.params
+        _semantic_single_choice(param) || continue
+        owner, OwnerT = _semantic_control_owner(obj, typeof(obj), param)
+        domain = _resolved_input_domain(owner, OwnerT, param, values)
+        domains[param.name] = domain
+        domain === nothing && continue
+        selected = _semantic_choice_value(domain, get(values, param.name, _NO_DEFAULT), param)
+        if selected === _NO_DEFAULT
+            selected = _semantic_choice_value(domain, _semantic_choice_default(obj, param, values), param)
+            if selected !== _NO_DEFAULT && _computed_default(param)
+                push!(follows, param.name)
+            end
+        end
+        values[param.name] = selected === _NO_DEFAULT ? nothing : selected
+    end
+    values
+end
+
 function _semantic_form_values(obj, route, provided)
     values = _semantic_values(provided)
     follows = Set{Symbol}()
@@ -29879,7 +29962,7 @@ function _semantic_form_values(obj, route, provided)
             values[param.name] = param.default
         end
     end
-    values
+    _semantic_normalize_choices!(obj, route, values)
 end
 
 function _semantic_select(name, label, domain, selected; required=false)
@@ -30321,7 +30404,11 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
     param.type isa Type && param.type <: Records &&
         return _records_control(control_obj, ControlT, param, label, value; radio_max)
     input = (name=param.name, domain=get(param, :domain, nothing))
-    domain = _resolved_input_domain(control_obj, ControlT, input, values)
+    # Keep the resolved domain's actual option objects alongside its selected
+    # value: evaluating a rebuilt source again may create fresh option objects.
+    domains = get(values, _SEMANTIC_DOMAINS, (;))
+    domain = haskey(domains, param.name) ? domains[param.name] :
+        _resolved_input_domain(control_obj, ControlT, input, values)
 
     if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
         options = get(domain, :options, NamedTuple[])
@@ -30963,7 +31050,7 @@ function _operation_refresh_values(req, route, base::Int, n_params::Int)
             values[param.name] = value
             push!(idx_vals, value)
         else
-            value = _lookup_param(src, fallback, param.name, param.type)
+            value = _semantic_lookup_value(src, fallback, param)
             if value !== _NO_DEFAULT
                 values[param.name] = value
             elseif !param.required && !_computed_default(param)
@@ -32063,6 +32150,7 @@ function _semantic_address_value(obj, param)
         return _semantic_context_value(obj, param)
     src = _kwargs_source(req, req.method)
     fallback = req.method in _queryparams_verbs ? nothing : query
+    _semantic_single_choice(param) && return _semantic_lookup_value(src, fallback, param)
     if isdefined(DynamicObjects, :has_option_declaration) &&
             Base.invokelatest(getproperty(DynamicObjects, :has_option_declaration),
                               typeof(obj), param.name)
@@ -32078,13 +32166,14 @@ end
 # over `semantic_app(…; values)`: it is the reader's last choice.
 function _semantic_address_current(obj, route, current, names)
     current = copy(current)
+    current[_SEMANTIC_FOLLOWS] = Set{Symbol}(_semantic_follows(current))
     for param in route.params
         _semantic_address_input(param) || continue
         isnothing(names) || param.name in names || continue
         value = _semantic_address_value(obj, param)
         value === _NO_DEFAULT || (current[param.name] = value)
     end
-    current
+    _semantic_normalize_choices!(obj, route, current)
 end
 
 # What an input shows when the address names nothing: its `values=` entry,
@@ -34571,6 +34660,9 @@ last change:
   (its control is hidden), requests nothing either;
 - only while the forms are valid, so an empty required input waits.
 
+Results and the page address also wait for an in-flight refresh of their
+controls: a domain may take longer to resolve than the result debounce.
+
 A hidden input is not sent, nor is one that shows its computed default until
 the reader sets it (`data-htmxo-follows`, see [`semantic_refresh_script`](@ref)),
 and an unchecked checkbox sends `false`. A new
@@ -34654,8 +34746,33 @@ semantic_follow_script() = h.script(Raw(raw"""
   function valid(region) {
     return formsOf(region).every(function(f) { return !f.checkValidity || f.checkValidity(); });
   }
+  // A slow controls refresh must finish before a result reads those controls.
+  // Track their form owners (including controls placed outside their form),
+  // and count overlapping refreshes independently. Unrelated forms keep working.
+  var refreshing = new Map();
+  function busy(form) { return refreshing.has(form); }
+  document.addEventListener('htmx:beforeSend', function(e) {
+    var d = e.detail, config = d && d.requestConfig, target = d && d.target;
+    if (!config || !/[?&]__htmxo_form=/.test(config.path || '') || !target) return;
+    var forms = [], owner = target.closest && target.closest('form');
+    if (owner) forms.push(owner);
+    target.querySelectorAll('input, select, textarea').forEach(function(c) {
+      if (c.form && forms.indexOf(c.form) < 0) forms.push(c.form);
+    });
+    forms.forEach(function(f) { refreshing.set(f, (refreshing.get(f) || 0) + 1); });
+    d.xhr.addEventListener('loadend', function() {
+      forms.forEach(function(f) {
+        var left = refreshing.get(f) - 1;
+        if (left) refreshing.set(f, left); else refreshing.delete(f);
+        if (d.xhr.status >= 200 && d.xhr.status < 300) {
+          readers(f).forEach(function(r) { if (visible(r)) later(r); });
+        }
+      });
+      if (touched && d.xhr.status >= 200 && d.xhr.status < 300) writeAddress();
+    }, {once: true});
+  });
   function consider(region) {
-    if (!window.htmx || !visible(region) || !valid(region)) return;
+    if (!window.htmx || !visible(region) || !valid(region) || formsOf(region).some(busy)) return;
     var pairs = pairsOf(region);
     var key = keyOf(region, pairs);
     if (region.getAttribute('data-htmxo-shown') === key) return;
@@ -34774,7 +34891,7 @@ semantic_follow_script() = h.script(Raw(raw"""
   var touched = false;
   function writeAddress(last) {
     var forms = Array.prototype.slice.call(document.querySelectorAll('form[data-htmxo-address]'));
-    if (!forms.length) return;
+    if (!forms.length || forms.some(busy)) return;
     // The changed form last, so its value wins a name two forms keep.
     if (last && forms.indexOf(last) >= 0) forms.splice(forms.indexOf(last), 1), forms.push(last);
     var url = new URL(location.href);

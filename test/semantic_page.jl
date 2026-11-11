@@ -72,7 +72,8 @@ using TestItemRunner
         criterion = CRITERIA[output]
         "Response quantity"
         @param response_quantity::String = criterion.quantity
-        @options(response_quantity) = option_domain(
+        @options(response_quantity) = option_domain(output == "pk" ?
+            ["cmin" => "Cmin", "cmax" => "Maximum", "auc" => "AUC"] :
             ["cmin" => "Cmin", "min_change" => "Maximal decrease", "auc" => "AUC"])
         "Direction"
         @param direction::String = criterion.direction
@@ -121,6 +122,38 @@ using TestItemRunner
              for a in eachmatch(r" ([\w-]+)=\"([^\"]*)\"", m.match))
     end
     result_text(response) = replace(String(response.body), r"<[^>]*>" => "")
+end
+
+@testitem "an unavailable generated choice returns to its current default" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    route!(CriterionPage(); operation_policy=:blocking)
+    page(url) = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
+    html = page("/?tab=responding&output=pk&response_quantity=cmax")
+    region = tag_attrs(tab_of(html, "responding"), r"<div class=\"htmxo-semantic-controls\"[^>]*>")
+    refreshed = page(region["hx-get"] * "&output=pbmc&response_quantity=cmax")
+    expected = "<input type=\"radio\" name=\"response_quantity\" value=\"min_change\" checked=\"true\" data-htmxo-follows=\"\">"
+    @test contains(refreshed, expected)
+    @test !contains(refreshed, "value=\"cmax\"")
+
+    # An address opened after its choices changed recovers in the same way.
+    recovered = page("/?tab=responding&output=pbmc&response_quantity=cmax")
+    @test contains(recovered, expected)
+    @test !contains(recovered, "name=\"response_quantity\" value=\"cmax\"")
+    load = tag_attrs(recovered, r"<div hx-get=\"/responding[^\"]*\" hx-trigger=\"load\"[^>]*>")
+    @test load !== nothing
+    if load !== nothing
+        @test load["hx-get"] == "/responding?output=pbmc"
+        @test result_text(dispatch(:GET, load["hx-get"]; headers=["HX-Request" => "true"])) ==
+              "responding:pbmc:min_change:below:-30.0"
+    end
+
+    # Still offered means still the reader's choice, including a nondefault.
+    kept = page(region["hx-get"] * "&output=pbmc&response_quantity=auc")
+    @test contains(kept, "<input type=\"radio\" name=\"response_quantity\" value=\"auc\" checked=\"true\">")
+    # Recovery belongs to the generated form; execution still rejects stale inputs.
+    @test contains(page("/responding?output=pbmc&response_quantity=cmax"),
+                   "Invalid value for parameter response_quantity")
 end
 
 @testitem "@relevant reads a @param's default where it does not apply" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
@@ -709,6 +742,30 @@ end
             await until(() => checked('response_quantity') === 'min_change', 'quantity follows');
             await until(() => address() === 'direction=below&output=pbmc&tab=responding&threshold=-10',
                         'final address');
+            // An explicit choice that disappears returns to the new default,
+            // then follows defaults again. A still offered choice stays explicit.
+            choose('output', 'pk');
+            await until(() => shown() === 'responding:pk:cmin:below:-10.0' &&
+                              checked('response_quantity') === 'cmin' &&
+                              document.querySelector('input[name="response_quantity"][value="cmax"]'),
+                        'before stale choice');
+            choose('response_quantity', 'cmax');
+            await until(() => shown() === 'responding:pk:cmax:below:-10.0', 'maximum');
+            choose('output', 'pbmc');
+            await until(() => shown() === 'responding:pbmc:min_change:below:-10.0' &&
+                              checked('response_quantity') === 'min_change', 'recovered quantity');
+            await until(() => address() === 'direction=below&output=pbmc&tab=responding&threshold=-10',
+                        'recovered address');
+            choose('output', 'pk');
+            await until(() => shown() === 'responding:pk:cmin:below:-10.0' &&
+                              checked('response_quantity') === 'cmin', 'recovered default follows');
+            choose('response_quantity', 'auc');
+            await until(() => shown() === 'responding:pk:auc:below:-10.0', 'shared choice');
+            choose('output', 'pbmc');
+            await until(() => shown() === 'responding:pbmc:auc:below:-10.0' &&
+                              checked('response_quantity') === 'auc', 'shared choice stays');
+            await until(() => address() === 'direction=below&output=pbmc&response_quantity=auc&tab=responding&threshold=-10',
+                        'explicit address');
             await fetch('/complete?status=passed&search=' + encodeURIComponent(address()));
           } catch (error) {
             await fetch('/complete?status=' + encodeURIComponent(String(error)));
@@ -734,6 +791,9 @@ end
                 return HTTP.Response(204)
             end
             path == "/responding" && push!(asked, String(req.target))
+            # A domain refresh can take longer than the result debounce (cold
+            # compilation or a remote dependency). Results must wait for it.
+            occursin("__htmxo_form=", req.target) && sleep(0.65)
             dispatch(req.method, req.target; headers=collect(req.headers),
                      body=HTMXObjects._request_body_bytes(req))
         end
@@ -750,13 +810,16 @@ end
                     # The reader set the output, the threshold and the
                     # direction; the response quantity follows the output.
                     @test HTTP.URIs.unescapeuri(outcome) ==
-                          "/complete?status=passed&search=direction=below&output=pbmc&tab=responding&threshold=-10"
+                          "/complete?status=passed&search=direction=below&output=pbmc&response_quantity=auc&tab=responding&threshold=-10"
                     # No request sent the default's source text, and none sent
                     # an input before the reader set it.
                     @test !any(contains("criterion."), asked)
                     typed = findfirst(contains("threshold=-10"), asked)
                     @test typed !== nothing
                     @test !any(contains(r"[?&](threshold|direction|response_quantity)="), asked[1:typed-1])
+                    @test any(url -> contains(url, "output=pk") && contains(url, "response_quantity=cmax"), asked)
+                    @test !any(url -> !contains(url, "__htmxo_form=") &&
+                        contains(url, "output=pbmc") && contains(url, "response_quantity=cmax"), asked)
                 finally
                     process_exited(process) || kill(process)
                     wait(process)

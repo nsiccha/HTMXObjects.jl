@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.106
+
+- Generated single-choice controls recover a removed or disabled selection
+  using the current declared default. Still-offered selections stay explicit;
+  recovered computed defaults follow their inputs again. Without an enabled
+  default the control stays unselected. Controls, hidden inputs and initial
+  result URLs use the same resolved choice; direct execution keeps validating
+  submitted values. Results and the page address wait for dependent controls
+  to finish refreshing, including when that takes longer than the debounce.
+
 ## 0.1.105
 
 - Generated semantic forms evaluate bare-identifier `@param` defaults, including
