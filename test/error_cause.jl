@@ -1,7 +1,5 @@
 using TestItemRunner
 
-# `__show_error_cause__ = true`: a server fault's article shows the exception
-# and its log entry (Bruno's web-sim; todo `02sz67d`, user decision `076o1gn`).
 
 @testitem "an app that shows its errors' causes shows a server fault's exception and log entry" tags=[:unit, :server] begin
     using HTMXObjects, HTTP

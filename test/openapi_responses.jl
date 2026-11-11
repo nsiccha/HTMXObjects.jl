@@ -1,9 +1,5 @@
 using TestItemRunner
 
-# A route declared `::JSONResponse{T}` answers its plain value encoded through
-# `T`, and `openapi` describes the same `T` as the route's response schema (snag
-# `declare-the-json-8263a67b`, reporter ODLPlaus: every operation of a JSON API
-# read `200: OK`, with no schema and no `components`).
 @testmodule JSONResponseFixtures begin
     using HTMXObjects, Dates
     export JRAlarm, JRAlarms, JRLevel, low, high, JRNode, JRApp, JRRoot, JRPlain, JRErrors, JROther
@@ -162,8 +158,6 @@ end
     @test HTTP.header(failed, "Content-Type") == "application/json; charset=utf-8"
     @test String(failed.body) == """{"error":"failed"}"""
 
-    # A finished answer the body returns on one branch is sent as it is, not
-    # encoded through the declared type (snag `move-odlplaus-ap-8416729f`).
     @test String(drive("/jr_api/either").body) ==
         """{"start":"2026-01-01T00:00:00","probes":["p"],"rain_share":0.5}"""
     note = drive("/jr_api/either?kind=mime")

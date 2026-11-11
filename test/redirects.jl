@@ -8,16 +8,16 @@
     @htmx struct RedirectApp
         __page__(content) = htmx(h.main(content))
         "Old address of the review page"
-        @direct @get transactions() = redirect_to(__req__, __self__/"transaction_review_all")
+        @direct @get samples() = redirect_to(__req__, __self__/"sample_review_all")
         "Old address that names its own year"
-        @get legacy() = redirect_to(__req__, __self__/"transaction_review_all?year=1999")
+        @get legacy() = redirect_to(__req__, __self__/"sample_review_all?year=1999")
         "Old address that drops the query"
-        @get bare() = redirect_to(__req__, __self__/"transaction_review_all"; query=false)
+        @get bare() = redirect_to(__req__, __self__/"sample_review_all"; query=false)
         "Slow old address"
         @get slow_moved() = (wait(redirect_gate[]);
-            redirect_to(__req__, __self__/"transaction_review_all"))
+            redirect_to(__req__, __self__/"sample_review_all"))
         "Review"
-        @get transaction_review_all(; year::Int=2024) =
+        @get sample_review_all(; year::Int=2024) =
             h.p("review $year hx=$(is_htmx(__req__))"; class="review")
     end
 
@@ -43,7 +43,7 @@ end
 @testitem "redirect_to: status, Location and query carry-over" tags=[:unit] begin
     using HTMXObjects, HTTP
     req(target) = HTTP.Request("GET", target)
-    moved = redirect_to(req("/transactions?year=2025&plain=1"), "/p/App/review")
+    moved = redirect_to(req("/samples?year=2025&plain=1"), "/p/App/review")
     @test moved.status == 303
     @test HTTP.header(moved, "Location") == "/p/App/review?year=2025&plain=1"
     @test HTTP.header(moved, "Content-Type") == "text/plain; charset=utf-8"
@@ -79,28 +79,28 @@ end
     route!(RedirectApp())
     # This route declares inline transport so a cold HTML navigation still
     # returns the redirect status instead of an :auto page-load shell.
-    direct = dispatch(:GET, "/transactions?year=2025"; headers=["Accept" => "text/html"])
+    direct = dispatch(:GET, "/samples?year=2025"; headers=["Accept" => "text/html"])
     @test direct.status == 303
-    @test HTTP.header(direct, "Location") == "/transaction_review_all?year=2025"
+    @test HTTP.header(direct, "Location") == "/sample_review_all?year=2025"
     # No `__page__` wrap around the redirect body.
     @test !contains(body_text(direct), "<html")
     # Behind the KB's `/p/<App>` proxy the location keeps the mount prefix.
-    proxied = dispatch(:GET, "/transactions?year=2025";
-        headers=["X-Forwarded-Prefix" => "/p/Invoices"])
+    proxied = dispatch(:GET, "/samples?year=2025";
+        headers=["X-Forwarded-Prefix" => "/p/DemoApp"])
     @test proxied.status == 303
-    @test HTTP.header(proxied, "Location") == "/p/Invoices/transaction_review_all?year=2025"
+    @test HTTP.header(proxied, "Location") == "/p/DemoApp/sample_review_all?year=2025"
     # An htmx request gets the same redirect; its XHR follows it.
-    swapped = hx_get("/transactions?year=2025"; headers=["X-Forwarded-Prefix" => "/p/Invoices/"])
+    swapped = hx_get("/samples?year=2025"; headers=["X-Forwarded-Prefix" => "/p/DemoApp/"])
     @test swapped.status == 303
-    @test HTTP.header(swapped, "Location") == "/p/Invoices/transaction_review_all?year=2025"
+    @test HTTP.header(swapped, "Location") == "/p/DemoApp/sample_review_all?year=2025"
     @test !HTTP.hasheader(swapped, "HX-Location") && !HTTP.hasheader(swapped, "HX-Redirect")
     # Markdown peers keep `?plain`.
-    plain = dispatch(:GET, "/transactions?plain=1&year=2025")
+    plain = dispatch(:GET, "/samples?plain=1&year=2025")
     @test plain.status == 303
-    @test HTTP.header(plain, "Location") == "/transaction_review_all?plain=1&year=2025"
+    @test HTTP.header(plain, "Location") == "/sample_review_all?plain=1&year=2025"
     @test HTTP.header(dispatch(:GET, "/legacy?year=2025&x=1"), "Location") ==
-          "/transaction_review_all?year=1999&x=1"
-    @test HTTP.header(dispatch(:GET, "/bare?year=2025"), "Location") == "/transaction_review_all"
+          "/sample_review_all?year=1999&x=1"
+    @test HTTP.header(dispatch(:GET, "/bare?year=2025"), "Location") == "/sample_review_all"
     # The destination answers the carried query.
     landed = hx_get(HTTP.header(direct, "Location"))
     @test landed.status == 200
@@ -114,21 +114,21 @@ end
     route!(RedirectApp())
     redirect_gate[] = Base.Event()
     # Behind a path-stripping proxy: the poll URL carries the external prefix.
-    proxy = ["X-Forwarded-Prefix" => "/p/Invoices"]
+    proxy = ["X-Forwarded-Prefix" => "/p/DemoApp"]
     started = hx_get("/slow_moved?year=2025"; headers=proxy)
     body = body_text(started)
     @test running(body)
     target = poll_url(body)
-    @test startswith(target, "/p/Invoices/slow_moved?")
+    @test startswith(target, "/p/DemoApp/slow_moved?")
     notify(redirect_gate[])
-    terminal = settle_response(chopprefix(target, "/p/Invoices"); headers=proxy)
+    terminal = settle_response(chopprefix(target, "/p/DemoApp"); headers=proxy)
     @test terminal.status == 286
-    @test HTTP.header(terminal, "HX-Redirect") == "/p/Invoices/transaction_review_all?year=2025"
+    @test HTTP.header(terminal, "HX-Redirect") == "/p/DemoApp/sample_review_all?year=2025"
     @test !HTTP.hasheader(terminal, "Location")
     @test HTTP.header(terminal, "Content-Type") == "text/html; charset=utf-8"
     text = body_text(terminal)
     @test contains(text, "data-htmxo-auto-terminal")
-    @test contains(text, "href=\"/p/Invoices/transaction_review_all?year=2025\"")
+    @test contains(text, "href=\"/p/DemoApp/sample_review_all?year=2025\"")
     @test !contains(text, "aria-invalid")
     # Any other non-2xx answer keeps its error article.
     failed = HTMXObjects._operation_finalized_terminal(HTTP.Response(409, "nope"))
@@ -177,16 +177,16 @@ end
             check('lazy-no-history', here() === '/');
             await click('nav', 'review 2025');
             check('nav-content', content() === 'review 2025 hx=true');
-            check('nav-history', here() === '/transaction_review_all?year=2025');
+            check('nav-history', here() === '/sample_review_all?year=2025');
             await click('nav-bare', 'review 2026');
             check('bare-content', content() === 'review 2026 hx=true');
-            check('bare-history', here() === '/transaction_review_all');
+            check('bare-history', here() === '/sample_review_all');
             await click('other', 'review 2028');
             check('other-history', here() === '/elsewhere');
             await click('follow', 'review 2029');
-            check('follow-history', here() === '/transaction_review_all?year=2029');
-            const r = await fetch('/transactions?year=2030');
-            check('fetch-follows', r.redirected && new URL(r.url).pathname === '/transaction_review_all' &&
+            check('follow-history', here() === '/sample_review_all?year=2029');
+            const r = await fetch('/samples?year=2030');
+            check('fetch-follows', r.redirected && new URL(r.url).pathname === '/sample_review_all' &&
                   (await r.text()).includes('review 2030'));
           } catch (err) {
             check('error: ' + String(err), false);
@@ -197,17 +197,17 @@ end
         });
         """))
         page = repr("text/html", htmx(h.main(
-            h.a("Nav"; id="nav", href="#", hx_get="/transactions?year=2025",
-                hx_target="#content", hx_push_url="/transactions?year=2025"),
-            h.a("Bare"; id="nav-bare", href="#", hx_get="/transactions",
+            h.a("Nav"; id="nav", href="#", hx_get="/samples?year=2025",
+                hx_target="#content", hx_push_url="/samples?year=2025"),
+            h.a("Bare"; id="nav-bare", href="#", hx_get="/samples",
                 hx_vals="{\"year\": \"2026\"}", hx_target="#content",
-                hx_push_url="/transactions"),
-            h.a("Other"; id="other", href="#", hx_get="/transactions?year=2028",
+                hx_push_url="/samples"),
+            h.a("Other"; id="other", href="#", hx_get="/samples?year=2028",
                 hx_target="#content", hx_push_url="/elsewhere"),
-            h.a("Follow"; id="follow", href="#", hx_get="/transactions?year=2029",
+            h.a("Follow"; id="follow", href="#", hx_get="/samples?year=2029",
                 hx_target="#content", hx_push_url="true"),
             h.div(; id="content"),
-            h.div(h.div(; hx_get="/transactions?year=2027", hx_trigger="load",
+            h.div(h.div(; hx_get="/samples?year=2027", hx_trigger="load",
                         hx_swap="outerHTML"); id="lazy-slot"),
             driver);
             assets="/test-assets", sse_version=nothing, ws_version=nothing,
@@ -241,7 +241,7 @@ end
             end
             # htmx's followed request keeps `HX-Request`, so the destination
             # answers a fragment.
-            @test "GET /transaction_review_all?year=2025 hx=true" in requests
+            @test "GET /sample_review_all?year=2025 hx=true" in requests
         finally
             close(server)
         end

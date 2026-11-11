@@ -11,7 +11,7 @@ using HTMXObjects
 @dynamicstruct struct Labels
     values = ["plasma", "serum"]
 end
-labels = Labels();
+label_data = Labels();
 
 @htmx struct LabelRoutes
     (; values) = __appdata__
@@ -19,7 +19,7 @@ labels = Labels();
 end
 
 @htmx struct LabelApp
-    __appdata__ = labels
+    __appdata__ = label_data
     @include labels = LabelRoutes()
 end
 
@@ -29,7 +29,7 @@ response = dispatch(:GET, "/inventory/labels/show/2");
 Base.HTML(String(response.body))
 ```
 
-`labels` is the persistent data object. Each request receives a fresh route
+`label_data` is the persistent data object. Each request receives a fresh route
 object, and the included `LabelRoutes` obtains `__appdata__` from its parent.
 The positional `id::Int` argument is parsed from the path before the route body
 indexes the vector.

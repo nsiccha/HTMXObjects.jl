@@ -41,3 +41,8 @@ dependency closure and VitePress before running the same build.
 Desktop verification covers Start and the example at 1400 × 1000 in light and
 dark themes. Figures are rendered HTML produced by the example itself: these
 docs demonstrate web responses, with no statistical fit or plotting dependency.
+
+Reference entries publish the signature and opening contract of each canonical
+source docstring, with its visible source link. The full help-mode docstrings
+remain in the source; long contextual snippets are not copied onto the site.
+The build checks export coverage before shortening the rendered docstrings.

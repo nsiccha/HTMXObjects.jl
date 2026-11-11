@@ -23,8 +23,6 @@ using TestItemRunner
                  for i in 1:8]
         headers = ["Datum", "Gegenpartei", "Beschreibung", "Betrag", "Status"]
         cells(t) = (h.td(t.date), h.td(t.party), h.td(t.desc), h.td(t.amount), h.td(t.status))
-        # A detail as Invoices' supplier documents have one: a paragraph, an
-        # unbreakable line and a wide form field.
         detail(t) = h.div(
             h.p(repeat("Ein langer Absatz im Detail, der die Spalten nicht verschieben darf. ", 6)),
             h.pre("DE89370400440532013000-Verwendungszweck-Rechnung-2026-0001-Wartungsarbeiten-Heizung"),
@@ -48,11 +46,6 @@ using TestItemRunner
             master_detail_table(headers, items; key=t -> p * "s-" * t.id, master=cells, detail,
                 searchable=true, id=p * "search"))
         unheld(x) = replace(repr("text/html", x), "data-htmxo-columns" => "data-control-columns")
-        # Snag held-table-colum-cdf2c38e: a table in a zoomed tile (Bruno's
-        # report viewer scales each tile with `transform: scale()`) was held at
-        # the zoom times its widths. One that fills its room (shares) and one
-        # wider than its room (pixels: an unbreakable description), each also
-        # in a tile at half and at 0.37 of its size.
         wide = [(; t..., desc=t.id == "t3" ? repeat("Verwendungszweck", 12) : t.desc) for t in items]
         zoomable(p) = (
             master_detail_table(headers, items; key=t -> p * "zf-" * t.id, master=cells, detail, id=p * "zfill"),

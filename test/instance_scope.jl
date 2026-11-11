@@ -1,10 +1,5 @@
 using TestItemRunner
 
-# `instance_scope_script`: one fragment open in several places of a page, each
-# place (`data-htmxo-instance`) giving the ids of what is swapped into it a
-# suffix of its own. Snag `shared-fragment-e919a4d2` (reporter ODLPlaus:dedup):
-# ODLPlaus passed a place parameter (`ort`) only to keep its plots' ids apart,
-# so its export wrote the same station view once per place (22,798 files).
 
 @testmodule InstanceScopeFixture begin
     using HTMXObjects, HTTP

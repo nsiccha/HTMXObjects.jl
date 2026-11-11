@@ -1,12 +1,5 @@
 using TestItemRunner
 
-# A slow `:auto` page answers in many requests: the first one returns a poller
-# after the grace period, the browser polls, and a `286` answer ends it. The
-# access log has one line per request, so how long the operation took, how many
-# polls it needed and how it ended could only be recovered by grouping lines by
-# their bearer token (snag `polled-operation-3eec5c50`, reporter Invoices). Every
-# polled operation now writes one record when it ends (`serve(; operation_log)`,
-# `HTMXObjects.OPERATION_LOG`).
 @testmodule OperationLogFixtures begin
     using HTMXObjects, HTTP, Logging
     import HTMXObjects: h

@@ -1,100 +1,103 @@
-# A report that quotes a PDF and an HTML document, with them beside it
-# (`pdf_panel`):
-#   - each reference (`pdf_ref`) is a chip, always lightly highlighted in its
-#     colour; its passage is marked in the same colour on its page of the PDF,
-#     or over its words in the HTML document (the procedure, a route of this
-#     app that answers htmx with a fragment; its code highlighted)
-#   - pointing at a reference, a requirement's row or a marked passage shows
-#     its counterparts more strongly; nothing scrolls
-#   - a click on a reference opens the panel at its passage; a click on a
-#     passage goes to its reference
-#   - the table's rows and the references share one hover-link group, so a
-#     row lights the passage its requirement quotes
-#   - the panel's pills switch between the plan and the procedure
-#   - the panel opens beside the report; the switch in its bar floats it over
-#     the page instead, on the right or below, and its inner edge resizes it
-#     (both kept for the next visit); closed, it leaves a tab on its edge
-#   - a reference inside the note (a modal dialog) opens the panel above the
-#     dialog; closing the note leaves the panel open beside the report
-#
-# Run with:  julia --project examples/pdf_panel.jl
-# Then open: http://localhost:8080
-
+# A synthetic inventory report with references into generated PDF and HTML views.
+# Run: julia --project examples/pdf_panel.jl
+# Open: http://localhost:8080
 module PdfPanelDemo
-
 using HTMXObjects
 
-const PDF = read(joinpath(@__DIR__, "pdf_panel.pdf"))
+function tiny_pdf(pages::Vector{Vector{String}})
+    esc(s) = replace(s, '\\' => "\\\\", '(' => "\\(", ')' => "\\)")
+    n = length(pages)
+    kids = [4 + 2(i - 1) for i in 1:n]
+    objs = String["<< /Type /Catalog /Pages 2 0 R >>",
+                  "<< /Type /Pages /Kids [$(join(("$k 0 R" for k in kids), " "))] /Count $n >>",
+                  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+    for (i, lines) in enumerate(pages)
+        content = "BT /F1 14 Tf 72 720 Td 20 TL " * join(("(" * esc(l) * ") Tj T*" for l in lines), " ") * " ET"
+        push!(objs, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " *
+                    "/Resources << /Font << /F1 3 0 R >> >> /Contents $(kids[i] + 1) 0 R >>")
+        push!(objs, "<< /Length $(sizeof(content)) >>\nstream\n$content\nendstream")
+    end
+    io = IOBuffer()
+    write(io, "%PDF-1.4\n")
+    offsets = Int[]
+    for (i, o) in enumerate(objs)
+        push!(offsets, position(io))
+        write(io, "$i 0 obj\n$o\nendobj\n")
+    end
+    xref = position(io)
+    write(io, "xref\n0 $(length(objs) + 1)\n0000000000 65535 f \n")
+    for off in offsets
+        write(io, lpad(off, 10, '0'), " 00000 n \n")
+    end
+    write(io, "trailer\n<< /Size $(length(objs) + 1) /Root 1 0 R >>\nstartxref\n$xref\n%%EOF\n")
+    take!(io)
+end
 
-# The requirements the report answers, each quoting the plan.
+# Written for this example; the PDF is generated in memory and never committed.
+const PDF = tiny_pdf([
+    ["Sample inventory", "Every sample has a unique identifier.",
+     "Identifiers link the sample to its material and collection."],
+    ["Sample records", "Every record names the material and storage shelf.",
+     "New samples enter the catalog within one day."],
+    ["Storage", "Samples remain in the collection for two weeks.",
+     "This is a synthetic example, not a laboratory protocol."]])
 const REQUIREMENTS = [
-    (id="r1", page=2, quoted="extended criminal record certificate before the first day of work"),
-    (id="r2", page=2, quoted="All staff take part in a training on child protection once a year"),
-    (id="r3", page=3, quoted="reported to the youth office within one day")]
+    (id="r1", page=1, quoted="Every sample has a unique identifier"),
+    (id="r2", page=2, quoted="Every record names the material and storage shelf"),
+    (id="r3", page=3, quoted="Samples remain in the collection for two weeks")]
 
-# A reference to the plan, opening the panel `plan`.
 cite(plan, text, page, quoted; kw...) = pdf_ref(text, plan; page, quoted, panel="plan", kw...)
-# A reference to a place (`#anchor`) of the procedure, an HTML document.
 cite_html(procedure, text, anchor, quoted) =
     pdf_ref(text, string(procedure, "#", anchor); kind=:html, quoted, panel="plan")
 
 const RULE = """
-function deadline(reported_at)
-    reported_at + Day(1)   # the youth office hears of it within one day
-end"""
+using Dates
+catalog_deadline(collected_at) = collected_at + Day(1)
+"""
 
 @htmx struct App
     __page__(content) = htmx(h.main(class="container")(content); pico_version="2", title="PDF panel")
     @get index() = report(__self__ / "plan", __self__ / "procedure")
     @get plan() = HTTP.Response(200, ["Content-Type" => "application/pdf"], PDF)
-    # The procedure: under htmx (the panel) its fragment, else a page of its own.
     @get procedure() = h.article(
-        h.h2("How a suspicion is handled"; id="handling"),
-        h.p("Whoever notices something tells the lead. The lead checks every report on the same day ",
-            "and decides on the next steps together with a second specialist."),
+        h.h2("Catalog entries"; id="handling"),
+        h.p("Enter the identifier, material and storage shelf for each sample."),
         h.h2("The deadline as code"; id="deadline"),
         h.pre(h.code(RULE; class="language-julia")))
 end
 
 report(plan, procedure) = h.article(
-    h.hgroup(h.h1("Child protection: our answers"), h.p(pdf_toggle("plan", "Show the plan"))),
+    h.hgroup(h.h1("Sample inventory"), h.p(pdf_toggle("plan", "Show the notes"))),
     pdf_beside(
         h.div(
-            h.p("The plan applies to everyone working with children ",
-                cite(plan, "(plan, p. 1)", 1, "Child protection is the task of every provider and of everyone"),
-                ". New staff show a criminal record certificate before they start ",
-                cite(plan, "(p. 2)", 2, "extended criminal record certificate before the first day of work"; key="r1"),
-                ", and every member of staff is trained once a year ",
-                cite(plan, "(p. 2)", 2, "All staff take part in a training on child protection once a year"; key="r2"), "."),
-            h.p("A suspicion reaches the youth office within a day ",
-                cite(plan, "(p. 3)", 3, "reported to the youth office within one day"; key="r3"),
-                ", and the parents are told unless that puts the child at risk ",
-                cite(plan, "(p. 3)", 3, "The lead informs the parents unless this would put the child at risk"), "."),
-            h.p("Two people decide what happens next ",
-                cite_html(procedure, "(procedure)", "handling", "decides on the next steps together with a second specialist"),
-                ", and the deadline is computed, not guessed ",
-                cite_html(procedure, "(code)", "deadline", "reported_at + Day(1)"), "."),
-            h.p(h.button(; type="button", class="secondary", onclick="document.getElementById('note').showModal()")(
-                "Read the note on reporting")),
+            h.p("Each sample has an identifier ",
+                cite(plan, "(p. 1)", 1, REQUIREMENTS[1].quoted; key="r1"),
+                ". Its record names the material and shelf ",
+                cite(plan, "(p. 2)", 2, REQUIREMENTS[2].quoted; key="r2"), "."),
+            h.p("The synthetic storage interval is two weeks ",
+                cite(plan, "(p. 3)", 3, REQUIREMENTS[3].quoted; key="r3"), "."),
+            h.p("The entry fields are listed in the HTML view ",
+                cite_html(procedure, "(fields)", "handling", "identifier, material and storage shelf"),
+                ". The catalog deadline appears as code ",
+                cite_html(procedure, "(code)", "deadline", "collected_at + Day(1)"), "."),
+            h.p(h.button(; type="button", onclick="document.getElementById('note').showModal()")("Open a note")),
             h.dialog(; id="note")(h.article(
-                h.h3("Reporting"),
-                h.p("Whoever suspects that a child is at risk reports it, and the report reaches the youth office within a day ",
-                    cite(plan, "(p. 3)", 3, "reported to the youth office within one day"), "."),
+                h.h3("Sample note"),
+                h.p("A reference also works inside a dialog ",
+                    cite(plan, "(p. 1)", 1, REQUIREMENTS[1].quoted), "."),
                 h.footer(h.button(; type="button", onclick="this.closest('dialog').close()")("Close")))),
-            h.h2("Requirements"),
-            sortable_table(["Requirement", "Where the plan says so"],
+            h.h2("Conventions"),
+            sortable_table(["Identifier", "Passage"],
                 [h.tr(h.td(r.id), h.td(cite(plan, "page $(r.page)", r.page, r.quoted; key=r.id));
-                      data_htmxo_link_key=r.id)
-                 for r in REQUIREMENTS]; link="plan")),
-        pdf_panel(["Child protection plan" => plan, (title="Our procedure", url=procedure, kind=:html)]; id="plan");
+                      data_htmxo_link_key=r.id) for r in REQUIREMENTS]; link="plan")),
+        pdf_panel(["Inventory notes" => plan, (title="Catalog entries", url=procedure, kind=:html)]; id="plan");
         placements=(:beside, :right, :bottom)))
 
 function main(; port=8080)
     route!(App())
     serve(; port)
 end
-
-end # module PdfPanelDemo
+end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     PdfPanelDemo.main()

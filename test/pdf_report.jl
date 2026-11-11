@@ -104,11 +104,11 @@ end
 
     answer(url) = HTMXObjects._pdf_report_mapped_url(url, "/api/x")
     @test answer(nothing) == ""
-    @test answer("https://example.org/odl/api-x.json") == "https://example.org/odl/api-x.json"
+    @test answer("https://example.org/demo/api-x.json") == "https://example.org/demo/api-x.json"
     @test answer(SubString("mailto:info@example.org", 1)) == "mailto:info@example.org"
     # refused: a PDF opens only an absolute URL; a relative target (StaticExport's
     # bundle file, say) would point at a file next to the PDF
-    for url in ("api-x.json", "/odl/api-x.json", "C:x", "https://example.org/a b", "")
+    for url in ("api-x.json", "/demo/api-x.json", "C:x", "https://example.org/a b", "")
         err = try answer(url) catch e e end
         @test err isa ArgumentError && occursin("absolute URL", err.msg) && occursin("/api/x", err.msg)
     end
@@ -135,7 +135,7 @@ end
     @test occursin("""
         lang: "de-DE"
         papersize: "a4"
-        subtitle: "Mietspiegel \\"2026\\""
+        subtitle: "Messreihe \\"2026\\""
         date: "2026-10-22"
         toc: true
         toc-depth: 2
@@ -144,7 +144,7 @@ end
         author: ["A", "B"]
         columns: 1
         format:
-        """, qmd("de-DE"; metadata=(subtitle="Mietspiegel \"2026\"", date=Date(2026, 10, 22), toc=true,
+        """, qmd("de-DE"; metadata=(subtitle="Messreihe \"2026\"", date=Date(2026, 10, 22), toc=true,
                                     toc_depth=2, margin=(x="2cm", y="2cm"), fontsize="10pt",
                                     author=["A", "B"], columns=1)))
     # Dictionary keys are written as given.
@@ -581,9 +581,9 @@ end
             # offer-pac-qualit-7471af7a). A one-letter "scheme" is a drive, not an address.
             titled = joinpath(dir, "titel.pdf")
             pdf_report("# Quellen\n", titled; title="Quellen", lang="de-DE",
-                       metadata=(subtitle="Stand: https://example.org/odl/, (www.example.org/karte). info@example.de C://x",
+                       metadata=(subtitle="Stand: https://example.org/demo/, (www.example.org/karte). info@example.de C://x",
                                  author="Autorin https://example.org/autorin/"))
-            @test uris(read(titled, String)) == sort(["https://example.org/odl/", "https://www.example.org/karte",
+            @test uris(read(titled, String)) == sort(["https://example.org/demo/", "https://www.example.org/karte",
                                                       "mailto:info@example.de", "https://example.org/autorin/"])
         end
     end
@@ -924,9 +924,9 @@ end
         using HTMXObjects
 
         quarto = Sys.which("quarto")
-        snapshot = "https://example.org/odl"
+        snapshot = "https://example.org/demo"
         # A static snapshot that stores `/api/v1/ap3/anomalien?p_min=0.9` as
-        # `api-v1-ap3-anomalien-p_min-0.9.json` (snag pdf-report-markd-23652624).
+        # `samples.json` (snag pdf-report-markd-23652624).
         snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
         asked = String[]
         url_map(a) = (push!(asked, a);
@@ -960,7 +960,7 @@ end
         end
         answers = [t => HTMXObjects._pdf_report_mapped_url(url_map(t), t) for t in targets]
         mapped = typst(answers)
-        json = "$snapshot/api-v1-ap3-anomalien-p_min-0.9.json"
+        json = "$snapshot/samples.json"
         @test count("#link(\"$json\")", mapped) == 2
         @test occursin("#link(\"$snapshot/api-v1-stationen.json\")[Liste]", mapped)
         # nothing leaves a link to base_url, its text, or itself

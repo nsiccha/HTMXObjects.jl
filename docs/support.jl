@@ -1,6 +1,6 @@
 module DocSupport
 
-using HTMXObjects, Markdown, TOML
+using HTMXObjects, Markdown, TOML, Documenter
 
 const GROUPS = TOML.parsefile(joinpath(@__DIR__, "reference_groups.toml"))
 const EXPORTS = Dict(Symbol(group) => Symbol.(data["names"]) for (group, data) in GROUPS)
@@ -26,7 +26,10 @@ function export_index(group)
         if !isdefined(HTMXObjects, name)
             definition = "Unbound in this revision; do not call."
         elseif haskey(docs, binding) && group !== :objects
-            label = "[`$name`](@ref)"
+            signature = first(docs[binding].order)
+            object = Documenter.Object(binding, signature)
+            anchor = replace(string(object), r"[\[\]\(\)*]" => "")
+            label = "[`$name`](#$(HTTP.escapeuri(anchor)))"
             definition = "HTMXObjects"
         else
             definition = "`$(binding.mod)`"
@@ -34,6 +37,31 @@ function export_index(group)
         push!(rows, "| $label | $definition |")
     end
     Markdown.parse(join(rows, '\n'))
+end
+
+# The website is a task index, not a second copy of the full help-mode manual.
+# Documenter still sees canonical docstrings and checks every exported binding.
+# Keep each source's opening contract and render its signature as inline syntax;
+# executable workflows belong to the @example pages. Full help stays in source.
+function reference_summaries!()
+    for (binding, multidoc) in Base.Docs.meta(HTMXObjects)
+        (binding.var in names(HTMXObjects) || binding.var === :SchemaInherited) || continue
+        for doc in values(multidoc.docs)
+            original = Base.Docs.parsedoc(doc)
+            original isa Markdown.MD || continue
+            blocks = Any[]
+            if !isempty(original.content) && first(original.content) isa Markdown.Code
+                signature = first(original.content).code
+                push!(blocks, Markdown.Paragraph(Any[Markdown.Code("", signature)]))
+            end
+            paragraph = findfirst(block -> block isa Markdown.Paragraph, original.content)
+            if !isnothing(paragraph)
+                push!(blocks, original.content[paragraph])
+            end
+            isempty(blocks) && error("No reference summary for $binding")
+            doc.object = Markdown.MD(blocks, copy(original.meta))
+        end
+    end
 end
 
 function receipt()

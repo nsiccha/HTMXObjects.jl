@@ -5,8 +5,8 @@
     # title, a body and a sources line. The words the browser item searches
     # for are spread over them (accents included).
     const CARDS = [
-        ("a1", "A · Die Stelle", h.div(h.h3("Aufgaben"), h.p("Bürgerservice und Meldewesen."), h.p("Quelle: Ausschreibung S. 2"))),
-        ("a2", "A · Die Stelle", h.div(h.h3("Träger"), h.p("Stadt Neumünster, Fachdienst Bürgerdienste."))),
+        ("a1", "A · Die Probe", h.div(h.h3("Aufgaben"), h.p("Synthetische Probe aus einer Sammlung."), h.p("Quelle: Beispielnotizen S. 2"))),
+        ("a2", "A · Die Probe", h.div(h.h3("Träger"), h.p("Stadt Neumünster, Fachdienst Bürgerdienste."))),
         ("b1", "B · Der Träger", h.div(h.h3("Leitbild"), h.p("Service für alle Bürgerinnen und Bürger."))),
         ("b2", "B · Der Träger", h.div(h.h3("Struktur"), h.p("Fünf Fachbereiche, ein Rathaus."))),
         ("b3", "B · Der Träger", h.div(h.h3("Haushalt"), h.p("Konsolidierung bis 2028."))),
@@ -28,7 +28,7 @@ end
     s = html(card_deck(CARDS; id="karten", assets=false))
     @test occursin(r"^<div id=\"karten\" class=\"htmxo-deck\" role=\"region\" aria-label=\"Cards\" data-htmxo-deck=\"\" data-htmxo-deck-view=\"grid\" data-htmxo-deck-view-param=\"view\" data-htmxo-deck-card-param=\"card\" data-text-position=\"\{position\} of \{count\}\" data-text-matches=\"Matches: \{shown\} of \{count\}\">", s)
     # each group a section under its heading, each card an article with its id, the first current
-    @test occursin("<section class=\"htmxo-deck-group\" data-htmxo-deck-group=\"A · Die Stelle\"><h2 class=\"htmxo-deck-group-heading\">A · Die Stelle</h2><article id=\"a1\" class=\"htmxo-deck-card\" data-htmxo-deck-group=\"A · Die Stelle\" data-htmxo-deck-current=\"\"><div><h3>Aufgaben</h3>", s)
+    @test occursin("<section class=\"htmxo-deck-group\" data-htmxo-deck-group=\"A · Die Probe\"><h2 class=\"htmxo-deck-group-heading\">A · Die Probe</h2><article id=\"a1\" class=\"htmxo-deck-card\" data-htmxo-deck-group=\"A · Die Probe\" data-htmxo-deck-current=\"\"><div><h3>Aufgaben</h3>", s)
     @test occursin("<article id=\"b3\" class=\"htmxo-deck-card\" data-htmxo-deck-group=\"B · Der Träger\"><div><h3>Haushalt</h3>", s)
     @test count("<section class=\"htmxo-deck-group\"", s) == 3 && count("<article ", s) == 6 && count(r"<article [^>]*data-htmxo-deck-current=", s) == 1
     @test occursin("<div id=\"karten-cards\" class=\"htmxo-deck-cards\">", s)
@@ -36,8 +36,8 @@ end
     @test occursin("<fieldset><legend>View</legend><label><input type=\"radio\" name=\"htmxo-deck-view-karten\" value=\"grid\" checked=\"true\">Grid</label><label><input type=\"radio\" name=\"htmxo-deck-view-karten\" value=\"carousel\">Carousel</label></fieldset>", s)
     @test occursin("<input type=\"search\" class=\"htmxo-deck-search\" placeholder=\"Search the cards…\" aria-label=\"Search the cards…\" autocomplete=\"off\" aria-controls=\"karten-cards\">", s)
     @test occursin("<span class=\"htmxo-deck-status\" data-htmxo-deck-status=\"\" role=\"status\"></span>", s)
-    @test occursin("<div class=\"htmxo-deck-groups\"><fieldset><legend>Group</legend><label><input type=\"radio\" name=\"htmxo-deck-group-karten\" value=\"\" checked=\"true\">All</label><label><input type=\"radio\" name=\"htmxo-deck-group-karten\" value=\"A · Die Stelle\">A · Die Stelle</label>", s)
-    @test occursin(r"<button type=\"button\" data-htmxo-deck-step=\"-1\" aria-label=\"Previous card\" title=\"Previous card\" disabled[^>]*>‹</button><span class=\"htmxo-deck-position\" data-htmxo-deck-position=\"\" aria-live=\"polite\">1 of 6</span><span class=\"htmxo-deck-current-group\" data-htmxo-deck-current-group=\"\">A · Die Stelle</span><button type=\"button\" data-htmxo-deck-step=\"1\" aria-label=\"Next card\" title=\"Next card\">›</button>", s)
+    @test occursin("<div class=\"htmxo-deck-groups\"><fieldset><legend>Group</legend><label><input type=\"radio\" name=\"htmxo-deck-group-karten\" value=\"\" checked=\"true\">All</label><label><input type=\"radio\" name=\"htmxo-deck-group-karten\" value=\"A · Die Probe\">A · Die Probe</label>", s)
+    @test occursin(r"<button type=\"button\" data-htmxo-deck-step=\"-1\" aria-label=\"Previous card\" title=\"Previous card\" disabled[^>]*>‹</button><span class=\"htmxo-deck-position\" data-htmxo-deck-position=\"\" aria-live=\"polite\">1 of 6</span><span class=\"htmxo-deck-current-group\" data-htmxo-deck-current-group=\"\">A · Die Probe</span><button type=\"button\" data-htmxo-deck-step=\"1\" aria-label=\"Next card\" title=\"Next card\">›</button>", s)
     @test occursin("<p class=\"htmxo-deck-empty\" data-htmxo-deck-empty-note=\"\" hidden", s) && occursin(">No card matches the search.</p>", s)
     @test endswith(s, "<script>(window.htmxoDeck || (d => console.warn('card_deck: card_deck_script() is not on this page, so the deck has no controls')))(document.currentScript.parentElement)</script></div>")
     @test !occursin("window.htmxoDeck = init", s)                                                # assets=false
@@ -48,7 +48,7 @@ end
     @test findfirst("<style>", full)[1] > findfirst("data-text-matches", full)[1]
     # Markdown: the group headings and the cards, nothing of the controls
     md = to_markdown_string(card_deck(CARDS; id="karten"))
-    @test occursin("\n## A · Die Stelle\n", md) && occursin("\n## B · Der Träger\n", md) && occursin("\n## C · Gespräch\n", md)
+    @test occursin("\n## A · Die Probe\n", md) && occursin("\n## B · Der Träger\n", md) && occursin("\n## C · Gespräch\n", md)
     @test occursin("### Aufgaben", md) && occursin("Konsolidierung bis 2028.", md)
     for chrome in ("Grid", "Carousel", "Search", "Matches", "No card matches", "‹", "1 of 6", "htmxoDeck", "{")
         @test !occursin(chrome, md)
@@ -86,7 +86,7 @@ end
     @test occursin(r"data-htmxo-deck-step=\"1\" aria-label=\"Next card\" title=\"Next card\" disabled", deck(["only" => "x"]))
     @test occursin("data-htmxo-deck-position=\"\" aria-live=\"polite\"></span>", deck([]))
     # a heading inside a section: one level deeper
-    @test occursin("<h3 class=\"htmxo-deck-group-heading\">A · Die Stelle</h3>",
+    @test occursin("<h3 class=\"htmxo-deck-group-heading\">A · Die Probe</h3>",
                    HTMXObjects._semantic_heading(_ -> deck(), 2))
     # address parameters of its own, or none
     own = deck(; view_param="ansicht", card_param="karte")
@@ -125,12 +125,12 @@ end
     import HTMXObjects: h
     route!(DeckApp())
     live = String(dispatch(:GET, "/deck_links").body)
-    exported = String(dispatch(:GET, "/deck_links"; static=StaticExport(; record_base="/odl")).body)
+    exported = String(dispatch(:GET, "/deck_links"; static=StaticExport(; record_base="/demo")).body)
     for s in (live, exported)
         @test occursin("window.htmxoDeck = init", s) && occursin("(document.currentScript.parentElement)</script></div>", s)
         @test occursin("data-htmxo-deck-view-param=\"view\"", s) && occursin("name=\"htmxo-deck-view-k\"", s)
     end
-    @test occursin("href=\"/odl/deck_quelle\"", exported) && occursin("href=\"/deck_quelle\"", live)
+    @test occursin("href=\"/demo/deck_quelle\"", exported) && occursin("href=\"/deck_quelle\"", live)
 end
 
 @testitem "card_deck browser: search, groups, the carousel and the address" setup=[DeckFixtures, ChromeDump] tags=[:unit, :browser] begin
@@ -198,7 +198,7 @@ end
                 check('no-address-yet', location.search === '' && changes.length === 0, [location.search, changes]);
                 // the carousel: the current card alone, its position and group, the address follows
                 pill('views', 'carousel').click();
-                check('carousel', shownIds() === 'a1' && position() === '1 of 6' && group() === 'A · Die Stelle' &&
+                check('carousel', shownIds() === 'a1' && position() === '1 of 6' && group() === 'A · Die Probe' &&
                       prev().disabled && !next().disabled && param('view') === 'carousel' && param('card') === 'a1' &&
                       headings() === 0, seen());
                 const card = document.getElementById('a1');

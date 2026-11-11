@@ -1,11 +1,5 @@
 using TestItemRunner
 
-# Content units: one identity, layers written separately, children at any depth,
-# and one reader's view of them. The user's request and refinement (ODLPlaus GO
-# 1qunouy, 04.11): each self-contained paragraph or other piece of information
-# has an offer text, a short and a deep explanation, in place and recursive;
-# layer selection and audience are separate; a public projection holds the offer
-# text alone, its bytes free of everything else.
 
 @testmodule UnitFixtures begin
     using HTMXObjects, HTTP
@@ -13,7 +7,7 @@ using TestItemRunner
     export LAYERS, UNITS, DOC, SECRETS, PRIVATE_WORDS, UnitSiteApp, UnitHeadApp, md, html, plain, secrets_in, positions,
         bundle_bytes
 
-    const LAYERS = [SemanticUnitLayer(:offer, "Angebot"; public=true, standalone=true),
+    const LAYERS = [SemanticUnitLayer(:notes, "Notizen"; public=true, standalone=true),
                     SemanticUnitLayer(:short, "Kurzfassung"),
                     SemanticUnitLayer(:deep, "Vertiefung")]
     # A paragraph, an equation under it, a table, a unit with nothing public, and
@@ -21,24 +15,24 @@ using TestItemRunner
     const UNITS = [
         SemanticUnit("ap1"; title="AP 1: Faktoren", public_title="AP 1", children=[
             SemanticUnit("c2"; title="Prüfung der Faktoren",
-                layers=(; offer="**Prüfung:** Die Faktoren stehen in [der Tabelle](#faktoren) und [intern](#intern).",
+                layers=(; notes="**Prüfung:** Die Faktoren stehen in [der Tabelle](#faktoren) und [intern](#intern).",
                         short="KURZ-C2: Die Prüfung unterscheidet Aufnahme und Verwendung.",
                         deep=["TIEF-C2: Die Unsicherheit bleibt gemeinsam, \$a^2\$.", SemanticCode(:julia, "tief_c2_code = 1")]),
                 references=["faktoren", "intern" => "faktoren", "c2--deep"],
                 meta=SemanticStatus(:warn; label="geplant", detail="META-C2"),
                 children=[SemanticUnit("formel"; title="Die Formel",
-                    layers=(; offer="\$\$\\bar f = \\frac{1}{n} \\sum_i f_i\$\$", short="KURZ-FORMEL: ungewichtet.", deep="TIEF-FORMEL: Gewichte später."),
+                    layers=(; notes="\$\$\\bar f = \\frac{1}{n} \\sum_i f_i\$\$", short="KURZ-FORMEL: ungewichtet.", deep="TIEF-FORMEL: Gewichte später."),
                     children=[SemanticUnit("grenzen"; title="GRENZEN-TITEL",
                         layers=(; short="KURZ-GRENZEN: gleiche Geometrie.", deep="TIEF-GRENZEN: räumliche Unterstützung."))])]),
             SemanticUnit("faktoren"; title="Tabelle der Faktoren",
-                layers=(; offer=SemanticTable((Quelle=["Boden", "Deposition"], Faktor=[1.02, 0.97])),
+                layers=(; notes=SemanticTable((Quelle=["Plasma", "Serum"], Faktor=[1.02, 0.97])),
                         short="KURZ-TABELLE: zwei Quellen.", deep="TIEF-TABELLE: simuliert, siehe [die Prüfung](#c2--deep)."),
                 references=["c2"]),
             SemanticUnit("intern"; title="INTERN-TITEL",
                 layers=(; short="KURZ-INTERN: Metadaten fehlen.", deep="TIEF-INTERN: ausführlich."))]),
         SemanticUnit("ap2"; title="AP 2: Muster", children=[
             SemanticUnit("rechenkern"; title="Rechenkern",
-                layers=(; offer="Der Rechenkern ist dokumentiert.", deep=SemanticCode(:julia, "tief_kern_code = 2")))])]
+                layers=(; notes="Der Rechenkern ist dokumentiert.", deep=SemanticCode(:julia, "tief_kern_code = 2")))])]
     const DOC = SemanticUnits(UNITS; layers=LAYERS, texts=unit_texts(:de))
     # Whatever a public reader must not get, in any format.
     const SECRETS = ["KURZ-", "TIEF-", "tief_c2_code", "tief_kern_code", "META-C2", "geplant", "INTERN-TITEL", "GRENZEN-TITEL",
@@ -65,7 +59,7 @@ end
 @testitem "a unit document refuses what would hide a gap" setup=[UnitFixtures] tags=[:unit] begin
     using HTMXObjects
     L = LAYERS
-    u(id; kw...) = SemanticUnit(id; title="T", layers=(; offer="o"), kw...)
+    u(id; kw...) = SemanticUnit(id; title="T", layers=(; notes="o"), kw...)
     # A layer name and an id are addresses.
     @test_throws ArgumentError SemanticUnitLayer(:all, "x")
     @test_throws ArgumentError SemanticUnitLayer("a--b", "x")
@@ -79,7 +73,7 @@ end
     @test err isa ArgumentError && occursin("\"a\"", err.msg) && occursin("twice", err.msg)
     # A layer the document does not declare.
     err = try SemanticUnits([SemanticUnit("a"; title="T", layers=(; tief="x"))]; layers=L); nothing catch e; e end
-    @test err isa ArgumentError && occursin(":tief", err.msg) && occursin(":offer", err.msg)
+    @test err isa ArgumentError && occursin(":tief", err.msg) && occursin(":notes", err.msg)
     # A reference that names no unit, or a layer its unit lacks, cannot hide.
     err = try SemanticUnits([u("a"; references=["fehlt"])]; layers=L); nothing catch e; e end
     @test err isa ArgumentError && occursin("\"fehlt\"", err.msg)
@@ -91,7 +85,7 @@ end
     err = try SemanticUnits([SemanticUnit("a"; layers=(; short="s"))]; layers=L); nothing catch e; e end
     @test err isa ArgumentError && occursin("title", err.msg)
     # `nothing` is an absent layer, and an absent optional part needs no branch.
-    @test SemanticUnits([SemanticUnit("a"; layers=(; offer="o", short=nothing))]; layers=L) isa SemanticUnits
+    @test SemanticUnits([SemanticUnit("a"; layers=(; notes="o", short=nothing))]; layers=L) isa SemanticUnits
     # Asking for what is not in the document.
     @test_throws ArgumentError unit_tree(DOC, "fehlt")
     @test_throws ArgumentError unit_tree(DOC; layer=:fehlt)
@@ -120,26 +114,26 @@ end
     for (name, text) in (("html", html(tree, :public)), ("markdown", md(tree; audience=:public)), ("plain", plain(tree, :public)))
         @testset "$name" begin
             @test isempty(secrets_in(text))
-            @test occursin("Prüfung:", text) && occursin("Der Rechenkern", text) && occursin("Deposition", text)
+            @test occursin("Prüfung:", text) && occursin("Der Rechenkern", text) && occursin("Serum", text)
             # A group's heading in its public wording; content in document order.
             @test occursin("AP 1", text) && occursin("AP 2: Muster", text)
-            p = positions(text, ["Prüfung:", "bar f", "Deposition", "Der Rechenkern"])
+            p = positions(text, ["Prüfung:", "bar f", "Serum", "Der Rechenkern"])
             @test all(>(0), p) && issorted(p)
         end
     end
     s = html(tree, :public)
     # Nothing to switch and nothing to open: one layer is all this reader has.
     @test !occursin("<details", s) && !occursin("<input", s) && !occursin("<fieldset", s)
-    # An offer's approved wording gets nothing added: no title, no line of
+    # An notes's approved wording gets nothing added: no title, no line of
     # references, no labels.
-    @test !occursin("Siehe auch", s) && !occursin("Angebot", s) && !occursin("Tabelle der Faktoren", s)
+    @test !occursin("Siehe auch", s) && !occursin("Notizen", s) && !occursin("Tabelle der Faktoren", s)
     # A link in the wording to a unit this reader cannot reach keeps its words
     # and loses its address; a link to one they can reach stays.
     @test occursin("<a href=\"#faktoren\">der Tabelle</a>", s) && occursin(" und intern.", s)
     m = md(tree; audience=:public)
     @test occursin("[der Tabelle](#faktoren) und intern.", m)
     # The units' anchors reach the Markdown.
-    @test occursin("## AP 1 {#ap1}", m) && occursin("::: {#c2}", m) && occursin("::: {#faktoren--offer}", m)
+    @test occursin("## AP 1 {#ap1}", m) && occursin("::: {#c2}", m) && occursin("::: {#faktoren--notes}", m)
     # Asking a public reader for a private layer gives nothing, and no error.
     for layer in (:short, :deep)
         @test md(unit_tree(DOC; layer); audience=:public) == ""
@@ -151,7 +145,7 @@ end
     # A group with nothing public below it goes whole, its heading and id too,
     # and so does a public reference to anything in it.
     quellen = SemanticUnits([
-        SemanticUnit("text"; title="Text", layers=(; offer="Siehe [die Quelle](#quelle-a) und [alle](#quellen).", short="k")),
+        SemanticUnit("text"; title="Text", layers=(; notes="Siehe [die Quelle](#quelle-a) und [alle](#quellen).", short="k")),
         SemanticUnit("quellen"; title="QUELLEN-TITEL", children=[
             SemanticUnit("quelle-a"; title="QUELLE-A", layers=(; short="ZITAT-KURZ", deep="ZITAT-TIEF"), meta="NOTIZ")])]; layers=LAYERS)
     for text in (md(unit_tree(quellen); audience=:public), html(unit_tree(quellen), :public), plain(unit_tree(quellen), :public))
@@ -195,9 +189,9 @@ end
 
     # The public layer read alone by a private reader is what a public reader
     # gets: no marks, no title, no references.
-    offer = md(unit_tree(DOC; layer=:offer); audience=:private)
-    @test replace(offer, "AP 1: Faktoren" => "AP 1") == md(unit_tree(DOC; layer=:offer); audience=:public)
-    @test !occursin("htmxo-private", offer) && !occursin("Siehe auch", offer)
+    notes = md(unit_tree(DOC; layer=:notes); audience=:private)
+    @test replace(notes, "AP 1: Faktoren" => "AP 1") == md(unit_tree(DOC; layer=:notes); audience=:public)
+    @test !occursin("htmxo-private", notes) && !occursin("Siehe auch", notes)
 
     # Headings nest from where the tree is placed.
     nested = SemanticSection("Bericht", unit_tree(DOC; layer=:short))
@@ -211,7 +205,7 @@ end
     tree = unit_tree(DOC)
     m = md(tree; audience=:private, lang="de-DE")
     # Each layer under its label, in the declared order; a unit's parts together.
-    p = positions(m, ["### Prüfung der Faktoren {#c2}", "**Angebot**", "Prüfung:", "**Kurzfassung**", "KURZ-C2", "**Vertiefung**", "TIEF-C2",
+    p = positions(m, ["### Prüfung der Faktoren {#c2}", "**Notizen**", "Prüfung:", "**Kurzfassung**", "KURZ-C2", "**Vertiefung**", "TIEF-C2",
                       "Siehe auch", "Die Formel", "KURZ-FORMEL"])
     @test all(>(0), p) && issorted(p)
     @test occursin("::: {#c2--short}", m) && occursin("::: {#c2--deep}", m)
@@ -220,7 +214,7 @@ end
     # What a public export leaves out says so, the public layer does not.
     @test occursin("nicht öffentlich", m)
     @test occursin(r"\*\*Kurzfassung\*\*\s+::: \{\.htmxo-private\}"s, m)
-    @test !occursin(r"\*\*Angebot\*\*\s+::: \{\.htmxo-private\}"s, m)
+    @test !occursin(r"\*\*Notizen\*\*\s+::: \{\.htmxo-private\}"s, m)
     # The private reader's address keeps a link the public one loses.
     @test occursin("[intern](#intern)", m)
     # What only private readers see beside a unit.
@@ -229,7 +223,7 @@ end
     s = html(tree, :private)
     # The first layer shown, the others closed under their labels with their
     # links, and each one its own address.
-    @test occursin("<div class=\"htmxo-unit-layer\" id=\"c2--offer\" data-htmxo-unit-layer=\"offer\">", s)
+    @test occursin("<div class=\"htmxo-unit-layer\" id=\"c2--notes\" data-htmxo-unit-layer=\"notes\">", s)
     @test occursin("<details class=\"htmxo-unit-layer\" id=\"c2--short\" data-htmxo-unit-layer=\"short\"><summary>Kurzfassung<a href=\"#c2--short\"", s)
     @test occursin("<details class=\"htmxo-unit-layer\" id=\"c2--deep\"", s)
     # Children of a content unit sit closed; a group's are shown.
@@ -250,8 +244,8 @@ end
     @test occursin("data-htmxo-unit-view=\"ebene\"", html(unit_view_control(DOC; param="ebene"), :private))
     # `open=` decides, either way.
     L = LAYERS
-    d = SemanticUnits([SemanticUnit("g"; title="G", open=false, children=[SemanticUnit("a"; title="A", open=true, layers=(; offer="o"),
-        children=[SemanticUnit("b"; layers=(; offer="p"))])])]; layers=L)
+    d = SemanticUnits([SemanticUnit("g"; title="G", open=false, children=[SemanticUnit("a"; title="A", open=true, layers=(; notes="o"),
+        children=[SemanticUnit("b"; layers=(; notes="p"))])])]; layers=L)
     o = html(unit_tree(d), :private)
     @test occursin("<details class=\"htmxo-unit-children\"><summary>Subpoints (1)</summary><div class=\"htmxo-unit htmxo-unit-content\" id=\"a\" data-htmxo-unit=\"a\">", o)
     @test occursin("<div class=\"htmxo-unit-children\"><div class=\"htmxo-unit htmxo-unit-content\" id=\"b\"", o)
@@ -265,47 +259,45 @@ end
 
 @testitem "a layer can say what another says: once together, whole alone" setup=[UnitFixtures] tags=[:unit] begin
     using HTMXObjects
-    # A generated table that short and deep explanations hang under, and a citation
-    # the short layer repeats while the deep layer adds a note (ODLPlaus K5, 77 units).
     d = SemanticUnits([
-        SemanticUnit("tabelle"; title="Tabelle K5", layers=(; offer=SemanticTable((Posten=["ROHZEILE"],)), short=:offer, deep=:offer),
+        SemanticUnit("tabelle"; title="Tabelle K5", layers=(; notes=SemanticTable((Posten=["ROHZEILE"],)), short=:notes, deep=:notes),
             open=true, children=[SemanticUnit("erkl"; title="Erklärung", layers=(; short="KURZ-ERKL", deep="TIEF-ERKL"))]),
-        SemanticUnit("quelle"; title="Quelle A", layers=(; offer="ZITAT", short=:offer, deep=["ZITAT", "NOTIZ"])),
+        SemanticUnit("quelle"; title="Quelle A", layers=(; notes="ZITAT", short=:notes, deep=["ZITAT", "NOTIZ"])),
         SemanticUnit("zeiger"; title="Zeiger", layers=(; short="[Tabelle](#tabelle--short)", deep="[Quelle](#quelle--deep)"), references=["tabelle--short"])]; layers=LAYERS)
     count_of(s, w) = length(collect(eachmatch(Regex(w), s)))
     # Together: once, and for a reader with one layer no label at all.
     m = md(unit_tree(d); audience=:private)
     @test count_of(m, "ROHZEILE") == 1 && count_of(m, "ZITAT") == 2
-    @test occursin("**Angebot · Kurzfassung**", m) && occursin("**Vertiefung**", m)
+    @test occursin("**Notizen · Kurzfassung**", m) && occursin("**Vertiefung**", m)
     # All three share the table: one panel, one place, nothing to label.
-    @test !occursin("Angebot · Kurzfassung · Vertiefung", m)
+    @test !occursin("Notizen · Kurzfassung · Vertiefung", m)
     h = html(unit_tree(d), :private)
     @test count_of(h, "ROHZEILE") == 1 && !occursin("id=\"tabelle--short\"", h)
-    @test occursin("id=\"tabelle--offer\" data-htmxo-unit-layer=\"offer short deep\"", h)
-    @test occursin("id=\"quelle--offer\" data-htmxo-unit-layer=\"offer short\"", h)
+    @test occursin("id=\"tabelle--notes\" data-htmxo-unit-layer=\"notes short deep\"", h)
+    @test occursin("id=\"quelle--notes\" data-htmxo-unit-layer=\"notes short\"", h)
     # A panel shared with a public layer is not marked as private; the deep layer is.
-    @test !occursin("id=\"tabelle--offer\" data-htmxo-unit-layer=\"offer short deep\"><div class=\"htmxo-private", h)
+    @test !occursin("id=\"tabelle--notes\" data-htmxo-unit-layer=\"notes short deep\"><div class=\"htmxo-private", h)
     # Alone: complete in each layer, with no mark on a table a public layer has too
     # beyond the one a private read carries.
-    for (layer, words) in ((:offer, ["ROHZEILE", "ZITAT"]), (:short, ["ROHZEILE", "KURZ-ERKL", "ZITAT"]), (:deep, ["ROHZEILE", "TIEF-ERKL", "ZITAT", "NOTIZ"]))
+    for (layer, words) in ((:notes, ["ROHZEILE", "ZITAT"]), (:short, ["ROHZEILE", "KURZ-ERKL", "ZITAT"]), (:deep, ["ROHZEILE", "TIEF-ERKL", "ZITAT", "NOTIZ"]))
         alone = md(unit_tree(d; layer); audience=:private)
         @test all(w -> occursin(w, alone), words)
         @test count_of(alone, "ROHZEILE") == 1
-        layer === :offer || @test occursin("::: {#tabelle--$layer}", alone)
+        layer === :notes || @test occursin("::: {#tabelle--$layer}", alone)
     end
     # A public reader: the public layer, and no other layer's name in the file.
     p = html(unit_tree(d), :public)
-    @test occursin("data-htmxo-unit-layer=\"offer\"", p) && !occursin("short", p) && !occursin("deep", p)
+    @test occursin("data-htmxo-unit-layer=\"notes\"", p) && !occursin("short", p) && !occursin("deep", p)
     @test count_of(p, "ROHZEILE") == 1 && !occursin("NOTIZ", p) && !occursin("KURZ-ERKL", p)
     # A link to a sharing layer lands on the panel among all layers, on its own in one.
-    @test occursin("[Tabelle](#tabelle--offer)", m) && occursin("#tabelle--short", md(unit_tree(d; layer=:short); audience=:private))
-    @test occursin("Tabelle K5 (Angebot)", m)
-    @test occursin("#tabelle--offer", html(unit_reference(d, "tabelle--short"), :private))
+    @test occursin("[Tabelle](#tabelle--notes)", m) && occursin("#tabelle--short", md(unit_tree(d; layer=:short); audience=:private))
+    @test occursin("Tabelle K5 (Notizen)", m)
+    @test occursin("#tabelle--notes", html(unit_reference(d, "tabelle--short"), :private))
     @test occursin("#tabelle--short", html(unit_reference(d, "tabelle--short"; layer=:short), :private))
     # Naming nothing, or a layer that itself only names another, cannot hide.
-    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; short=:offer))]; layers=LAYERS)
-    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; offer=:short, short=:offer))]; layers=LAYERS)
-    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; offer="o", short=:offer, deep=:short))]; layers=LAYERS)
+    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; short=:notes))]; layers=LAYERS)
+    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; notes=:short, short=:notes))]; layers=LAYERS)
+    @test_throws ArgumentError SemanticUnits([SemanticUnit("a"; title="A", layers=(; notes="o", short=:notes, deep=:short))]; layers=LAYERS)
 end
 
 @testitem "a Markdown table sits in the scroll container every table has" tags=[:unit] begin
@@ -321,7 +313,7 @@ end
     import HTMXObjects: h
     # A bibliography cited only by private layers, and a unit with a public layer.
     d = SemanticUnits([
-        SemanticUnit("text"; title="Text", layers=(; offer="OFFENER-TEXT", short="k")),
+        SemanticUnit("text"; title="Text", layers=(; notes="OFFENER-TEXT", short="k")),
         SemanticUnit("quelle"; title="Quelle", layers=(; short="ZITAT-KURZ", deep="ZITAT-TIEF")),
         SemanticUnit("nur-tief"; title="Nur tief", layers=(; deep="T"))]; layers=LAYERS)
     calls = Ref(0)
@@ -376,9 +368,6 @@ end
 @testitem "a title with Markdown's marks is its text, and keeps its anchor" setup=[UnitFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
-    # As HTML shows them. An unmatched `*` runs Pandoc's emphasis over the line's
-    # `{#id}`, which became text, and Typst refused every link to it (ODLPlaus,
-    # `Luftkerma, H*(10) und Geräteanzeige`, 77 units on 42bb0b7).
     m(x) = repr("text/markdown", x)
     @test m(SemanticSection("H*(10) a"; anchor="x")) == "## H\\*(10) a {#x}"
     @test m(SemanticCard("H*(10)"; anchor="y")) == "### H\\*(10) {#y}"
@@ -409,7 +398,7 @@ end
     @test href(link(r, :private)) == "#c2--short" && text(link(r, :private)) == "Prüfung der Faktoren (Kurzfassung)"
     # Where it does not show, the link comes down to the unit.
     @test href(link(r, :public)) == "#c2" && text(link(r, :public)) == "Prüfung der Faktoren"
-    r = unit_reference(DOC, "c2--short"; layer=:offer)
+    r = unit_reference(DOC, "c2--short"; layer=:notes)
     @test href(link(r, :private)) == "#c2"
     r = unit_reference(DOC, "c2--short"; layer=:short)
     @test href(link(r, :private)) == "#c2--short"
@@ -456,7 +445,7 @@ end
     t = md(unit_tree(short_only; layer=:short); audience=:private)
     @test occursin("zur Tiefe", t) && !occursin("#y", t)
     # A link to something that is no unit is the author's.
-    other = SemanticUnits([SemanticUnit("x"; title="X", layers=(; offer="[oben](#seitenanfang)"))]; layers=LAYERS)
+    other = SemanticUnits([SemanticUnit("x"; title="X", layers=(; notes="[oben](#seitenanfang)"))]; layers=LAYERS)
     @test occursin("[oben](#seitenanfang)", md(unit_tree(other); audience=:public))
 end
 
@@ -530,7 +519,7 @@ end
             # Typst refuses a link to a label the document lacks, so every one of
             # these building is a check of the anchors and of what references keep.
             pub = text(build(unit_tree(DOC), "public.pdf"))
-            @test occursin("Prüfung:", pub) && occursin("Deposition", pub) && occursin("Rechenkern ist", pub)
+            @test occursin("Prüfung:", pub) && occursin("Serum", pub) && occursin("Rechenkern ist", pub)
             for word in ("KURZ-", "TIEF-", "tief_c2_code", "META-C2", "INTERN-TITEL", "GRENZEN-TITEL", "Kurzfassung", "Vertiefung", "Siehe auch")
                 @test !occursin(word, pub)
             end
@@ -548,9 +537,9 @@ end
                 SemanticUnit("leser"; title="Leser", layers=(; deep="Siehe [dort](#ziel)."), references=["ziel"])]; layers=LAYERS)
             read_marks = text(build(unit_tree(marks; layer=:deep), "marks.pdf"; audience=:private))
             @test occursin("H*(10)", read_marks) && occursin("TIEF-ZIEL", read_marks) && !occursin("{#", read_marks)
-            # An offer of its own, for a private reader too, has no mark.
-            offer = text(build(unit_tree(DOC; layer=:offer), "offer.pdf"; audience=:private))
-            @test !occursin("nicht öffentlich", offer) && occursin("Rechenkern ist", offer)
+            # An notes of its own, for a private reader too, has no mark.
+            notes = text(build(unit_tree(DOC; layer=:notes), "notes.pdf"; audience=:private))
+            @test !occursin("nicht öffentlich", notes) && occursin("Rechenkern ist", notes)
         end
     end
 end
@@ -568,19 +557,19 @@ end
             feedback=false, compose=false, thread=false, treebars_assets=false, preload_version=nothing,
             pico_version=HTMXObjects._PICO_VERSION, kw...)
         rendered(x, audience) = with_audience(() -> repr("text/html", x), audience)
-        side(p) = SemanticUnits([SemanticUnit("$p-eins"; title="$p eins", layers=(; offer="$p o", short="$p k", deep="$p t"))]; layers=LAYERS)
-        later_doc = SemanticUnits([SemanticUnit("spaeter"; title="Später", layers=(; offer="o", deep="spät tief"))]; layers=LAYERS)
+        side(p) = SemanticUnits([SemanticUnit("$p-eins"; title="$p eins", layers=(; notes="$p o", short="$p k", deep="$p t"))]; layers=LAYERS)
+        later_doc = SemanticUnits([SemanticUnit("spaeter"; title="Später", layers=(; notes="o", deep="spät tief"))]; layers=LAYERS)
         pages = Dict(
             "/" => rendered(shell(unit_tree(DOC)), :private),
             "/public" => rendered(shell(unit_tree(DOC)), :public),
             "/export" => repr("text/html", static_transform(htmx(h.main(unit_tree(DOC)); assets=:vendor, runtime=:linked,
                 pico_version=HTMXObjects._PICO_VERSION), StaticExport(; audience=:private))),
             "/frag" => rendered(shell(h.div(; id="spaet", hx_get="/fragment", hx_trigger="load")), :private),
-            "/shared" => rendered(shell(unit_tree(SemanticUnits([SemanticUnit("geteilt"; title="Geteilt", layers=(; offer="ROH", short=:offer, deep=:offer),
+            "/shared" => rendered(shell(unit_tree(SemanticUnits([SemanticUnit("geteilt"; title="Geteilt", layers=(; notes="ROH", short=:notes, deep=:notes),
                 children=[SemanticUnit("kind"; title="Kind", layers=(; short="k", deep="t"))])]; layers=LAYERS))), :private),
             "/wide" => rendered(shell(h.div(; style="width: 400px")(unit_tree(SemanticUnits([SemanticUnit("breit"; title="Breit",
-                layers=(; offer="o", short="| " * join(("Spalte$i" for i in 1:30), " | ") * " |\n|" * " --- |"^30 * "\n| " * join(("x$i" for i in 1:30), " | ") * " |"))]; layers=LAYERS)))), :private),
-            "/wrapped" => (w = SemanticUnits([SemanticUnit("anderes"; title="Anderes", layers=(; offer="o", short="k")),
+                layers=(; notes="o", short="| " * join(("Spalte$i" for i in 1:30), " | ") * " |\n|" * " --- |"^30 * "\n| " * join(("x$i" for i in 1:30), " | ") * " |"))]; layers=LAYERS)))), :private),
+            "/wrapped" => (w = SemanticUnits([SemanticUnit("anderes"; title="Anderes", layers=(; notes="o", short="k")),
                                               SemanticUnit("nur-tief"; title="Nur tief", layers=(; deep="t"))]; layers=LAYERS);
                 rendered(shell(h.div(unit_view_control(w), unit_tree(w, "anderes"; control=false),
                     unit_tree(w, "nur-tief"; control=false, wrap=c -> SemanticSection("Im Projekt", c)))), :private)),
@@ -636,7 +625,7 @@ end
                         @testset "$name" begin
                             # The first layer is what a reader starts with.
                             @test load(page)
-                            @test seen("c2--offer") == "true" && opened("c2--short") == "false" && opened("c2--deep") == "false"
+                            @test seen("c2--notes") == "true" && opened("c2--short") == "false" && opened("c2--deep") == "false"
                             @test closed_around("formel") == "1"
                             # A direct link to a layer four levels down opens the chain, and lands.
                             @test load("$page#grenzen--deep")
@@ -700,7 +689,7 @@ end
                     @test wait_for(b, "window.htmxoUnits.view() === 'short'")
                     @test address() == "/?layer=short"
                     @test seen("c2--short") == "true" && seen("grenzen--short") == "true" && seen("intern--short") == "true"
-                    @test seen("c2--offer") == "false" && seen("c2--deep") == "false"
+                    @test seen("c2--notes") == "false" && seen("c2--deep") == "false"
                     @test seen("rechenkern") == "false" && seen("ap2") == "false"
                     TabsetBrowser.call(b, "Page.reload")
                     sleep(0.2)
@@ -715,11 +704,11 @@ end
                     @test wait_for(b, "window.htmxoUnits.view() === 'deep'")
                     evaluate(b, "document.querySelector('[data-htmxo-unit-view] input[value=all]').click(); ''")
                     @test wait_for(b, "window.htmxoUnits.view() === null")
-                    @test opened("c2--deep") == "false" && seen("c2--offer") == "true" && seen("rechenkern") == "true"
+                    @test opened("c2--deep") == "false" && seen("c2--notes") == "true" && seen("rechenkern") == "true"
                     @test evaluate(b, "location.search") == ""
                     # An unknown layer in an address is the default view.
                     @test load("$base/?layer=nichts")
-                    @test evaluate(b, "String(window.htmxoUnits.view())") == "null" && seen("c2--offer") == "true"
+                    @test evaluate(b, "String(window.htmxoUnits.view())") == "null" && seen("c2--notes") == "true"
 
                     # Two documents side by side, each with a scope and a parameter
                     # of its own: choosing in one leaves the other, and a reload has both.
@@ -729,26 +718,26 @@ end
                     @test wait_for(b, "window.htmxoUnits.view(document.getElementById('b-eins')) === 'short'")
                     @test address() == "/scopes?zweite=short"
                     @test evaluate(b, "String(window.htmxoUnits.view(document.getElementById('a-eins')))") == "null"
-                    @test seen("b-eins--short") == "true" && seen("b-eins--offer") == "false"
-                    @test seen("a-eins--offer") == "true" && opened("a-eins--short") == "false"
+                    @test seen("b-eins--short") == "true" && seen("b-eins--notes") == "false"
+                    @test seen("a-eins--notes") == "true" && opened("a-eins--short") == "false"
                     @test evaluate(b, "document.querySelector('[data-htmxo-unit-view=erste] input:checked').value") == "all"
                     @test load("$base/scopes?zweite=short&erste=deep")
                     @test wait_for(b, "window.htmxoUnits.view(document.getElementById('a-eins')) === 'deep'")
-                    @test seen("a-eins--deep") == "true" && seen("b-eins--short") == "true" && seen("a-eins--offer") == "false"
+                    @test seen("a-eins--deep") == "true" && seen("b-eins--short") == "true" && seen("a-eins--notes") == "false"
                     # A link to what one scope's layer hides clears that scope only.
-                    evaluate(b, "location.hash = '#a-eins--offer'; ''")
+                    evaluate(b, "location.hash = '#a-eins--notes'; ''")
                     @test wait_for(b, "window.htmxoUnits.view(document.getElementById('a-eins')) === null")
-                    @test address() == "/scopes?zweite=short#a-eins--offer"
+                    @test address() == "/scopes?zweite=short#a-eins--notes"
                     @test evaluate(b, "window.htmxoUnits.view(document.getElementById('b-eins'))") == "short"
 
                     # A panel several layers share: the layer view keeps it, and a link
                     # to a layer sharing it, which has no element of its own, lands there.
                     @test load("$base/shared?layer=short")
                     @test wait_for(b, "window.htmxoUnits.view() === 'short'")
-                    @test seen("geteilt--offer") == "true"
+                    @test seen("geteilt--notes") == "true"
                     @test load("$base/shared#geteilt--deep")
-                    @test wait_for(b, "document.getElementById('geteilt--offer').getClientRects().length > 0")
-                    @test closed_around("geteilt--offer") == "0" && closed_around("kind") == "1"
+                    @test wait_for(b, "document.getElementById('geteilt--notes').getClientRects().length > 0")
+                    @test closed_around("geteilt--notes") == "0" && closed_around("kind") == "1"
                     @test load("$base/shared#kind--deep")
                     @test wait_for(b, "document.getElementById('kind--deep').open")
 
@@ -811,7 +800,7 @@ end
                     # A public page has nothing to open or switch and runs inert.
                     @test load("$base/public")
                     @test evaluate(b, "String(document.querySelectorAll('details, fieldset').length)") == "0"
-                    @test seen("c2--offer") == "true"
+                    @test seen("c2--notes") == "true"
                     @test load("$base/public#intern--deep")
                     @test evaluate(b, "String(document.getElementById('intern--deep'))") == "null"
                 end

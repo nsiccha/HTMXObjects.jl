@@ -1,7 +1,5 @@
 using TestItemRunner
 
-# A row's cell may span columns (TenderViews' section rows hold their content in
-# one wide cell). Sorting and CSV count columns, not cells.
 @testitem "a cell spanning columns sorts under its first and keeps later cells in theirs" setup=[HTMXOTestImports, ChromeDump] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
         @test_skip false

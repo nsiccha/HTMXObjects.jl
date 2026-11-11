@@ -24,6 +24,7 @@ pages = [
     ],
 ]
 DocSupport.lint(pages)
+DocSupport.reference_summaries!()
 
 makedocs(
     sitename = "HTMXObjects.jl",

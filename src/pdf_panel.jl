@@ -115,7 +115,7 @@ pdf_panel(docs; id="originals", texts=pdf_panel_texts(:de; label="Originale"))
 ```
 
 Without `texts=`, [`pdf_panel`](@ref) and [`pdf_toggle`](@ref) write in the
-page's language ([`HTMXObjects.page_lang`](@ref): German under `__lang__ = "de"`,
+page's language (`HTMXObjects.page_lang`: German under `__lang__ = "de"`,
 English for any other and outside a route). An unknown locale or text name,
 or a placeholder the text does not take, throws an `ArgumentError`.
 """
@@ -270,12 +270,12 @@ not rewritten.
 
 ```julia
 @get bericht() = pdf_beside(
-    h.article(h.p("Der Träger sichert den Kinderschutz ",
+    h.article(h.p("Jede Probe erhält eine Kennung ",
         pdf_ref("(Konzept, S. 12)", "/files/konzept.pdf"; page=12, panel="originale",
-                quoted="Kinderschutz ist Aufgabe aller Träger"), ".",
-        " Gemeldet wird binnen eines Tages ",
+                quoted="Proben erhalten eine eindeutige Kennung"), ".",
+        " Erfasst wird innerhalb eines Tages ",
         pdf_ref("(Verfahren)", "/verfahren#meldung"; kind=:html, panel="originale",
-                quoted="binnen eines Tages an das Jugendamt"), ".")),
+                quoted="innerhalb eines Tages im Probenregister"), ".")),
     pdf_panel(["Konzept" => "/files/konzept.pdf",
                (title="Verfahren", url="/verfahren", kind=:html)]; id="originale"))
 ```
@@ -356,8 +356,7 @@ end
 # never uncheck each other's documents. LOCKSTEP: `redraw` in the script.
 _pdf_choice_name(id::AbstractString) = "htmxo-pdf-document-" * id
 
-# The document chooser, never a native select box (the user's rule, decision
-# `VerkehrsStrukturdaten:ux/19mny0l`): one document is its title, a few a row
+# The document chooser: one document is its title, a few a row
 # of pills (`radio_group`), a long list a searchable list (`_choice_list`, past
 # `_RADIO_MAX` as for generated forms). The first document is the one chosen.
 # The script draws it again in these forms when a reference adds a file

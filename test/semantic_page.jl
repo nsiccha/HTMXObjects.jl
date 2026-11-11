@@ -7,9 +7,6 @@ using TestItemRunner
 
     const UPLOADS = String[]
 
-    # A simulator in the shape of Bruno's web-sim: a scenario every view reads,
-    # settings of single views, inputs that apply only to some scenarios, and
-    # one mutation.
     @htmx struct SimPage
         "Fit"
         @param fit::String = "one"
@@ -51,7 +48,6 @@ using TestItemRunner
             title="Simulator", select=entry -> entry.name !== :index)
     end
 
-    # Defaults computed from other properties, as Bruno's web-sim's are.
     @htmx struct FitsPage
         fits = ["x", "y"]
         "Fit"

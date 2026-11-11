@@ -424,10 +424,6 @@ end
 @testitem "master/detail rows read as one table, eager details after it" tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: to_markdown_string, filter_errors
-    # Snag master-detail-ma-e63263bb (reporter TenderViews), user pick 1mu8842:
-    # every `detail-<key>` companion used to be a one-cell row of the pipe
-    # table (`|  |`, `| Loading… |`, a whole section folded into a cell), in
-    # `?plain`, a consumer's own `show` and `pdf_report` alike.
     struct ConsumerTable
         inner
     end
@@ -584,8 +580,6 @@ end
                 document.body.dataset.done = '1';
             });
             """))
-        # A mean over its range (MietspiegelBayes' table cell), block children,
-        # source line breaks inside a text, a unit and a quote.
         rows = [h.tr(h.td("gut"), h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55")),
                      h.td(h.div("a"), h.div("b, \"c\"")), h.td("\n   x\n   y  "), h.td("6,28 €/m²"))]
         table = sortable_table(["Wohnlage", h.th("Baujahr", h.br(), "bis 1918"), "Liste", "Text", "Miete"], rows;
@@ -804,8 +798,6 @@ end
         inner(i) = sortable_table(["Inner"], [h.tr(h.td("inner $i.$k")) for k in 1:12]; searchable=true)
         nested = master_detail_table(["Outer"], 1:12; key=i -> "o$i", master=i -> (h.td("Outer $i"),),
             detail=inner, initially_open=i -> i == 2, searchable=true)
-        # An outer table that keeps its width (TenderViews' crosswalk does this):
-        # the wide inner table cannot widen it and scrolls sideways itself.
         nested_wide = master_detail_table(["Outer"], 1:4; key=i -> "w$i", master=i -> (h.td("Outer $i"),),
             detail=i -> widecols(40), initially_open=i -> i == 1, searchable=true)
         fixed = h.style(Raw("#s-nested-wide table:not(td table) { table-layout: fixed; width: 100%; }"))

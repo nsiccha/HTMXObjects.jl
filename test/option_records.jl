@@ -1,9 +1,5 @@
 using TestItemRunner
 
-# Hand-placed choices take the option records a generated control reads
-# (snag in-brunopkpd-s-r-c614c7ec, reporter Bruno:reports:ux): an option can be
-# shown but unavailable, carry help, and sit in a group, without hand-building
-# the control's markup.
 
 @testitem "a hand-placed choice renders option records as a generated control does" tags=[:unit] begin
     using HTMXObjects

@@ -77,7 +77,7 @@ live_thread(items; id="chat", texts=live_thread_texts(:de; start="Anfang des Cha
 ```
 
 Without `texts=`, [`live_thread`](@ref) writes in the page's language
-([`HTMXObjects.page_lang`](@ref): German under `__lang__ = "de"`, English for
+(`HTMXObjects.page_lang`: German under `__lang__ = "de"`, English for
 any other and outside a route). An unknown locale or text name, or a
 placeholder the text does not take, throws an `ArgumentError`.
 """

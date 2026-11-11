@@ -523,7 +523,7 @@ label. **`layer=:short`** gives that one layer alone: complete and in order, wit
 no labels or controls and without the units that lack it (and their groups, when
 nothing below them has it). This is the read and export of one layer.
 
-**Who reads it** is the page's audience ([`private`](@ref)), separate from the
+**Who reads it** is the page's audience ([`private`](@ref Private)), separate from the
 layer. Only layers declared `public=true` reach a public reader: the other
 layers, their labels, and the ids and titles of units with nothing public exist
 in the private branch only, so they are absent from a public page, its Markdown,
