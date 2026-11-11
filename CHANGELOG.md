@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.104
+
+- A vector `@param` with `@options` keeps its declared vector type when a
+  query or form submits one selection. Repeated selections resolve each
+  option against the current domain, including object-valued options;
+  unavailable or unknown selections answer 400.
+
 ## 0.1.103
 
 - Bind `application/json` object fields automatically to POST/PUT/PATCH keywords
