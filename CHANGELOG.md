@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.102
+
+- `serve` flushes stderr after its readiness message, so Julia's default logger
+  exposes `Serving on` immediately when output is redirected to a regular file,
+  in both blocking and asynchronous modes. Custom loggers retain their own
+  filtering and output handling.
+
 ## 0.1.101
 
 - Extract overlapping, non-exhaustive `ServiceSlice` selections from one
