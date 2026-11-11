@@ -15,7 +15,7 @@ response = dispatch(:GET, "/echo/?value=plasma");
 body = String(response.body);
 @assert response.status == 200
 @assert body == "<p>plasma</p>"
-(status=response.status, body=body)
+foreach(println, pairs((status=response.status, body=body)))
 ```
 
 The body check proves that the query reached the route. A status-only check
@@ -30,7 +30,7 @@ catalog = discover_test_items(pkgdir(HTMXObjects));
 items = catalog.items;
 @assert !isempty(items) # hide
 item = first(items);
-(name=item.name, file=item.file, tags=item.tags)
+foreach(println, pairs((name=item.name, file=item.file, tags=item.tags)))
 ```
 
 Discovery parses test metadata without importing test bodies into the web
@@ -59,7 +59,7 @@ reporting an empty success.
 @htmx struct TestApp
     @include tests = TestRoutes(; project=pkgdir(HTMXObjects))
 end
-[(r.verb, r.path) for r in reflect(TestApp)]
+foreach(println, [(r.verb, r.path) for r in reflect(TestApp)])
 ```
 
 The generated routes expose discovery, selection, execution state and captured

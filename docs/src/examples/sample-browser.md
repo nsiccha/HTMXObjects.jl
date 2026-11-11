@@ -22,7 +22,7 @@ using HTMXObjects
 end
 
 inventory = Inventory();
-inventory.matching("plasma")
+foreach(println, inventory.matching("plasma"))
 ```
 
 `Inventory` owns the records and the selection rule. Its `matching` property is
@@ -53,8 +53,8 @@ end
 
 app = SampleBrowser();
 route!(app; prefix="/samples", operation_policy=:blocking);
-[(route.verb, route.path, [p.name for p in route.params])
- for route in reflect(SampleBrowser)]
+foreach(println, [(route.verb, route.path, [p.name for p in route.params])
+                  for route in reflect(SampleBrowser)])
 ```
 
 The generated route description exposes the HTTP verb, relative path and
@@ -121,7 +121,7 @@ checks = (
 )
 @assert checks == (status=200, has_plasma_A=true,
                   has_plasma_C=true, excludes_serum=true)
-checks
+foreach(println, pairs(checks))
 ```
 
 The default and an unknown material exercise the other branches of the filter.
@@ -138,7 +138,7 @@ edge_checks = (
     unknown_includes_none=all(id -> !occursin(id, empty_body), ids),
 )
 @assert all(edge_checks)
-edge_checks
+foreach(println, pairs(edge_checks))
 ```
 
 These assertions run when the documentation is built. A change that drops a

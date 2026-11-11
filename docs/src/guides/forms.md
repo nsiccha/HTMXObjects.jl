@@ -21,7 +21,7 @@ post_response = dispatch(:POST, "/stages/choose";
     body="stage=complete");
 results = (get=String(get_response.body), post=String(post_response.body))
 @assert results == (get="active", post="complete") # hide
-results
+foreach(println, pairs(results))
 ```
 
 GET keywords come from the query string; POST keywords can come from the form
@@ -47,7 +47,7 @@ checks = (
     target=occursin("hx-target=\"#results\"", markup),
 )
 @assert all(checks) # hide
-checks
+foreach(println, pairs(checks))
 ```
 
 `linput` supplies the label, input name and value. It does not infer an HTTP
@@ -64,7 +64,7 @@ parameters already supplied by visible controls.
 ## URLs
 
 ```@example forms
-query_url("/samples/"; material="whole blood", location="Freezer A")
+println(query_url("/samples/"; material="whole blood", location="Freezer A"))
 ```
 
 `query_url` encodes values for a query string. Keep HTML escaping, URL encoding

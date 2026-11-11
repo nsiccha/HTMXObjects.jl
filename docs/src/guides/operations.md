@@ -15,7 +15,7 @@ response = dispatch(:GET, "/ready/";
     headers=["HX-Request" => "true"]);
 result = (status=response.status, body=String(response.body))
 @assert result == (status=200, body="<p>Ready</p>") # hide
-result
+foreach(println, pairs(result))
 ```
 
 `:blocking` answers in the current request and is appropriate for this small,
@@ -38,7 +38,7 @@ output it claims to show.
     @include runtime = RuntimeRoutes()
     @get index() = h.p("Application")
 end
-[(r.verb, r.path) for r in reflect(MonitoredApp)]
+foreach(println, [(r.verb, r.path) for r in reflect(MonitoredApp)])
 ```
 
 `RuntimeRoutes` provides the mountable runtime surface. `runtime_snapshot`

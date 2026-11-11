@@ -47,7 +47,7 @@ Registration contributes `/inventory`. Reflection describes the type's route
 tree before the registration prefix is applied:
 
 ```@example objects
-[(r.verb, r.path) for r in reflect(LabelApp)]
+foreach(println, [(r.verb, r.path) for r in reflect(LabelApp)])
 ```
 
 Use route-relative links when the same component can appear under different

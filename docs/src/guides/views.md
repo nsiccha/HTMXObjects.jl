@@ -22,7 +22,7 @@ comparison = (
 )
 @assert comparison == (page_has_shell=true, fragment_has_shell=false,
                        both_have_answer=true) # hide
-comparison
+foreach(println, pairs(comparison))
 ```
 
 The response pipeline applies `__page__` to ordinary browser navigation and
@@ -57,7 +57,7 @@ defines sorting keys and the distinction between display and numeric values.
 markdown = dispatch(:GET, "/views/";
     headers=["Accept" => "text/markdown"]);
 @assert markdown.status == 200 # hide
-String(markdown.body)
+println(String(markdown.body))
 ```
 
 A Markdown request asks for the route value's Markdown view. Semantic content
