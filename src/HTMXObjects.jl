@@ -18597,7 +18597,7 @@ end
 # `@param`'s emitted RHS is `_extract_param(req, :name, T[, default])` or,
 # when the same name has `@options`,
 # `_extract_option_param(options, req, :name, T[, default])`.
-function _reflect_local_param(T, nm)
+function _reflect_local_param(T, nm; unquote_default=true)
     info = Base.invokelatest(DynamicObjects.metafirst, T, nm)
     info === nothing && return nothing
     rhs = info.rhs
@@ -18612,9 +18612,10 @@ function _reflect_local_param(T, nm)
     length(rhs.args) >= type_index || return nothing
     default_index = type_index + 1
     has_default = length(rhs.args) >= default_index
+    default = has_default ? rhs.args[default_index] : nothing
     return (type=_reflect_resolve_type(parentmodule(T), rhs.args[type_index]),
             required=!has_default,
-            default=has_default ? _unquote(rhs.args[default_index]) : nothing,
+            default=unquote_default ? _unquote(default) : default,
             doc=_decl_doc(info))
 end
 
@@ -29780,10 +29781,12 @@ const _FOLLOWS_ATTR = Symbol("data-htmxo-follows")
 
 _semantic_follows(values) = get(values, _SEMANTIC_FOLLOWS, ())
 
-# Whether `param`'s declared default is computed: an expression, which only
-# the declaring struct's property evaluates. A list of records is not a value
-# of its own (`Records`).
-_computed_default(param) = !param.required && param.default isa Expr &&
+# Expressions and bare identifiers need the declaring struct's property to
+# evaluate them. Runtime descriptors mark quoted Symbol defaults as literal
+# (`_with_default_reads`), preserving their ordinary form submission behavior.
+# A list of records is not a value of its own (`Records`).
+_computed_default(param) = !param.required && param.default isa Union{Expr,Symbol,GlobalRef} &&
+    !get(param, :literal_default, false) &&
     param.source !== :path && !(param.type isa Type && param.type <: Records)
 
 # Whether the request `obj` answers names `name`. A blank value names nothing:
@@ -29824,6 +29827,12 @@ function _with_default_reads(obj, param)
     source = _param_declaring_object(obj, param.name)
     source === nothing && return param
     T = typeof(source)
+    if param.default isa Symbol
+        # Reflection unquotes :value and a reference named value to the same
+        # Symbol. The original declaration distinguishes them without eval.
+        declared = _reflect_local_param(T, param.name; unquote_default=false)
+        declared.default isa QuoteNode && return merge(param, (; literal_default=true))
+    end
     closure = _dependency_closure(T, param.name)
     isnothing(closure) && return param
     params = Set{Symbol}(Base.invokelatest(_param_names, T))
