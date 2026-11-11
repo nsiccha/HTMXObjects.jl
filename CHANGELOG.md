@@ -9,6 +9,14 @@
 - Documentation builds reject warnings and no longer depend on recorded app
   embeds. The docs workflow follows the development branch used by the package.
 
+## 0.1.101
+
+- `JSONResponse{T,Status}` declares a JSON route's HTTP status and generated
+  OpenAPI response entry together, for example `JSONResponse{CreatedItem,201}`
+  for a POST that creates an item. Return the plain value; projection still
+  follows `T`. `JSONResponse{T}` and `JSONResponse(value)` keep their 200 defaults,
+  and finished responses returned by the body still pass through unchanged.
+
 ## 0.1.100
 
 - A `@param` whose default is computed from other inputs
