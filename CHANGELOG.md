@@ -14,6 +14,26 @@ HTMXObjects commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package HTMXObjects`, instead of
 failing at render with a `MethodError`.
 
+## 0.1.100
+
+- A `@param` whose default is computed from other inputs
+  (`@param threshold::Float64 = criterion.threshold`, `criterion` reading `output`)
+  shows the value it computes in every generated control, and follows it until the
+  reader sets it. A number or text field and the hidden inputs of a generated form
+  carried the default's source text (`value="criterion.threshold"`), which the page
+  then sent and the view refused with 400; the controls of an option domain showed the
+  value, but kept the one computed for the inputs the page opened with. Now a control
+  that shows its computed default is marked `data-htmxo-follows`, the page sends no
+  marked field and no hidden copy of it (the server computes the default for the
+  inputs sent), and its control is drawn again when an input the default reads
+  changes. A value the reader types or chooses, one the page address names, one
+  `values=` gives and one `set_inputs` sets is sent as before. The page address keeps
+  such an input once the reader sets it, even at the value its default computes
+  (`data-htmxo-address` gives it `null`); a computed default that reads no input
+  (`@param fit = first(fits)`) keeps the value it computes there, as before.
+  `semantic_refresh_script` and `semantic_follow_script` do this; a hand-built
+  `<head>` includes both, as before.
+
 ## 0.1.99
 
 - A group summary over values known only within bounds shows the range it lies in.

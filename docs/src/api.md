@@ -1735,11 +1735,23 @@ and button.
   sent with the sidebar; once it finishes, the other results are asked for
   again when next shown. [`semantic_follow_script`](@ref) does this, and the
   `htmx()` shell installs it.
+- **A default computed from other inputs follows them** (from 0.1.100).
+  `@param threshold::Float64 = criterion.threshold`, where `criterion` reads
+  the `output` input, shows the threshold of the output on the page, and
+  until the reader sets it, it follows: choosing another output draws it
+  again with that output's threshold, and the results use it. The page sends
+  no such input (no field and no hidden copy), so the server computes the
+  default for the inputs it sends; the control is drawn again when an input
+  its default reads changes. Once the reader types or chooses a value, that
+  value is sent and stays when the output changes, as is one the page address
+  names. The control's fields carry `data-htmxo-follows` while they follow.
 - **The page address keeps the inputs** (from 0.1.20). After the reader
   changes an input of the sidebar or of a read's tab, every such input whose
   value differs from its default (its `values=` entry, if given; a default
   computed from other properties, such as `@param fit = first(fits)`, is the
-  value it computes) is in the page address beside `?tab=`: choosing New subjects and 40 subjects above
+  value it computes) is in the page address beside `?tab=`. An input whose
+  default reads other inputs, which changes with them, is in the address once
+  the reader sets it, whatever its value. Choosing New subjects and 40 subjects above
   reads `/?tab=dose_response&basis=cohort&subjects=40`. An input back at
   its default, an empty one, and one `@relevant` hides are left out, so the
   address stays short, and other parameters of the address stay. The history
