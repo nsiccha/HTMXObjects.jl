@@ -925,8 +925,8 @@ end
 
         quarto = Sys.which("quarto")
         snapshot = "https://example.org/demo"
-        # A static snapshot that stores `/api/v1/ap3/anomalien?p_min=0.9` as
-        # `samples.json` (snag pdf-report-markd-23652624).
+        # A static snapshot that stores `/api/v1/samples?material=plasma&limit=2` as
+        # `api-v1-samples-material-plasma-limit-2.json` (snag pdf-report-markd-23652624).
         snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
         asked = String[]
         url_map(a) = (push!(asked, a);
@@ -935,15 +935,15 @@ end
         md = """
             # Schnittstelle {#oben}
 
-            Anomalien: [JSON](/api/v1/ap3/anomalien?p_min=0.9) · [Seite](/schnittstelle) · [Bremen](region/04)
-            · [Bayern]() · [Quelle](https://example.org/daten) · [Nach oben](#oben) · [noch einmal](/api/v1/ap3/anomalien?p_min=0.9)
+            Proben: [JSON](/api/v1/samples?material=plasma&limit=2) · [Seite](/schnittstelle) · [Bremen](region/04)
+            · [Bayern]() · [Quelle](https://example.org/daten) · [Nach oben](#oben) · [noch einmal](/api/v1/samples?material=plasma&limit=2)
 
             | Antwort | Adresse |
             |---|---|
-            | Stationen | [Liste](/api/v1/stationen) |
+            | Materialien | [Liste](/api/v1/materials) |
             """
-        targets = ["/api/v1/ap3/anomalien?p_min=0.9", "/schnittstelle", "region/04",
-                   "https://example.org/daten", "#oben", "/api/v1/stationen"]
+        targets = ["/api/v1/samples?material=plasma&limit=2", "/schnittstelle", "region/04",
+                   "https://example.org/daten", "#oben", "/api/v1/materials"]
         document = HTMXObjects._pdf_report_qmd(md; title="Konzept [Start](/start)", lang="de-DE", base_url=snapshot)
         # The title's link is read with the document's, each target once.
         @test HTMXObjects._pdf_report_link_targets(quarto, document) == ["/start"; targets]
@@ -960,9 +960,9 @@ end
         end
         answers = [t => HTMXObjects._pdf_report_mapped_url(url_map(t), t) for t in targets]
         mapped = typst(answers)
-        json = "$snapshot/samples.json"
+        json = "$snapshot/api-v1-samples-material-plasma-limit-2.json"
         @test count("#link(\"$json\")", mapped) == 2
-        @test occursin("#link(\"$snapshot/api-v1-stationen.json\")[Liste]", mapped)
+        @test occursin("#link(\"$snapshot/api-v1-materials.json\")[Liste]", mapped)
         # nothing leaves a link to base_url, its text, or itself
         @test occursin("#link(\"$snapshot/schnittstelle\")[Seite]", mapped)
         @test occursin("#link(\"$snapshot/region.html?r=04\")[Bremen]", mapped)
@@ -972,7 +972,7 @@ end
         # A target the render reads but nobody asked url_map about stops the
         # filter rather than taking a rule url_map was never consulted on.
         stopped = typst(answers[2:end])
-        @test occursin("url_map was not asked about the link target /api/v1/ap3/anomalien?p_min=0.9", stopped)
+        @test occursin("url_map was not asked about the link target /api/v1/samples?material=plasma&limit=2", stopped)
 
         pdfua(path) = let bytes = read(path, String)
             startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
@@ -991,7 +991,7 @@ end
                 if success(run(pipeline(ignorestatus(`pdfinfo -url $out`); stdout=io, stderr=devnull)))
                     found = sort!([last(split(l)) for l in split(String(take!(io)), '\n') if occursin("Annotation", l)])
                     @test found == sort!([json, json, "$snapshot/schnittstelle", "$snapshot/region.html?r=04",
-                                          "https://example.org/daten", "$snapshot/api-v1-stationen.json"])
+                                          "https://example.org/daten", "$snapshot/api-v1-materials.json"])
                 else
                     @test_skip "pdfinfo -url (poppler ≥ 22) lists the links"
                 end
@@ -1011,7 +1011,7 @@ end
             catch e
                 e
             end
-            @test err isa ErrorException && occursin("no map for /api/v1/ap3/anomalien?p_min=0.9", err.msg)
+            @test err isa ErrorException && occursin("no map for /api/v1/samples?material=plasma&limit=2", err.msg)
             @test readdir(dir) == []
         end
     end

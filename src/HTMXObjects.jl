@@ -3874,7 +3874,7 @@ _with_page_meta(f, meta) = ScopedValues.with(f, _PAGE_META => meta)
 The language of the answer being produced: the BCP 47 tag that the route's
 mount chain declares with `__lang__` (the innermost declaration wins), or the
 one the answer is asked for in. `dispatch(…; lang)` wins over the declaration;
-`to_markdown_string``(x; lang)` and a [`pdf_report`](@ref) of a value
+`to_markdown_string(x; lang)` and a [`pdf_report`](@ref) of a value
 set it while they render. It is `nothing` when none of them sets one, as
 outside a route.
 
@@ -6163,7 +6163,7 @@ element's `lang`, come from [`htmxo_utility_styles`](@ref), which every
 `::: {.htmxo-private}` that opens with the label, `*not public*`, and inline
 content a span `[*not public:* …]{.htmxo-private}`. The label is in the
 language of `HTMXObjects.page_lang()`: a route's `__lang__`, or the `lang` of
-`to_markdown_string``(x; lang)`, of `dispatch(…; lang)` and of a
+`to_markdown_string(x; lang)`, of `dispatch(…; lang)` and of a
 [`pdf_report`](@ref) of a value. A Markdown string keeps the language it was
 rendered in. Private content inside private content is marked once.
 `mark=false` shows `content` without the mark.
@@ -6173,7 +6173,7 @@ a [`StaticExport`](@ref) or [`export_site`](@ref) bundle, a
 [`pdf_report`](@ref) of a value, a `dispatch` made outside any request (the
 Markdown a concept PDF inlines), and a `dispatch(...; audience=:public)`.
 Anything rendered outside any request is public too, unless it is rendered
-with `to_markdown_string``(x; audience=:private)` or inside
+with `to_markdown_string(x; audience=:private)` or inside
 [`with_audience`](@ref)`(f, :private)`. The live app always shows everything.
 [`export_audience`](@ref) tells a route which audience it answers for.
 
@@ -6312,7 +6312,7 @@ tasks: an `:auto` or `@queued` operation's body and a task the route spawns.
 Outside any request it is for the public. Use `with_audience` where code
 renders for someone else: HTML it builds itself (`repr("text/html", x)`, an
 [`HTMLSnapshot`](@ref)) for a given reader. For Markdown,
-`to_markdown_string``(x; audience)` does the same.
+`to_markdown_string(x; audience)` does the same.
 
 ```julia
 html = with_audience(:private) do
@@ -20149,7 +20149,7 @@ for a loopback request.
   throws [`PrivateContentEscaped`](@ref).
 - `lang` — the language of the answer, a BCP 47 tag such as `"de-DE"`, in
   place of the one the route's mount chain declares with `__lang__`: the
-  route reads it as `HTMXObjects.page_lang``()`, the page shell takes
+  route reads it as `HTMXObjects.page_lang()`, the page shell takes
   it as its `lang` default, and the words HTMXObjects writes itself follow it,
   such as the label of [`private`](@ref Private) content in Markdown ("nicht
   öffentlich"). Without it the route's `__lang__` holds, also for a
@@ -21102,7 +21102,7 @@ image within a line of text stays in its paragraph, and PAC still warns about it
 value is rendered for it, so a public report shows the stand-in of each
 [`private`](@ref Private) part, or nothing. A Markdown string is rendered already:
 render it for the report's audience and language, with
-`to_markdown_string``(x; audience, lang)` or `dispatch(...; audience,
+`to_markdown_string(x; audience, lang)` or `dispatch(...; audience,
 lang)` (both public by default outside a request; a live request is
 `:private`, so pass the audience inside one). Its label of private content
 stays in the language it was rendered in. A public report refuses Markdown
