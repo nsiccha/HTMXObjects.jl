@@ -1,2 +1,0 @@
-Start typing to search.
-
