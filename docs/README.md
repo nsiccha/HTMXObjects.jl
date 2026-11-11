@@ -10,6 +10,7 @@ other pages link to it rather than repeating its contract.
 | Guides | `guides/forms.md` | Bind typed query and form inputs to routes. |
 | Guides | `guides/views.md` | Render HTML, Markdown, tables and captions from one value. |
 | Guides | `guides/operations.md` | Choose request execution and inspect runtime work. |
+| Guides | `guides/service-slices.md` | Select, connect and replace independent Julia services. |
 | Guides | `guides/testing.md` | Check route responses and discover isolated test items. |
 | Examples | `examples/sample-browser.md` | Build and verify a searchable sample inventory, including its rendered output. |
 | Reference | `reference/routes.md` | Route declarations, registration, request context and reflection. |

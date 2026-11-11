@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.101
+
+- Extract overlapping, non-exhaustive `ServiceSlice` selections from one
+  application. `service_plan` separates public, internal, forwarded and
+  compile-only operations, preserves mount/input context, and uses DynamicObjects
+  0.5.19 declaration selections to explain local requirements and unresolved reads.
+- `ServiceRuntime` uses isolated HTTP routers and explicit peer boundaries, with
+  shared policy, identity/context propagation and resource-owner validation.
+  The first transport is blocking and buffered; `drain_service!` keeps admitted
+  work owned by its process while rejecting new requests during replacement.
+- Selectively compile handlers without executing their bodies. The runnable
+  ordered-stream example verifies colocated/split parity and reader replacement
+  while the writer keeps its PID, state and cache; measurements include both
+  split processes rather than inferring savings from route counts.
+
 - Documentation is organized into Start, Guides, Examples and Reference.
   The landing page and guides execute their Julia examples during the build.
 - The sample-browser example renders its actual response and checks the selected
