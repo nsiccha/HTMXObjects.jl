@@ -119,7 +119,7 @@ using TestItemRunner
 
     # A route without keywords refuses a form field too. A body is a form when
     # its Content-Type says so; without one only for a route that reads form
-    # fields; a JSON body submits no parameters.
+    # fields. A JSON object's keys also submit parameters.
     r = dispatch(:POST, "/strict/rows/stalecheck?plain=1"; headers=form, body="reason=x")
     @test r.status == 400
     @test occursin("Unknown parameter: reason; accepted parameters: lang, from, by", body(r))
@@ -127,8 +127,10 @@ using TestItemRunner
     @test dispatch(:POST, "/german/rows/stalecheck?plain=1"; body="reason=x").status == 200
     r = dispatch(:POST, "/german/rows/stalecheck?plain=1";
         headers=["Content-Type" => "application/json"], body="{\"reason\": 1}")
-    @test r.status == 200
-    @test body(r) == "checked"
+    @test r.status == 400
+    @test occursin("reason", body(r))
+    @test dispatch(:POST, "/german/rows/stalecheck?plain=1";
+        headers=["Content-Type" => "application/json"], body="{").status == 200
 
     # A keyword splat takes every field, so the policy leaves its route alone.
     r = dispatch(:POST, "/strict/rows/take?plain=1"; headers=form, body="a=1&b=2")

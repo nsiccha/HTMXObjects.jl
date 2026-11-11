@@ -7,12 +7,12 @@ using HTMXObjects
 import HTMXObjects: h
 
 @htmx struct ParamChild
-    @param (; dataset, data_version, tags, level, optional) = __parent__
+    @param (; dataset, data_version, tags, level, optional, note) = __parent__
     @param child::Int = 3
     @queued @get results(; method::String="pathfinder") =
         h.p("pid=$(getpid()) dataset=$dataset version=$data_version tags=$(join(tags, ',')) child=$child method=$method level=$level optional=$optional")
     @queued @post results(; method::String="pathfinder") =
-        h.p("pid=$(getpid()) dataset=$dataset version=$data_version tags=$(join(tags, ',')) child=$child method=$method")
+        h.p("pid=$(getpid()) dataset=$dataset version=$data_version tags=$(join(tags, ',')) child=$child method=$method note=$(repr(note))")
 end
 
 @htmx struct UploadApp
@@ -29,6 +29,7 @@ end
     @options(level) = [1, 2]
     @param enabled::Bool = false
     @param optional::Int = 4
+    @param note::Union{Nothing,String} = "default"
     @relevant(optional) = enabled
     @include fit = ParamChild()
     @include nested = begin

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.103
+
+- Bind `application/json` object fields automatically to POST/PUT/PATCH keywords
+  and `@param`, including worker requests and keyword splats. Native JSON values
+  use JSON.jl's typed conversion; explicit null and empty values override query
+  fallback. Malformed bodies and rejected values answer 400.
+- Include JSON request bodies and nullable types in OpenAPI descriptions.
+- **Breaking:** JSON field names now participate in `__undeclared_params__`.
+  Declare or allow intentionally accepted fields in apps using `:refuse`.
+
 ## 0.1.102
 
 - `serve` flushes stderr after its readiness message, so Julia's default logger

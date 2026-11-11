@@ -1313,26 +1313,55 @@ _multipart_rejection(err) = nothing
 """
     bodyparams(req::HTTP.Request) -> AbstractDict
 
-The request-body parameter source for the POST/PUT/PATCH argument extractor:
-a `multipart/form-data` body routes to [`multipartparams`](@ref) (text fields as
-`String`, file fields as [`Upload`](@ref)); everything else routes to
-`formparams` (which itself only parses an
-`application/x-www-form-urlencoded` body and returns an empty dict otherwise).
-A multipart body that does not parse throws `HTMXObjects.UnreadableBody`,
-which a route answers 400; a urlencoded body never throws.
-This is what lets a declared kwarg bind from either body shape through the one
-shared `_lookup_param` path — `@post f(; x)` for a urlencoded field and
-`@post upload(; file)` for a file both Just Work.
+The request-body parameter source for POST/PUT/PATCH keywords and `@param`.
+`application/json` reads a JSON object, preserving its native values (including
+`nothing` for null). `multipart/form-data` uses [`multipartparams`](@ref), with
+text fields as strings and files as [`Upload`](@ref). Other requests use
+`formparams`, which reads urlencoded forms and otherwise returns an empty dict.
+Malformed JSON or multipart bodies, and non-object JSON, throw
+`HTMXObjects.UnreadableBody`, which a route answers 400. Parsing copies the
+body bytes, so reading parameters does not consume the request body.
 """
 function bodyparams(req::HTTP.Request)
     ct = lowercase(HTTP.header(req, "Content-Type", ""))
+    if _json_content_type(ct)
+        return try
+            raw = JSON.lazy(_request_body_bytes(req))
+            values = JSON.parse(raw)
+            values isa JSON.Object || throw(UnreadableBody("application/json", "expected a JSON object"))
+            fields = Dict{String,typeof(raw)}()
+            JSON.StructUtils.applyeach(JSON.StructUtils.DefaultStyle(), (key, value) -> begin
+                fields[String(key)] = value
+                nothing
+            end, raw)
+            _JSONParams(values, fields)
+        catch err
+            err isa ArgumentError || rethrow()
+            throw(UnreadableBody("application/json", sprint(showerror, err)))
+        end
+    end
     occursin("multipart/form-data", ct) && return multipartparams(req)
     formparams(req)
 end
 
+_json_content_type(ct) = lowercase(strip(first(split(ct, ';'; limit=2)))) == "application/json"
+
+# Public readers see native values; typed binding retains the JSON source for
+# JSON.jl's decoder. Index the lazy fields once, avoiding a body scan per key.
+struct _JSONParams{V,F} <: AbstractDict{String,Any}
+    values::V
+    fields::F
+end
+Base.length(src::_JSONParams) = length(src.values)
+Base.iterate(src::_JSONParams, state...) = iterate(src.values, state...)
+Base.getindex(src::_JSONParams, key) = src.values[key]
+Base.get(src::_JSONParams, key, default) = get(src.values, key, default)
+Base.haskey(src::_JSONParams, key) = haskey(src.values, key)
+Base.keys(src::_JSONParams) = keys(src.values)
+
 # The serializable input of `@param`: no connection, response, request context
 # or already-computed property values. Parsing stays lazy and uses the same
-# query/form/multipart readers as a live request. A worker address carries this
+# query/form/multipart/JSON readers as a live request. A worker address carries this
 # ordinary remount context even though DynamicObjects omits `__req__`.
 struct _ParamRequest
     method::String
@@ -1344,11 +1373,11 @@ end
 _param_request(::Nothing) = nothing
 function _param_request(req::HTTP.Request)
     ct = HTTP.header(req, "Content-Type", "")
-    has_form = !(req.method in _queryparams_verbs) &&
+    has_params = !(req.method in _queryparams_verbs) &&
         (isempty(ct) || occursin("application/x-www-form-urlencoded", lowercase(ct)) ||
-         occursin("multipart/form-data", lowercase(ct)))
+         occursin("multipart/form-data", lowercase(ct)) || _json_content_type(ct))
     _ParamRequest(req.method, HTTP.URI(req.target).query, ct,
-                  has_form ? _request_body_bytes(req) : UInt8[])
+                  has_params ? _request_body_bytes(req) : UInt8[])
 end
 queryparams(req::_ParamRequest) = _parse_form_encoded(req.query)
 bodyparams(req::_ParamRequest) = bodyparams(HTTP.Request(req.method, "/",
@@ -1650,7 +1679,7 @@ per-request route URL, the error hook, and the error answers' texts down through
 
 Defaults:
 - `__param_request__ = nothing` at the root, inherited by mounted children —
-  request providers bind a serializable query/form snapshot for worker execution.
+  request providers bind a serializable query/body snapshot for worker execution.
   A live request remains authoritative when a caller explicitly remounts it.
 - `__parent__ = nothing` — set by `@include` desugar to point at the enclosing struct.
 - `__mount_step__ = nothing` — the PARENT-RELATIVE URL step this object is
@@ -10433,9 +10462,10 @@ declared type rejects is the caller's fault, answered 400:
 so the answer lists the allowed values, otherwise `InvalidParamValue` naming
 the expected type.
 """
-function _convert_submitted(val, T, name)
+_convert_submitted(val, T, name) = _convert_submitted(_convert_param, val, T, name)
+function _convert_submitted(converter, val, T, name)
     try
-        _convert_param(val, T)
+        converter(val, T)
     catch err
         _rejects_value(err) || rethrow()
         allowed = _inferred_param_domain(T)
@@ -10444,7 +10474,27 @@ function _convert_submitted(val, T, name)
     end
 end
 
-# Determine whether kwargs come from queryparams (GET/DELETE) or formparams (POST/PUT/PATCH).
+# Use JSON.jl's typed decoder on the original field, including nested records,
+# arrays and nullable types; never stringify a JSON field into a form. Generic
+# StructUtils.make on native values would accept null/scalars as empty arrays.
+function _convert_json_param(raw, T)
+    try
+        if T isa Type && (T <: Enum || T === MultilineText)
+            return _convert_param(JSON.parse(raw, String), T)
+        end
+        JSON.parse(raw, T === nothing ? Any : T)
+    catch err
+        # Unsupported convert methods describe a mismatched JSON value, unlike
+        # a missing form parser. Leave errors in application constructors alone.
+        if err isa Union{ArgumentError,OverflowError,InexactError} ||
+           (err isa MethodError && err.f === convert)
+            throw(ArgumentError(sprint(showerror, err)))
+        end
+        rethrow()
+    end
+end
+
+# Determine whether kwargs come from queryparams (GET/DELETE) or bodyparams (POST/PUT/PATCH).
 const _queryparams_verbs = Set(["GET", "DELETE"])
 function _kwargs_source(req, method)
     method in _queryparams_verbs && return queryparams(req)
@@ -10475,6 +10525,11 @@ function _lookup_param(src, fallback, name, T)
     v = _submitted_raw(src, fallback, name)
     v === _NO_DEFAULT ? v : _convert_submitted(v, T, name)
 end
+function _lookup_param(src::_JSONParams, fallback, name, T)
+    key = String(name)
+    haskey(src, key) || return fallback === nothing ? _NO_DEFAULT : _lookup_param(fallback, nothing, name, T)
+    _convert_submitted((_, type) -> _convert_json_param(src.fields[key], type), src[key], T, name)
+end
 
 # The raw submitted value for `name`, or `_NO_DEFAULT` when it is absent or empty
 # in both the primary source and the fallback.
@@ -10486,6 +10541,11 @@ function _submitted_raw(src, fallback, name)
     end
     (v === nothing || v == "") ? _NO_DEFAULT : v
 end
+_submitted_raw(src::_JSONParams, fallback, name) = haskey(src, String(name)) ?
+    src[String(name)] : fallback === nothing ? _NO_DEFAULT : _submitted_raw(fallback, nothing, name)
+
+_blank_submitted(src, value) = value == ""
+_blank_submitted(src::_JSONParams, value) = false
 
 # Query and form names the framework itself reads on every route — the
 # Markdown and error projections (`?plain`, `?markdown`, `?error`), the vendor
@@ -10505,11 +10565,11 @@ keyword or `@param` reads (`bound`, fixed when the route is defined) and that
 is not framework-reserved (`_reserved_param_name`). `src` is the verb's source
 (query string for GET/DELETE/WS/SSE, body for POST/PUT/PATCH) and `fallback`
 the query string behind a body, as for a declared keyword; a name in both is
-taken from `src`. An empty value is not submitted, as for a declared keyword,
-so an unchecked checkbox and a blank text field are both absent. Values stay
+taken from `src`. Blank form/query text is absent; every JSON field is supplied,
+including null, empty strings and empty arrays. Values stay
 as parsed — `String`, `Vector{String}` for a repeated field, an `Upload` for a
-multipart file — and are appended sorted by name, so the splat's order does
-not depend on `Dict` iteration.
+multipart file, native JSON values — and are appended sorted by name, so the
+splat's order does not depend on `Dict` iteration.
 """
 function _collect_rest_params!(kw, src, fallback, bound)
     rest = Dict{String,Any}()
@@ -10520,7 +10580,7 @@ function _collect_rest_params!(kw, src, fallback, bound)
             haskey(rest, key) && continue
             _reserved_param_name(key) && continue
             Symbol(key) in bound && continue
-            value == "" && continue
+            _blank_submitted(source, value) && continue
             rest[key] = value
         end
     end
@@ -10588,11 +10648,11 @@ _reads_query_only(::Union{Verb{:GET},Verb{:DELETE},Verb{:WEBSOCKET},Verb{:SSE}})
 _reads_query_only(::Verb) = false
 
 # The parameter names a request submits where its route reads them: the query
-# string, and for POST/PUT/PATCH also the body when it is a form. A body says
-# so with its Content-Type (urlencoded or multipart); a body without one is a
+# string, and for POST/PUT/PATCH also the body when it is a form or JSON object.
+# A body says so with its Content-Type; a body without one is a
 # form only for a route that reads form fields (`reads_form`), as
-# `_generate_extract_args` builds its sources only then. A JSON or other raw
-# body submits no names, and neither does a form body that does not parse: its
+# `_generate_extract_args` builds its sources only then. An unsupported raw
+# body submits no names, and neither does a body that does not parse: its
 # `UnreadableBody` is returned beside the names, and the route then reads that
 # body as it would without the check (snag `undeclared-param-65ddfd9b`: the
 # parse error escaped the check, so a policy that only warns answered 500 before
@@ -10602,7 +10662,7 @@ function _submitted_param_names(req::HTTP.Request, verb::Verb, reads_form::Bool)
     _reads_query_only(verb) && return names, nothing
     ct = lowercase(HTTP.header(req, "Content-Type", ""))
     form = occursin("application/x-www-form-urlencoded", ct) ||
-        occursin("multipart/form-data", ct) || (isempty(ct) && reads_form)
+        occursin("multipart/form-data", ct) || _json_content_type(ct) || (isempty(ct) && reads_form)
     form || return names, nothing
     fields = try
         bodyparams(req)
@@ -10632,7 +10692,7 @@ with what the route takes: its keywords, the `@param`s of every struct in
 `target.objects` (inline and external mounts alike), its semantic context
 inputs, the policy's `allow`, and the framework's own names
 (`_framework_param_name`). Any other name is undeclared: `:warn` logs it,
-`:refuse` throws `UndeclaredParams`. A form body that does not parse submits no
+`:refuse` throws `UndeclaredParams`. A body that does not parse submits no
 names under either action: one warning says its names were not checked, and the
 route answers it as it would without a declaration (its own reply, or the
 `UnreadableBody` 400 when it binds a field from it). A mutation's result poll
@@ -10708,17 +10768,35 @@ function _lookup_option_param(options, src, fallback, name, T)
     v = _submitted_raw(src, fallback, name)
     v === _NO_DEFAULT ? v : _convert_option_param(options, v, name, T)
 end
+function _lookup_option_param(options, src::_JSONParams, fallback, name, T)
+    haskey(src, String(name)) ||
+        return fallback === nothing ? _NO_DEFAULT : _lookup_option_param(options, fallback, nothing, name, T)
+    val = src[String(name)]
+    records = _declared_param_options(options, name)
+    # Option wire strings may represent application objects without a parser.
+    if records !== nothing && val isa AbstractString
+        return _convert_option_param(options, val, name, T)
+    end
+    converted = _lookup_param(src, nothing, name, T)
+    if records !== nothing
+        allowed = Any[option.value for option in records if !get(option, :disabled, false)]
+        any(candidate -> isequal(candidate, converted), allowed) ||
+            throw(InvalidDomainValue(Symbol(name), converted, allowed))
+    end
+    converted
+end
 
 """
     _extract_param(req, name, T, default=_NO_DEFAULT) -> value
 
 Extract a single typed parameter from an HTTP request, mirroring the behavior of
 `@get`/`@post` kwarg extraction. Looks up `name` in the method-appropriate source
-(`queryparams` for GET/DELETE, `formparams` for POST/PUT/PATCH with a `queryparams`
-fallback), converts via `_convert_param(value, T)`, and returns `default` when the
-key is absent or empty. Throws `MissingRequiredParam(name)` if no default was supplied.
+(`queryparams` for GET/DELETE, `bodyparams` for POST/PUT/PATCH with a `queryparams`
+fallback), converts to `T`, and returns `default` when the key is absent (or
+form/query text is blank). JSON null and empty values are supplied values.
+Throws `MissingRequiredParam(name)` if no default was supplied.
 
-`T` may be `nothing` for untyped params (raw `String`/`Vector{String}`).
+`T` may be `nothing` for untyped params, retaining the parsed value.
 """
 function _extract_param(req, name, T, default=_NO_DEFAULT)
     method = req.method
@@ -17392,7 +17470,7 @@ The handler:
 1. Constructs the root struct.
 2. Walks the include chain if any.
 3. Calls `_extract_args(LeafT, Val(name), Verb{V}(), req, base, n_params)`
-   to parse URL/query/form params.
+   to parse path, query, and body parameters.
 4. Invokes `prop(Verb{V}(), idx_vals…; kw…)` where `prop = getproperty(leaf, name)`
    is the IP wrapper.
 
