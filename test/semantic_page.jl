@@ -61,8 +61,8 @@ using TestItemRunner
         @get summary() = h.p("summary:", fit, ":", n)
     end
 
-    # Defaults computed from another input, as Bruno's web-sim starts Fraction
-    # responding from each output's standard response criterion.
+    # Defaults computed from another input: the page starts the threshold from
+    # each output's standard response criterion.
     const CRITERIA = Dict("pk" => (; quantity="cmin", direction="above", threshold=-50.0),
                           "pbmc" => (; quantity="min_change", direction="below", threshold=-30.0))
     @htmx struct CriterionPage
