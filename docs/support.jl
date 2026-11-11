@@ -8,7 +8,7 @@ const EXPORTS = Dict(Symbol(group) => Symbol.(data["names"]) for (group, data) i
 function check_exports()
     listed = reduce(vcat, values(EXPORTS))
     length(listed) == length(unique(listed)) || error("An export has two reference homes")
-    actual = Set(names(HTMXObjects))
+    actual = Set(filter(name -> isdefined(HTMXObjects, name), names(HTMXObjects)))
     documented = Set(listed)
     actual == documented || error("Reference coverage changed: missing=$(setdiff(actual, documented)); retired=$(setdiff(documented, actual))")
 end
@@ -23,9 +23,7 @@ function export_index(group)
     for name in EXPORTS[group]
         binding = Base.Docs.Binding(HTMXObjects, name)
         label = "`$name`"
-        if !isdefined(HTMXObjects, name)
-            definition = "Unbound in this revision; do not call."
-        elseif haskey(docs, binding) && group !== :objects
+        if haskey(docs, binding) && group !== :objects
             signature = first(docs[binding].order)
             object = Documenter.Object(binding, signature)
             anchor = replace(string(object), r"[\[\]\(\)*]" => "")

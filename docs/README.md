@@ -45,4 +45,5 @@ docs demonstrate web responses, with no statistical fit or plotting dependency.
 Reference entries publish the signature and opening contract of each canonical
 source docstring, with its visible source link. The full help-mode docstrings
 remain in the source; long contextual snippets are not copied onto the site.
-The build checks export coverage before shortening the rendered docstrings.
+The build checks coverage of every defined public binding before shortening the
+rendered docstrings. Unbound export declarations are not callable API entries.
