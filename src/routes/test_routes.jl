@@ -1,6 +1,8 @@
 """
     TestRoutes(; project)
 
+Mount routes for discovering, selecting and running a Julia package’s documented test items. Include this bundle in an `@htmx` application.
+
 Mountable `@htmx` route bundle for documented, selectively runnable
 `@testitem`s in a Julia package. Mount it under any `@htmx struct` via:
 

@@ -26,7 +26,7 @@ page's use of it should link. `see` names related entries, by term or by id;
 the entry ends with a line of links to them (`See also: KBA-Gebiet,
 Verkehrszelle`).
 
-`private=true` keeps the entry out of public answers (see [`private`](@ref)):
+`private=true` keeps the entry out of public answers (see [`private`](@ref Private)):
 the glossary shows it to private readers, marked, and leaves it out of a
 public answer, together with the links to it from the pages and from other
 entries. A public reader sees a private term's uses as plain text, without a

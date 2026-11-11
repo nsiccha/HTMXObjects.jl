@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - dev
+      - devibe
     tags: '*'
   pull_request:
 
@@ -25,23 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure git for private repos
-        run: git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1'
       - uses: julia-actions/cache@v2
       - name: Install dependencies
         run: |
-          julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
-      - name: Record example apps
-        # Produces docs/public/examples/<name>/{,hx/}*.html — HTMXO recordings
-        # with hx-get URLs rewritten under the GitHub Pages base. `make.jl`
-        # copies these into the build output so VitePress serves them at
-        # the same site origin (and `examples.md` embeds them via
-        # `<div hx-get="…/hx/" hx-trigger="load">`).
-        run: julia --project=docs docs/record_examples.jl
-
+          julia --project=docs -e 'using Pkg; Pkg.instantiate()'
       - name: Build and deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

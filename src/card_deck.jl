@@ -75,6 +75,8 @@ const _DECK_TEXT_LOCALES = (
 """
     card_deck_texts(locale::Symbol=:en; texts...)
 
+Construct localized card-deck text for `:en` or `:de`. Keyword arguments override individual phrases.
+
 The [`CardDeckTexts`](@ref) for `locale` (`:en` or `:de`), with any of its
 texts replaced by keyword:
 
@@ -83,7 +85,7 @@ card_deck(cards; id="karten", texts=card_deck_texts(:de; carousel="Karteikarten"
 ```
 
 Without `texts=`, [`card_deck`](@ref) writes in the page's language
-([`HTMXObjects.page_lang`](@ref): German under `__lang__ = "de"`, English for
+(`HTMXObjects.page_lang`: German under `__lang__ = "de"`, English for
 any other and outside a route). An unknown locale or text name, or a
 placeholder the text does not take, throws an `ArgumentError`.
 """

@@ -42,8 +42,6 @@ end
 
     route!(ChoicePage(); operation_policy=:blocking)
     html = String(dispatch(:GET, "/"; headers=["HX-Request" => "true"]).body)
-    # Up to 8 options are pills (snag moved-bruno-s-we-59d19444, design 17cdax3);
-    # past 8, a searchable list. No generated single choice is a native select.
     @test pills_of(html) == Set(["vessel", "basis", "quantity"])
     @test lists_of(html) == Set(["compound"])
     @test isempty(selects_of(html))

@@ -26,7 +26,7 @@ using HTMXObjects
     @get increment(n::Int) = counter_ui(n + 1)
 end
 
-# URL list — used by `record_examples.jl` to drive `record!`.
+# Paths a caller can pass to `record!` when recording this application.
 gallery_paths() = ["/", "/increment/0", "/increment/1", "/increment/2"]
 
 function main(; record=false, record_dir="site", port=8080, record_base="")

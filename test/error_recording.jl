@@ -1,12 +1,5 @@
 using TestItemRunner
 
-# Every error answer is recorded, a caller fault (4xx) like a server fault: an
-# error log whose header names the status, the `@error` line, the error id in
-# the article and in `X-HTMXO-Error-Id`, and `__on_error__` (user decision
-# `06kz9d3`, replacing `1danmww`). Before, a 4xx left no trace, so Bruno's
-# "Missing required parameter" answers could not be forwarded with
-# `bruno-error` (snag bruno-s-mac-app-827adcee). The header also says where an
-# htmx request came from and which fields a form body submitted (names only).
 @testitem "caller faults are recorded like server faults, with their status" tags=[:unit, :server] begin
     using HTMXObjects, HTTP, Logging
     import HTMXObjects: h
@@ -267,12 +260,6 @@ end
     end
 end
 
-# A route body throws `CallerFault(status, message)` when the request is at
-# fault: an unknown resource id, an argument out of range. It is answered like
-# a missing parameter, with its own status and message, and recorded with that
-# status (snag json-api-errors-056cb64e: ODLPlaus's unknown probe id and
-# out-of-range float were 500s; user decision `06kz9d3`: every error answer is
-# recorded).
 @testitem "a route body's CallerFault is answered and recorded with its status" tags=[:unit, :server] begin
     using HTMXObjects, HTTP, Logging
     import HTMXObjects: h
@@ -461,14 +448,6 @@ end
     @test stamped(hx, nothing, nothing) == (200, "")
 end
 
-# An app in another language sets its error texts once on the root struct:
-# `@htmx` threads `__error_texts__` down the `__parent__` chain, so an
-# `@include`d struct's routes answer in it too, and the server-fault article
-# keeps the recorded error id that ties it to its log (snag
-# error-articles-i-c4c9b7f6, reporter ODLPlaus:ux; design pick `16ro3ue`).
-# Before, every framework word was English and a German `__error__` hook could
-# not see the id. An app without the setting is the control: byte-identical
-# English.
 @testitem "error articles speak the root's error_texts and keep the error id" tags=[:unit, :server] begin
     using HTMXObjects, HTTP, Logging
     import HTMXObjects: h

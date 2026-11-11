@@ -9,13 +9,13 @@
         page(htmx(h.main(class="container-fluid")(h.p("x")); pico_version="2", title="T"))
 
     framed = body(HTMXObjects.pico_page(h.p("x"); brand="Atlas" => "/",
-        nav=["Karte" => "/", "Methodik" => "/modell", h.li(h.a("Extern"; href="https://example.org/"))],
+        nav=["Karte" => "/", "Methoden" => "/modell", h.li(h.a("Extern"; href="https://example.org/"))],
         footer=h.small("Datenbasis")))
     @test framed == string(
         "<a href=\"#main\" class=\"htmxo-skip-link\">Skip to content</a>",
         "<header class=\"container\"><nav aria-label=\"Main navigation\">",
         "<ul><li><a href=\"/\"><strong>Atlas</strong></a></li></ul>",
-        "<ul><li><a href=\"/\">Karte</a></li><li><a href=\"/modell\">Methodik</a></li>",
+        "<ul><li><a href=\"/\">Karte</a></li><li><a href=\"/modell\">Methoden</a></li>",
         "<li><a href=\"https://example.org/\">Extern</a></li></ul></nav></header>",
         "<main class=\"container\" id=\"main\"><p>x</p></main>",
         "<footer class=\"container\"><small>Datenbasis</small></footer>")
@@ -88,25 +88,24 @@ end
             document.body.appendChild(result);
         });
         """))
-        # Real headers: ODLPlaus (its private entry shown) and ArbeitsplatzAtlas,
-        # the longest on `pico_page`. And one that a full 1280 px window cannot hold.
-        odl = Any["Messnetz" => "/", "Modellergebnisse" => "/referenzfit", "In-situ" => "/insitu",
-            "Methodik" => "/methodik", "Daten" => "/daten", private("Angebot" => "/gegenueberstellung")]
-        atlas = Any["Atlas" => "/", "PLZ" => "/plz", "Messorte" => "/messorte", "Methodik" => "/modell", "Bericht" => "/bericht",
-            "Datenquellen" => "/daten", "Glossar" => "/glossar", "Ausschreibung" => "/gegenueberstellung"]
-        long = vcat(odl, Any["Auswertung" => "/a", "Verfahrensvergleich" => "/v", "Langzeitdemonstration" => "/l",
+        # Synthetic navigation fixtures with varied label lengths.
+        inventory_nav = Any["Bestand" => "/", "Probenergebnisse" => "/ergebnisse", "Analyse" => "/analyse",
+            "Methoden" => "/methodik", "Daten" => "/daten", private("Notizen" => "/notizen")]
+        atlas = Any["Atlas" => "/", "PLZ" => "/plz", "Messorte" => "/messorte", "Methoden" => "/modell", "Bericht" => "/bericht",
+            "Datenquellen" => "/daten", "Glossar" => "/glossar", "Arbeitsnotizen" => "/notizen"]
+        long = vcat(inventory_nav, Any["Auswertung" => "/a", "Verfahrensvergleich" => "/v", "Langzeitdemonstration" => "/l",
             "Bericht" => "/b", "Schnittstelle" => "/s", "Dienste" => "/d"])
         # The control takes the bridge's rule back, leaving Pico's one-line nav.
         pico_only = h.style(Raw("body > header nav { flex-wrap: nowrap; width: auto; min-width: 0; max-width: none; column-gap: 0; } " *
             "body > header nav ul { flex-wrap: nowrap; } body > header nav ul:last-of-type { margin-left: 0; }"))
-        shell(nav, extra_head=(); brand="ODL-Plausibilität") = with_audience(:private) do
+        shell(nav, extra_head=(); brand="Probenverwaltung") = with_audience(:private) do
             repr("text/html", HTMXObjects.pico_page(h.div(h.p("Text."), driver); brand=brand => "/", nav, lang="de",
                 assets=:vendor, htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false,
                 extra_head))
         end
-        pages = Dict("/" => shell(odl), "/control" => shell(odl, (pico_only,)), "/long" => shell(long),
-            "/long-control" => shell(long, (pico_only,)), "/atlas" => shell(atlas; brand="ArbeitsplatzAtlas"),
-            "/atlas-control" => shell(atlas, (pico_only,); brand="ArbeitsplatzAtlas"),
+        pages = Dict("/" => shell(inventory_nav), "/control" => shell(inventory_nav, (pico_only,)), "/long" => shell(long),
+            "/long-control" => shell(long, (pico_only,)), "/atlas" => shell(atlas; brand="MaterialienAtlas"),
+            "/atlas-control" => shell(atlas, (pico_only,); brand="MaterialienAtlas"),
             "/vendor/pico.min.css" => read(HTMXObjects._vendor_file(:pico), String))
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2]); close(socket)
@@ -209,9 +208,9 @@ end
                 h.nav(h.ul(h.li(link("Innen", "in-private"); class="htmxo-private")))),
             h.ul(private(h.li(link("Liste", "outside-nav")))),
             driver)
-        nav = Any["Messnetz" => "/", "Daten" => "/daten", private("Angebot" => "/angebot")]
+        nav = Any["Bestand" => "/", "Daten" => "/daten", private("Notizen" => "/notizen")]
         page(lang, extra_head=()) = with_audience(:private) do
-            repr("text/html", HTMXObjects.pico_page(content; brand="ODL" => "/", nav, lang, assets="vendor", extra_head,
+            repr("text/html", HTMXObjects.pico_page(content; brand="Samples" => "/", nav, lang, assets="vendor", extra_head,
                 htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
         end
         checks(html, scheme=1) = mktempdir() do directory
@@ -288,7 +287,7 @@ end
                 nav=["Karte" => base * "/", "PLZ" => base * "/plz", "PLZ-Liste" => base * "/plz/liste",
                      "Glossar" => base * "/glossar?suche=", "Abschnitt" => base * "/#karte",
                      "München" => base * "/plz/karte/München",
-                     private("Angebot" => base * "/angebot"; public=h.li("Angebot folgt"))])
+                     private("Notizen" => base * "/notizen"; public=h.li("Notizen folgt"))])
         end
         @get index() = h.p("Start")
         @include plz = begin
@@ -297,7 +296,7 @@ end
             @get karte(code::String) = h.p(code)
         end
         @get glossar() = h.p("Glossar")
-        @get angebot() = h.p("Angebot")
+        @get notizen() = h.p("Notizen")
         @get impressum() = h.p("Impressum")
     end
     route!(SiteFrameApp())
@@ -319,8 +318,8 @@ end
     # The home entry names only itself: an unlisted page marks nothing.
     @test current(page("/impressum")) == []
     # The live app shows the private entry, marked where it is read.
-    @test occursin(r"<li class=\"htmxo-private\"[^>]*><a href=\"/angebot\">Angebot</a></li>", page("/"))
-    @test current(page("/angebot")) == ["Angebot"]
+    @test occursin(r"<li class=\"htmxo-private\"[^>]*><a href=\"/notizen\">Notizen</a></li>", page("/"))
+    @test current(page("/notizen")) == ["Notizen"]
     # The page's language names the nav and the skip link.
     @test contains(page("/plz"), "<nav aria-label=\"Hauptnavigation\">")
     @test contains(page("/plz"), ">Zum Inhalt springen</a>")
@@ -334,7 +333,7 @@ end
     # A public export leaves the private entry out, its stand-in in place, and
     # keeps the mark.
     exported = String(dispatch(:GET, "/plz"; static=StaticExport()).body)
-    @test !contains(exported, "/angebot") && contains(exported, "<li>Angebot folgt</li>")
+    @test !contains(exported, "/notizen") && contains(exported, "<li>Notizen folgt</li>")
     @test current(exported) == ["PLZ"]
     # An answer HTMX swaps in carries no frame.
     fragment = String(dispatch(:GET, "/plz"; headers=["HX-Request" => "true"]).body)
@@ -367,7 +366,7 @@ end
         # Built as the request for /modell builds it.
         html = HTMXObjects._with_page_meta((; HTMXObjects._NO_PAGE_META..., route="/modell", prefix="")) do
             repr("text/html", HTMXObjects.pico_page(h.p("Body text."); assets=:vendor, extra_head=(driver,),
-                brand="Atlas" => "/", nav=["Karte" => "/", "Methodik" => "/modell"],
+                brand="Atlas" => "/", nav=["Karte" => "/", "Methoden" => "/modell"],
                 htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false))
         end
         pages = Dict("/modell" => html, "/vendor/pico.min.css" => read(HTMXObjects._vendor_file(:pico), String))

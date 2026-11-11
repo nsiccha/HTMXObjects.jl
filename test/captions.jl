@@ -5,9 +5,6 @@ using TestItemRunner
 
     title, short, long = "Fig 14", "amplitude is shown separately.", "Shape only: NPDE decorrelates."
 
-    # Three tiers join exactly like Bruno's single-figure `_vplot_caption_text`
-    # (single paragraph — Quarto promotes only the final paragraph to the
-    # numbered caption, so a blank-line separator would break PDF numbering).
     @test HTMXObjects.to_markdown_string(render_caption(
         CaptionSpec(; title, short, long))) == "**Fig 14** — amplitude is shown separately. — Shape only: NPDE decorrelates."
     @test !contains(HTMXObjects.to_markdown_string(render_caption(
@@ -22,8 +19,6 @@ using TestItemRunner
     @test HTMXObjects.to_markdown_string(render_caption(
         CaptionSpec(; title, long))) == "**Fig 14** — Shape only: NPDE decorrelates."
 
-    # Blank longs emit no separator: several Bruno composites pass `long=""`,
-    # and an unconditional separator would leave a trailing " — ".
     @test HTMXObjects.to_markdown_string(render_caption(
         CaptionSpec(; title, short, long=""))) == "**Fig 14** — amplitude is shown separately."
     blank_md = HTMXObjects.to_markdown_string(render_caption(
@@ -33,8 +28,6 @@ using TestItemRunner
     @test HTMXObjects.to_markdown_string(render_caption(
         CaptionSpec(; title, short, long=h.div()))) == "**Fig 14** — amplitude is shown separately."
 
-    # Node longs (Bruno's `render_blocks` shape: `div(p, p, …)`) separate at
-    # the header boundary; internal paragraph breaks are the paragraphs' own.
     node_md = HTMXObjects.to_markdown_string(render_caption(CaptionSpec(; title, short,
         long=h.div(h.p("Para one here."), h.p("Para two here.")))))
     @test contains(node_md, "separately. — Para one here.")
@@ -113,7 +106,6 @@ end
     @test_throws MethodError with_caption(1, h.p("Plot."))
     @test_throws MethodError render_caption(1)
 
-    # A route answers with the table, not a 500 (Bruno's report table embed).
     @htmx struct StringCaptionApp
         @get auc() = render_table((dose=[10.0, 20.0], auc=[1.5, 3.25]);
             sortable=true, download=true, caption="AUC by dose")

@@ -1,8 +1,5 @@
 using TestItemRunner
 
-# Help text under a generated control (a docstring's later paragraphs,
-# `@help(name) = text`) and a caller fault that names its input (todo
-# `1tixesk`, for Bruno's web-sim; user decision `04rngh7`).
 
 @testmodule FieldHelpFixtures begin
     using HTMXObjects, HTTP, Sockets
@@ -288,9 +285,6 @@ end
     end
 end
 
-# Snag `on-web-sim-s-gen-fa2a5324` (reporter Bruno:simulator:ux): under a root
-# with a glossary, the fault's message links its terms, and the field's copy of
-# it read the hidden definition out as part of the sentence.
 @testitem "a fault's message under a glossary links its terms" setup=[FieldHelpFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP
     import HTMXObjects: _clear_operation_polls!

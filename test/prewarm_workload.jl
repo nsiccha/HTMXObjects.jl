@@ -131,14 +131,6 @@ end
 end
 
 @testitem "a prewarm timeout bounds a hang, not a compile" setup=[HTMXOTestImports] tags=[:integration, :server] begin
-    # Snag precompile-bruno-329ff905: an app page's cold first request compiled
-    # for 44 s on two busy CPUs, the 45 s timeout cut it off although the
-    # server answered 200, and the app failed to precompile. Here the page's
-    # first render compiles six fresh 800-statement methods, with a short wait
-    # between them as a real page has (I/O, locks, tasks): a few seconds of
-    # compilation, several times the 0.5 s timeout below. Those waits are what
-    # let the old elapsed-time limit fire on one thread. A handler waiting on
-    # an event is the hang.
     chunk(k) = Expr(:block, (:(x = muladd(x, 1.0001, $(Float64(i + 1000k))) +
                                (x > $(Float64(i)) ? sin(x) : cos(x))) for i in 1:800)...)
     prewarm_cold = Function[(@eval $(Symbol(:prewarm_cold, k))(x) = ($(chunk(k)); x))

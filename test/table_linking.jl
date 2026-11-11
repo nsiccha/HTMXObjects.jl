@@ -488,10 +488,6 @@ end
     @test contains(sheets[2], "var(--htmxo-selected-row, color-mix(in srgb, var(--htmxo-accent, Highlight) 22%, transparent))")
 end
 
-# Snag focused-master-d-b37a1471 (reporter ODLPlaus:review:ux): axe read
-# #0172ad on #cce2ec, 3.9:1, on a focused label under the pointer. A selected
-# row's tint is an inset box shadow axe cannot read, so this composites every
-# painted layer itself rather than relying on axe.
 @testitem "text in a lit or selected row keeps 4.5:1 in light and dark browser" setup=[LinkFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     import HTMXObjects: h

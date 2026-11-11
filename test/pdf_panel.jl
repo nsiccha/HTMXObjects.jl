@@ -34,21 +34,22 @@
         take!(io)
     end
 
+    # Synthetic inventory text, written for these rendering tests.
     const PDF_PAGES = [
-        ["Section 1: Child protection",
-         "Child protection is the task of every provider and of",
-         "everyone who works with children in the provider's care.",
+        ["Section 1: Sample inventory",
+         "Sample tracking is the task of every collector and of",
+         "everyone who works with samples in the shared collection.",
          "Other text on the first page."],
         ["Section 2: Reporting",
-         "A suspected case is reported to the youth office within one day.",
-         "The report names the facts observed and the steps taken."]]
+         "A new sample is reported to the shared catalog within one day.",
+         "The record names the material collected and the storage shelf."]]
     const PDF3 = tiny_pdf([PDF_PAGES; [["Section 3: Records",
-                                        "Every report is kept for ten years in the provider's records."]]])
+                                        "Every sample is kept for two weeks in the shared collection."]]])
 
     html(x) = repr("text/html", x)
 
     # A panel in an app, for its static export (snag pdf-panel-static-81f73b0d):
-    # its files come from routes without an extension, as a tender app's do. A
+    # its files come from routes without an extension, as a sample app does. A
     # page with one document, with references to it and to a file it does not
     # list, one with pills and one with a searchable list.
     @htmx struct PdfExportApp
@@ -57,14 +58,14 @@
         @get index() = pdf_beside(
             h.article(
                 h.p("Records ", pdf_ref("(LB, p. 3)", "/pdfx_datei/lb"; page=3, panel="orig", id="r3",
-                                        quoted="kept for ten years in the provider's records"), "."),
+                                        quoted="kept for two weeks in the shared collection"), "."),
                 h.p("Reports ", pdf_ref("(annex, p. 2)", "/pdfx_datei/anlage"; page=2, panel="orig", id="r2",
-                                        quoted="reported to the youth office"), "."),
+                                        quoted="reported to the shared catalog"), "."),
                 pdf_toggle("orig", "Originale"; id="toggle"),
                 h.p("Trips ", pdf_ref("(Methodik)", "/pdfx_text#methodik"; kind=:html, panel="orig", id="rh",
                                       quoted="follow a Poisson distribution"), "."),
                 h.p(h.a("Pills"; href="/pdfx_pills"), " ", h.a("List"; href="/pdfx_list"))),
-            pdf_panel(["Leistungsbeschreibung" => "/pdfx_datei/lb"]; id="orig"))
+            pdf_panel(["Sammlungsbeschreibung" => "/pdfx_datei/lb"]; id="orig"))
         @get pdfx_pills() = pdf_panel(["LB" => "/pdfx_datei/lb", "Anlage" => "/pdfx_datei/anlage",
                                        (title="Text", url="/pdfx_text", kind=:html)]; id="pills")
         @get pdfx_list() = pdf_panel(["Teil $i" => "/pdfx_datei/teil$i" for i in 1:9]; id="list")
@@ -78,27 +79,27 @@ end
 @testitem "pdf_ref is a link to the page that names its passage" setup=[PdfFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h, to_markdown_string
-    r = pdf_ref("(S. 12)", "/files/k.pdf#zoom=50"; page=12, panel="orig", quoted="Kinderschutz ist Aufgabe aller Träger")
+    r = pdf_ref("(S. 12)", "/files/k.pdf#zoom=50"; page=12, panel="orig", quoted="Proben erhalten eine eindeutige Kennung")
     s = html(r)
     @test occursin("href=\"/files/k.pdf#page=12\"", s)              # the file at its page, its own fragment dropped
     @test occursin("data-htmxo-pdf-url=\"/files/k.pdf\"", s)
     @test occursin("data-htmxo-pdf-page=\"12\"", s)
     @test occursin("data-htmxo-pdf-panel=\"orig\"", s) && occursin("aria-controls=\"orig\"", s)
-    @test occursin("data-htmxo-pdf-quote=\"Kinderschutz ist Aufgabe aller Träger\"", s)
+    @test occursin("data-htmxo-pdf-quote=\"Proben erhalten eine eindeutige Kennung\"", s)
     key = match(r"data-htmxo-pdf-key=\"([^\"]+)\"", s)[1]
     hue = parse(Int, match(r"data-htmxo-pdf-hue=\"(\d)\"", s)[1])
     @test 1 <= hue <= 8
     # one passage, one key and one colour, wherever it is quoted; another passage, another key
-    again = html(pdf_ref("ebd.", "/files/k.pdf"; page=12, panel="orig", quoted="Kinderschutz ist Aufgabe aller Träger"))
+    again = html(pdf_ref("ebd.", "/files/k.pdf"; page=12, panel="orig", quoted="Proben erhalten eine eindeutige Kennung"))
     @test occursin("data-htmxo-pdf-key=\"$key\"", again) && occursin("data-htmxo-pdf-hue=\"$hue\"", again)
-    @test !occursin(key, html(pdf_ref("x", "/files/k.pdf"; page=13, panel="orig", quoted="Kinderschutz ist Aufgabe aller Träger")))
+    @test !occursin(key, html(pdf_ref("x", "/files/k.pdf"; page=13, panel="orig", quoted="Proben erhalten eine eindeutige Kennung")))
     # a key and a colour of one's own
     own = html(pdf_ref("LB 3.2", "/doc.pdf"; page=2, panel="p", quoted="words here", key="lb-3-2", hue=3,
-                       document="Leistungsbeschreibung", class="ref"))
+                       document="Sammlungsbeschreibung", class="ref"))
     @test occursin("data-htmxo-pdf-key=\"lb-3-2\"", own) && occursin("data-htmxo-pdf-hue=\"3\"", own)
-    @test occursin("data-htmxo-pdf-document=\"Leistungsbeschreibung\"", own) && occursin("class=\"ref\"", own)
+    @test occursin("data-htmxo-pdf-document=\"Sammlungsbeschreibung\"", own) && occursin("class=\"ref\"", own)
     # without quoted words: the page's top, no passage, no key
-    plain = html(pdf_ref("Leistungsbeschreibung", "/doc.pdf"; panel="p"))
+    plain = html(pdf_ref("Sammlungsbeschreibung", "/doc.pdf"; panel="p"))
     @test occursin("href=\"/doc.pdf#page=1\"", plain)
     @test !occursin("data-htmxo-pdf-key", plain) && !occursin("data-htmxo-pdf-quote", plain) && !occursin("data-htmxo-pdf-hue", plain)
     @test !occursin("data-htmxo-pdf-quote", html(pdf_ref("x", "/doc.pdf"; panel="p", quoted="  ")))
@@ -150,9 +151,6 @@ end
 end
 
 @testitem "pdf_panel: the document chooser is never a native select box" setup=[PdfFixtures] tags=[:unit] begin
-    # User rule (VerkehrsStrukturdaten:ux/decisions/2026-10-26T14-07-45-293-19mny0l, snag
-    # pdf-panel-docume-fcc431e2): one document is its title, a few a row of pills, a long
-    # list a searchable list; never a <select>.
     using HTMXObjects
     docs(n) = ["Document $i" => "/d$i.pdf" for i in 1:n]
     panel(n; kw...) = html(pdf_panel(docs(n); id="p", assets=false, kw...))
@@ -161,8 +159,8 @@ end
     # none yet: an empty chooser, which a reference fills
     @test chooser(panel(0)) == ""
     # one: its title as text, carrying its address; no control
-    one = html(pdf_panel(["Leistungsbeschreibung, Stand März 2026" => "/unterlagen/lb"]; id="p", link="g", assets=false))
-    @test chooser(one) == "<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"/unterlagen/lb\">Leistungsbeschreibung, Stand März 2026</span>"
+    one = html(pdf_panel(["Sammlungsbeschreibung, Stand März 2026" => "/unterlagen/lb"]; id="p", link="g", assets=false))
+    @test chooser(one) == "<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"/unterlagen/lb\">Sammlungsbeschreibung, Stand März 2026</span>"
     @test !occursin("type=\"radio\"", one)
     # two to eight: radio_group's pills, named for the panel, the first chosen
     for n in (2, 8)
@@ -263,9 +261,9 @@ end
     @test occursin("href=\"/code?path=src/m.jl&amp;line=4-9\"", code) && !occursin("data-htmxo-pdf-anchor", code)
     @test occursin("data-htmxo-pdf-document=\"m.jl\"", code)
     # a PDF reference is as before: its key does not change
-    pdf = html(pdf_ref("(S. 12)", "/files/k.pdf"; page=12, panel="orig", quoted="Kinderschutz ist Aufgabe aller Träger"))
+    pdf = html(pdf_ref("(S. 12)", "/files/k.pdf"; page=12, panel="orig", quoted="Proben erhalten eine eindeutige Kennung"))
     @test occursin("href=\"/files/k.pdf#page=12\"", pdf) && !occursin("data-htmxo-pdf-kind", pdf)
-    @test occursin("data-htmxo-pdf-key=\"$(HTMXObjects._thread_digest("/files/k.pdf#page=12\nKinderschutz ist Aufgabe aller Träger"))\"", pdf)
+    @test occursin("data-htmxo-pdf-key=\"$(HTMXObjects._thread_digest("/files/k.pdf#page=12\nProben erhalten eine eindeutige Kennung"))\"", pdf)
     @test occursin("href=\"/files/k.pdf#page=1\"", html(pdf_ref("x", "/files/k.pdf"; panel="orig", kind=:pdf)))
     @test strip(to_markdown_string(h.p("Siehe ", pdf_ref("Annahmen", "/m#a"; kind=:html, panel="p"), "."))) ==
           "Siehe [Annahmen](/m#a)."
@@ -293,10 +291,6 @@ end
 end
 
 @testitem "pdf_panel in a static export loads the files the export wrote" setup=[PdfFixtures] tags=[:unit] begin
-    # Snag pdf-panel-static-81f73b0d (ODLPlaus:review): export_site rewrote a
-    # reference's href, but its data-htmxo-pdf-url, the lone document's and the
-    # chooser's radio values kept the live address, so the exported panel fetched
-    # /unterlagen/lb (a 404 outside the bundle) and said the PDF was missing.
     using HTMXObjects, Treebars
     route!(PdfExportApp())
     vendorfiles()
@@ -316,7 +310,7 @@ end
     r2 = tag(index, "r2")
     @test occursin("data-htmxo-pdf-url=\"pdfx_datei-anlage.pdf\"", r2) && occursin("data-htmxo-pdf-document=\"anlage\"", r2)
     # the lone document and the "open file" link
-    @test occursin("<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"pdfx_datei-lb.pdf\">Leistungsbeschreibung</span>", index)
+    @test occursin("<span class=\"htmxo-pdf-title\" data-htmxo-pdf-url=\"pdfx_datei-lb.pdf\">Sammlungsbeschreibung</span>", index)
     @test occursin(r"<a [^>]*data-htmxo-pdf-file=\"\"[^>]*>", index) &&
           occursin("href=\"pdfx_datei-lb.pdf\"", match(r"<a [^>]*data-htmxo-pdf-file=\"\"[^>]*>", index).match)
     # pills and a searchable list: each document's radio names its written file
@@ -343,26 +337,26 @@ end
     @test "pdfx_datei-lb.pdf" in HTMXObjects._site_references(index)
     @test HTMXObjects._site_references("<span data-htmxo-pdf-url=\"/x\">x</span>") == ["/x"]
     # a request-scoped export puts its record_base before them, as before a link
-    spec = StaticExport(; record_base="/odl")
+    spec = StaticExport(; record_base="/demo")
     page = String(dispatch(:GET, "/"; static=spec).body)
-    @test occursin("data-htmxo-pdf-url=\"/odl/pdfx_datei/lb\"", tag(page, "r3")) &&
-          occursin("href=\"/odl/pdfx_datei/lb#page=3\"", tag(page, "r3"))
-    @test occursin("data-htmxo-pdf-url=\"/odl/pdfx_datei/lb\">Leistungsbeschreibung</span>", page)
-    @test occursin("value=\"/odl/pdfx_datei/anlage\">Anlage</label>",
+    @test occursin("data-htmxo-pdf-url=\"/demo/pdfx_datei/lb\"", tag(page, "r3")) &&
+          occursin("href=\"/demo/pdfx_datei/lb#page=3\"", tag(page, "r3"))
+    @test occursin("data-htmxo-pdf-url=\"/demo/pdfx_datei/lb\">Sammlungsbeschreibung</span>", page)
+    @test occursin("value=\"/demo/pdfx_datei/anlage\">Anlage</label>",
                    String(dispatch(:GET, "/pdfx_pills"; static=spec).body))
-    @test occursin("data-htmxo-pdf-url=\"/odl/hx/pdfx_text\"", tag(page, "rh")) &&
-          occursin("href=\"/odl/pdfx_text#methodik\"", tag(page, "rh"))
-    @test occursin("value=\"/odl/hx/pdfx_text\" data-htmxo-pdf-kind=\"html\">Text</label>",
+    @test occursin("data-htmxo-pdf-url=\"/demo/hx/pdfx_text\"", tag(page, "rh")) &&
+          occursin("href=\"/demo/pdfx_text#methodik\"", tag(page, "rh"))
+    @test occursin("value=\"/demo/hx/pdfx_text\" data-htmxo-pdf-kind=\"html\">Text</label>",
                    String(dispatch(:GET, "/pdfx_pills"; static=spec).body))
     # the live page keeps the app's addresses
     live = String(dispatch(:GET, "/").body)
-    @test occursin("data-htmxo-pdf-url=\"/pdfx_datei/lb\">Leistungsbeschreibung</span>", live)
+    @test occursin("data-htmxo-pdf-url=\"/pdfx_datei/lb\">Sammlungsbeschreibung</span>", live)
     @test occursin("data-htmxo-pdf-url=\"/pdfx_datei/anlage\"", tag(live, "r2"))
     @test occursin("value=\"/pdfx_datei/anlage\">Anlage</label>", String(dispatch(:GET, "/pdfx_pills").body))
 end
 
 @testitem "pdf_panel browser: an exported panel served from a subdirectory shows the files the export wrote" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
-    # Snag pdf-panel-static-81f73b0d: served from /odl/, the exported panel
+    # Snag pdf-panel-static-81f73b0d: served from /demo/, the exported panel
     # fetched the live /unterlagen/lb outside the bundle and showed no page.
     using HTMXObjects, HTTP, Sockets, Treebars
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
@@ -430,18 +424,18 @@ end
         requested = String[]
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2]); close(socket)
-        # The bundle below /odl/, as a static server holds it; nothing else is there.
+        # The bundle below /demo/, as a static server holds it; nothing else is there.
         server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             path = HTTP.unescapeuri(HTTP.URI(req.target).path)
             path == "/tick" && return (sleep(0.05); HTTP.Response(200, "ok"))
             push!(requested, path)
-            file = startswith(path, "/odl/") ? joinpath(dir, path[6:end]) : ""
+            file = startswith(path, "/demo/") ? joinpath(dir, path[7:end]) : ""
             isfile(file) || return HTTP.Response(404)
             HTTP.Response(200, ["Content-Type" => get(types, last(splitext(file)), "application/octet-stream")], read(file))
         end
         try
             dom = mktempdir() do profile
-                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/odl/index.html`; timeout=180)
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1280,900 --virtual-time-budget=120000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/demo/index.html`; timeout=180)
             end
             checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
             @test !isnothing(checks)
@@ -453,10 +447,10 @@ end
                 @test count(==('\n'), checks[1]) + 1 == 4
             end
             # every file the page asked for is in the bundle, the PDFs among them
-            outside = filter(p -> !startswith(p, "/odl/") && p != "/favicon.ico", requested)
+            outside = filter(p -> !startswith(p, "/demo/") && p != "/favicon.ico", requested)
             @test isempty(outside)
             isempty(outside) || println("pdf_panel export browser: requests outside the bundle: ", outside)
-            @test "/odl/pdfx_datei-lb.pdf" in requested && "/odl/pdfx_datei-anlage.pdf" in requested
+            @test "/demo/pdfx_datei-lb.pdf" in requested && "/demo/pdfx_datei-anlage.pdf" in requested
         finally
             close(server)
         end
@@ -472,17 +466,17 @@ end
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         pdf = tiny_pdf(PDF_PAGES)
         ref(id, text; kw...) = pdf_ref(text, "/doc.pdf"; panel="orig", id, kw...)
-        two_lines = "every provider and of everyone who works with children"
+        two_lines = "every collector and of everyone who works with samples"
         content = h.div(; id="content")(
-            h.p(ref("a", "(p. 1)"; page=1, quoted=two_lines), " Child protection is everyone's task."),
-            h.p("Reports go to the youth office ", ref("b", "(p. 2)"; page=2, quoted="reported to the youth office"), "."),
+            h.p(ref("a", "(p. 1)"; page=1, quoted=two_lines), " Sample tracking is everyone's task."),
+            h.p("Records go to the shared catalog ", ref("b", "(p. 2)"; page=2, quoted="reported to the shared catalog"), "."),
             h.p("As above ", ref("c", "(ibid.)"; page=1, quoted=two_lines), "; ",
                 ref("d", "(missing)"; page=2, quoted="This sentence is not in the document at all"), "; ",
                 ref("e", "the reporting page"; page=2), "; ",
                 pdf_ref("elsewhere", "/doc.pdf"; panel="nowhere", id="nowhere", quoted="words that are elsewhere")),
             # a row of a linked table: the row names the passage, its reference does not
             sortable_table(["Requirement"], [h.tr(h.td(ref("row-ref", "LB 2"; page=2, key="req-1",
-                    quoted="The report names the facts observed")); data_htmxo_link_key="req-1", id="row")];
+                    quoted="The record names the material collected")); data_htmxo_link_key="req-1", id="row")];
                 link="orig-link", id="reqs"),
             h.template(; id="late")(ref("f", "(late)"; page=1, quoted="Other text on the first page")),
             h.div(; style="height: 3000px"))
@@ -674,8 +668,6 @@ end
 end
 
 @testitem "pdf_panel browser: the document chooser grows from a title to pills to a searchable list" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
-    # Snag pdf-panel-docume-fcc431e2: never a native select box (user rule
-    # VerkehrsStrukturdaten:ux/decisions/2026-10-26T14-07-45-293-19mny0l).
     using HTMXObjects, HTTP, Sockets
     import HTMXObjects: h
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
@@ -683,7 +675,7 @@ end
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         pdf = tiny_pdf(PDF_PAGES)
-        long = "Leistungsbeschreibung, Stand März 2026, mit allen Anlagen, Nachträgen und Antworten auf die Bieterfragen"
+        long = "Sammlungsbeschreibung, Stand März 2026, mit allen Anlagen, Messwerten und Beschreibungen der Materialien"
         content = h.div(; id="content")(
             h.p(pdf_toggle("one"; id="tone"), " ", pdf_ref("(Konzept)", "/b.pdf"; panel="one", id="rb", document="Konzept")),
             h.p(pdf_ref("(Ninth)", "/d9.pdf"; panel="eight", id="r9", document="Ninth"), " ",
@@ -790,10 +782,6 @@ end
 end
 
 @testitem "pdf_panel browser: a document chosen in the chooser opens at its first page" setup=[PdfFixtures, ChromeDump] tags=[:unit, :browser] begin
-    # Snag pdf-panel-choose-708af86e (TenderViews): after a pill's click the
-    # panel went on showing the other file's pages and page line ("page 3 of
-    # 3") under the new file's name until the new file had loaded, so the
-    # page read depended on how fast it loaded.
     using HTMXObjects, HTTP, Sockets
     import HTMXObjects: h
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
@@ -801,12 +789,12 @@ end
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         pdf = tiny_pdf([PDF_PAGES; [["Section 3: Records",
-                                     "Every report is kept for ten years in the provider's records."]]])
+                                     "Every sample is kept for two weeks in the shared collection."]]])
         content = h.div(; id="content")(
             h.p("Records ", pdf_ref("(LB, p. 3)", "/lb.pdf"; page=3, panel="orig", id="r3",
-                                    quoted="kept for ten years in the provider's records"), "."),
+                                    quoted="kept for two weeks in the shared collection"), "."),
             h.p("Reports ", pdf_ref("(LB 2, p. 2)", "/lb2.pdf"; page=2, panel="orig", id="r2",
-                                    quoted="reported to the youth office"), "."),
+                                    quoted="reported to the shared catalog"), "."),
             h.div(; style="height: 1500px"))
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function () {
@@ -904,11 +892,11 @@ end
         pdf = tiny_pdf(PDF_PAGES)
         # Rows that wrap anew when the table narrows or widens, under the
         # table's sticky control line and header.
-        words = "Every provider makes sure that everyone who works with children in its care knows these requirements"
+        words = "Every collector makes sure that everyone who works with samples in the collection knows these conventions"
         rows = [h.tr(h.td("Requirement $i"),
                      h.td(repeat(words * " ", 1 + i % 3),
                           pdf_ref("(p. $(1 + i % 2))", "/doc.pdf"; page=1 + i % 2, panel="orig", id="ref-$i",
-                                  quoted=isodd(i) ? "reported to the youth office" : "the task of every provider")),
+                                  quoted=isodd(i) ? "reported to the shared catalog" : "the task of every collector")),
                      h.td(repeat("The offer meets it. ", 1 + (i + 1) % 4)))
                 for i in 1:60]
         content = h.div(; id="content")(sortable_table(["Requirement", "Text", "Offer"], rows; id="reqs"),
@@ -1027,7 +1015,7 @@ end
                 ref("h5", "(missing)", "/brief"; quoted="This sentence is not in the document at all"), "; ",
                 ref("h6", "(end)", "/brief"; quoted="The last words of the document stand here"), "; ",
                 ref("hb", "(broken)", "/broken"; quoted="words that cannot be shown"), "; ",
-                pdf_ref("(p. 2)", "/doc.pdf"; panel="orig", id="pd", page=2, quoted="reported to the youth office")),
+                pdf_ref("(p. 2)", "/doc.pdf"; panel="orig", id="pd", page=2, quoted="reported to the shared catalog")),
             h.template(; id="late")(ref("hl", "(late)", "/brief"; quoted="number of residents and workplaces")),
             h.div(; style="height: 2000px"))
         driver = h.script(Raw(raw"""
@@ -1219,13 +1207,13 @@ end
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         pdf = tiny_pdf(PDF_PAGES)
-        two_lines = "every provider and of everyone who works with children"
+        two_lines = "every collector and of everyone who works with samples"
         ref(id, text; kw...) = pdf_ref(text, "/doc.pdf"; panel="page-pdf", id, kw...)
         filler(n) = [h.p("Filler paragraph $i of the dialog, so that it scrolls.") for i in 1:n]
         content = h.div(; id="content")(
             h.p("Intro ", ref("r1", "(p. 1)"; page=1, quoted=two_lines), " and the toggle ", pdf_toggle("page-pdf"; id="toggle"), "."),
             h.div(; style="height: 700px"),
-            h.p("Lower down ", ref("r2", "(p. 2)"; page=2, quoted="reported to the youth office"), "."),
+            h.p("Lower down ", ref("r2", "(p. 2)"; page=2, quoted="reported to the shared catalog"), "."),
             h.p("Another panel ", pdf_ref("(other)", "/doc.pdf"; panel="other-pdf", id="ro", page=1), "."),
             h.div(; style="height: 2500px"),
             h.dialog(; id="modal")(h.article(; style="max-height: 70vh; overflow: auto")(
@@ -1470,10 +1458,10 @@ end
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         pdf = tiny_pdf(PDF_PAGES)
-        words = "Every provider makes sure that everyone who works with children in its care knows these requirements. "
+        words = "Every collector makes sure that everyone who works with samples in the collection knows these conventions. "
         content = h.div(; id="content")(
             [h.p(repeat(words, 3), pdf_ref("(p. $(1 + i % 2))", "/doc.pdf"; page=1 + i % 2, panel="orig", id="ref-$i",
-                                           quoted=isodd(i) ? "reported to the youth office" : "the task of every provider"))
+                                           quoted=isodd(i) ? "reported to the shared catalog" : "the task of every collector"))
              for i in 1:30]...)
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function () {
@@ -1619,9 +1607,9 @@ end
         pdf = tiny_pdf(PDF_PAGES)
         ref(id, text; kw...) = pdf_ref(text, "/doc.pdf"; panel="pdf", id, kw...)
         content = h.div(; id="content")(
-            h.p("Intro ", ref("r1", "(p. 1)"; page=1, quoted="every provider and of everyone who works with children"), "."),
+            h.p("Intro ", ref("r1", "(p. 1)"; page=1, quoted="every collector and of everyone who works with samples"), "."),
             h.div(; style="height: 1200px"),
-            h.p("Lower down ", ref("r2", "(p. 2)"; page=2, quoted="reported to the youth office"), "."),
+            h.p("Lower down ", ref("r2", "(p. 2)"; page=2, quoted="reported to the shared catalog"), "."),
             h.div(; style="height: 2500px"))
         # A sticky header 3rem high, and a bar like the KB's: fixed along the
         # bottom, its live height in `--htmxo-overlay-h` and the body's padding.

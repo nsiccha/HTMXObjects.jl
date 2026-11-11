@@ -1,10 +1,5 @@
 using TestItemRunner
 
-# An app declares its technical terms once (`Glossary` as `__glossary__` on its
-# root) and every answer links the uses of its terms to their entries, with the
-# definition beside the link on hover or keyboard focus (snag
-# `no-glossary-prim-026537ac`, reporter VerkehrsStrukturdaten:ux; design
-# decision 0xuzhdk, no preference on all four prongs = the recommended ones).
 
 @testmodule GlossaryFixture begin
     using HTMXObjects
@@ -191,10 +186,6 @@ end
     @test !contains(plain, "HtmlOnly") && !contains(plain, "Node(") && !contains(plain, "{#term-")
 end
 
-# A glossary by topic, with other names, related entries and private terms
-# (snag `moving-verkehrss-02fbe479`, reporter VerkehrsStrukturdaten:ux:modell;
-# design decision 16ra5z8, no preference on all three prongs = the recommended
-# ones: a list per topic, `"topic" => terms` pairs, other names shown only).
 @testmodule TopicGlossaryFixture begin
     using HTMXObjects
     import HTMXObjects: h

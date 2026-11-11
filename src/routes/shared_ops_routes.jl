@@ -1,8 +1,6 @@
 # --- SharedOpsRoutes ------------------------------------------------------
 #
-# Reusable reset + revise routes bundle, factored out of the per-Bruno-app
-# `OpsRoutes` definitions in `bruno/web-pkpd/src/ops.jl` and
-# `bruno/web-explore/src/app.jl`. Apps mount it with:
+# Reusable reset and development-reload routes. Apps mount it with:
 #
 #     @include ops = SharedOpsRoutes()
 #

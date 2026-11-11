@@ -1,12 +1,5 @@
 using TestItemRunner
 
-# A polled operation that never finishes used to answer "running" forever:
-# every poll renewed its registry entry, and no failure ever reached the
-# reader (snag `invoices-income-2015193b`). Past the root's
-# `OperationPolicy` stall bound the next poll now answers `OperationStalled`
-# instead — unless the operation finished or failed, which always answers its
-# own result. The fixtures age a retained operation by moving its
-# `created_at` back rather than waiting ten minutes.
 @testmodule StallFixtures begin
     using HTMXObjects, HTTP
     import HTMXObjects: h

@@ -437,9 +437,6 @@ end
 @testitem "group_masters: the group rows of a browser regroup, and no leaf" setup=[GroupingFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
-    # Snag group-master-ref-7ac31517 (reporter Invoices:taxes), user no
-    # preference on design 06kfork: after a browser regroup, a table with its
-    # own group rows asks for those alone, not for the whole table again.
     html(x) = repr("text/html", x)
     row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
     group_ids(page) = [m[1] for m in eachmatch(r"<tr[^>]*? id=\"(row-[^\"]*)\"[^>]*data-htmxo-group=", page)]
@@ -1707,10 +1704,6 @@ end
         @test_skip false
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
-        # Invoices whose detail holds a disclosure that loads the invoice's
-        # editor into itself when the reader opens it; saving in the editor
-        # answers with a row update. `ed-*` disclosures are hx-preserve,
-        # `plain-*` ones are not.
         hours = Dict(id => 0 for id in ("e1", "e2", "l1", "l2", "g1", "m1"))
         stage = Dict("g1" => "Open", "m1" => "Open")
         save_url(id, t) = "/save?id=$id&t=$t"
@@ -2205,9 +2198,6 @@ end
     import HTMXObjects: h, to_markdown_string
     html(x) = repr("text/html", x)
     row(page, id) = match(Regex("<tr[^>]*id=\"$id\"[^>]*>.*?</tr>", "s"), page).match
-    # ProjectPlans' toy plan (snag columnsummary-ra-702fd9be): AP 1 is one done
-    # step of 2 months and seven in-progress steps of 3 months each without a
-    # known share; AP 2 is done, half done and not started, 4 months each.
     steps = [(; id="a1", wp="AP 1", months=2.0, share=1.0);
              [(; id="a$(i + 1)", wp="AP 1", months=3.0, share=nothing) for i in 1:7];
              (; id="b1", wp="AP 2", months=4.0, share=1.0); (; id="b2", wp="AP 2", months=4.0, share=0.5);
@@ -3342,9 +3332,6 @@ end
     @test_throws ArgumentError outline_table(leaf_key=r -> r.id)
     # refused: a tree's branches keep the tree's order
     @test_throws ArgumentError outline_table(group_order=["Outline" => ["1"]])
-    # Not built yet (decision HTMXObjects:snag.tenderviews-tend-7a5a0baa/decisions/2026-10-26T15-39-47-852-0dwgr77
-    # left them for later): levels nested in the tree, and the hooks that ask
-    # the server for group rows or update rows.
     @test_broken (outline_table(group_by=["Outline", "Status"]); true)
     for hook in ((; group_master=(k, ms) -> (h.td(k), h.td(""), h.td(""))), (; group_by_url="/t"),
                  (; group_rows_url=(k, ms) -> nothing), (; group_rows="[\"shown\"]"), (; group_masters=true), (; update_rows="c1"),
