@@ -1,6 +1,8 @@
 """
     ErrorRecorder(; repo_root, state_dir, label="App", urls_env="", max_urls=1000)
 
+Retain bounded error metadata and failing URLs for an application’s `__on_error__` hook.
+
 Opt-in capture metadata and a bounded failing-URL index for an application's
 `__on_error__` hook. Keep one recorder per app and use:
 

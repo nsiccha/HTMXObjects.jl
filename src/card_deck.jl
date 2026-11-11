@@ -75,6 +75,8 @@ const _DECK_TEXT_LOCALES = (
 """
     card_deck_texts(locale::Symbol=:en; texts...)
 
+Construct localized card-deck text for `:en` or `:de`. Keyword arguments override individual phrases.
+
 The [`CardDeckTexts`](@ref) for `locale` (`:en` or `:de`), with any of its
 texts replaced by keyword:
 

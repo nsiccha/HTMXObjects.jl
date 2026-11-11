@@ -420,6 +420,8 @@ end
 """
     OpenAPIRoutes(; root::Type, title="", version="1.0.0", description=nothing, servers=[])
 
+Mount an OpenAPI endpoint for an `@htmx` application's route tree with `@include`.
+
 Opt-in OpenAPI endpoint for the route tree of an `@htmx` app. Mount via
 `@include` on any `@htmx struct`:
 
@@ -492,6 +494,8 @@ end
 
 """
     SwaggerRoutes(; title="API docs", spec_url="/openapi", swagger_version=_SWAGGER_UI_VERSION, cdn_base="https://cdn.jsdelivr.net/npm")
+
+Mount a Swagger UI viewer next to an application’s `OpenAPIRoutes` endpoint.
 
 Opt-in Swagger UI viewer for an `@htmx` app's OpenAPI document. Mount via
 `@include` on any `@htmx struct`, next to its [`OpenAPIRoutes`](@ref):

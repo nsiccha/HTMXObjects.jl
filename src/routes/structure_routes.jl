@@ -84,6 +84,8 @@ _schema_payload(root, ::Val{SchemaInherited.inline}) = reflect(root)
 """
     StructureRoutes(; root::Type)
 
+Serve the JSON schema of an application route tree. New applications can use the equivalent `SchemaRoutes` name.
+
 JSON schema endpoint for the route tree of an `@htmx` app. Mount opt-in via
 `@include` on any `@htmx struct`:
 
@@ -122,6 +124,8 @@ end
 
 """
     SchemaRoutes(; root::Type)
+
+Mount the JSON schema endpoint for an application. This is the preferred name for `StructureRoutes`.
 
 Canonical name for [`StructureRoutes`](@ref) — the opt-in JSON schema
 endpoint. Mount via:

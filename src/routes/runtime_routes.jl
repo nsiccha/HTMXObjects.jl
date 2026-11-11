@@ -148,6 +148,8 @@ end
                empty="No running jobs.", expanded=false, linger_ms=1500,
                newest_first=false, limit=nothing)
 
+Render tracked jobs with their state, timing and available progress trees. An optional polling URL updates the board as jobs run and finish.
+
 A live board of jobs from the runtime ledger ([`runtime_jobs`](@ref)): each job
 with its label, state, elapsed time, start/update time, caller count and — with
 Treebars loaded — its progress tree, rendered by `Treebars.htmx_render_board`.
@@ -406,6 +408,8 @@ end
 
 """
     RuntimeRoutes(; tracker=nothing, refresh="2s")
+
+Mount a development dashboard for current and completed requests and jobs.
 
 Mountable dev dashboard for current and past requests and jobs. Mount it opt-in
 on any `@htmx struct`:

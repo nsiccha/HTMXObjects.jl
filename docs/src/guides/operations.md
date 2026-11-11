@@ -50,7 +50,7 @@ different responsibilities; `configure_job_queue!` configures the queue.
 Expose operational controls only where the application's access policy allows
 them. An administrative route is not an authentication mechanism. The
 [runtime reference](../reference/runtime.md) groups the tracker, job, error and
-streaming interfaces with their full contracts.
+streaming interfaces and links to their source contracts.
 
 ## Error boundary
 

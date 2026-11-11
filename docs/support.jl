@@ -43,20 +43,32 @@ end
 # Documenter still sees canonical docstrings and checks every exported binding.
 # Keep each source's opening contract and render its signature as inline syntax;
 # executable workflows belong to the @example pages. Full help stays in source.
+reference_blocks(md::Markdown.MD) = reduce(vcat,
+    [block isa Markdown.MD ? reference_blocks(block) : Any[block] for block in md.content]; init=Any[])
+
 function reference_summaries!()
+    seen = Base.IdSet{Any}()
     for (binding, multidoc) in Base.Docs.meta(HTMXObjects)
         (binding.var in names(HTMXObjects) || binding.var === :SchemaInherited) || continue
         for doc in values(multidoc.docs)
+            doc in seen && continue
+            push!(seen, doc)
             original = Base.Docs.parsedoc(doc)
             original isa Markdown.MD || continue
+            content = reference_blocks(original)
             blocks = Any[]
-            if !isempty(original.content) && first(original.content) isa Markdown.Code
-                signature = first(original.content).code
+            if !isempty(content) && first(content) isa Markdown.Code
+                signature = first(content).code
                 push!(blocks, Markdown.Paragraph(Any[Markdown.Code("", signature)]))
             end
-            paragraph = findfirst(block -> block isa Markdown.Paragraph, original.content)
+            paragraph = findfirst(block -> block isa Markdown.Paragraph, content)
             if !isnothing(paragraph)
-                push!(blocks, original.content[paragraph])
+                summary = content[paragraph]
+                prose = sprint(show, MIME"text/plain"(), Markdown.MD(Any[summary]))
+                occursin(r"\b(seamless|robust|powerful|leverage|delve|crucial|comprehensive|unlock|simply)\b|it's worth noting"i, prose) &&
+                    error("Banned prose in reference summary for $binding")
+                endswith(strip(prose), ":") && error("Unfinished reference summary for $binding")
+                push!(blocks, summary)
             end
             isempty(blocks) && error("No reference summary for $binding")
             doc.object = Markdown.MD(blocks, copy(original.meta))

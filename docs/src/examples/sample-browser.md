@@ -133,9 +133,12 @@ application from confusing an empty result with an invalid request.
 all_body = String(dispatch(:GET, "/samples/").body);
 empty_body = String(dispatch(:GET, "/samples/?material=unknown").body);
 ids = getproperty.(inventory.samples, :sample);
-@assert all(id -> occursin(id, all_body), ids)
-@assert all(id -> !occursin(id, empty_body), ids)
-(default_includes_all=true, unknown_includes_none=true)
+edge_checks = (
+    default_includes_all=all(id -> occursin(id, all_body), ids),
+    unknown_includes_none=all(id -> !occursin(id, empty_body), ids),
+)
+@assert all(edge_checks)
+edge_checks
 ```
 
 These assertions run when the documentation is built. A change that drops a

@@ -120,6 +120,8 @@ const _GET_ROUTER = HTTP.Router(_ -> _NoGetRoute(), _ -> _NoGetRoute())
 """
     Verb{V}
 
+Identify the HTTP method as a singleton type. Generated route properties receive `Verb{V}` as their first positional argument.
+
 Singleton type used as the **first positional argument** of every route IP
 emitted by `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse`. Routes are pure
 sugar over DynamicObjects' indexable properties:
@@ -3097,6 +3099,9 @@ end
 """
     vendorfiles(mountdir="vendor"; headers=[])
 
+Serve the package’s pinned browser assets under a mount directory for pages
+using `assets=:vendor`.
+
 Serve the vendored [`htmx`](@ref) head assets — the exact pins behind
 `assets=:vendor` — at `/<mountdir>/<file>`, next to [`staticfiles`](@ref):
 
@@ -4254,6 +4259,8 @@ end
 """
     SemanticTexts
 
+Hold localized phrases and numeric punctuation used by semantic content. Construct a value with `semantic_texts` and pass it through the `texts` keyword.
+
 The words the semantic vocabulary writes itself, besides the caller's own
 content: `unavailable` is the marker of a [`SemanticUnavailable`](@ref), in
 every peer format, and `decimal` is the decimal mark of a
@@ -4272,6 +4279,8 @@ const _SEMANTIC_TEXT_LOCALES = (
 
 """
     semantic_texts(locale::Symbol=:en; texts...)
+
+Construct localized semantic-content text for `:en` or `:de`. Keyword arguments override individual phrases.
 
 The [`SemanticTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword:
@@ -5363,6 +5372,8 @@ end
 
 """
     decorated_link(label, href, entry; class, attrs, base=(;)) -> Node
+
+Render an inline reference with metadata supplied by a background cache entry. This function reads the entry; the cache owns fetching and retry behavior.
 
 Render one inline reference that gains metadata once its background batch
 lands — the read-through half of deferred batched decoration. The fetch half
@@ -6807,6 +6818,8 @@ const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-pa
     StaticExport(; url_map=nothing, controls=:disable, record_base="", runtime=:inline,
                  audience=:public)
 
+Configure static transformation of one dispatched request. Supply the specification through `dispatch(...; static=spec)`.
+
 Request-scoped static-export spec: pass it as `dispatch(...; static=spec)` to
 receive one route's response in static form from inside a live server. For
 that request only:
@@ -7215,6 +7228,8 @@ _static_url(::Nothing, address::AbstractString) = String(address)
 
 """
     url_params(; name = value, …, values = (name = domain, …)) -> NamedTuple
+
+Construct attributes that connect page-address parameters to an element which loads content with `hx-get`.
 
 Attributes that let parameters in the page address drive an element that loads
 its content with `hx-get`. Splat them onto that element:
@@ -9556,6 +9571,8 @@ hx_link(url; preload=nothing, kwargs...) =
 """
     htmx_or(full_page_fn, req, fragment)
 
+Return a fragment for an HTMX swap, or call `full_page_fn` for ordinary navigation and uncached history restoration.
+
 Return `fragment` directly for HTMX swaps; call `full_page_fn()` and wrap
 its result for direct browser navigation, and for htmx's reload of a history
 entry it holds no snapshot of (`HX-History-Restore-Request`), whose answer
@@ -9668,6 +9685,8 @@ const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 """
     redirect_to(req, location; status=303, query=true) -> HTTP.Response
+
+Return an HTTP redirect to a canonical location, with optional forwarding of the request’s query parameters.
 
 Answer `req` with an HTTP redirect to `location`, typically a moved or aliased
 route sending every visitor to its canonical URL:
@@ -10724,6 +10743,8 @@ _checked_relevance(relevant::Bool, _name) = relevant
 """
     Records(fields::Symbol...; label="Record")
 
+Declare a list of records as one request parameter. Each record supplies values for the named `fields`, which are other parameters of the same object.
+
 A list of records, declared as one `@param` of an `@htmx` struct whose other
 `@param`s `fields` each record has a value for:
 
@@ -10875,6 +10896,8 @@ end
 
 """
     record_view(obj, record) -> obj
+
+View an object with one record’s field values substituted for its request parameters. The record belongs to a `Records` parameter.
 
 `obj` as it answers the one record `record` of a [`Records`](@ref) list: its
 properties read that record's field values in place of the request's. For a
@@ -11732,6 +11755,8 @@ end
 
 """
     live_region_script()
+
+Maintain event-stream subscriptions for discoverable live regions and dispatch incoming events to their descendant fragments.
 
 Client runtime for [`live_region`](@ref) discover mode (`discover=true`).
 Each `[data-htmxo-live-discover]` region keeps one `EventSource` open on
@@ -12660,6 +12685,8 @@ url_anchor_script() = h.script(Raw(raw"""
 
 """
     instance_scope_script()
+
+Allow a fragment to appear in several independently identified places on one page. A `data-htmxo-instance` attribute identifies each containing region.
 
 Client runtime that lets one fragment be open in several places of a page at
 once. Mark each place with `data-htmxo-instance="<key>"` (letters, digits,
@@ -13727,6 +13754,8 @@ const _ERROR_TEXT_LOCALES = (
 
 """
     error_texts(locale::Symbol=:en; texts...)
+
+Construct localized error messages for `:en` or `:de`, with keyword overrides. A `reasons` override replaces the named HTTP status phrases while retaining the locale’s other phrases.
 
 The [`ErrorTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword. `reasons` replaces the reason phrases of the statuses it
@@ -20246,6 +20275,8 @@ const _REVISE_UUID = "295af30f-e4ad-537b-8983-00126c2a3abe"
 """
     create_app(path; port=8000, module_name=nothing, setup=true)
 
+Generate a package and application scaffold at `path`, with optional dependency setup.
+
 Generate a new HTMXObjects app at `path` with the standard package + app structure:
 
     path/
@@ -21263,6 +21294,8 @@ const _CAPTION_TEXT_LOCALES = (
 """
     caption_texts(locale::Symbol=:en; texts...)
 
+Construct localized caption text for `:en` or `:de`. Keyword arguments override individual phrases.
+
 The [`CaptionTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword:
 
@@ -21571,6 +21604,8 @@ _sort_key_names_only(hdr) = hdr
 
 """
     sort_values(values...)
+
+Construct the attributes carrying a cell’s numeric sort values, in the order of its column’s declared sort keys.
 
 The attributes that give a table cell its values for the sort keys of its
 column ([`ColumnSpec`](@ref)`(label; sort_keys)`), in the order of the keys:
@@ -24676,6 +24711,8 @@ const _TABLE_TEXT_LOCALES = (
 """
     table_texts(locale::Symbol=:en; texts...)
 
+Construct localized table text for `:en` or `:de`. Keyword arguments override individual phrases.
+
 The [`TableTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword:
 
@@ -27661,6 +27698,8 @@ _number_cell(x, text, attrs) = let key = _number_key(x)
     h.td(; data_sort_value=key, data_htmxo_number=key, attrs...)(text)
 end
 
+Render a numeric table cell with localized display text and its unformatted value for sorting and export.
+
 # The number a cell writes: integers and floats as they are, other reals as
 # their float; `nothing` for no value.
 _number_value(::Union{Nothing,Missing}) = nothing
@@ -27787,6 +27826,9 @@ _number_key(x::AbstractFloat) = isinf(x) ? (x > 0 ? "Infinity" : "-Infinity") : 
 
 """
     IntervalEstimate(estimate, lower, upper; width_digits=2, log=false, digits=nothing, sigdigits=nothing)
+
+Store an estimate and its lower and upper interval bounds as one value.
+Tables format the estimate together with its interval.
 
 An estimate with its interval as one value, such as a posterior median with
 its 95 % credible interval. A table writes it as one cell, `22 (13–34)`, with
@@ -28035,6 +28077,8 @@ end
 # The three exact numbers the ⬇ CSV writes for an interval cell, as JSON
 # strings (`""` for no value).
 _interval_csv_json(values...) = JSON.json(map(v -> isnothing(v) ? "" : _number_key(v), values))
+
+Render an estimate and its interval in a table cell while retaining the underlying numbers for sorting and export.
 
 # An `IntervalEstimate` is its cell wherever a table makes a float a
 # `number_cell`: a `render_table` column, a bare `master` cell, and the text
@@ -28717,6 +28761,8 @@ Vector values produce repeated inputs (one `<input>` per element).
 """
 hidden_inputs(; kwargs...) = mapreduce(((k, v),) -> _hidden_input(k, v), vcat, kwargs; init=[])
 
+Generate hidden input elements from keyword arguments so a form can forward their names and values.
+
 """
     hidden_inputs(obj; skip=(), overrides...) -> Vector{Node}
 
@@ -29194,6 +29240,8 @@ like `(; fit_key)` extracts name and value automatically:
 """
 ainput(nt::NamedTuple; value=first(nt), kwargs...) = h.input(; name=_aname(nt), value, kwargs...)
 ainput(name::AbstractString; kwargs...) = h.input(; name, kwargs...)
+
+Construct an input from a string or named tuple. A named tuple supplies both the field name and its current value.
 
 """
     linput(nv, placeholder=Long(nv); label=Long(nv), show_when=nothing, kwargs...)
@@ -34214,6 +34262,8 @@ set_inputs(; inputs...) = h.template(; data_htmxo_set_inputs=_schema_json(
 """
     semantic_follow_script()
 
+Refresh a semantic application’s result regions when their associated inputs change. The runtime reads the regions’ input and dependency attributes.
+
 Keep the results of a [`semantic_app`](@ref)`(…; presentation=:tabs)` page on
 their inputs. Each read's result region (`[data-htmxo-follow]`) names its
 address, the forms it is sent (`data-htmxo-inputs`: the sidebar and its tab's
@@ -35096,6 +35146,8 @@ vitepress_asset_dir() = abspath(_VITEPRESS_ASSETS_DIR)
 
 """
     vitepress_theme_install(theme_dir; force=true) -> String
+
+Install the package’s HTMX embedding runtime into a VitePress theme directory before building the documentation.
 
 Copy the bundled `htmxo-embed.ts` into a VitePress theme directory.
 Call from `make.jl` before DocumenterVitepress runs:
@@ -37261,6 +37313,8 @@ toast_styles() = h.style(Raw(raw"""
 """
     toast_script()
 
+Supply the page shell’s notification runtime, which `htmx` includes.
+
 The page shell's notification runtime, which [`htmx`](@ref) includes:
 
 - `window.htmxoToast(text, status)` shows a toast (`status` `"success"`,
@@ -38055,6 +38109,8 @@ end
 
 """
     htmx_tabset(items; active=nothing, target="#content", preload=nothing, ...)
+
+Build tabs that fetch server-rendered content into a target element. Each item pairs a visible label with its URL; the active and inactive tabs have separate configurable classes.
 
 HTMX-driven tab row: each tab click fetches content from the server.
 `items` is a collection of `"Label" => url` pairs.

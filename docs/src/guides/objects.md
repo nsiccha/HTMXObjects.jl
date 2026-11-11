@@ -67,9 +67,5 @@ Julia process. Mount application routes before opening the listener.
 macros. Their contract belongs to [`@htmx`](@ref). Use GET for retrieval;
 declare a mutation as a mutation verb even when its result is HTML.
 
-Restart the application process to deploy changed definitions. Development
-reloading and route re-registration do not establish that an already running
-deployment uses the new source.
-
 The [sample browser](../examples/sample-browser.md) uses this lifetime split
 with a reusable selection property and an executed response check.

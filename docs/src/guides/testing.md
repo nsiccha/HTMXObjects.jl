@@ -30,7 +30,7 @@ catalog = discover_test_items(pkgdir(HTMXObjects));
 items = catalog.items;
 @assert !isempty(items) # hide
 item = first(items);
-(name=item.name, file=relpath(item.file, pkgdir(HTMXObjects)), tags=item.tags)
+(name=item.name, file=item.file, tags=item.tags)
 ```
 
 Discovery parses test metadata without importing test bodies into the web

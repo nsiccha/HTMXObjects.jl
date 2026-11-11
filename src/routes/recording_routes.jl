@@ -57,6 +57,9 @@ const RECORDING_STATE = RecordingState()
         record_base="/MyPkg.jl/dev/live-app",
     )
 
+Mount the recording route used to capture application responses for static
+documentation.
+
 Mountable routes for the docs-build flow. Provides one route at the
 mount prefix:
 

@@ -107,6 +107,8 @@ const _PDF_TEXT_LOCALES = (
 """
     pdf_panel_texts(locale::Symbol=:en; texts...)
 
+Construct localized document-panel text for `:en` or `:de`. Keyword arguments override individual phrases.
+
 The [`PdfPanelTexts`](@ref) for `locale` (`:en` or `:de`), with any of its
 texts replaced by keyword:
 
@@ -521,6 +523,8 @@ end
 
 """
     pdf_overlay(panel; placements=(:right, :bottom), placement=first(placements), class="")
+
+Place a document panel over the right or bottom of a page. References can open the panel, including references inserted later or placed inside a modal dialog.
 
 The [`pdf_panel`](@ref) `panel` floating over the page while it is open, so
 the page keeps its width and layout: on the right (`:right`, 40 % of the

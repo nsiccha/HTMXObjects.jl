@@ -386,6 +386,8 @@ end
 """
     application_descriptor(root; contributions=()) -> NamedTuple
 
+Combine object declarations, mounted routes and artifacts into a JSON-serializable application descriptor. `root` accepts an application type or object.
+
 Compose DynamicObjects' declaration graph with HTMXObjects' mount, route and
 artifact reflection into a deterministic, JSON-serializable application
 descriptor. `root` may be an application type or object. The flat `nodes` and
@@ -835,6 +837,8 @@ end
 
 """
     ReflectionRoutes(; root::Type, target=nothing, contributions=())
+
+Mount an inspectable reflection surface for an `@htmx` application with `@include`.
 
 Mountable reflection surface for an `@htmx` application. Mount opt-in via
 `@include` on any `@htmx struct`:
