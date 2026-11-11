@@ -1,6 +1,11 @@
 module HTMXObjects
 
-export DynamicObjects, @persist, @dynamicstruct, @htmx, @memo, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, cancel!, cancel_all!, PropertyComputationError, unwrap_error
+# Every exported name must be bound (test/exports.jl). `@memo` (renamed
+# `@memo!` in DO `111b0b8`) and `cancel!` / `cancel_all!` (removed with the
+# retained compute Task, DO `737d892`) were dropped for that reason: no
+# DynamicObjects version the [compat] entry admits defines them, so they only
+# listed a name in `names(HTMXObjects)` whose every use was an `UndefVarError`.
+export DynamicObjects, @persist, @dynamicstruct, @htmx, @cache_status, @is_cached, @cache_path, @clear_cache!, fetchindex, getstatus, PropertyComputationError, unwrap_error
 # Re-exports of the DynamicObjects reflection surface. `@semantic`,
 # `option_descriptor`, `dynamic_domain` and `materialization_plan` were dropped
 # when DO removed authored semantic metadata (DO `9490b55`); nothing defines
