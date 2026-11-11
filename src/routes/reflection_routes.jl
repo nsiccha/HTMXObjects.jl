@@ -299,7 +299,7 @@ function _htmx_declaration_fragment(semantic, declaration)
     route_count = Ref(0)
     artifact_count = Ref(0)
 
-    function walk(node, ancestry::Vector{Symbol}, parent_mount)
+    function walk(node, ancestry::Vector{Symbol}, parent_mount, mount_properties=String[])
         mount_id = _mount_node_id(ancestry)
         type_id = _do_declaration_node_id(declaration, node.type)
         mount_count[] += 1
@@ -313,9 +313,13 @@ function _htmx_declaration_fragment(semantic, declaration)
             indexed=node.indexed,
             selection=node.selection,
             options=node.options,
+            property_nodes=mount_properties,
         )))
         push!(edges, _architecture_edge(:mounts, type_id, mount_id;
                                         metadata=(; path=node.path)))
+        for property_id in mount_properties
+            push!(edges, _architecture_edge(:reads, mount_id, property_id))
+        end
         parent_mount === nothing ||
             push!(edges, _architecture_edge(:contains, parent_mount, mount_id;
                                             metadata=(; path=node.path)))
@@ -372,7 +376,10 @@ function _htmx_declaration_fragment(semantic, declaration)
         end
 
         for child in node.children
-            walk(child, [ancestry; child.name], mount_id)
+            declarations = count(p -> p.name === child.name, node.properties)
+            properties = String[_do_declaration_node_id(declaration, node.type, child.name;
+                declaration=i) for i in 1:declarations]
+            walk(child, [ancestry; child.name], mount_id, properties)
         end
     end
 
@@ -396,7 +403,8 @@ add HTMXObjects nodes with the following relations:
 
 - `:mounts` — a declared type is mounted at a URL location;
 - `:serves` — a mount serves a route;
-- `:reads` — a route is backed by its declared operation property;
+- `:reads` — a route is backed by its declared operation property, or a mount
+  requires its declared construction property;
 - `:produces` — a declared materialized property produces an artifact.
 
 DynamicObjects' `:contains`, `:depends_on` and `:describes` relations remain

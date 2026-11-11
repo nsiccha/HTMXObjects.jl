@@ -8,6 +8,7 @@ pages = [
         "Forms" => "guides/forms.md",
         "Response views" => "guides/views.md",
         "Operations" => "guides/operations.md",
+        "Service slices" => "guides/service-slices.md",
         "Testing" => "guides/testing.md",
     ],
     "Examples" => ["Sample browser" => "examples/sample-browser.md"],
