@@ -10740,14 +10740,23 @@ function _declared_param_options(options, name)
     Base.invokelatest(getproperty(DynamicObjects, :option_records), declared)
 end
 
-function _convert_option_param(options, val::AbstractString, name, T)
+function _convert_option_param(options, val::Union{AbstractString,AbstractVector}, name, T)
     records = _declared_param_options(options, name)
     records === nothing && return _convert_submitted(val, T, name)
     allowed = Any[option.value for option in records
                   if !get(option, :disabled, false)]
+    by_wire = Dict{String,Any}()
     for candidate in allowed
-        _option_wire_string(candidate) == val && return candidate
+        # Preserve the first match, as the scalar lookup does, and build the
+        # index once so a multiple selection does not scan the domain per value.
+        get!(by_wire, _option_wire_string(candidate), candidate)
     end
+    domain = (; allowed, by_wire, values=Set(allowed))
+    _convert_option_value(domain, val, name, T)
+end
+
+function _convert_option_value(domain, val::AbstractString, name, T)
+    haskey(domain.by_wire, val) && return domain.by_wire[val]
 
     # Keep the established scalar conversion as a fallback for domains whose
     # wire spelling is accepted by the annotated type. The resolved value must
@@ -10756,12 +10765,21 @@ function _convert_option_param(options, val::AbstractString, name, T)
         _convert_param(val, T)
     catch err
         err isa Union{ArgumentError,MethodError} || rethrow()
-        throw(InvalidDomainValue(Symbol(name), val, allowed))
+        throw(InvalidDomainValue(Symbol(name), val, domain.allowed))
     end
-    any(candidate -> isequal(candidate, converted), allowed) ||
-        throw(InvalidDomainValue(Symbol(name), converted, allowed))
+    converted in domain.values ||
+        throw(InvalidDomainValue(Symbol(name), converted, domain.allowed))
     converted
 end
+# A vector declaration describes the container even when the form/query sends
+# only one value. Resolve its elements against the live domain before returning
+# the declared vector, including options whose objects have no string parser.
+_convert_option_value(domain, val::AbstractString, name, T::Type{<:AbstractVector}) =
+    _convert_option_value(domain, [val], name, T)
+function _convert_option_value(domain, vals::AbstractVector, name, ::Type{V}) where {V<:AbstractVector}
+    convert(V, [_convert_option_value(domain, val, name, eltype(V)) for val in vals])
+end
+_convert_option_value(_domain, val, name, T) = _convert_submitted(val, T, name)
 _convert_option_param(options, val, name, T) = _convert_submitted(val, T, name)
 
 function _lookup_option_param(options, src, fallback, name, T)

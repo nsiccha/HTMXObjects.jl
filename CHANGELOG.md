@@ -2,12 +2,19 @@
 
 ## Unreleased
 
-## 0.1.104
+## 0.1.105
 
 - Generated semantic forms evaluate bare-identifier `@param` defaults, including
   imported constants and references to other inputs, instead of displaying or
   submitting the identifier's name. Explicit values still override defaults,
   and defaults that read another input follow its changes.
+
+## 0.1.104
+
+- A vector `@param` with `@options` keeps its declared vector type when a
+  query or form submits one selection. Repeated selections resolve each
+  option against the current domain, including object-valued options;
+  unavailable or unknown selections answer 400.
 
 ## 0.1.103
 
