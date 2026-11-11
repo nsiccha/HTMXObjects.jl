@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.107
+
+- Generated single-choice controls with no enabled default remain unselected
+  while dependent defaults, options and relevance conditions read the
+  parameter's declared default. Empty option lists no longer replace a typed
+  parameter with `nothing` while rendering a semantic application page.
+
 ## 0.1.106
 
 - Generated single-choice controls recover a removed or disabled selection
