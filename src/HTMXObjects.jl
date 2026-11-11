@@ -3099,8 +3099,7 @@ end
 """
     vendorfiles(mountdir="vendor"; headers=[])
 
-Serve the package’s pinned browser assets under a mount directory for pages
-using `assets=:vendor`.
+Serve the package’s pinned browser assets under a mount directory for pages using `assets=:vendor`.
 
 Serve the vendored [`htmx`](@ref) head assets — the exact pins behind
 `assets=:vendor` — at `/<mountdir>/<file>`, next to [`staticfiles`](@ref):
@@ -27635,6 +27634,8 @@ _summary_rounding_fields(r::_SigDigits) = (; sigdigits=r.k)
 """
     format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing) -> String
 
+Format a number using the decimal mark, grouping and rounding rules of the selected table language.
+
 Write the number `x` in a table's language, with the decimal mark and
 thousands separator of `texts` (a [`TableTexts`](@ref)): `table_texts(:de)`
 writes `0,156`, `1.234.567` and `3,81·10⁻⁵`; the default English texts write
@@ -27675,6 +27676,8 @@ format_number(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Intege
 """
     number_cell(x; texts=table_texts(), digits=nothing, sigdigits=nothing, attrs...)
 
+Render a numeric table cell with localized display text and its unformatted value for sorting and export.
+
 A table cell, `<td>`, that shows `format_number(x; texts, digits, sigdigits)`
 (see [`format_number`](@ref)) and keeps the exact value of `x` twice:
 
@@ -27697,8 +27700,6 @@ _number_cell(::Nothing, text, attrs) = h.td(; data_htmxo_number="", attrs...)(te
 _number_cell(x, text, attrs) = let key = _number_key(x)
     h.td(; data_sort_value=key, data_htmxo_number=key, attrs...)(text)
 end
-
-Render a numeric table cell with localized display text and its unformatted value for sorting and export.
 
 # The number a cell writes: integers and floats as they are, other reals as
 # their float; `nothing` for no value.
@@ -27827,8 +27828,7 @@ _number_key(x::AbstractFloat) = isinf(x) ? (x > 0 ? "Infinity" : "-Infinity") : 
 """
     IntervalEstimate(estimate, lower, upper; width_digits=2, log=false, digits=nothing, sigdigits=nothing)
 
-Store an estimate and its lower and upper interval bounds as one value.
-Tables format the estimate together with its interval.
+Store an estimate and its lower and upper interval bounds as one value. Tables format the estimate together with the interval, using its width to choose display precision.
 
 An estimate with its interval as one value, such as a posterior median with
 its 95 % credible interval. A table writes it as one cell, `22 (13–34)`, with
@@ -27916,6 +27916,8 @@ _interval_parts(x::IntervalEstimate) = map(_interval_value, (x.estimate, x.lower
 """
     format_interval(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing) -> String
     format_interval(x::IntervalEstimate; kw...)
+
+Format an estimate and its interval with language-specific separators and precision determined by the interval width or explicit rounding options.
 
 Write an estimate with its interval in a table's language (`texts`, a
 [`TableTexts`](@ref)): `22 (13–34)`, `0,52 (0,36–0,71)` with
@@ -28041,6 +28043,8 @@ end
     interval_cell(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing, attrs...)
     interval_cell(x::IntervalEstimate; kw...)
 
+Render an estimate and its interval in a table cell while retaining the underlying numbers for sorting and export.
+
 A table cell, `<td>`, that shows [`format_interval`](@ref)`(estimate, lower,
 upper; …)` and keeps the exact numbers:
 
@@ -28077,8 +28081,6 @@ end
 # The three exact numbers the ⬇ CSV writes for an interval cell, as JSON
 # strings (`""` for no value).
 _interval_csv_json(values...) = JSON.json(map(v -> isnothing(v) ? "" : _number_key(v), values))
-
-Render an estimate and its interval in a table cell while retaining the underlying numbers for sorting and export.
 
 # An `IntervalEstimate` is its cell wherever a table makes a float a
 # `number_cell`: a `render_table` column, a bare `master` cell, and the text
@@ -28749,6 +28751,8 @@ _hidden_input(k, v::AbstractVector) =
 """
     hidden_inputs(; kwargs...) -> Vector{Node}
 
+Generate hidden input elements from keyword arguments so a form can forward their names and values.
+
 Generate hidden `<input>` elements for each keyword argument. Splat into a form
 to pass parameters to `@post` routes via `formdata`:
 
@@ -28761,10 +28765,10 @@ Vector values produce repeated inputs (one `<input>` per element).
 """
 hidden_inputs(; kwargs...) = mapreduce(((k, v),) -> _hidden_input(k, v), vcat, kwargs; init=[])
 
-Generate hidden input elements from keyword arguments so a form can forward their names and values.
-
 """
     hidden_inputs(obj; skip=(), overrides...) -> Vector{Node}
+
+Generate hidden inputs from the declared request parameters present on a route object, with optional omissions and value overrides.
 
 Object-form of [`hidden_inputs`](@ref) — the GET-form hop symmetric to
 [`query_url(path, obj)`](@ref). Emit a hidden `<input>` for every `@param`
@@ -29232,6 +29236,8 @@ _as_vector(v) = [v]
 """
     ainput(nv; kwargs...)
 
+Construct an input from a string or named tuple. A named tuple supplies both the field name and its current value.
+
 Smart `h.input` wrapper that accepts a `NamedTuple` or `String`. A `NamedTuple`
 like `(; fit_key)` extracts name and value automatically:
 
@@ -29240,8 +29246,6 @@ like `(; fit_key)` extracts name and value automatically:
 """
 ainput(nt::NamedTuple; value=first(nt), kwargs...) = h.input(; name=_aname(nt), value, kwargs...)
 ainput(name::AbstractString; kwargs...) = h.input(; name, kwargs...)
-
-Construct an input from a string or named tuple. A named tuple supplies both the field name and its current value.
 
 """
     linput(nv, placeholder=Long(nv); label=Long(nv), show_when=nothing, kwargs...)

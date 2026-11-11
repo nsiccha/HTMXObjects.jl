@@ -50,15 +50,9 @@ end
 const RECORDING_STATE = RecordingState()
 
 """
-    @include record_gallery = RecordingRoutes(;
-        app_type=AppContext,
-        paths=String["/", "/page", "/plot/foo"],
-        record_dir="docs/src/public/live-app",
-        record_base="/MyPkg.jl/dev/live-app",
-    )
+    RecordingRoutes(; app_type, paths, record_dir, record_base)
 
-Mount the recording route used to capture application responses for static
-documentation.
+Mount the recording route used to capture application responses for static documentation.
 
 Mountable routes for the docs-build flow. Provides one route at the
 mount prefix:
