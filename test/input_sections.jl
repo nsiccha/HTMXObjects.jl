@@ -5,9 +5,6 @@ using TestItemRunner
     using HTMXObjects.DynamicObjects: option_domain
     export SectionPage, SECTIONS, section_page, sidebar_of, tab_of, sections_of, fields_of
 
-    # A simulator in the shape of Bruno's web-sim: a scenario every view reads,
-    # settings of the simulation and of the views, inputs that apply only to
-    # some scenarios, and a view with arguments of its own.
     @htmx struct SectionPage
         "Fit"
         @param fit::String = "one"

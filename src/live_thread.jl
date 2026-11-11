@@ -69,6 +69,8 @@ const _THREAD_TEXT_LOCALES = (
 """
     live_thread_texts(locale::Symbol=:en; texts...)
 
+Construct localized live-thread text for `:en` or `:de`. Keyword arguments override individual phrases.
+
 The [`LiveThreadTexts`](@ref) for `locale` (`:en` or `:de`), with any of its
 texts replaced by keyword:
 
@@ -77,7 +79,7 @@ live_thread(items; id="chat", texts=live_thread_texts(:de; start="Anfang des Cha
 ```
 
 Without `texts=`, [`live_thread`](@ref) writes in the page's language
-([`HTMXObjects.page_lang`](@ref): German under `__lang__ = "de"`, English for
+(`HTMXObjects.page_lang`: German under `__lang__ = "de"`, English for
 any other and outside a route). An unknown locale or text name, or a
 placeholder the text does not take, throws an `ArgumentError`.
 """
@@ -264,6 +266,8 @@ live_thread_unchanged() = HTTP.Response(204)
 
 """
     live_thread_refresh(target=nothing; bottom=true) -> String
+
+Construct an `HX-Trigger` header value asking live threads to fetch newly available tail content.
 
 `HX-Trigger` header value asking [`live_thread`](@ref)s to fetch their tail
 now — e.g. from the POST that sent a message:

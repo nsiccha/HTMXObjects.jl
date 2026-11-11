@@ -70,7 +70,7 @@ end
     # goes with its label, one with a stand-in shows the stand-in.
     view = SemanticSection("Modell",
         tabset("Überblick" => SemanticProse("Bayes-Regression."),
-               "Modelldefinition" => private(SemanticCode(:julia, "mu ~ 1 + wohnflaeche")),
+               "Modelldefinition" => private(SemanticCode(:julia, "mu ~ 1 + temperature")),
                "Kurz" => private(h.p("lang"); public=h.p("kurz"));
                url_param=nothing))
     @test repr("text/plain", view) == "Modell\n\nÜberblick\n\nBayes-Regression.\n\nKurz\n\nkurz"

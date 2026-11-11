@@ -1,3 +1,25 @@
+
+# `editor` comes from the MOUNTING APP, so a value that is not a per-file handle
+# only surfaces once a route computes with it — as a `MethodError` raised deep
+# inside `collect`/destructuring that names neither the property that was wrong
+# nor what it needed (measured: a placeholder value reached `history` and
+# reported `no method matching length(::StubExpr)` four frames down). These
+# guards check the property surface at the point of use and name both. They
+# inspect `hasproperty` only and never wrap the calls, so a genuine failure
+# inside a real handle still propagates untouched.
+const _EDITOR_API = (:current_content, :current_version, :versions, :read_version, :write!)
+
+_editor_props(names) = join(("`$p`" for p in names), ", ")
+
+function _check_editor(editor, route::Symbol, needed)
+    absent = Symbol[p for p in needed if !hasproperty(editor, p)]
+    isempty(absent) && return editor
+    error("EditorRoutes.$route: `editor` must be a per-file handle as returned by " *
+          "`GitRepo(path).editor(relpath)`, exposing " * _editor_props(_EDITOR_API) *
+          "; got $(typeof(editor)) with no " * _editor_props(absent) *
+          ". Fix the `editor` local the parent passes to `@include … = EditorRoutes(…)`.")
+end
+
 """
     EditorRoutes
 
@@ -45,27 +67,6 @@ the missing ones, rather than failing inside the route body.
 
 See the `section_routes` demo in `HTMXObjects/web/src/git_editor_demo.jl`.
 """
-# `editor` comes from the MOUNTING APP, so a value that is not a per-file handle
-# only surfaces once a route computes with it — as a `MethodError` raised deep
-# inside `collect`/destructuring that names neither the property that was wrong
-# nor what it needed (measured: a placeholder value reached `history` and
-# reported `no method matching length(::StubExpr)` four frames down). These
-# guards check the property surface at the point of use and name both. They
-# inspect `hasproperty` only and never wrap the calls, so a genuine failure
-# inside a real handle still propagates untouched.
-const _EDITOR_API = (:current_content, :current_version, :versions, :read_version, :write!)
-
-_editor_props(names) = join(("`$p`" for p in names), ", ")
-
-function _check_editor(editor, route::Symbol, needed)
-    absent = Symbol[p for p in needed if !hasproperty(editor, p)]
-    isempty(absent) && return editor
-    error("EditorRoutes.$route: `editor` must be a per-file handle as returned by " *
-          "`GitRepo(path).editor(relpath)`, exposing " * _editor_props(_EDITOR_API) *
-          "; got $(typeof(editor)) with no " * _editor_props(absent) *
-          ". Fix the `editor` local the parent passes to `@include … = EditorRoutes(…)`.")
-end
-
 @htmx struct EditorRoutes
     # Locals destructured from the parent so the routes can use `editor` and
     # `container_id` directly without a parent-prefix.

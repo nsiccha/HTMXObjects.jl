@@ -1,10 +1,5 @@
 using TestItemRunner
 
-# Public vs private content: `private(x; public)` and the audience of an
-# answer (`export_audience`, `audience=` on `dispatch`, `StaticExport`,
-# `export_site` and `pdf_report`). Design: user pick on
-# TenderViews/decisions/2026-10-24T23-26-35-726-0id3m3n (one wrapper; exports
-# public unless asked otherwise, the live app shows everything).
 
 @testmodule AudienceFixture begin
     using HTMXObjects, HTTP
@@ -65,9 +60,6 @@ using TestItemRunner
         @get aud_script_spec() = private(h.pre("SECRET-SCRIPT"))
     end
 
-    # Library code answering a private page it has to build: it looks the
-    # document up and reads its file, which only a private reader's answer
-    # does (TenderViews' `tender_document`; snag private-page-con-b8682fea).
     const BUILDS = Ref(0)
     const DOCS = Dict("lb" => "lb.pdf")
     const DOCS_DIR = Ref("")
@@ -183,7 +175,7 @@ end
 
 @testitem "a private reader sees which parts are not public" setup=[HTMXOTestImports] tags=[:unit] begin
     import HTMXObjects: h, _with_audience, _with_page_meta, to_markdown_string, htmxo_utility_styles
-    # Snag mark-a-tender-pr-fd4b7782: the live app and a private export mark
+    # the live app and a private export mark
     # every private part, so a reviewer can tell what a public export leaves out.
     html(x) = with_audience(() -> repr("text/html", x), :private)
     md(x) = to_markdown_string(x; audience=:private)
@@ -498,7 +490,7 @@ end
     # Plain text shows what its reader may see, never the private source.
     @test plain(private(secret), :public) == ""
     @test plain(private(secret; public = SemanticProse("Kurzfassung")), :public) == "Kurzfassung"
-    # A private reader sees it marked (snag mark-a-tender-pr-fd4b7782).
+    # A private reader sees it marked.
     @test plain(private(secret), :private) == "[not public] SECRET-SPEC"
     @test plain(private(secret; mark=false), :private) == "SECRET-SPEC"
     @test plain(SemanticCard("Modell", private(secret), "y ~ x"), :public) == "Modell\n\ny ~ x"

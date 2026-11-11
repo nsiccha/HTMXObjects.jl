@@ -31,9 +31,8 @@ end
 
 # The `/schema` document: `reflect`'s route walk with every inherited `@param`
 # described once. An app root's `@param`s reach every route mounted below it,
-# so the flat array repeated ~115 root params on each of ~217 routes — 3 MB of
-# copies (snag `schemaroutes-rep-4e4caea7`). Here a route keeps its own params
-# inline and names a shared `context` instead:
+# so the flat array repeats the root parameters on every route. A route keeps
+# its own parameters inline and names a shared `context` instead:
 #
 #   routes    reflect's route fields, with `params` holding the route's call
 #             params and its owner's own `@param`s, plus `context` and
@@ -85,6 +84,8 @@ _schema_payload(root, ::Val{SchemaInherited.inline}) = reflect(root)
 """
     StructureRoutes(; root::Type)
 
+Serve the JSON schema of an application route tree. New applications can use the equivalent `SchemaRoutes` name.
+
 JSON schema endpoint for the route tree of an `@htmx` app. Mount opt-in via
 `@include` on any `@htmx struct`:
 
@@ -123,6 +124,8 @@ end
 
 """
     SchemaRoutes(; root::Type)
+
+Mount the JSON schema endpoint for an application. This is the preferred name for `StructureRoutes`.
 
 Canonical name for [`StructureRoutes`](@ref) — the opt-in JSON schema
 endpoint. Mount via:

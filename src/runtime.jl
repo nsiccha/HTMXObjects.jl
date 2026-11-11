@@ -1299,6 +1299,8 @@ end
 """
     runtime_snapshot(tracker=runtime_tracker()) -> NamedTuple
 
+Return a consistent copy of the runtime tracker’s state as plain data.
+
 A consistent copy of the tracker's state as plain data:
 
 - `inflight` — requests still being handled, oldest first, with their
@@ -1339,6 +1341,8 @@ const _RUNTIME_JOB_STATES = (:queued, :running, :done, :failed)
 """
     runtime_jobs(tracker=runtime_tracker(); states=(:queued, :running),
                  filter=nothing, mine=nothing, recent=Inf) -> Vector{NamedTuple}
+
+Return the tracker’s selected queued, running, completed or failed jobs as plain rows, ordered from oldest to newest and retaining their progress nodes.
 
 The tracker's jobs in `states` (any of `:queued`, `:running`, `:done`,
 `:failed`) as plain rows, oldest first, each with its progress node:

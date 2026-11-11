@@ -1,8 +1,5 @@
 using TestItemRunner
 
-# A list of records (`@param name::Records`): typed records for routes, a card
-# per record on an app page (todo `1w1bnkx`, for Bruno's web-sim; decision
-# `1a5bx6n`).
 
 @testmodule RecordsFixtures begin
     using HTMXObjects

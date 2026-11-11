@@ -632,14 +632,6 @@ end
     end
 end
 
-# A lazy detail's content is bound at the slot's afterSwap (`htmxoMdReady`) and
-# again in htmx's settle step. A `hx-trigger="load"` element in it sends its
-# request at the first pass, and the request's class makes the second pass
-# re-initialize it, after which htmx 2.0.8 listens for DOM `load` events on it.
-# _hyperscript dispatches a bubbling `load` on every element it initializes, so
-# a tabset in the loaded content sent the request again without end (snag
-# `data-htmxo-insta-645ebb35`: 8 requests a second in ODLPlaus's K-40 table).
-# The control phase turns the runtime's `load` guard off and must see the loop.
 @testitem "a load element in a lazy detail sends its request once" tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
@@ -649,7 +641,6 @@ end
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         table = master_detail_table(["Name"], ["probe"];
             key=identity, master=x -> (h.td(x),), detail_url="/detail", initially_open=true)
-        # The fragment holds the loader, as ODLPlaus's probe view does.
         detail_html = repr("text/html", h.article(
             h.div(; id="loader", hx_get="/content", hx_trigger="load", hx_target="this",
                   hx_swap="innerHTML")("loading")))

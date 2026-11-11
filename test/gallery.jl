@@ -6,11 +6,11 @@
     function fixture_gallery()
         dir = mktempdir()
         files = [
-            "odl/a.jl" => "# title: Alpha\n# tags: bayes, stan\n\n1\n",
-            "odl/b.jl" => "# title: Beta\n# tags: stan web\n\n2\n",
-            "odl/c.jl" => "# title: Gamma\n# tags: bayes\n\n3\n",
-            "odl/d.jl" => "# title: Delta\n\n4\n",
-            "odl/_section.md" => "# ODL showcases\n",
+            "demo/a.jl" => "# title: Alpha\n# tags: bayes, stan\n\n1\n",
+            "demo/b.jl" => "# title: Beta\n# tags: stan web\n\n2\n",
+            "demo/c.jl" => "# title: Gamma\n# tags: bayes\n\n3\n",
+            "demo/d.jl" => "# title: Delta\n\n4\n",
+            "demo/_section.md" => "# demo showcases\n",
             "pkgs/e.jl" => "# title: Epsilon\n# tags: julia\n\n5\n",
             "pkgs/f.jl" => "# title: Phi\n# tags: julia, web\n\n6\n",
             "zplain/g.jl" => "# title: Plain\n\n7\n",
@@ -48,7 +48,7 @@ end
 
     page = html(gallery_grid(g.items; section_titles=g.section_titles, tag_filters=true))
     # Distinct tags of the section's items, first appearance first.
-    @test occursin("<h3>ODL showcases</h3><div data-role=\"tag-filters\" data-tag-match=\"all\">" *
+    @test occursin("<h3>demo showcases</h3><div data-role=\"tag-filters\" data-tag-match=\"all\">" *
         "<button type=\"button\" data-tag=\"bayes\" aria-pressed=\"false\">bayes</button>" *
         "<button type=\"button\" data-tag=\"stan\" aria-pressed=\"false\">stan</button>" *
         "<button type=\"button\" data-tag=\"web\" aria-pressed=\"false\">web</button></div>" *
@@ -85,7 +85,7 @@ end
     @test !occursin("Page size", full)
     @test !occursin("No items match", full)
     @test !occursin("bayes", full)
-    @test occursin("### ODL showcases", full)
+    @test occursin("### demo showcases", full)
     @test occursin("[Alpha](#a)", full)
 end
 
@@ -95,7 +95,7 @@ end
     page = htmx(gallery_grid(g.items; section_titles=g.section_titles, tag_filters=true);
                 pico_version=nothing, hyperscript_version=nothing)
     live = repr("text/html", page)
-    group = match(r"<h3>ODL showcases</h3><div data-role=\"tag-filters\".*?</div>"s, live).match
+    group = match(r"<h3>demo showcases</h3><div data-role=\"tag-filters\".*?</div>"s, live).match
     for controls in (:disable, :remove)
         exported = repr("text/html", static_transform(page, StaticExport(; controls)))
         @test occursin(group, exported)
@@ -122,43 +122,43 @@ end
             const on = (s, t) => chip(s, t).getAttribute('aria-pressed') === 'true';
             const search = document.querySelector('.htmxo-gallery-toolbar input[type="search"]');
             const type = v => { search.value = v; search.dispatchEvent(new Event('input', {bubbles: true})); };
-            const tagParam = () => new URLSearchParams(location.search).get('tag.odl');
+            const tagParam = () => new URLSearchParams(location.search).get('tag.demo');
             const finish = () => {
                 const result = document.createElement('pre'); result.id = 'checks';
                 result.textContent = checks.map(([name, ok]) => name + ':' + ok).join('\n');
                 document.body.appendChild(result);
             };
-            if (new URLSearchParams(location.search).has('tag.odl')) {
-                // Deep link: ?tag.odl=bayes,stan restores the pressed chips.
-                check('restored-pressed', on('odl', 'bayes') && on('odl', 'stan') && !on('odl', 'web'));
-                check('restored-filter', shown('odl') === 'a' && shown('pkgs') === 'e,f');
-                check('restored-dead-chip', chip('odl', 'web').disabled);
+            if (new URLSearchParams(location.search).has('tag.demo')) {
+                // Deep link: ?tag.demo=bayes,stan restores the pressed chips.
+                check('restored-pressed', on('demo', 'bayes') && on('demo', 'stan') && !on('demo', 'web'));
+                check('restored-filter', shown('demo') === 'a' && shown('pkgs') === 'e,f');
+                check('restored-dead-chip', chip('demo', 'web').disabled);
                 return finish();
             }
-            check('initial', shown('odl') === 'a,b,c,d' && shown('pkgs') === 'e,f' && shown('zplain') === 'g');
+            check('initial', shown('demo') === 'a,b,c,d' && shown('pkgs') === 'e,f' && shown('zplain') === 'g');
             check('no-chips-untagged', !section('zplain').querySelector('[data-role="tag-filters"]'));
-            chip('odl', 'stan').click();
-            check('stan-pressed', on('odl', 'stan'));
-            check('stan-narrows', shown('odl') === 'a,b');
+            chip('demo', 'stan').click();
+            check('stan-pressed', on('demo', 'stan'));
+            check('stan-narrows', shown('demo') === 'a,b');
             check('other-section-untouched', shown('pkgs') === 'e,f');
             check('url-written', tagParam() === 'stan');
-            check('live-chips-enabled', !chip('odl', 'bayes').disabled && !chip('odl', 'web').disabled);
-            chip('odl', 'bayes').click();
-            check('all-semantics', shown('odl') === 'a');
-            check('dead-chip-disabled', chip('odl', 'web').disabled);
-            check('pressed-stay-enabled', !chip('odl', 'stan').disabled && !chip('odl', 'bayes').disabled);
+            check('live-chips-enabled', !chip('demo', 'bayes').disabled && !chip('demo', 'web').disabled);
+            chip('demo', 'bayes').click();
+            check('all-semantics', shown('demo') === 'a');
+            check('dead-chip-disabled', chip('demo', 'web').disabled);
+            check('pressed-stay-enabled', !chip('demo', 'stan').disabled && !chip('demo', 'bayes').disabled);
             check('url-two-tags', tagParam() === 'bayes,stan');
-            chip('odl', 'bayes').click();
-            check('unpress', shown('odl') === 'a,b');
+            chip('demo', 'bayes').click();
+            check('unpress', shown('demo') === 'a,b');
             type('web');
-            check('search-and-tags', shown('odl') === 'b' && shown('pkgs') === 'f');
-            check('search-disables-chip', chip('odl', 'bayes').disabled);
+            check('search-and-tags', shown('demo') === 'b' && shown('pkgs') === 'f');
+            check('search-disables-chip', chip('demo', 'bayes').disabled);
             type('julia');
-            check('empty-section-hidden', section('odl').offsetParent === null && shown('pkgs') === 'e,f');
+            check('empty-section-hidden', section('demo').offsetParent === null && shown('pkgs') === 'e,f');
             type('');
-            check('section-back', section('odl').offsetParent !== null && shown('odl') === 'a,b');
-            chip('odl', 'stan').click();
-            check('cleared', shown('odl') === 'a,b,c,d' && tagParam() === null);
+            check('section-back', section('demo').offsetParent !== null && shown('demo') === 'a,b');
+            chip('demo', 'stan').click();
+            check('cleared', shown('demo') === 'a,b,c,d' && tagParam() === null);
             // A custom card renderer and tag_match=:any.
             chip('custom', 'red').click();
             check('any-one', shown('custom') === 'both1,red1');
@@ -166,10 +166,10 @@ end
             check('any-widens', shown('custom') === 'blue1,both1,red1');
             chip('custom', 'blue').click(); chip('custom', 'red').click();
             // Following a card's #anchor reveals it past the chips.
-            chip('odl', 'web').click();
-            check('web-only', shown('odl') === 'b');
+            chip('demo', 'web').click();
+            check('web-only', shown('demo') === 'b');
             window.addEventListener('hashchange', () => setTimeout(() => {
-                check('hash-reveals', shown('odl').split(',').includes('a') && !on('odl', 'web'));
+                check('hash-reveals', shown('demo').split(',').includes('a') && !on('demo', 'web'));
                 finish();
             }, 0));
             location.hash = 'a';
@@ -190,7 +190,7 @@ end
                 HTTP.Response(200, ["Content-Type" => "text/html"], exported) : HTTP.Response(404)
         end
         try
-            for (query, n) in (("", 21), ("?tag.odl=bayes,stan", 3))
+            for (query, n) in (("", 21), ("?tag.demo=bayes,stan", 3))
                 dom = mktempdir() do profile
                     dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/$query`)
                 end
@@ -215,18 +215,18 @@ end
     html(x) = repr("text/html", x)
     for page in (html(gallery_grid(g.items; section_titles=g.section_titles)),
                  html(gallery_grid(g.items; controls=false)))
-        @test occursin("<section id=\"odl\" data-section=\"odl\"><h3>", page)
+        @test occursin("<section id=\"demo\" data-section=\"demo\"><h3>", page)
         @test count("<section id=", page) == 3
     end
     # refused: a section key equal to a card id puts one id on two elements,
     # so a `#id` link reaches only the first of them (decision 1ap95jg).
     dir = mktempdir()
-    mkpath(joinpath(dir, "odl")); write(joinpath(dir, "odl", "pkgs.jl"), "1\n")
+    mkpath(joinpath(dir, "demo")); write(joinpath(dir, "demo", "pkgs.jl"), "1\n")
     mkpath(joinpath(dir, "pkgs")); write(joinpath(dir, "pkgs", "e.jl"), "2\n")
     err = try gallery_grid(Gallery(dir).items); nothing catch e; e end
     @test err isa ArgumentError && occursin("the section \"pkgs\" and the card", err.msg)
     # The card's `# id:` header resolves it.
-    write(joinpath(dir, "odl", "pkgs.jl"), "# id: pkgs-card\n\n1\n")
+    write(joinpath(dir, "demo", "pkgs.jl"), "# id: pkgs-card\n\n1\n")
     @test occursin("<section id=\"pkgs\" data-section=\"pkgs\">", html(gallery_grid(Gallery(dir).items)))
 end
 
@@ -267,29 +267,29 @@ end
             });
             if (location.hash === '#pkgs') {
                 // Opened at the link: its cards are on page 3 of 4.
-                check('load-reveals', info().startsWith('Page 3') && shown('pkgs') === 'e,f' && !visible('odl'));
+                check('load-reveals', info().startsWith('Page 3') && shown('pkgs') === 'e,f' && !visible('demo'));
                 check('load-below-toolbar', belowToolbar('pkgs'));
                 return finish();
             }
-            check('ids', section('odl').dataset.section === 'odl' && section('zplain').tagName === 'SECTION');
-            check('initial', info().startsWith('Page 1') && shown('odl') === 'a,b' && !visible('pkgs'));
+            check('ids', section('demo').dataset.section === 'demo' && section('zplain').tagName === 'SECTION');
+            check('initial', info().startsWith('Page 1') && shown('demo') === 'a,b' && !visible('pkgs'));
             await go('pkgs');
-            check('page-turns', info().startsWith('Page 3') && shown('pkgs') === 'e,f' && !visible('odl'));
+            check('page-turns', info().startsWith('Page 3') && shown('pkgs') === 'e,f' && !visible('demo'));
             check('page-in-url', new URLSearchParams(location.search).get('page') === '3');
             psSel.value = '0'; psSel.dispatchEvent(new Event('change', {bubbles: true}));
             type('julia');
-            await go('odl');
-            check('search-cleared', search.value === '' && shown('odl') === 'a,b,c,d');
+            await go('demo');
+            check('search-cleared', search.value === '' && shown('demo') === 'a,b,c,d');
             type('web');
             await go('pkgs');
             check('shown-keeps-search', search.value === 'web' && shown('pkgs') === 'f');
             type('');
-            chip('odl', 'web').click();
+            chip('demo', 'web').click();
             type('alpha');
-            check('chips-and-search-hide', !visible('odl'));
-            await go('odl');
-            check('chips-released', search.value === 'alpha' && shown('odl') === 'a'
-                && chip('odl', 'web').getAttribute('aria-pressed') === 'false');
+            check('chips-and-search-hide', !visible('demo'));
+            await go('demo');
+            check('chips-released', search.value === 'alpha' && shown('demo') === 'a'
+                && chip('demo', 'web').getAttribute('aria-pressed') === 'false');
             type('');
             await go('zplain');
             check('below-toolbar', window.scrollY > 0 && belowToolbar('zplain'));
@@ -353,8 +353,8 @@ end
     g = fixture_gallery()
     a = only(filter(it -> it.id == "a", g.items))
     html(x) = repr("text/html", x)
-    @test html(gallery_card(a)(h.p("x"))) == "<article id=\"a\" data-id=\"a\" data-section=\"odl\" " *
-        "data-tags=\"bayes stan\" data-search-text=\"alpha  bayes stan odl a\"><p>x</p></article>"
+    @test html(gallery_card(a)(h.p("x"))) == "<article id=\"a\" data-id=\"a\" data-section=\"demo\" " *
+        "data-tags=\"bayes stan\" data-search-text=\"alpha  bayes stan demo a\"><p>x</p></article>"
     # Further keywords add attributes; one named like a default replaces it.
     custom = html(gallery_card(a; class="wide", data_search_text="own corpus")())
     @test occursin("class=\"wide\"", custom)

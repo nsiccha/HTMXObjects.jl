@@ -7,9 +7,6 @@ using TestItemRunner
 
     const UPLOADS = String[]
 
-    # A simulator in the shape of Bruno's web-sim: a scenario every view reads,
-    # settings of single views, inputs that apply only to some scenarios, and
-    # one mutation.
     @htmx struct SimPage
         "Fit"
         @param fit::String = "one"
@@ -51,7 +48,6 @@ using TestItemRunner
             title="Simulator", select=entry -> entry.name !== :index)
     end
 
-    # Defaults computed from other properties, as Bruno's web-sim's are.
     @htmx struct FitsPage
         fits = ["x", "y"]
         "Fit"
@@ -65,8 +61,8 @@ using TestItemRunner
         @get summary() = h.p("summary:", fit, ":", n)
     end
 
-    # Defaults computed from another input, as Bruno's web-sim starts Fraction
-    # responding from each output's standard response criterion.
+    # Defaults computed from another input: the page starts the threshold from
+    # each output's standard response criterion.
     const CRITERIA = Dict("pk" => (; quantity="cmin", direction="above", threshold=-50.0),
                           "pbmc" => (; quantity="min_change", direction="below", threshold=-30.0))
     @htmx struct CriterionPage

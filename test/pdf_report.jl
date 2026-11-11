@@ -104,11 +104,11 @@ end
 
     answer(url) = HTMXObjects._pdf_report_mapped_url(url, "/api/x")
     @test answer(nothing) == ""
-    @test answer("https://example.org/odl/api-x.json") == "https://example.org/odl/api-x.json"
+    @test answer("https://example.org/demo/api-x.json") == "https://example.org/demo/api-x.json"
     @test answer(SubString("mailto:info@example.org", 1)) == "mailto:info@example.org"
     # refused: a PDF opens only an absolute URL; a relative target (StaticExport's
     # bundle file, say) would point at a file next to the PDF
-    for url in ("api-x.json", "/odl/api-x.json", "C:x", "https://example.org/a b", "")
+    for url in ("api-x.json", "/demo/api-x.json", "C:x", "https://example.org/a b", "")
         err = try answer(url) catch e e end
         @test err isa ArgumentError && occursin("absolute URL", err.msg) && occursin("/api/x", err.msg)
     end
@@ -135,7 +135,7 @@ end
     @test occursin("""
         lang: "de-DE"
         papersize: "a4"
-        subtitle: "Mietspiegel \\"2026\\""
+        subtitle: "Messreihe \\"2026\\""
         date: "2026-10-22"
         toc: true
         toc-depth: 2
@@ -144,7 +144,7 @@ end
         author: ["A", "B"]
         columns: 1
         format:
-        """, qmd("de-DE"; metadata=(subtitle="Mietspiegel \"2026\"", date=Date(2026, 10, 22), toc=true,
+        """, qmd("de-DE"; metadata=(subtitle="Messreihe \"2026\"", date=Date(2026, 10, 22), toc=true,
                                     toc_depth=2, margin=(x="2cm", y="2cm"), fontsize="10pt",
                                     author=["A", "B"], columns=1)))
     # Dictionary keys are written as given.
@@ -581,9 +581,9 @@ end
             # offer-pac-qualit-7471af7a). A one-letter "scheme" is a drive, not an address.
             titled = joinpath(dir, "titel.pdf")
             pdf_report("# Quellen\n", titled; title="Quellen", lang="de-DE",
-                       metadata=(subtitle="Stand: https://example.org/odl/, (www.example.org/karte). info@example.de C://x",
+                       metadata=(subtitle="Stand: https://example.org/demo/, (www.example.org/karte). info@example.de C://x",
                                  author="Autorin https://example.org/autorin/"))
-            @test uris(read(titled, String)) == sort(["https://example.org/odl/", "https://www.example.org/karte",
+            @test uris(read(titled, String)) == sort(["https://example.org/demo/", "https://www.example.org/karte",
                                                       "mailto:info@example.de", "https://example.org/autorin/"])
         end
     end
@@ -924,9 +924,9 @@ end
         using HTMXObjects
 
         quarto = Sys.which("quarto")
-        snapshot = "https://example.org/odl"
-        # A static snapshot that stores `/api/v1/ap3/anomalien?p_min=0.9` as
-        # `api-v1-ap3-anomalien-p_min-0.9.json` (snag pdf-report-markd-23652624).
+        snapshot = "https://example.org/demo"
+        # A static snapshot that stores `/api/v1/samples?material=plasma&limit=2` as
+        # `api-v1-samples-material-plasma-limit-2.json` (snag pdf-report-markd-23652624).
         snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
         asked = String[]
         url_map(a) = (push!(asked, a);
@@ -935,15 +935,15 @@ end
         md = """
             # Schnittstelle {#oben}
 
-            Anomalien: [JSON](/api/v1/ap3/anomalien?p_min=0.9) · [Seite](/schnittstelle) · [Bremen](region/04)
-            · [Bayern]() · [Quelle](https://example.org/daten) · [Nach oben](#oben) · [noch einmal](/api/v1/ap3/anomalien?p_min=0.9)
+            Proben: [JSON](/api/v1/samples?material=plasma&limit=2) · [Seite](/schnittstelle) · [Bremen](region/04)
+            · [Bayern]() · [Quelle](https://example.org/daten) · [Nach oben](#oben) · [noch einmal](/api/v1/samples?material=plasma&limit=2)
 
             | Antwort | Adresse |
             |---|---|
-            | Stationen | [Liste](/api/v1/stationen) |
+            | Materialien | [Liste](/api/v1/materials) |
             """
-        targets = ["/api/v1/ap3/anomalien?p_min=0.9", "/schnittstelle", "region/04",
-                   "https://example.org/daten", "#oben", "/api/v1/stationen"]
+        targets = ["/api/v1/samples?material=plasma&limit=2", "/schnittstelle", "region/04",
+                   "https://example.org/daten", "#oben", "/api/v1/materials"]
         document = HTMXObjects._pdf_report_qmd(md; title="Konzept [Start](/start)", lang="de-DE", base_url=snapshot)
         # The title's link is read with the document's, each target once.
         @test HTMXObjects._pdf_report_link_targets(quarto, document) == ["/start"; targets]
@@ -960,9 +960,9 @@ end
         end
         answers = [t => HTMXObjects._pdf_report_mapped_url(url_map(t), t) for t in targets]
         mapped = typst(answers)
-        json = "$snapshot/api-v1-ap3-anomalien-p_min-0.9.json"
+        json = "$snapshot/api-v1-samples-material-plasma-limit-2.json"
         @test count("#link(\"$json\")", mapped) == 2
-        @test occursin("#link(\"$snapshot/api-v1-stationen.json\")[Liste]", mapped)
+        @test occursin("#link(\"$snapshot/api-v1-materials.json\")[Liste]", mapped)
         # nothing leaves a link to base_url, its text, or itself
         @test occursin("#link(\"$snapshot/schnittstelle\")[Seite]", mapped)
         @test occursin("#link(\"$snapshot/region.html?r=04\")[Bremen]", mapped)
@@ -972,7 +972,7 @@ end
         # A target the render reads but nobody asked url_map about stops the
         # filter rather than taking a rule url_map was never consulted on.
         stopped = typst(answers[2:end])
-        @test occursin("url_map was not asked about the link target /api/v1/ap3/anomalien?p_min=0.9", stopped)
+        @test occursin("url_map was not asked about the link target /api/v1/samples?material=plasma&limit=2", stopped)
 
         pdfua(path) = let bytes = read(path, String)
             startswith(bytes, "%PDF") && occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
@@ -991,7 +991,7 @@ end
                 if success(run(pipeline(ignorestatus(`pdfinfo -url $out`); stdout=io, stderr=devnull)))
                     found = sort!([last(split(l)) for l in split(String(take!(io)), '\n') if occursin("Annotation", l)])
                     @test found == sort!([json, json, "$snapshot/schnittstelle", "$snapshot/region.html?r=04",
-                                          "https://example.org/daten", "$snapshot/api-v1-stationen.json"])
+                                          "https://example.org/daten", "$snapshot/api-v1-materials.json"])
                 else
                     @test_skip "pdfinfo -url (poppler ≥ 22) lists the links"
                 end
@@ -1011,7 +1011,7 @@ end
             catch e
                 e
             end
-            @test err isa ErrorException && occursin("no map for /api/v1/ap3/anomalien?p_min=0.9", err.msg)
+            @test err isa ErrorException && occursin("no map for /api/v1/samples?material=plasma&limit=2", err.msg)
             @test readdir(dir) == []
         end
     end

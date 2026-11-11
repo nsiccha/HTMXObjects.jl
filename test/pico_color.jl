@@ -1,10 +1,5 @@
 using TestItemRunner
 
-# Snag dbsvergleich-tod-35acaead (reporter DBSVergleich): an app that wanted
-# another accent than Pico's azure redeclared Pico's `--pico-primary*`
-# variables for light, dark and `[data-theme=dark]` in `extra_head` (40 lines),
-# because the shell only ever loaded `css/pico.min.css`. Its copy missed
-# `--pico-text-selection-color`. `pico_color` loads Pico's own colour build.
 
 @testitem "pico_color names exactly the colour builds of the vendored Pico" tags=[:unit] begin
     using HTMXObjects

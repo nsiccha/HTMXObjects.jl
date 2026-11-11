@@ -125,6 +125,8 @@ const _GET_ROUTER = HTTP.Router(_ -> _NoGetRoute(), _ -> _NoGetRoute())
 """
     Verb{V}
 
+Identify the HTTP method as a singleton type. Generated route properties receive `Verb{V}` as their first positional argument.
+
 Singleton type used as the **first positional argument** of every route IP
 emitted by `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse`. Routes are pure
 sugar over DynamicObjects' indexable properties:
@@ -213,7 +215,7 @@ _url_segment_escapes(b::UInt8) =
           middleware=[], check_origin=nothing, access_log=<timed default>,
           operation_log=<default>, runtime_tracking=true, compress=true, kwargs...)
 
-Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
+Start an HTTP server for the routes registered on `ROUTER`. When
 `async=false` (the default), blocks until interrupted and calls
 [`terminate`](@ref) on exit; `async=true` returns the running `HTTP.Server`.
 
@@ -230,7 +232,7 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   log. The default line is `time - ip:port - "GET /path HTTP/1.1" 200 12.3ms`.
 - `operation_log` — an `(io, record)` formatter written once for every polled
   operation (one that outlived the `:auto` grace period) when it ends, or
-  `nothing` to disable it. `record` is an [`HTMXObjects.OperationRecord`](@ref).
+  `nothing` to disable it. `record` is an `HTMXObjects.OperationRecord`.
   The default line is
   `time - operation GET /path?x=1 ok compute=12.4s answered=477.0s polls=23`.
   An access-log line covers one request, and a slow page is many of them; this
@@ -238,7 +240,7 @@ Start an HTTP server for the routes registered on [`ROUTER`](@ref). When
   `abandoned`, `evicted`, `unclaimed`), how long its computation ran, how long the client
   took to receive the answer, and how many polls reached it. Records are
   logged at `Info` with `_group=:operation`. The setting is process-wide
-  ([`HTMXObjects.OPERATION_LOG`](@ref)).
+  (`HTMXObjects.OPERATION_LOG`).
 - `runtime_tracking=true` (the default) installs [`track_requests`](@ref)
   outside `middleware`, recording in-flight and finished requests with their
   handling times in [`runtime_tracker`](@ref) for the [`RuntimeRoutes`](@ref)
@@ -737,7 +739,7 @@ end
     HTMXObjects.OperationRecord
 
 How one polled operation ended, as handed to the `operation_log` formatter of
-[`serve`](@ref) (see [`HTMXObjects.OPERATION_LOG`](@ref)). A polled operation is
+[`serve`](@ref) (see `HTMXObjects.OPERATION_LOG`). A polled operation is
 a route operation that outlived the `:auto` grace period, so the client
 followed it with polls; one that answered within the grace period is only its
 request's access-log line.
@@ -859,7 +861,7 @@ mounted. `headers` are added to every response, and `loadfile(path)` replaces
 - `private=true` serves the folder to a private reader only (the live app, an
   `audience=:private` export): a public answer is the empty `404` of a private
   page (`X-HTMXO-Private: true`), so a public export writes none of it and
-  leaves out every element that links it, as for [`private`](@ref) content.
+  leaves out every element that links it, as for [`private`](@ref Private) content.
 
 ```julia
 staticfiles(bundle_dir, "modelldefinition/ansicht"; bundle=true, private=true)
@@ -1115,20 +1117,7 @@ hand-typed `?q=50%` is a value, not a 500 (see `_percent_decode_lenient`).
 """
 queryparams(req::HTTP.Request) = _parse_form_encoded(HTTP.URI(req.target).query)
 
-"""
-    formparams(req::HTTP.Request) -> Dict{String, Union{String, Vector{String}}}
 
-Parse a urlencoded request body into a multi-value-preserving Dict. The
-`formparams` analogue of `queryparams` — repeated body fields (`image=a&image=b`)
-become a `Vector{String}` instead of collapsing to the last value, which is
-what [`formdata`](@ref) (a thin wrapper over `HTTP.queryparams`) does. Used by
-the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
-receives every posted value.
-
-Reads a non-destructive copy of the request body; an empty body yields an empty
-dict. Never throws — a body that isn't really urlencoded yields junk keys at
-worst, never a 500 (see `_percent_decode_lenient`).
-"""
 _request_body_bytes(req::HTTP.Request) = _message_body_bytes(req)
 
 function _message_body_bytes(message::Union{HTTP.Request,HTTP.Response})
@@ -1156,6 +1145,20 @@ function _message_body_bytes(message::Union{HTTP.Request,HTTP.Response})
     return UInt8[]
 end
 
+"""
+    formparams(req::HTTP.Request) -> Dict{String, Union{String, Vector{String}}}
+
+Parse a urlencoded request body into a multi-value-preserving Dict. The
+`formparams` analogue of `queryparams` — repeated body fields (`image=a&image=b`)
+become a `Vector{String}` instead of collapsing to the last value, which is
+what [`formdata`](@ref) (a thin wrapper over `HTTP.queryparams`) does. Used by
+the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
+receives every posted value.
+
+Reads a non-destructive copy of the request body; an empty body yields an empty
+dict. Bodies with a different Content-Type yield an empty dictionary.
+Repeated keys retain all values in order.
+"""
 function formparams(req::HTTP.Request)
     # Only an `application/x-www-form-urlencoded` body is parseable here — it's
     # the wire format `_parse_form_encoded` understands. A `multipart/form-data`
@@ -1183,7 +1186,7 @@ end
     formdata(req::HTTP.Request) -> Dict{String, String}
 
 Parse a urlencoded request body into a `Dict`; a repeated field keeps only its
-last value. See [`formparams`](@ref) for the multi-value form.
+last value. See `formparams` for the multi-value form.
 """
 formdata(req::HTTP.Request) = HTTP.queryparams(String(_request_body_bytes(req)))
 
@@ -1253,7 +1256,7 @@ Parse a `multipart/form-data` body into a field-name → value map: a file part
 (one carrying a filename) becomes an [`Upload`](@ref); a plain text part becomes
 a `String`. Repeated field names collect into a `Vector`. Returns an empty dict
 when the request's `Content-Type` names no multipart boundary. A body that does
-not parse under its boundary throws [`HTMXObjects.UnreadableBody`](@ref), a
+not parse under its boundary throws `HTMXObjects.UnreadableBody`, a
 caller fault answered `400 Bad Request`, whose `reason` says what was wrong
 (`boundary delimiter not found`, `a part has no form-data name`, …). That is
 also what a route answers when it binds a keyword from such a body.
@@ -1304,9 +1307,9 @@ _multipart_rejection(err) = nothing
 The request-body parameter source for the POST/PUT/PATCH argument extractor:
 a `multipart/form-data` body routes to [`multipartparams`](@ref) (text fields as
 `String`, file fields as [`Upload`](@ref)); everything else routes to
-[`formparams`](@ref) (which itself only parses an
+`formparams` (which itself only parses an
 `application/x-www-form-urlencoded` body and returns an empty dict otherwise).
-A multipart body that does not parse throws [`HTMXObjects.UnreadableBody`](@ref),
+A multipart body that does not parse throws `HTMXObjects.UnreadableBody`,
 which a route answers 400; a urlencoded body never throws.
 This is what lets a declared kwarg bind from either body shape through the one
 shared `_lookup_param` path — `@post f(; x)` for a urlencoded field and
@@ -2898,7 +2901,7 @@ end
 
 A complete HTML document: the `<html>` element `root` plus the `<!DOCTYPE html>`
 preamble that must precede it in the serialized bytes. This is what [`htmx`](@ref)
-returns — and therefore what [`pico_page`](@ref) and every `__page__` built on
+returns — and therefore what `pico_page` and every `__page__` built on
 them return.
 
 A doctype is not an element, so it cannot live inside the `HTMX.Node` tree; it is
@@ -3101,6 +3104,8 @@ end
 """
     vendorfiles(mountdir="vendor"; headers=[])
 
+Serve the package’s pinned browser assets under a mount directory for pages using `assets=:vendor`.
+
 Serve the vendored [`htmx`](@ref) head assets — the exact pins behind
 `assets=:vendor` — at `/<mountdir>/<file>`, next to [`staticfiles`](@ref):
 
@@ -3123,7 +3128,7 @@ The first call downloads the pinned npm tarballs from Artifacts.toml (about
 5.2 MB, cached in the depot); further calls re-read from disk. Files
 are served with [`staticfiles`](@ref)-style content types. A custom
 `mountdir` (or a second mount elsewhere) pairs with the matching
-`assets="/<mountdir>"` prefix on [`htmx`](@ref)/[`pico_page`](@ref).
+`assets="/<mountdir>"` prefix on [`htmx`](@ref)/`pico_page`.
 
 The same mount also serves HTMXObjects' own page runtime at
 `/<mountdir>/htmxo/<name>.css|js`, which `htmx(...; runtime=:linked)` links
@@ -3874,7 +3879,7 @@ _with_page_meta(f, meta) = ScopedValues.with(f, _PAGE_META => meta)
 The language of the answer being produced: the BCP 47 tag that the route's
 mount chain declares with `__lang__` (the innermost declaration wins), or the
 one the answer is asked for in. `dispatch(…; lang)` wins over the declaration;
-[`to_markdown_string`](@ref)`(x; lang)` and a [`pdf_report`](@ref) of a value
+`to_markdown_string(x; lang)` and a [`pdf_report`](@ref) of a value
 set it while they render. It is `nothing` when none of them sets one, as
 outside a route.
 
@@ -3900,7 +3905,7 @@ on, which a visitor reads as a stuck page. Treebars' `:auto` pollers and live
 boards read the value and leave out their ❚❚ / Pause control; `nothing` shows
 it, as before.
 
-It holds where [`HTMXObjects.page_lang`](@ref) holds: while the route's
+It holds where `HTMXObjects.page_lang` holds: while the route's
 property runs and while its answer is rendered (an `:auto` poller and its poll
 answers, the page shell, an error page), and in the work the route runs on
 other tasks.
@@ -3980,15 +3985,15 @@ with
 and a whole site frame with
 
     __page__(content) = let base = __prefix__
-        pico_page(content; brand="Strukturdaten Berlin" => base * "/",
+        pico_page(content; brand="Synthetic samples" => base * "/",
                   nav=["Karte" => base * "/", "Methodik" => base * "/modell",
-                       private("Angebot" => base * "/angebot")],
+                       private("Notes" => base * "/notes")],
                   footer=h.small("Datenbasis: …"))
     end
 
 `brand` is the header's home link, `label => href` (the label in bold), or
 an element placed as it is. `nav` lists the main navigation: each
-`label => href` pair is a link, a [`private`](@ref) pair a link that public
+`label => href` pair is a link, a [`private`](@ref Private) pair a link that public
 answers leave out, and any other element (an `h.li` of the app's own) is
 placed as it is. Together they form
 `<header class="container"><nav aria-label="Main navigation"><ul>brand</ul><ul>nav</ul></nav></header>`;
@@ -4147,7 +4152,7 @@ plain-text projections.
 Those are projections of the NODE, reached with `show(io, mime, node)` or
 `repr(mime, node)`. HTML and Markdown are additionally reachable through a
 route: a semantic node survives markdown chrome-stripping (see
-[`_strip_md_chrome`](@ref)), so it renders in `?plain` / `?markdown` reads even
+`_strip_md_chrome`), so it renders in `?plain` / `?markdown` reads even
 when mounted inside a generated `<form>`. The response pipeline negotiates no
 `application/vnd.hyperview+xml` arm, so the HXML projection is node-level only.
 """
@@ -4258,6 +4263,8 @@ end
 """
     SemanticTexts
 
+Hold localized phrases and numeric punctuation used by semantic content. Construct a value with `semantic_texts` and pass it through the `texts` keyword.
+
 The words the semantic vocabulary writes itself, besides the caller's own
 content: `unavailable` is the marker of a [`SemanticUnavailable`](@ref), in
 every peer format, and `decimal` is the decimal mark of a
@@ -4276,6 +4283,8 @@ const _SEMANTIC_TEXT_LOCALES = (
 
 """
     semantic_texts(locale::Symbol=:en; texts...)
+
+Construct localized semantic-content text for `:en` or `:de`. Keyword arguments override individual phrases.
 
 The [`SemanticTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword:
@@ -4590,7 +4599,7 @@ keeps it with the start of its body; the body can continue across pages.
 
 A disclosure with nothing to open renders nothing in any format, its label
 included. That covers a disclosure with no children, one holding only `nothing`,
-and one whose [`private`](@ref) content has no stand-in for a public reader.
+and one whose [`private`](@ref Private) content has no stand-in for a public reader.
 In Markdown it also covers a body that held only form controls. Groups and
 vectors of such children count as empty too. A static export also leaves out
 a disclosure whose controls it removed (`controls=:remove`).
@@ -4612,7 +4621,7 @@ preview, a summary and its full body. The first view is the DEFAULT: it
 renders directly, and it is the ONLY view in the Markdown, plain and HXML
 peers. Every later view renders collapsed inside a native `<details>` with its
 label as the `<summary>` — view-switching with no client JavaScript. A later
-view with nothing to show its reader, such as [`private`](@ref) content without
+view with nothing to show its reader, such as [`private`](@ref Private) content without
 a stand-in for a public reader, is left out together with its label.
 
 Later views MUST be `label => view` pairs (the label heads the collapsed
@@ -5368,6 +5377,8 @@ end
 """
     decorated_link(label, href, entry; class, attrs, base=(;)) -> Node
 
+Render an inline reference with metadata supplied by a background cache entry. This function reads the entry; the cache owns fetching and retry behavior.
+
 Render one inline reference that gains metadata once its background batch
 lands — the read-through half of deferred batched decoration. The fetch half
 is a DynamicObjects `BackgroundCache` in batch mode (single-flighted drain,
@@ -6047,7 +6058,7 @@ The Markdown of `val`, as a `?plain` or `Accept: text/markdown` answer holds it:
 buttons) is dropped, or `""` when nothing else is left.
 
 `audience` (`:public` or `:private`) is who the Markdown is for:
-[`private`](@ref) content shows its stand-in, or nothing, for `:public`, and in
+[`private`](@ref Private) content shows its stand-in, or nothing, for `:public`, and in
 full for `:private`. Without it, `val` renders for the audience of the answer
 it is rendered in (a route's `export_audience(__req__)`), and for the public
 outside any request.
@@ -6055,7 +6066,7 @@ outside any request.
 `lang` (a BCP 47 tag such as `"de-DE"`) is the language of the words
 HTMXObjects writes itself, such as the label of private content ("nicht
 öffentlich"). Without it they follow the answer `val` is rendered in
-([`HTMXObjects.page_lang`](@ref)), and are English outside any route. The
+(`HTMXObjects.page_lang`), and are English outside any route. The
 Markdown keeps the language it is rendered in.
 
 Library code that assembles a document from values it renders itself passes
@@ -6157,7 +6168,7 @@ element's `lang`, come from [`htmxo_utility_styles`](@ref), which every
 `::: {.htmxo-private}` that opens with the label, `*not public*`, and inline
 content a span `[*not public:* …]{.htmxo-private}`. The label is in the
 language of `HTMXObjects.page_lang()`: a route's `__lang__`, or the `lang` of
-[`to_markdown_string`](@ref)`(x; lang)`, of `dispatch(…; lang)` and of a
+`to_markdown_string(x; lang)`, of `dispatch(…; lang)` and of a
 [`pdf_report`](@ref) of a value. A Markdown string keeps the language it was
 rendered in. Private content inside private content is marked once.
 `mark=false` shows `content` without the mark.
@@ -6167,7 +6178,7 @@ a [`StaticExport`](@ref) or [`export_site`](@ref) bundle, a
 [`pdf_report`](@ref) of a value, a `dispatch` made outside any request (the
 Markdown a concept PDF inlines), and a `dispatch(...; audience=:public)`.
 Anything rendered outside any request is public too, unless it is rendered
-with [`to_markdown_string`](@ref)`(x; audience=:private)` or inside
+with `to_markdown_string(x; audience=:private)` or inside
 [`with_audience`](@ref)`(f, :private)`. The live app always shows everything.
 [`export_audience`](@ref) tells a route which audience it answers for.
 
@@ -6217,6 +6228,11 @@ struct Private
     public::Any
     mark::Bool
 end
+"""
+    private(content; public=nothing, mark=true)
+
+Wrap content in [`Private`](@ref), optionally supplying a public replacement.
+"""
 private(content; public=nothing, mark::Bool=true) = Private(content, public, mark)
 
 # Content a function builds is built when it is shown.
@@ -6292,7 +6308,7 @@ _check_audience(audience, who) = audience in (:public, :private) ? audience :
     with_audience(f, audience)
 
 Call `f()` and return its value, rendering everything it renders for
-`audience`: `:public` or `:private`. [`private`](@ref) content shows its
+`audience`: `:public` or `:private`. [`private`](@ref Private) content shows its
 stand-in, or nothing, for `:public`, and in full for `:private`.
 
 Rendering already follows the answer it is part of: a route renders for
@@ -6301,7 +6317,7 @@ tasks: an `:auto` or `@queued` operation's body and a task the route spawns.
 Outside any request it is for the public. Use `with_audience` where code
 renders for someone else: HTML it builds itself (`repr("text/html", x)`, an
 [`HTMLSnapshot`](@ref)) for a given reader. For Markdown,
-[`to_markdown_string`](@ref)`(x; audience)` does the same.
+`to_markdown_string(x; audience)` does the same.
 
 ```julia
 html = with_audience(:private) do
@@ -6320,7 +6336,7 @@ _shown(p::Private, audience) = audience === :public ? p.public : _marked(p, _bui
 _shown(p::Private) = _shown(p, _ambient_audience())
 
 # Private content as a private reader sees it: marked, so the reader can tell
-# what a public export leaves out (snag mark-a-tender-pr-fd4b7782). Every
+# what a public export leaves out. Every
 # projection treats it as its content, plus the mark.
 struct _PrivateMark
     content::Any
@@ -6543,7 +6559,7 @@ _built_answer(req::HTTP.Request, p::Private) =
 
 Thrown when a public answer (a public static export or `dispatch(...;
 audience=:public)`, a recording, a public `pdf_report`) still holds content
-marked [`private`](@ref): markup rendered for the live app before the export
+marked [`private`](@ref Private): markup rendered for the live app before the export
 could leave it out, such as a `Raw` string built from `repr("text/html", …)` or
 an `HTMLSnapshot` held inside a value the export cannot walk. Render that
 markup from the value instead, or build it for the request's
@@ -6584,7 +6600,7 @@ and captures whatever context `value` was built under. Retain it only under the
 application-owned identity documented in "Reusing generated markup" (root and
 provider lifetime, external prefix, selected indices, request inputs, controls
 and domains, presentation settings, and the [`export_audience`](@ref) the
-stored bytes show [`private`](@ref) content for).
+stored bytes show [`private`](@ref Private) content for).
 """
 struct HTMLSnapshot
     value::Any
@@ -6697,7 +6713,7 @@ _record_file_path(url_path::AbstractString, ext::AbstractString) =
 Save a response body to disk, mirroring the URL path structure
 (`/post/42` → `record_dir/post/42<ext>`). Enables later replay via a
 static file server. Pass `ext=".md"` for markdown recordings (under the
-`/md/` subtree); see also [`_save_typed_response`](@ref) which picks
+`/md/` subtree); see also `_save_typed_response` which picks
 the extension from the response's Content-Type.
 """
 function save_response(record_dir::String, url_path::String, response::HTTP.Response; ext::String=".html")
@@ -6806,6 +6822,8 @@ const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-pa
     StaticExport(; url_map=nothing, controls=:disable, record_base="", runtime=:inline,
                  audience=:public)
 
+Configure static transformation of one dispatched request. Supply the specification through `dispatch(...; static=spec)`.
+
 Request-scoped static-export spec: pass it as `dispatch(...; static=spec)` to
 receive one route's response in static form from inside a live server. For
 that request only:
@@ -6862,7 +6880,7 @@ alone, so concurrent ordinary requests are unaffected.
   page whose `assets` addresses the copied libraries addresses the runtime
   too. A many-page export then holds one copy instead of one per page.
 - `audience` — who reads the export. `:public` (default) shows the stand-in
-  of each [`private`](@ref) part, or nothing, and answers a private page with
+  of each [`private`](@ref Private) part, or nothing, and answers a private page with
   an empty `404` (header `X-HTMXO-Private: true`); links inside what it leaves
   out never reach `url_map`. `:private` shows everything, as the live app does.
   The route sees it as [`export_audience`](@ref)`(__req__)`, and Markdown
@@ -6957,7 +6975,7 @@ Who the answer to this request is for: `:public` or `:private`. A request of
 the live app is `:private`, since the live app shows everything. A `dispatch`
 answers for the `audience` it was given, else its `StaticExport`'s (`:public`
 unless asked otherwise), else the audience of the request it is made in, and
-`:public` outside any request. [`private`](@ref) content shows its public
+`:public` outside any request. [`private`](@ref Private) content shows its public
 stand-in, or nothing, in a `:public` answer.
 
 A `dispatch` made while the route runs inherits it, in the route's own task and
@@ -7088,7 +7106,7 @@ through `h.*`. As of the escape-by-default flip, `h.*` escapes text
 children and all attribute values exactly once, so **never** pre-escape
 a value you hand to a node builder (that double-escapes). Reach for
 `escape_html` only when you assemble HTML text yourself; for deliberate
-trusted markup inside a node use [`Raw`](@ref) instead.
+trusted markup inside a node use `Raw` instead.
 """
 escape_html(s::AbstractString) = HTMX.escape(s)
 
@@ -7098,7 +7116,7 @@ escape_html(s::AbstractString) = HTMX.escape(s)
 Escape `&`, `<`, `>` in `s` for safe interpolation into a **hand-built
 raw HTML string** (e.g. `replace(_, => "<a href=...>...")` for a `<pre>`
 block). Never pre-escape a value passed through `h.*` — node builders
-escape text and attributes themselves; use [`Raw`](@ref) for trusted
+escape text and attributes themselves; use `Raw` for trusted
 markup inside a node.
 
 For values that may contain quotes / apostrophes, use
@@ -7132,12 +7150,12 @@ Walk a Node tree and make it static-safe under `rules`:
 - Put a linked page-runtime block (`htmx(...; runtime=:linked)`) back inline,
   unless the spec keeps it linked (`runtime=:linked`)
 
-- Leave out what [`private`](@ref) content does not show the spec's
+- Leave out what [`private`](@ref Private) content does not show the spec's
   `audience`, and every element that links a page the export leaves out as
   private
 
 Documents, arrays, tuples, `content => id` pairs, [`html_only`](@ref) and
-[`private`](@ref) content and [`HTMLSnapshot`](@ref) values are walked
+[`private`](@ref Private) content and [`HTMLSnapshot`](@ref) values are walked
 through; other values pass through unchanged.
 """
 _static_walk(val, rules::_StaticRules) = val
@@ -7214,6 +7232,8 @@ _static_url(::Nothing, address::AbstractString) = String(address)
 
 """
     url_params(; name = value, …, values = (name = domain, …)) -> NamedTuple
+
+Construct attributes that connect page-address parameters to an element which loads content with `hx-get`.
 
 Attributes that let parameters in the page address drive an element that loads
 its content with `hx-get`. Splat them onto that element:
@@ -8165,10 +8185,6 @@ end
 
 # Whether rendering pages concurrently pays: the process has more than one
 # default thread and no more than it has CPUs (the host's, or a quota's).
-# Measured on ODLPlaus's private export (Julia 1.10, a two-CPU quota): one
-# page at a time 1,322-1,362 s; two threads rendering 1,122 s; eight threads
-# 1,709 s, and 1,706 s with at most two of them rendering at once, since
-# threads beyond the CPUs spend the quota spinning.
 function _parallel_pays(n::Integer=Threads.nthreads(:default), quota=_cgroup_cpu_quota())
     cpus = min(Sys.CPU_THREADS, isnothing(quota) ? typemax(Int) : ceil(Int, quota - 1e-6))
     1 < n <= cpus
@@ -8388,7 +8404,7 @@ can run inside a serving app (it renders in process with
   requests needs a lock, as it does for a server, and `file_name` is called
   from several threads.
 - **Private content.** `audience` says who reads the site: `:public` (default)
-  or `:private`. A public site shows the stand-in of each [`private`](@ref)
+  or `:private`. A public site shows the stand-in of each [`private`](@ref Private)
   part, or nothing, and never follows a link inside what it leaves out. A page
   or fragment whose whole answer is private gets no file, and every element
   that links or loads it is left out; a page written before such a page was
@@ -8817,7 +8833,7 @@ const _SITE_RAW_CLOSE = ("-->", r"</script\b[^>]*>"i, r"</style\b[^>]*>"i)
 #
 # No pattern is matched across a text: PCRE stops on one of more than about
 # ten million characters ("match limit exceeded"), and a page may carry its
-# data inline (snag `odlplaus-s-stati-cff9ee9c`). Each byte is searched at
+# data inline. Each byte is searched at
 # most once for a closing tag of a kind that is not there, so many unclosed
 # tags do not make the time quadratic: no closing tag of a kind starts at or
 # after `none[kind]`. A start tag can begin inside an earlier one's attribute
@@ -9559,6 +9575,8 @@ hx_link(url; preload=nothing, kwargs...) =
 """
     htmx_or(full_page_fn, req, fragment)
 
+Return a fragment for an HTMX swap, or call `full_page_fn` for ordinary navigation and uncached history restoration.
+
 Return `fragment` directly for HTMX swaps; call `full_page_fn()` and wrap
 its result for direct browser navigation, and for htmx's reload of a history
 entry it holds no snapshot of (`HX-History-Restore-Request`), whose answer
@@ -9672,6 +9690,8 @@ const _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 """
     redirect_to(req, location; status=303, query=true) -> HTTP.Response
 
+Return an HTTP redirect to a canonical location, with optional forwarding of the request’s query parameters.
+
 Answer `req` with an HTTP redirect to `location`, typically a moved or aliased
 route sending every visitor to its canonical URL:
 
@@ -9744,7 +9764,7 @@ end
     route!(obj; prefix="", record_dir=nothing)
 
 Register all `@get`/`@post`/`@put`/`@patch`/`@delete`-marked properties of `obj`
-on [`ROUTER`](@ref). The type is stored in `_registered_types` so that `_reroute!`
+on `ROUTER`. The type is stored in `_registered_types` so that `_reroute!`
 (called automatically by the `@htmx` macro) can re-register routes when Revise
 updates the struct.
 
@@ -10727,6 +10747,8 @@ _checked_relevance(relevant::Bool, _name) = relevant
 """
     Records(fields::Symbol...; label="Record")
 
+Declare a list of records as one request parameter. Each record supplies values for the named `fields`, which are other parameters of the same object.
+
 A list of records, declared as one `@param` of an `@htmx` struct whose other
 `@param`s `fields` each record has a value for:
 
@@ -10878,6 +10900,8 @@ end
 
 """
     record_view(obj, record) -> obj
+
+View an object with one record’s field values substituted for its request parameters. The record belongs to a `Records` parameter.
 
 `obj` as it answers the one record `record` of a [`Records`](@ref) list: its
 properties read that record's field values in place of the request's. For a
@@ -11735,6 +11759,8 @@ end
 
 """
     live_region_script()
+
+Maintain event-stream subscriptions for discoverable live regions and dispatch incoming events to their descendant fragments.
 
 Client runtime for [`live_region`](@ref) discover mode (`discover=true`).
 Each `[data-htmxo-live-discover]` region keeps one `EventSource` open on
@@ -12598,7 +12624,7 @@ panel) loads afterwards.
 With this runtime the page scrolls to the element once the swap that brings it
 has settled, and after every later swap scrolls it back to where the `#id`
 puts it, as the browser does while the page loads: a link to
-`?tab=trends#odl-tabs` opens the tabset's `trends` tab and lands on it,
+`?tab=trends#sample-tabs` opens the tabset's `trends` tab and lands on it,
 whether the tabset is part of the page or arrives in a fragment, and whatever
 loads first.
 
@@ -12664,6 +12690,8 @@ url_anchor_script() = h.script(Raw(raw"""
 """
     instance_scope_script()
 
+Allow a fragment to appear in several independently identified places on one page. A `data-htmxo-instance` attribute identifies each containing region.
+
 Client runtime that lets one fragment be open in several places of a page at
 once. Mark each place with `data-htmxo-instance="<key>"` (letters, digits,
 `-` and `_`), on the element the fragment loads into or on any element around
@@ -12678,7 +12706,7 @@ h.div(; data_htmxo_instance="liste")(
 ```
 
 When htmx swaps an answer into such a place, every id the answer defines gets
-`--<key>` appended (`odl-tage-010010001` → `odl-tage-010010001--karte`), with
+`--<key>` appended (`sample-days-001` → `sample-days-001--karte`), with
 one `--<key>` per enclosing place, outermost first. Every reference to such
 an id in the answer is renamed with it:
 
@@ -13731,6 +13759,8 @@ const _ERROR_TEXT_LOCALES = (
 """
     error_texts(locale::Symbol=:en; texts...)
 
+Construct localized error messages for `:en` or `:de`, with keyword overrides. A `reasons` override replaces the named HTTP status phrases while retaining the locale’s other phrases.
+
 The [`ErrorTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword. `reasons` replaces the reason phrases of the statuses it
 names and keeps the locale's others:
@@ -13862,8 +13892,8 @@ parsing the trace; `nothing` (a caught, recovered-from error,
 """
 function _record_error end
 
-# One `key: value` line of an error log's header. Readers (the KB's error
-# sweep, Bruno's `bruno-error`) read the header up to its first blank line and
+# One `key: value` line of an error log's header. Readers
+# read the header up to its first blank line and
 # pick the keys they know, so keys stay `[A-Za-z_]+`.
 _print_log_field(io, key, value) = println(io, rpad(string(key, ":"), 10), " ", value)
 
@@ -18910,8 +18940,7 @@ end
 _prewarm_base(base_url::AbstractString) = rstrip(String(base_url), '/')
 
 # A prewarm `timeout` bounds a hang, not a compile. A cold first request can
-# compile for minutes on a slow or loaded machine (one app page took 44 s on two
-# busy CPUs, snag precompile-bruno-329ff905), and inside a precompile workload
+# compile for minutes on a slow or loaded machine, and inside a precompile workload
 # that compilation is the point. So the limit counts only time this process
 # spends outside compilation: wall time minus Julia's cumulative compile time
 # (type inference and code generation, on every thread), which
@@ -19772,7 +19801,7 @@ end
 
 Register every `@get`/`@post`/`@put`/`@patch`/`@delete`/`@ws`/`@sse` route declared on
 `app`'s `@htmx struct` (and all transitively-`@include`d sub-structs) on
-[`ROUTER`](@ref). Returns `app`.
+`ROUTER`. Returns `app`.
 
 Requests are served from `app`: every root HTMXObjects builds for a request —
 a fresh one per request by default, or a new entry of a managed
@@ -19844,7 +19873,7 @@ end
 Drive each path through the in-process route handler with one or more
 header sets, writing recordings under `record_dir`. No subprocess, no
 HTTP listener — looks each path up via `HTTP.Handlers.gethandler` on
-[`ROUTER`](@ref) and invokes the handler with a manufactured
+`ROUTER` and invokes the handler with a manufactured
 `HTTP.Request`. The handler's existing save logic in `_resolve_response`
 writes the appropriate file shape.
 
@@ -20115,7 +20144,7 @@ for a loopback request.
   own: dispatch them with the same `operation_policy` to keep it.
 - `audience` — who the answer is for, `:public` or `:private` (the route reads
   it as [`export_audience`](@ref)`(__req__)`). A `:public` answer shows the
-  stand-in of each [`private`](@ref) part, or nothing, and a private page
+  stand-in of each [`private`](@ref Private) part, or nothing, and a private page
   answers an empty `404` with the header `X-HTMXO-Private: true`. By default
   it is `static`'s audience, else the audience of the request this `dispatch`
   is made in (a live request's is `:private`), else `:public`: a script that
@@ -20125,9 +20154,9 @@ for a loopback request.
   throws [`PrivateContentEscaped`](@ref).
 - `lang` — the language of the answer, a BCP 47 tag such as `"de-DE"`, in
   place of the one the route's mount chain declares with `__lang__`: the
-  route reads it as [`HTMXObjects.page_lang`](@ref)`()`, the page shell takes
+  route reads it as `HTMXObjects.page_lang()`, the page shell takes
   it as its `lang` default, and the words HTMXObjects writes itself follow it,
-  such as the label of [`private`](@ref) content in Markdown ("nicht
+  such as the label of [`private`](@ref Private) content in Markdown ("nicht
   öffentlich"). Without it the route's `__lang__` holds, also for a
   `dispatch` made inside another request. A follow-up poll is a request of its
   own: dispatch it with the same `lang`. A `lang` that is not a language tag
@@ -20249,6 +20278,8 @@ const _REVISE_UUID = "295af30f-e4ad-537b-8983-00126c2a3abe"
 
 """
     create_app(path; port=8000, module_name=nothing, setup=true)
+
+Generate a package and application scaffold at `path`, with optional dependency setup.
 
 Generate a new HTMXObjects app at `path` with the standard package + app structure:
 
@@ -20468,7 +20499,7 @@ pressed or checked, a `<select>` shows its chosen option, a checkbox or radio
 button its mark, and a value field its value. Inside a dropped `<form>` nothing
 is projected; the form still goes whole.
 
-Applied automatically by [`to_markdown_string`](@ref) so every
+Applied automatically by `to_markdown_string` so every
 `?plain` / `?markdown` / `Accept: text/markdown` read drops form chrome with no
 consumer annotation — the automatic counterpart to [`html_only`](@ref), which
 is the explicit per-node opt-out for other HTML-only content.
@@ -20523,7 +20554,7 @@ end
     _rescue_semantic!(out, val)
 
 Collect, in document order, the [`SemanticNode`](@ref)s inside a chrome subtree
-that [`_strip_md_chrome`](@ref) is about to drop.
+that `_strip_md_chrome` is about to drop.
 
 A semantic node sits ABOVE markup: it owns peer Markdown and plain-text
 projections, and its rich view is required to be presentational — no links,
@@ -21074,9 +21105,9 @@ image within a line of text stays in its paragraph, and PAC still warns about it
 
 `audience` says who reads the report: `:public` (default) or `:private`. A
 value is rendered for it, so a public report shows the stand-in of each
-[`private`](@ref) part, or nothing. A Markdown string is rendered already:
+[`private`](@ref Private) part, or nothing. A Markdown string is rendered already:
 render it for the report's audience and language, with
-[`to_markdown_string`](@ref)`(x; audience, lang)` or `dispatch(...; audience,
+`to_markdown_string(x; audience, lang)` or `dispatch(...; audience,
 lang)` (both public by default outside a request; a live request is
 `:private`, so pass the audience inside one). Its label of private content
 stays in the language it was rendered in. A public report refuses Markdown
@@ -21120,21 +21151,21 @@ page address to follow and is still written as its text.
 
 `url_map` says where links open when the site the report links to does not
 serve each address under the app's own name, as a static snapshot that stores
-`/api/v1/ap3/anomalien?p_min=0.9` as `api-v1-ap3-anomalien-p_min-0.9.json`. It
+`/samples?material=plasma` as `samples.json`. It
 is a function from a link's target, as the Markdown writes it (query included;
 a site address, a relative address, an `#id` or a URL), to a URL or `nothing`.
 `pdf_report` calls it before rendering, once for each target of a link in the
 Markdown or in the document options (an address with a scheme in the text is a
 link too, a `[…]()` has no target); Pandoc reads a space in a target as `%20`.
 A `String` answer is the URL the link opens and must be absolute
-(`"https://example.org/odl/api-v1-ap3-anomalien-p_min-0.9.json"`); `nothing`
+(`"https://example.org/demo/samples.json"`); `nothing`
 leaves the link to the rules above. This is the shape of `StaticExport`'s
 `url_map`, except that a PDF cannot open a relative target. A `www.` address
 or a code span that is an address is linked to itself after that, without
 `url_map`.
 
 ```julia
-snapshot = "https://example.org/odl"
+snapshot = "https://example.org/demo"
 snapshot_file(a) = replace(lstrip(a, '/'), r"[/?=&]" => "-") * ".json"
 pdf_report(md, "konzept.pdf"; title="Konzept", lang="de-DE", base_url=snapshot,
            url_map = a -> startswith(a, "/api/") ? "\$snapshot/\$(snapshot_file(a))" : nothing)
@@ -21266,6 +21297,8 @@ const _CAPTION_TEXT_LOCALES = (
 
 """
     caption_texts(locale::Symbol=:en; texts...)
+
+Construct localized caption text for `:en` or `:de`. Keyword arguments override individual phrases.
 
 The [`CaptionTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword:
@@ -21575,6 +21608,8 @@ _sort_key_names_only(hdr) = hdr
 
 """
     sort_values(values...)
+
+Construct the attributes carrying a cell’s numeric sort values, in the order of its column’s declared sort keys.
 
 The attributes that give a table cell its values for the sort keys of its
 column ([`ColumnSpec`](@ref)`(label; sort_keys)`), in the order of the keys:
@@ -24680,6 +24715,8 @@ const _TABLE_TEXT_LOCALES = (
 """
     table_texts(locale::Symbol=:en; texts...)
 
+Construct localized table text for `:en` or `:de`. Keyword arguments override individual phrases.
+
 The [`TableTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
 replaced by keyword:
 
@@ -25681,8 +25718,7 @@ end
 # `querySelector('#detail-' + key)` — a CSS selector — so a `:`, `.`, `/`,
 # leading digit, or space in the raw key throws `SyntaxError` and breaks
 # the whole sort. Replacing every non-`[A-Za-z0-9_-]` char with `--`
-# normalises ids like `Bruno:pkpd` → `Bruno--pkpd`, matching the convention
-# the KB agents panel established by hand.
+# normalises ids like `sample:plasma` to `sample--plasma`.
 _md_safe_key(key) = replace(string(key), r"[^A-Za-z0-9_\-]" => "--")
 
 """
@@ -25973,7 +26009,7 @@ Return an `h.script(...)` node defining the master/detail client runtime
 (`htmxoMdToggle`, `htmxoMdBefore`, `htmxoMdReady`, `htmxoMdAfter`,
 `htmxoMdRetry`) that every row built by [`master_detail_pair`](@ref) /
 [`master_detail_table`](@ref) and
-every [`master_detail_toggle_js`](@ref) snippet calls into.
+every `master_detail_toggle_js` snippet calls into.
 
 Auto-included by [`htmx`](@ref) (so `pico_page` too) and carried by
 [`sortable_table_js`](@ref), the documented companion of every master/detail
@@ -26010,7 +26046,7 @@ a `<form>` or `<details>` still toggles — toggles the
 to the master row and to its detail control (`aria-expanded` on the control,
 and on the row where ARIA allows it: see [`master_detail_table`](@ref)).
 `safe_key` MUST already be CSS-safe
-(see [`master_detail_safe_key`](@ref)).
+(see `master_detail_safe_key`).
 
 The snippet is a short call into the page's master/detail runtime
 ([`master_detail_js`](@ref), auto-included by [`htmx`](@ref) and carried by
@@ -26147,7 +26183,7 @@ Build the `(master_tr, detail_tr)` pair for one master/detail item.
 
 The master `<tr>` carries id `"row-<safe>"` and an onclick that toggles
 the paired detail `<tr id="detail-<safe>">`, where `safe` is `key` run
-through [`master_detail_safe_key`](@ref). The detail row wraps
+through `master_detail_safe_key`. The detail row wraps
 `detail_body` in a single `<td colspan="\$ncols">` cell. By default the
 detail is collapsed initially (`hidden=true`, `aria-expanded="false"` on
 the master) — pass `initially_open=true` for rows whose body IS the content
@@ -26214,7 +26250,7 @@ the user came to see (a question + answer brief, for example).
   an explicit `htmx:abort`, or the third transient failure shows
   click-to-retry. The load is driven by the
   toggle's `lazy_slot_id` seam — never by `load`/`revealed`/`intersect`
-  (see [`master_detail_toggle_js`](@ref)). A collapsed row issues no
+  (see `master_detail_toggle_js`). A collapsed row issues no
   request; an `initially_open=true` lazy row loads once on render.
   The inserted controls are initialized before the slot's `htmx:afterSwap`
   event bubbles to consumers, so immediate form submissions stay in their
@@ -27603,6 +27639,8 @@ _summary_rounding_fields(r::_SigDigits) = (; sigdigits=r.k)
 """
     format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing) -> String
 
+Format a number using the decimal mark, grouping and rounding rules of the selected table language.
+
 Write the number `x` in a table's language, with the decimal mark and
 thousands separator of `texts` (a [`TableTexts`](@ref)): `table_texts(:de)`
 writes `0,156`, `1.234.567` and `3,81·10⁻⁵`; the default English texts write
@@ -27642,6 +27680,8 @@ format_number(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Intege
 
 """
     number_cell(x; texts=table_texts(), digits=nothing, sigdigits=nothing, attrs...)
+
+Render a numeric table cell with localized display text and its unformatted value for sorting and export.
 
 A table cell, `<td>`, that shows `format_number(x; texts, digits, sigdigits)`
 (see [`format_number`](@ref)) and keeps the exact value of `x` twice:
@@ -27793,6 +27833,8 @@ _number_key(x::AbstractFloat) = isinf(x) ? (x > 0 ? "Infinity" : "-Infinity") : 
 """
     IntervalEstimate(estimate, lower, upper; width_digits=2, log=false, digits=nothing, sigdigits=nothing)
 
+Store an estimate and its lower and upper interval bounds as one value. Tables format the estimate together with the interval, using its width to choose display precision.
+
 An estimate with its interval as one value, such as a posterior median with
 its 95 % credible interval. A table writes it as one cell, `22 (13–34)`, with
 no more digits than the interval supports (see [`format_interval`](@ref)), by
@@ -27879,6 +27921,8 @@ _interval_parts(x::IntervalEstimate) = map(_interval_value, (x.estimate, x.lower
 """
     format_interval(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing) -> String
     format_interval(x::IntervalEstimate; kw...)
+
+Format an estimate and its interval with language-specific separators and precision determined by the interval width or explicit rounding options.
 
 Write an estimate with its interval in a table's language (`texts`, a
 [`TableTexts`](@ref)): `22 (13–34)`, `0,52 (0,36–0,71)` with
@@ -28003,6 +28047,8 @@ end
 """
     interval_cell(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing, attrs...)
     interval_cell(x::IntervalEstimate; kw...)
+
+Render an estimate and its interval in a table cell while retaining the underlying numbers for sorting and export.
 
 A table cell, `<td>`, that shows [`format_interval`](@ref)`(estimate, lower,
 upper; …)` and keeps the exact numbers:
@@ -28710,6 +28756,8 @@ _hidden_input(k, v::AbstractVector) =
 """
     hidden_inputs(; kwargs...) -> Vector{Node}
 
+Generate hidden input elements from keyword arguments so a form can forward their names and values.
+
 Generate hidden `<input>` elements for each keyword argument. Splat into a form
 to pass parameters to `@post` routes via `formdata`:
 
@@ -28724,6 +28772,8 @@ hidden_inputs(; kwargs...) = mapreduce(((k, v),) -> _hidden_input(k, v), vcat, k
 
 """
     hidden_inputs(obj; skip=(), overrides...) -> Vector{Node}
+
+Generate hidden inputs from the declared request parameters present on a route object, with optional omissions and value overrides.
 
 Object-form of [`hidden_inputs`](@ref) — the GET-form hop symmetric to
 [`query_url(path, obj)`](@ref). Emit a hidden `<input>` for every `@param`
@@ -29190,6 +29240,8 @@ _as_vector(v) = [v]
 
 """
     ainput(nv; kwargs...)
+
+Construct an input from a string or named tuple. A named tuple supplies both the field name and its current value.
 
 Smart `h.input` wrapper that accepts a `NamedTuple` or `String`. A `NamedTuple`
 like `(; fit_key)` extracts name and value automatically:
@@ -34373,6 +34425,8 @@ set_inputs(; inputs...) = h.template(; data_htmxo_set_inputs=_schema_json(
 """
     semantic_follow_script()
 
+Refresh a semantic application’s result regions when their associated inputs change. The runtime reads the regions’ input and dependency attributes.
+
 Keep the results of a [`semantic_app`](@ref)`(…; presentation=:tabs)` page on
 their inputs. Each read's result region (`[data-htmxo-follow]`) names its
 address, the forms it is sent (`data-htmxo-inputs`: the sidebar and its tab's
@@ -34956,7 +35010,7 @@ $(_STATUS_TONE_CSS)
 
 `<style>` block adapting a Pico CSS page to HTMXO. Include once at the page
 level, after Pico's stylesheet, when an HTMXO app uses Pico CSS. Loaded
-automatically by [`htmx`](@ref) (and so [`pico_page`](@ref)) when
+automatically by [`htmx`](@ref) (and so `pico_page`) when
 `pico_version` is non-`nothing`.
 
 It remaps `--htmxo-*` to Pico's color tokens, so HTMXO components pick up the
@@ -34980,13 +35034,13 @@ later stylesheet (for example in `extra_head`) overrides them:
 `:root { --htmxo-container-max-width: 1800px; --htmxo-container-gutter: 1rem; }`
 tunes the width.
 
-The header of [`pico_page`](@ref), or any `<header><nav>` directly in `<body>`,
+The header of `pico_page`, or any `<header><nav>` directly in `<body>`,
 stays in the page. It may run past `.container` while it fits the window, as
 under Pico, and then continues on further lines: the navigation below the brand,
 starting where the brand does, its entries whole. A later
 `body > header nav, body > header nav ul { flex-wrap: nowrap; }` keeps one line.
 
-A [`private`](@ref) entry of any Pico `nav` (a header, a breadcrumb, a sidebar)
+A [`private`](@ref Private) entry of any Pico `nav` (a header, a breadcrumb, a sidebar)
 shows the label of every private part before its link, its outline inside the
 nav's row. Pico styles the same `::before` as the label, so this rule lives here
 rather than in [`htmxo_utility_styles`](@ref). The label takes up room in the
@@ -35269,6 +35323,8 @@ vitepress_asset_dir() = abspath(_VITEPRESS_ASSETS_DIR)
 """
     vitepress_theme_install(theme_dir; force=true) -> String
 
+Install the package’s HTMX embedding runtime into a VitePress theme directory before building the documentation.
+
 Copy the bundled `htmxo-embed.ts` into a VitePress theme directory.
 Call from `make.jl` before DocumenterVitepress runs:
 
@@ -35394,7 +35450,7 @@ a `role` keeps Pico's look. A choice among many options ([`choice_list`](@ref))
 is a field styled as an input whose list opens beside it, its chosen row filled
 like a pill.
 
-It draws [`pico_page`](@ref)'s frame: the skip link (`.htmxo-skip-link`) is
+It draws `pico_page`'s frame: the skip link (`.htmxo-skip-link`) is
 out of sight until the keyboard reaches it, and the header's link to the page
 being read (`aria-current="page"`) is bold.
 
@@ -36710,7 +36766,7 @@ request_feedback() = (request_feedback_style(), request_feedback_script())
 The page side of `@preload` routes, included by [`htmx`](@ref) whenever it loads
 the `preload` extension. It draws one random id per page load and sends it as the
 `HTMXO-Client` header on the page's same-origin GET requests, so a click can join
-the operation its own preload already started (see [`PRELOAD_MAX_AGE`](@ref) and
+the operation its own preload already started (see `PRELOAD_MAX_AGE` and
 the `@preload` route marker). Include it next to the extension when building a
 `<head>` by hand.
 """
@@ -37433,6 +37489,8 @@ toast_styles() = h.style(Raw(raw"""
 """
     toast_script()
 
+Supply the page shell’s notification runtime, which `htmx` includes.
+
 The page shell's notification runtime, which [`htmx`](@ref) includes:
 
 - `window.htmxoToast(text, status)` shows a toast (`status` `"success"`,
@@ -38136,7 +38194,7 @@ Mixed (eager + lazy):
 Each tabset switches only its own panels, also beside tabsets with the same
 labels. `id` comes from the labels and from what the panels say, so it stays the
 same from one render to the next as long as they do, and it changes with them.
-[`private`](@ref) content does not count, only its public stand-in. Tabsets
+[`private`](@ref Private) content does not count, only its public stand-in. Tabsets
 alike in all of it share an id, and still work. Pass `id="…"` for anything that
 has to name the tabset, such as a link to it.
 
@@ -38156,7 +38214,7 @@ their tabs apart. `url_param=nothing` leaves the URL alone. Inside a docs embed
 
 A lazy tab the URL names loads like the initially active one: once it is
 scrolled into view, so a tabset below the fold waits for the reader. A link
-that should land on the tab names the tabset's `id` too, `?tab=trends#odl-tabs`;
+that should land on the tab names the tabset's `id` too, `?tab=trends#sample-tabs`;
 the browser scrolls to it, and an `htmx()` page keeps it there while lazy parts
 load after the page, and scrolls to a tabset that arrives in a fragment
 ([`url_anchor_script`](@ref)).
@@ -38175,10 +38233,10 @@ fetched only when it is opened. A page with its own `<head>` adds
 [`tabset_script`](@ref) for this; without it every tab is a stop in the page's
 Tab order and opens with Enter.
 
-Markdown (`?plain`, [`to_markdown_string`](@ref), [`pdf_report`](@ref)) has no
+Markdown (`?plain`, `to_markdown_string`, [`pdf_report`](@ref)) has no
 tab to click, so it writes no tab bar: every tab follows in order, its label in
 bold and then its content, as a [`SemanticDisclosure`](@ref) writes its label
-and body. A tab whose content its reader does not see ([`private`](@ref)
+and body. A tab whose content its reader does not see ([`private`](@ref Private)
 content read publicly, with no stand-in) is left out with its label, and a lazy
 tab is its label as a link to its address (`**[Details](/api/details)**`).
 Plain text (`repr("text/plain", …)` of the semantic content holding the tabset)
@@ -38227,6 +38285,8 @@ end
 
 """
     htmx_tabset(items; active=nothing, target="#content", preload=nothing, ...)
+
+Build tabs that fetch server-rendered content into a target element. Each item pairs a visible label with its URL; the active and inactive tabs have separate configurable classes.
 
 HTMX-driven tab row: each tab click fetches content from the server.
 `items` is a collection of `"Label" => url` pairs.
@@ -39266,7 +39326,7 @@ _rename_over!(src, dst) = Sys.iswindows() ?
     GitRepo(path; author="HTMXObjects <noreply@localhost>")
 
 A `@dynamicstruct` owning a directory managed as a git repo — the backend
-for [`EditorRoutes`](@ref). Auto-`git init`s on first access.
+for `EditorRoutes`. Auto-`git init`s on first access.
 
 `editor(relpath; default_content="")` returns a per-file handle with
 `current_content()`, `current_version()`, `versions()`, `read_version(sha)`,

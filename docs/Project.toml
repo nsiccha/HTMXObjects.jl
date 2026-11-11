@@ -4,14 +4,19 @@ DocumenterVitepress = "4710194d-e776-4893-9690-8d956a29c365"
 DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
 HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
 HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
+Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 
 [sources.HTMXObjects]
 path = ".."
 
 [sources.DynamicObjects]
 url = "https://github.com/nsiccha/DynamicObjects.jl.git"
-rev = "dev"
+rev = "pre-inference"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl.git"
 rev = "dev"
+
+[sources.Treebars]
+url = "https://github.com/nsiccha/Treebars.jl"
+rev = "e03f2c7be5579fafce38d8759b531a6e22996ba5"

@@ -1,9 +1,5 @@
 using TestItemRunner
 
-# `export_site`: the whole app as a static site, built on the per-response
-# export (`dispatch(...; static=StaticExport(...))`). Snag
-# `static-site-expo-b42a738b` (reporter VerkehrsStrukturdaten): ODLPlaus,
-# AvHPreise and Portfolio each wrote their own crawler around that primitive.
 
 @testmodule ExportSiteFixture begin
     using HTMXObjects, HTTP
@@ -80,10 +76,6 @@ using TestItemRunner
         @direct @get inline_raster() = MIMEResponse("application/geo+json", "{\"type\":\"FeatureCollection\",\"features\":[]}")
     end
 
-    # A page and a fragment that carry their data inline, as a region map
-    # does, in a 50 MB script: more than PCRE matches a pattern across (snag
-    # `odlplaus-s-stati-cff9ee9c`). The script names a file, so the export
-    # rewrites it.
     big_inline_script(req) = h.script(Raw("var data = [" * "1.25,"^10_000_000 * "0];\nvar spec = {\"data\":{\"url\":" *
                                           repr(static_url(req, base * "/big_raster")) * "}};"))
     @htmx struct BigInlineSiteApp
@@ -146,10 +138,6 @@ using TestItemRunner
             url_params(k = k; values = (k = ("1", "2"),))...)("lone $k")
     end
 
-    # A page whose own address has a query, as a probe's page has its `kenn`:
-    # its frame declares the view it was opened from, and the links that open
-    # it in a view name that address with the view's parameters added (snag
-    # `odlplaus-static-02f57da3`, reporter ODLPlaus:review:ux).
     const STATION_REGIONS = ("de", "land")
     const STATION_LAYERS = ("x", "y")
     const STATION_SIZES = ("k40", "cs137")
@@ -187,10 +175,6 @@ using TestItemRunner
             insitu_frame(kenn, region, groesse)
     end
 
-    # Extensionless downloads whose Content-Type the export's own table does
-    # not name: one the media-type database lists (an Xfig sketch), one it
-    # does not, and one the table names differently from the database
-    # (snag `export-custom-mi-904ff844`, reporter ODLPlaus:review).
     @htmx struct TypedSiteApp
         __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
             pico_version=HTMXObjects._PICO_VERSION)
@@ -231,10 +215,6 @@ using TestItemRunner
         @get parallel_part(; k::Int=0) = rendering(() -> h.p("Teil $k"))
     end
 
-    # A finished bundle another process wrote (snag `private-prebuilt-1136df2c`:
-    # ODLPlaus serves BRM's exported model view from /modelldefinition): its
-    # pages link their styles and scripts relatively, a stylesheet loads a font,
-    # and a script loads a file no markup names.
     function finished_bundle()
         dir = mktempdir()
         mkpath(joinpath(dir, "assets")); mkpath(joinpath(dir, "teil"))
@@ -265,10 +245,6 @@ using TestItemRunner
             h.a("Teil"; href=base * "/bundle_ansicht/teil"))
     end
 
-    # A section exported on its own, served beside a site published before it
-    # (snag `native-static-re-756c2710`, reporter ODLPlaus:ux): the routes of
-    # that site's pages count every render, which an alias to its files must
-    # never cause.
     const SECTION_OLD_CALLS = Threads.Atomic{Int}(0)
     @htmx struct SectionSiteApp
         __page__(content) = htmx(h.main(content); assets=:vendor, runtime=:linked,
@@ -491,15 +467,10 @@ end
 end
 
 @testitem "export_site links files outside the bundle without rendering them, and pages in a folder from there" setup=[HTMXOTestImports, ExportSiteFixture] tags=[:unit] begin
-    # Snag `native-static-re-756c2710` (reporter ODLPlaus:ux): a section is
-    # exported on its own and served beside a site published before it. Its
-    # links to that site's pages name the published files (`aliases` to a file
-    # outside the bundle), and nothing of that site is rendered, copied or
-    # checked. A page that `file_name` puts in a folder links from that folder.
     using Treebars
     route!(SectionSiteApp())
     vendorfiles()
-    old = "https://example.org/p/ODL/alt.html"
+    old = "https://example.org/p/demo/alt.html"
     inside(dir, path) = startswith(path, "/site/fit/") && isfile(joinpath(dir, path[11:end]))
     SECTION_OLD_CALLS[] = 0
 
@@ -637,9 +608,6 @@ end
 
 @testitem "export_site reads and rewrites a script, style or comment larger than PCRE matches across" tags=[:unit] begin
     import HTMXObjects
-    # A pattern matched across a text of more than about ten million
-    # characters stops with "PCRE.exec error: match limit exceeded" (snag
-    # `odlplaus-s-stati-cff9ee9c`). Each text here is over 50 MB.
     data = "[1.25,2.5],"^4_600_000
     link(m) = "f.html?m=" * m * "&k=1"
     marker = r"mk[0-9]+x"

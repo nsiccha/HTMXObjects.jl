@@ -1,12 +1,5 @@
 using TestItemRunner
 
-# Syntax highlighting: every `<code class="language-…">` on an `htmx()` page,
-# such as a `SemanticCode` or a Markdown fence naming its language, is
-# highlighted by the shell's `syntax_script` with PrismJS, which it loads on
-# demand from the `prism_version` template (CDN or the vendor mount). Snag
-# `syntax-highlight-d62ced15` (reporter VerkehrsStrukturdaten:ux): code showed
-# monochrome unless an app added `htmxo_syntax_head()`, which loaded PrismJS
-# from jsdelivr only and never highlighted code swapped in later.
 
 @testmodule SyntaxSiteFixture begin
     using HTMXObjects

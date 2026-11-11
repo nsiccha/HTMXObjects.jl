@@ -10,6 +10,8 @@
     JSONResponse{T}(value)
     JSONResponse(value)
 
+Encode a route value as an `application/json` response using its declared type. OpenAPI reflection uses that type as the response schema.
+
 A finished `application/json` answer: `value` encoded through the declared type
 `T`. Declare it as a route's return type and return the plain value; the route
 answers with the encoded JSON, and [`openapi`](@ref) describes `T` as the

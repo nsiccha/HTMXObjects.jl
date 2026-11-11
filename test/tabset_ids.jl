@@ -75,8 +75,6 @@ end
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
         isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
 
-        # What Bruno's report composer does: the same tab pair inside each panel
-        # of an outer tabset, every form on the page.
         form(kind, mode) = h.form(; id="$kind-$mode")(h.select(; name="profile")(h.option("$kind $mode")))
         composer(kind) = h.div(; id="kind-$kind")(tabset("One report" => form(kind, "one"), "Several reports" => form(kind, "several");
             names=["one", "several"], url_param="reports"))

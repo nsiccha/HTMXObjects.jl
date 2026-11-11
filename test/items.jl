@@ -8931,14 +8931,14 @@ end
     outline(markdown) = [m.captures[1] for m in eachmatch(r"<(h\d)>",
         CommonMark.html(HTMXObjects.markdown_parser()(markdown)))]
 
-    # The reported tender section: the sub-section is one level below its
+    # A synthetic nested section: the sub-section is one level below its
     # parent in every peer, not its sibling.
-    tender = SemanticSection("AP 2: Modell", SemanticProse("…"),
-        SemanticSection("Im Prototyp", SemanticProse("Bayes-Regression")); anchor="tender-ap-2")
-    @test md(tender) == "## AP 2: Modell {#tender-ap-2}\n\n…\n\n### Im Prototyp\n\nBayes-Regression"
-    @test contains(html(tender), "<h2>AP 2: Modell</h2>")
-    @test contains(html(tender), "<h3>Im Prototyp</h3>")
-    @test contains(repr("application/vnd.hyperview+xml", tender),
+    sample_section = SemanticSection("AP 2: Modell", SemanticProse("…"),
+        SemanticSection("Im Prototyp", SemanticProse("Bayes-Regression")); anchor="sample-ap-2")
+    @test md(sample_section) == "## AP 2: Modell {#sample-ap-2}\n\n…\n\n### Im Prototyp\n\nBayes-Regression"
+    @test contains(html(sample_section), "<h2>AP 2: Modell</h2>")
+    @test contains(html(sample_section), "<h3>Im Prototyp</h3>")
+    @test contains(repr("application/vnd.hyperview+xml", sample_section),
         "<text style=\"h3\">Im Prototyp</text>")
 
     # Unnested, a section and the cards it holds read as before.
@@ -10323,8 +10323,6 @@ end
     custom_app = SemanticNodeParamApp()
     custom_html = repr("text/html", operation_form(custom_app, :index))
     @test count("class=\"htmxo-semantic-context\"", custom_html) == 1
-    # Thirteen options, past `radio_max`: one searchable choice list, one
-    # radio per option (snag moved-bruno-s-we-59d19444).
     @test count("class=\"htmxo-choice-list\"", custom_html) == 1
     @test count("type=\"radio\" name=\"model\"", custom_html) == 13
     @test count("name=\"model\"", custom_html) == 13

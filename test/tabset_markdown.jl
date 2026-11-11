@@ -35,8 +35,8 @@ end
 
     # A label that is not text reads as its words; one with none leaves its
     # content without a label.
-    @test startswith(to_markdown_string(tabset(h.span(h.strong("Güte"), " (K-40)") => h.p("g"))),
-        "::: {.htmxo-label}\n**Güte (K-40)**\n:::\n\ng")
+    @test startswith(to_markdown_string(tabset(h.span(h.strong("Güte"), " (Probe A)") => h.p("g"))),
+        "::: {.htmxo-label}\n**Güte (Probe A)**\n:::\n\ng")
     @test to_markdown_string(tabset(h.span() => h.p("bare"), "B" => h.p("b"))) ==
         "bare\n\n::: {.htmxo-label}\n**B**\n:::\n\nb\n\n"
 
@@ -52,15 +52,15 @@ end
     using HTMXObjects
     import HTMXObjects: to_markdown_string
 
-    ts = tabset("Überblick" => SemanticProse("Bayes-Regression der Nettokaltmiete."),
-                "Modelldefinition" => private(SemanticCode(:julia, "mu ~ 1 + wohnflaeche")),
+    ts = tabset("Überblick" => SemanticProse("Regression synthetischer Messwerte."),
+                "Modelldefinition" => private(SemanticCode(:julia, "mu ~ 1 + temperature")),
                 "Kurz" => private(h.p("lang"); public=h.p("kurz")))
     public = to_markdown_string(ts; audience=:public)
-    @test !contains(public, "Modelldefinition") && !contains(public, "wohnflaeche")
-    @test public == "::: {.htmxo-label}\n**Überblick**\n:::\n\nBayes-Regression der Nettokaltmiete.\n\n::: {.htmxo-label}\n**Kurz**\n:::\n\nkurz\n\n"
+    @test !contains(public, "Modelldefinition") && !contains(public, "temperature")
+    @test public == "::: {.htmxo-label}\n**Überblick**\n:::\n\nRegression synthetischer Messwerte.\n\n::: {.htmxo-label}\n**Kurz**\n:::\n\nkurz\n\n"
     own = to_markdown_string(ts; audience=:private)
     @test contains(own, "::: {.htmxo-label}\n**Modelldefinition**\n:::\n\n")
-    @test contains(own, "```julia\nmu ~ 1 + wohnflaeche\n```")
+    @test contains(own, "```julia\nmu ~ 1 + temperature\n```")
     @test contains(own, "::: {.htmxo-label}\n**Kurz**\n:::\n\n") && contains(own, "lang")
 end
 
@@ -68,17 +68,17 @@ end
     using HTMXObjects
     import HTMXObjects: to_markdown_string
 
-    # The reporter's shape: a model entry whose parts are tabs inside a section.
-    entry = SemanticSection("Mietspiegelmodell",
+    # A synthetic model entry whose parts are tabs inside a section.
+    entry = SemanticSection("Messwertmodell",
         tabset("Überblick" => SemanticGroup(SemanticProse("Bayes-Regression."),
                                             SemanticFields(Konvergenz="R̂ 1,004")),
-               "Verwendet in" => SemanticTable((LB=["1"], Anforderung=["Mietspiegel"])),
+               "Verwendet in" => SemanticTable((LB=["1"], Anforderung=["Messwerte"])),
                "Details" => SemanticSection("Priors", SemanticProse("Normal(0, 1)"));
-               id="tender-model-mietmodell-tabs", url_param="tender-model-mietmodell");
-        anchor="tender-model-mietmodell")
+               id="sample-model-readings-tabs", url_param="sample-model-readings");
+        anchor="sample-model-readings")
     md = to_markdown_string(entry)
     @test md == """
-        ## Mietspiegelmodell {#tender-model-mietmodell}
+        ## Messwertmodell {#sample-model-readings}
 
         ::: {.htmxo-label}
         **Überblick**
@@ -94,7 +94,7 @@ end
 
         | LB | Anforderung |
         | --- | --- |
-        | 1 | Mietspiegel |
+        | 1 | Messwerte |
 
         ::: {.htmxo-label}
         **Details**
