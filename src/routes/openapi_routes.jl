@@ -44,6 +44,19 @@ function _openapi_type_schema(t)
     (type="string",)
 end
 
+# JSON inputs retain their shape, unlike textual query/form inputs. A record's
+# detailed construction may be customized through JSON.jl, so promise only its
+# object shape here; container element types and nullability are unambiguous.
+function _openapi_json_input_schema(t)
+    (t === nothing || t === Any || !(t isa Type)) && return (;)
+    t === Nothing && return (type="null",)
+    t isa Union && return (anyOf=map(_openapi_json_input_schema, Base.uniontypes(t)),)
+    t <: AbstractVector && return _openapi_array_schema(_openapi_json_input_schema(eltype(t)))
+    t <: AbstractDict && return _openapi_map_schema(_openapi_json_input_schema(valtype(t)))
+    _json_object_type(t) && return (type="object",)
+    _openapi_type_schema(t)
+end
+
 # Normalize a `reflect` param `default` (already `_unquote`d) into a
 # `_schema_json`-compatible value. Structured values pass through;
 # anything else degrades to its string rendering rather than failing the
@@ -112,21 +125,24 @@ function _openapi_description_body(doc::AbstractString)
 end
 
 # `requestBody` for one route's body-source params (POST/PUT/PATCH kwargs
-# and `@param`s). HTMXObjects reads these from the form body, so the content
-# is `application/x-www-form-urlencoded`.
+# and `@param`s). Both form and JSON objects bind the same declarations.
 function _openapi_request_body(body_params)
     properties = Dict{String,Any}()
+    json_properties = Dict{String,Any}()
     required = String[]
     for param in body_params
         properties[string(param.name)] =
             _openapi_annotate(_openapi_type_schema(param.type), param)
+        json_properties[string(param.name)] =
+            _openapi_annotate(_openapi_json_input_schema(param.type), param)
         param.required && push!(required, string(param.name))
     end
     schema = isempty(required) ?
         (type="object", properties=properties) :
         (type="object", properties=properties, required=required)
     (required=!isempty(required),
-     content=Dict("application/x-www-form-urlencoded" => (schema=schema,)))
+     content=Dict("application/x-www-form-urlencoded" => (schema=schema,),
+                  "application/json" => (schema=merge(schema, (properties=json_properties,)),)))
 end
 
 # --- Response schemas -----------------------------------------------------------

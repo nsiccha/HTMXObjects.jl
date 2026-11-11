@@ -96,6 +96,13 @@ end
             untyped = completed(dispatch(:POST, "/fit/results";
                 headers=["HX-Request" => "true"], body="dataset=no-content-type&data_version=8"))
             @test contains(untyped, "dataset=no-content-type version=8")
+            json = completed(dispatch(:POST, "/fit/results?dataset=query&data_version=7&tags=q&note=query";
+                headers=["HX-Request" => "true", "Content-Type" => "application/json"],
+                body="""{"dataset":"","data_version":8,"tags":[],"child":12,"method":"json","note":null}"""))
+            @test contains(json, "dataset= version=8 tags= child=12 method=json note=nothing")
+            pid = match(r"pid=(\d+)", json)
+            @test pid !== nothing
+            @test (parse(Int, pid.captures[1]) == getpid()) == (workers == 0)
             defaults = completed(hx_get("/fit/results?optional=99"))
             @test contains(defaults, "dataset=default version=0 tags=default child=3 method=pathfinder")
             @test contains(defaults, "level=1 optional=4")

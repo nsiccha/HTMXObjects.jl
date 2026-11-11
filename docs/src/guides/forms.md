@@ -1,6 +1,6 @@
 # Forms
 
-Bind typed query and form values to a route, and give a form an explicit endpoint
+Bind typed query, form, and JSON values to a route, and give a form an explicit endpoint
 and result target.
 
 ## Parameters
@@ -32,6 +32,38 @@ A positional argument belongs to the route path. A keyword argument belongs to
 the request parameters, and a default makes it optional. Use a type annotation
 when the route needs a parsed value rather than a string. Declare `@param`
 inside an object when several of its routes share the same request parameter.
+
+## JSON requests
+
+POST, PUT, and PATCH keywords and `@param` also bind fields from an
+`application/json` object automatically. The same declaration accepts a form
+submission or JSON; send the corresponding `Content-Type`.
+
+```@example forms
+@htmx struct JsonInputs
+    @post item(; name::String, value::Float64) = "$name: $value"
+end
+route!(JsonInputs(); prefix="/json-inputs", operation_policy=:blocking);
+response = dispatch(:POST, "/json-inputs/item";
+    headers=["Content-Type" => "application/json"],
+    body="""{"name":"demo","value":3.0}""");
+@assert response.status == 200 # hide
+result = String(response.body)
+@assert result == "demo: 3.0" # hide
+println(result)
+```
+
+JSON fields retain their native values. Typed fields use JSON.jl's conversion,
+including arrays, dictionaries, and records; send numbers as JSON numbers.
+Missing fields fall back to the query string, then to the declared default, or
+answer 400 when required. Explicit `null`, `""`, and `[]` are supplied values:
+they override query fallback and defaults. To accept null, declare a nullable
+type such as `Union{Nothing,Float64}` (or leave the field untyped).
+
+Malformed JSON, a non-object body, and values the declared type rejects answer
+400. A route without bound inputs can still read its raw body itself. Keyword
+splats retain native JSON values, and `__undeclared_params__` checks JSON field
+names too. OpenAPI advertises both JSON and form request bodies.
 
 ## Controls
 
