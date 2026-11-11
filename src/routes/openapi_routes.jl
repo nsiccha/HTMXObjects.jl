@@ -245,15 +245,18 @@ function _type_field_docs(T)
     docstr === nothing ? Dict{Symbol,Any}() : get(docstr.data, :fields, Dict{Symbol,Any}())
 end
 
-# The `200` response of a route with declared output `returns`. Only a
+# The response of a route with declared output `returns`. Only a
 # `JSONResponse` declaration says what the body holds; its description is the
 # first line of the payload struct's docstring.
-_openapi_ok(c, _returns) = (description="OK",)
-function _openapi_ok(c, ::Type{J}) where {J<:JSONResponse}
+_openapi_status(_returns) = 200
+_openapi_status(::Type{J}) where {J<:JSONResponse} = _json_status(J)
+_openapi_response(c, _returns) = (description="OK",)
+function _openapi_response(c, ::Type{J}) where {J<:JSONResponse}
     T = _json_payload_type(J)
     doc = _json_object_type(T) ? _type_doc(T) : nothing
     summary = doc === nothing ? nothing : _openapi_summary(doc)
-    (description=something(summary, "OK"),
+    status = _json_status(J)
+    (description=something(summary, status == 200 ? "OK" : "HTTP $status"),
      content=Dict("application/json" => (schema=_openapi_response_schema(c, T),)))
 end
 
@@ -295,7 +298,8 @@ function _openapi_operation(route, method::AbstractString, operation_id::Abstrac
     isempty(parameters) || (operation = merge(operation, (parameters=parameters,)))
     isempty(body_params) ||
         (operation = merge(operation, (requestBody=_openapi_request_body(body_params),)))
-    merge(operation, (responses=Dict("200" => _openapi_ok(components, returns)),))
+    merge(operation, (responses=Dict(string(_openapi_status(returns)) =>
+                                    _openapi_response(components, returns)),))
 end
 
 # One `operationId` per operation, unique in the document as OpenAPI requires
@@ -369,8 +373,9 @@ doc = openapi(MyApp; title="My API", version="2.0.0")
   enums → `string`, arrays → `array`, dates → `string` + `format`);
   unresolvable types degrade to `string`.
 - A route declared `::JSONResponse{T}` (see [`JSONResponse`](@ref)) gets an
-  `application/json` `200` response whose schema describes `T` by the rules it
-  is encoded with: a struct is an object of all its fields (all `required`; a
+  `application/json` `200` response; `::JSONResponse{T,Status}` uses `Status`
+  instead (for example, `201` for a created item). Its schema describes `T`
+  by the rules it is encoded with: a struct is an object of all its fields (all `required`; a
   field whose type admits `nothing` may be `null`), described once under
   `components.schemas` and referenced by `\$ref`, with its docstring and
   field docstrings as descriptions and its docstring's first line as the
