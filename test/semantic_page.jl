@@ -3,7 +3,7 @@ using TestItemRunner
 @testmodule SemanticPageFixtures begin
     using HTMXObjects
     using HTMXObjects.DynamicObjects: option_domain
-    export SimPage, FitsPage, CriterionPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
+    export SimPage, FitsPage, CriterionPage, IdentifierPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
 
     const UPLOADS = String[]
 
@@ -88,6 +88,26 @@ using TestItemRunner
         @post add_fit(; name::String) = h.p("added:", name; class="result")
         @get index() = semantic_app(__self__; presentation=:tabs,
             title="Criterion", select=entry -> entry.name !== :index)
+    end
+
+    module Defaults
+        const DEFAULT_TARGET = -50.0
+        const DEFAULT_DIRECTION = "below"
+    end
+    using .Defaults: DEFAULT_TARGET, DEFAULT_DIRECTION
+
+    @htmx struct IdentifierPage
+        @param target::Float64 = DEFAULT_TARGET
+        @param direction::String = DEFAULT_DIRECTION
+        @options(direction) = option_domain(["above", "below"])
+        @param base::Float64 = -25.0
+        @param threshold::Float64 = base
+        @param literal::Symbol = :above
+        @get profile() = h.p("profile:", base; class="result")
+        @get responding() = h.p("responding:", target, ":", direction, ":",
+                                threshold, ":", literal; class="result")
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            select=entry -> entry.name !== :index)
     end
 
     # The sidebar form, and one tab's content, of a rendered page.
@@ -577,6 +597,58 @@ end
     # the value it computes ("a tabs page keeps its inputs in the page address").
     @test contains(repr("text/html", semantic_app(FitsPage(); presentation=:tabs)),
                    "<input type=\"radio\" name=\"fit\" value=\"x\" checked=\"true\" data-htmxo-follows=\"\">")
+end
+
+@testitem "identifier defaults render their values and follow their inputs" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, JSON
+
+    route!(IdentifierPage(); operation_policy=:blocking)
+    page(url) = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
+    result(url) = result_text(dispatch(:GET, url; headers=["HX-Request" => "true"]))
+    field(html, name) = tag_attrs(html, Regex("<input[^>]*name=\"$name\"[^>]*>"))
+    html = page("/?tab=responding")
+    tab = tab_of(html, "responding")
+    @test !contains(html, "DEFAULT_TARGET")
+    @test !contains(html, "DEFAULT_DIRECTION")
+    @test field(tab, "target")["value"] == "-50"
+    @test field(tab, "threshold")["value"] == "-25"
+    @test field(tab, "literal")["value"] == "above"
+    @test !haskey(field(tab, "literal"), "data-htmxo-follows")
+    @test contains(tab, "name=\"direction\" value=\"below\" checked=\"true\"")
+    first_load = tag_attrs(tab, r"<div hx-get=\"/responding[^\"]*\" hx-trigger=\"load\"[^>]*>")
+    @test !contains(first_load["hx-get"], "DEFAULT_")
+    @test result(first_load["hx-get"]) == "responding:-50.0:below:-25.0:above"
+
+    # A bare property reference follows the changed input on a control refresh.
+    region = tag_attrs(tab, r"<div class=\"htmxo-semantic-controls\"[^>]*>")
+    @test region["data-htmxo-depends"] == "base"
+    refreshed = page(region["hx-get"] * "&base=-30")
+    @test field(refreshed, "target")["value"] == "-50"
+    @test field(refreshed, "threshold")["value"] == "-30"
+    @test haskey(field(refreshed, "threshold"), "data-htmxo-follows")
+    @test result("/responding?base=-30") == "responding:-50.0:below:-30.0:above"
+
+    # Explicit request and form values win, including a literal Symbol default.
+    named = page("/?tab=responding&base=-30&target=-10&threshold=-5&literal=below")
+    @test field(named, "target")["value"] == "-10"
+    @test field(named, "threshold")["value"] == "-5"
+    @test field(named, "literal")["value"] == "below"
+    @test !haskey(field(named, "target"), "data-htmxo-follows")
+    @test result("/responding?base=-30&target=-10&threshold=-5&literal=below") ==
+        "responding:-10.0:below:-5.0:below"
+    form = repr("text/html", operation_form(IdentifierPage(), :responding;
+        values=(; target=-12.0, threshold=-7.0)))
+    @test contains(form, "name=\"target\" value=\"-12.0\"")
+    @test contains(form, "name=\"threshold\" value=\"-7.0\"")
+    @test contains(form, "type=\"hidden\" name=\"literal\" value=\"above\"")
+    @test !contains(form, "DEFAULT_")
+
+    # A constant's page-address default is its value; an input-dependent one
+    # stays unset so returning to it continues to follow the other input.
+    defaults = JSON.parse(tag_attrs(tab, r"<form[^>]*>")["data-htmxo-address"])
+    @test defaults["target"] == ["-50.0"]
+    @test defaults["threshold"] === nothing
+    @test defaults["literal"] == ["above"]
 end
 
 @testitem "a default computed from other inputs follows them in a browser" setup=[SemanticPageFixtures] tags=[:browser, :semantic] begin
