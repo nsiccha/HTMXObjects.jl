@@ -63,6 +63,7 @@ export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracke
 export poll_trigger, process_rss_bytes, system_load_panel,
     collect_and_measure!, last_memory_collection, memory_collect_panel
 export reflect, select_routes, precompile_routes!, prewarm_routes!, prewarm_workload!, dispatch, dispatch_parent
+export ServiceSlice, ServicePlan, ServiceRuntime, service_plan, service_owns, drain_service!
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -364,7 +365,9 @@ second slot to `1`, not "match default" — `:interactive` stays at 1 thread eve
 with `auto`. To size both pools equally, compute shell-side:
 `julia -t\$(nproc),\$(nproc)`.
 """
-function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
+serve(; kwargs...) = _serve(ROUTER; kwargs...)
+
+function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
         runtime_tracking::Bool=true, compress::Bool=true, prestart::Bool=true,
@@ -380,10 +383,10 @@ function serve(; host="127.0.0.1", port=8080, async=false, parallel=false,
     tracker = runtime_tracking ? runtime_tracker() : nothing
     _PRESTART_APP[] = prestart ? _prestart_pipeline(middleware) : nothing
     _OPERATION_STREAM[] = operation_stream
-    _OPERATION_PUSH_APP[] = operation_stream ? _inner_pipeline(middleware, ROUTER) : nothing
+    _OPERATION_PUSH_APP[] = operation_stream ? _inner_pipeline(middleware, router) : nothing
     handle = _stream_handler(
         _served_middleware(_request_pipeline(middleware, access_log, Revise,
-                                             tracker; operation_stream)),
+                                             tracker; operation_stream, router)),
         check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
@@ -448,9 +451,9 @@ end
 # The request pipeline, outermost first: access log → runtime `tracker` →
 # Revise → caller `middleware` → fallback → `ROUTER`.
 function _request_pipeline(middleware, access_log, Revise, tracker=nothing;
-        operation_stream::Bool=false)
+        operation_stream::Bool=false, router=ROUTER)
     app = _fallback_middleware(
-        operation_stream ? _operation_stream_router(ROUTER) : ROUTER)
+        operation_stream ? _operation_stream_router(router) : router)
     for m in reverse(middleware)
         app = m(app)
     end
@@ -10954,7 +10957,9 @@ end
 function _register_handler(method, path, handler; resume_only::Bool=false,
         operation::Bool=false)
     http_method = get(_TRANSPORT_HTTP_METHODS, method, method)
+    routers = _registration_routers()
     wrapped = function(req)
+        req.context[:htmxo_get_router] = routers.get
         _runtime_note_route!(req, method, path)
         try
             _check_revise_errors!()
@@ -10968,7 +10973,7 @@ function _register_handler(method, path, handler; resume_only::Bool=false,
     if http_method == "GET" && !resume_only
         _register_get_route!(path, wrapped)
     else
-        HTTP.register!(ROUTER, http_method, path, wrapped)
+        HTTP.register!(routers.all, http_method, path, wrapped)
     end
 end
 
@@ -10982,14 +10987,18 @@ end
 # Every GET route goes on `ROUTER` and on its `_GET_ROUTER` mirror; the
 # resume-only GETs of mutation paths go on `ROUTER` alone. A GET route an app
 # registers on `ROUTER` directly is not mirrored.
+_registration_routers() = get(task_local_storage(), :htmxo_registration_routers,
+                              (; all=ROUTER, get=_GET_ROUTER))
+
 function _register_get_route!(path, handler)
+    routers = _registration_routers()
     pass = _route_registration_pass()
     pass === nothing || push!(pass.get_shapes, _route_shape(path))
     # Re-registering a route already warns once, from `ROUTER`.
     Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
-        HTTP.register!(_GET_ROUTER, "GET", path, handler)
+        HTTP.register!(routers.get, "GET", path, handler)
     end
-    HTTP.register!(ROUTER, "GET", path, handler)
+    HTTP.register!(routers.all, "GET", path, handler)
 end
 
 # The router node a path is filed under. HTTP.jl matches a `{name}` (or `*`)
@@ -11030,7 +11039,7 @@ end
 # without the path's resume-only GET (a `{param}` route covering the path,
 # say), or `405` with the path's mutation verbs as `Allow` when there is none.
 function _resume_only_plain_get(req, allow)
-    response = _GET_ROUTER(req)
+    response = get(req.context, :htmxo_get_router, _GET_ROUTER)(req)
     response isa _NoGetRoute ? HTTP.Response(405, ["Allow" => allow]) : response
 end
 
@@ -17603,7 +17612,8 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                               mount_prefix::AbstractString, name::Symbol, info,
                               method::AbstractString, record_dir, record_base::AbstractString,
                               root_provider::RootProvider,
-                              operation_policy::OperationPolicy)
+                              operation_policy::OperationPolicy;
+                              selection=nothing)
     positional_indices = Any[]
     has_kwargs = false
     # The first positional index of every route is the injected
@@ -17622,6 +17632,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
 
     param_strs, n_params, default_positions = _route_param_shape(positional_indices)
     path = _route_path(prefix, name, param_strs)
+    selection === nothing || (Symbol(method), path) in selection || return nothing
     preload = Symbol("@preload") in info.macros
     direct = Symbol("@direct") in info.macros
     # `@queued`: the route's computation is heavy — it runs on `:default`,
@@ -17766,7 +17777,7 @@ end
 
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
         parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
-        operation_policy=get(_operation_policies, T, OperationPolicy()))
+        operation_policy=get(_operation_policies, T, OperationPolicy()), selection=nothing)
     mount_prefix = isempty(prefix) ? "" : "/" * prefix
     _with_route_registration_pass() do
         _walk_route_meta(T,
@@ -17775,11 +17786,11 @@ function _register_routes(T; prefix="", record_dir=nothing, record_base::String=
                 chain = vcat(parent_chain, [step])
                 _register_included_routes(T, nested_type, chain, nested_prefix, record_dir;
                                           root_prefix=mount_prefix, record_base, root_provider,
-                                          operation_policy)
+                                          operation_policy, selection)
             end,
             (name, info, method) -> _register_one_route(T, T, Symbol[], prefix,
                 mount_prefix, name, info, method, record_dir, record_base,
-                root_provider, operation_policy),
+                root_provider, operation_policy; selection),
         )
     end
 end
@@ -18363,7 +18374,7 @@ end
 function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String,
         record_dir; root_prefix::String="", record_base::String="",
         root_provider=get(_root_providers, ParentT, RootProvider()),
-        operation_policy=get(_operation_policies, ParentT, OperationPolicy()))
+        operation_policy=get(_operation_policies, ParentT, OperationPolicy()), selection=nothing)
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
     _walk_route_meta(NestedT,
@@ -18371,11 +18382,11 @@ function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::Stri
             nested_prefix, step = _nested_prefix_and_step(NestedT, name, info, prefix)
             _register_included_routes(ParentT, nested_type, vcat(chain, [step]),
                 nested_prefix, record_dir; root_prefix, record_base, root_provider,
-                operation_policy)
+                operation_policy, selection)
         end,
         (name, info, method) -> _register_one_route(ParentT, NestedT, chain,
             prefix, root_prefix, name, info, method, record_dir, record_base,
-            root_provider, operation_policy),
+            root_provider, operation_policy; selection),
     )
 end
 
@@ -19801,6 +19812,21 @@ function navigation(obj; depth::Integer=1)
        request=_nav_request(obj))
 end
 
+function _configure_route_root!(obj; root_provider=nothing,
+        operation_policy=OperationPolicy())
+    T = typeof(obj)
+    existing_provider = get(_root_providers, T, nothing)
+    provider = isnothing(root_provider) &&
+               _is_semantic_root_provider(existing_provider) ?
+        existing_provider : _normalize_root_provider(root_provider)
+    policy = _operation_policy(operation_policy)
+    _root_providers[T] = provider
+    get(_root_templates, T, nothing) === obj || _forget_managed_roots!(provider, T, obj)
+    _root_templates[T] = obj
+    _operation_policies[T] = policy
+    (; provider, policy)
+end
+
 """
     route!(app; prefix="", record_dir=nothing, record_base="",
            root_provider=nothing, operation_policy=OperationPolicy())
@@ -19856,17 +19882,9 @@ properties a mutation reads keep their own DynamicObjects cache semantics.
 function route!(obj; prefix="", record_dir=nothing, record_base="",
         root_provider=nothing, operation_policy=OperationPolicy())
     T = typeof(obj)
-    existing_provider = get(_root_providers, T, nothing)
-    provider = isnothing(root_provider) &&
-               _is_semantic_root_provider(existing_provider) ?
-        existing_provider : _normalize_root_provider(root_provider)
-    policy = _operation_policy(operation_policy)
+    (; provider, policy) = _configure_route_root!(obj; root_provider, operation_policy)
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base
-    _root_providers[T] = provider
-    get(_root_templates, T, nothing) === obj || _forget_managed_roots!(provider, T, obj)
-    _root_templates[T] = obj
-    _operation_policies[T] = policy
     !isnothing(record_dir) && empty!(_static_kwargs_paths)
     _register_routes(T; prefix, record_dir, record_base, root_provider=provider,
                      operation_policy=policy)
@@ -20197,7 +20215,7 @@ function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
     policy !== nothing && (req.context[:htmxo_operation_policy] = policy)
     lang !== nothing && (req.context[:htmxo_lang] = lang)
     req.context[:htmxo_audience] = audience
-    resp = _with_dispatch_parent(() -> ROUTER(req), parent)
+    resp = _with_dispatch_parent(() -> _service_dispatch(req), parent)
     audience === :public ? _check_public(resp, "the answer to $(req.method) $(req.target)") : resp
 end
 
@@ -39532,6 +39550,7 @@ content, never a partial one. No lock is needed to read.
 end
 
 include("routes/editor_routes.jl")
+include("services.jl")
 
 function __init__()
     # Per-process error log dir for caught route exceptions.
