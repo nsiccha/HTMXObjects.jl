@@ -10905,6 +10905,16 @@ every field, its controls set closer than a section's. A field's docstring help
 text, the same in every card, is shown once under the cards after the field's
 label (hidden while the field applies to no card); a `@help` text, computed
 per record, stays in each card.
+
+Every card starts open. Its fold control, the disclosures' chevron first in
+its head, folds it to its on/off box, its label and a summary of its values
+in field order: a choice by its option's label, a number after its field's
+label (`Age (years): 50`), a checked box by its label and other text as
+entered, leaving out fields that do not apply (`@relevant`), e.g. `100% q 24
+x 14 · Tablet-20 · Fasted`. Its fields, Duplicate and Remove return when it is
+unfolded. The fold is a reading aid: it changes no input, result or page
+address. A new or duplicated card opens, a folded card stays folded when the
+page draws its list again, and a reload opens every card.
 """
 struct Records <: AbstractVector{NamedTuple}
     fields::Vector{Symbol}
@@ -13794,6 +13804,7 @@ struct ErrorTexts
     record_remove::String              # ... remove this one
     record_include::String             # ... its on/off box
     record_label::String               # ... the accessible name of its label field
+    record_fields::String              # ... the accessible name of its fold control
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -13847,6 +13858,7 @@ const _ERROR_TEXT_LOCALES = (
         record_remove = "Remove",
         record_include = "Include",
         record_label = "Label",
+        record_fields = "Fields",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -13888,6 +13900,7 @@ const _ERROR_TEXT_LOCALES = (
         record_remove = "Entfernen",
         record_include = "Einbeziehen",
         record_label = "Bezeichnung",
+        record_fields = "Felder",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -29707,13 +29720,16 @@ end
 _radio_option(name, option, checked::Bool; attrs...) =
     _choice_option(name, option, checked; type="radio", attrs...)
 
+# The help sits in its own span, so the option's label is the label's own
+# text (a folded `Records` card summarises a choice by it).
 function _choice_option(name, option, checked::Bool; type="checkbox", attrs...)
     disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
     help = get(option, :help, nothing)
     h.label(
         h.input(; type, name=string(name), value=_option_wire_string(option.value),
                 (checked ? (; checked="true") : (;))..., disabled_attrs..., attrs...),
-        isnothing(help) ? option.label : "$(option.label) — $(help)")
+        option.label,
+        (isnothing(help) ? () : (h.span(" — ", help; class="htmxo-option-help"),))...)
 end
 
 """
@@ -30165,13 +30181,14 @@ end
     _records_control(obj, T, param, label, value; radio_max)
 
 The control of a [`Records`](@ref) list: a `<fieldset>` with a card per record
-and an Add button. A card has an on/off box, its label, Duplicate and Remove,
-and a control per field, drawn as the field's own control is (its `@options`,
-`@relevant` and `@help` text evaluated for that record: [`record_view`](@ref)),
-named `name.<i>.<field>`. A field's docstring help, the same in every card, is
-shown once, under the cards, after the field's label; each card's field names
-it in `aria-describedby`. The page runtime (`semantic_follow_script`) adds,
-duplicates and removes cards and numbers them again.
+and an Add button. A card has a fold control, an on/off box, its label,
+Duplicate and Remove, and a control per field, drawn as the field's own
+control is (its `@options`, `@relevant` and `@help` text evaluated for that
+record: [`record_view`](@ref)), named `name.<i>.<field>`. A field's docstring
+help, the same in every card, is shown once, under the cards, after the
+field's label; each card's field names it in `aria-describedby`. The page
+runtime (`semantic_follow_script`) adds, duplicates and removes cards and
+numbers them again, and folds a card to its head with a summary of its values.
 """
 function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX)
     records = value isa Records ? value : getproperty(obj, param.name)
@@ -30243,13 +30260,22 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
                       radio_max::Int=_RADIO_MAX, help_ids=Dict{Symbol,String}())
     prefix = string(name, ".", i, ".")
     kept = Set{String}(Base.values(help_ids))
+    # The fold control names the fields it shows and hides; the id carries
+    # the card's `--name-<i>` suffix, which the page runtime renumbers.
+    fields_id = string("htmxo-record-fields--", name, "-", i)
     head = h.div(
+        h.button(; type="button", class="htmxo-record-fold", aria_expanded="true",
+                 aria_controls=fields_id, aria_label=texts.record_fields,
+                 title=texts.record_fields, data_htmxo_record_action="fold"),
         h.input(; type="hidden", name=prefix * "on", value="false"),
         h.label(h.input(; type="checkbox", name=prefix * "on", value="true",
                         (entry.on ? (; checked="true") : (;))...), texts.record_include;
                 class="htmxo-record-on"),
         h.input(; name=prefix * "label", value=entry.label, aria_label=texts.record_label,
                 class="htmxo-record-label"),
+        # A folded card summarises its values here, after its label; the page
+        # runtime writes it when the reader folds the card.
+        h.span(; class="htmxo-record-summary"),
         h.button(texts.record_duplicate; type="button", class="outline secondary",
                  data_htmxo_record_action="duplicate"),
         h.button(texts.record_remove; type="button", class="outline secondary",
@@ -30264,7 +30290,7 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
                          (_semantic_short_field(view, T, field, values; radio_max) ?
                              (; data_htmxo_width="short") : (;))...)
                    for field in fields]
-    h.div(head, h.div(controls...; class="htmxo-input-section-fields");
+    h.div(head, h.div(controls...; id=fields_id, class="htmxo-input-section-fields");
           class="htmxo-record", data_htmxo_record=string(i))
 end
 
@@ -35482,6 +35508,102 @@ semantic_follow_script() = h.script(Raw(raw"""
   function cardsOf(group) {
     return Array.prototype.filter.call(group.children, function(c) { return c.matches('.htmxo-record'); });
   }
+  // A card's fold control shows its fields or, folded, a summary of its
+  // values after its label in field order: a choice by its option's label, a number
+  // after its field's label, a checked box by its label, other text as
+  // entered; a field that does not apply (hidden) is left out. The card's
+  // `data-htmxo-folded` hides the fields through the stylesheet, never
+  // `hidden`, which the requests and the address read as "does not apply":
+  // the fold changes no input and no result. Every card starts open; a new
+  // or duplicated card opens; a card folded when its list is drawn again (a
+  // refreshed control) stays folded, and a reload opens every card.
+  var FOLDED = 'data-htmxo-folded', folds = {};
+  function ownText(el) {
+    return Array.prototype.filter.call(el.childNodes, function(n) { return n.nodeType === 3; })
+      .map(function(n) { return n.nodeValue; }).join(' ').replace(/\s+/g, ' ').trim();
+  }
+  function optionText(c) {
+    var label = c.closest('label');
+    if (!label) return c.value;
+    var named = label.querySelector('.htmxo-choice-label');
+    return named ? named.textContent.trim() : ownText(label);
+  }
+  function fieldLabel(c) {
+    var label = c.closest('label');
+    if (label) return ownText(label);
+    var set = c.closest('fieldset'), legend = set && set.querySelector(':scope > legend');
+    return legend ? legend.textContent.trim() : '';
+  }
+  function fieldSummary(field) {
+    var controls = Array.prototype.filter.call(field.querySelectorAll('input, select, textarea'), function(c) {
+      return c.name && c.type !== 'hidden' && !PRESSED.test(c.type) && !c.closest('[hidden]');
+    });
+    var first = controls[0];
+    if (!first) return '';
+    if (first.type === 'radio' || (first.type === 'checkbox' && first.closest('[data-htmxo-multiple]'))) {
+      return controls.filter(function(c) { return c.checked; }).map(optionText).join(', ');
+    }
+    if (first.type === 'checkbox') return first.checked ? fieldLabel(first) : '';
+    if (first.tagName === 'SELECT') {
+      return Array.prototype.map.call(first.selectedOptions, function(o) { return o.textContent.trim(); }).join(', ');
+    }
+    var value = first.value.replace(/\s+/g, ' ').trim();
+    if (value === '') return '';
+    return first.type === 'number' ? fieldLabel(first) + ': ' + value : value;
+  }
+  // Each value, with the separator after it, is a span the stylesheet keeps
+  // on one line where it fits: the line breaks between values, after a
+  // separator.
+  function summarise(card) {
+    var summary = card.querySelector(':scope > .htmxo-record-head > .htmxo-record-summary');
+    var fields = card.querySelector(':scope > .htmxo-input-section-fields');
+    if (!summary) return;
+    summary.textContent = '';
+    if (!card.hasAttribute(FOLDED) || !fields) return;
+    var parts = Array.prototype.map.call(fields.children, fieldSummary).filter(Boolean);
+    parts.forEach(function(part, i) {
+      if (i) summary.appendChild(document.createTextNode(' '));
+      var value = document.createElement('span');
+      value.textContent = i < parts.length - 1 ? part + '\u00a0·' : part;
+      summary.appendChild(value);
+    });
+  }
+  function fold(card, folded) {
+    var button = card.querySelector(':scope > .htmxo-record-head > .htmxo-record-fold');
+    if (folded) card.setAttribute(FOLDED, ''); else card.removeAttribute(FOLDED);
+    if (button) button.setAttribute('aria-expanded', folded ? 'false' : 'true');
+    summarise(card);
+  }
+  function foldKey(group) {
+    var form = group.closest('form');
+    return (form && form.id || '') + ' ' + group.getAttribute('data-htmxo-records');
+  }
+  function keepFolds(group) {
+    folds[foldKey(group)] = cardsOf(group).map(function(c) { return c.hasAttribute(FOLDED); });
+  }
+  document.addEventListener('htmx:load', function(e) {
+    var root = e.target;
+    if (!root || !root.querySelectorAll) return;
+    var groups = Array.prototype.slice.call(root.querySelectorAll('[data-htmxo-records]'));
+    if (root.matches('[data-htmxo-records]')) groups.push(root);
+    groups.forEach(function(group) {
+      var kept = folds[foldKey(group)];
+      if (kept) cardsOf(group).forEach(function(c, i) { if (kept[i]) fold(c, true); });
+    });
+  });
+  // A folded card's line follows its values and which fields apply, once
+  // the page's other change handlers and a settling swap have run.
+  var summarising = false;
+  function summariseFolded() {
+    if (summarising) return;
+    summarising = true;
+    setTimeout(function() {
+      summarising = false;
+      document.querySelectorAll('.htmxo-record[' + FOLDED + ']').forEach(summarise);
+    }, 0);
+  }
+  document.addEventListener('change', summariseFolded);
+  document.addEventListener('htmx:afterSettle', summariseFolded);
   document.addEventListener('click', function(e) {
     var button = e.target && e.target.closest && e.target.closest('[data-htmxo-record-action]');
     if (!button) return;
@@ -35490,6 +35612,11 @@ semantic_follow_script() = h.script(Raw(raw"""
     e.preventDefault();
     var name = group.getAttribute('data-htmxo-records'), action = button.getAttribute('data-htmxo-record-action');
     var cards = cardsOf(group), card = button.closest('.htmxo-record');
+    if (action === 'fold') {
+      if (card) fold(card, !card.hasAttribute(FOLDED));
+      keepFolds(group);
+      return;
+    }
     if (action === 'remove') {
       if (cards.length < 2) return;
       card.remove();
@@ -35505,8 +35632,10 @@ semantic_follow_script() = h.script(Raw(raw"""
       var on = copy.querySelector('.htmxo-record-on input');
       if (on && action === 'add') on.checked = true;
       source.insertAdjacentElement('afterend', copy);
+      fold(copy, false);
     }
     cardsOf(group).forEach(function(c, i) { renumber(c, name, c.getAttribute('data-htmxo-record'), i + 1); });
+    keepFolds(group);
     if (window.htmx) window.htmx.process(group);
     group.dispatchEvent(new Event('change', {bubbles: true}));
   });
@@ -36191,7 +36320,7 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-field-error .htmxo-term-def { color: var(--pico-color, CanvasText); }
 [data-htmxo-follow][data-htmxo-stale] { opacity: 0.45; }
 /* A list of records (`Records`): a bordered card per record; its head holds
-   the on/off box, the label, Duplicate and Remove on one row. Pico's
+   the fold control, the on/off box, the label, Duplicate and Remove. Pico's
    unlayered field and button rules read the spacing variables set here: a
    card's fields sit closer, and its inputs are lower, than a section's, so
    several cards fit in a sidebar with every field shown. Short fields,
@@ -36221,11 +36350,48 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-semantic-inputs .htmxo-records { flex: 1 1 100%; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex-basis: 6rem; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
-.htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > :not(.htmxo-record-head) {
+.htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > :not(.htmxo-record-head),
+.htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > .htmxo-record-head > .htmxo-record-summary {
     opacity: 0.5;
 }
 .htmxo-record-add { width: auto; font-size: 0.85em; }
 .htmxo-record-help { margin-bottom: 0.25rem; }
+/* A card's fold control, first in its head, is a button showing the chevron
+   the disclosures draw (`pico_bridge`): down while the card is open, right
+   while it is folded, as tall as the head's other buttons. A folded card
+   (`data-htmxo-folded`) is its fold control, on/off box and label, then a
+   summary of its values, beside the label where the row has room and on the
+   next line where it has not; its fields, Duplicate and Remove give way.
+   These rules hide them, not the `hidden` attribute, which marks an input
+   that does not apply: a folded card's values are still sent and kept in the
+   address. */
+.htmxo-record-head > .htmxo-record-fold {
+    display: flex;
+    --pico-form-element-spacing-horizontal: 0.375rem;
+}
+/* One text line high, as the label of the head's other buttons is. */
+.htmxo-record-fold::before {
+    content: "";
+    width: 1rem;
+    height: calc(var(--pico-line-height, 1.5) * 1em);
+    background-image: var(--pico-icon-chevron, url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgb(136, 145, 164)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E"));
+    background-position: center;
+    background-size: 1rem auto;
+    background-repeat: no-repeat;
+    transition: transform var(--pico-transition, 0.2s ease-in-out);
+}
+.htmxo-record-fold[aria-expanded="false"]::before { transform: rotate(-90deg); }
+.htmxo-record[data-htmxo-folded] > .htmxo-input-section-fields,
+.htmxo-record[data-htmxo-folded] > .htmxo-record-head > button:not(.htmxo-record-fold),
+.htmxo-record:not([data-htmxo-folded]) > .htmxo-record-head > .htmxo-record-summary { display: none; }
+.htmxo-record-head > .htmxo-record-summary {
+    flex: 1 1 12rem;
+    min-width: 0;
+    font-size: 0.875em;
+    color: var(--pico-muted-color, inherit);
+    overflow-wrap: anywhere;
+}
+.htmxo-record-summary > span { display: inline-block; max-width: 100%; }
 /* A choice drawn as a table: the legend is the first column's header, so it
    is read but not shown twice; a row is chosen by a click, and the chosen
    row is marked along its left edge and in bold. */
