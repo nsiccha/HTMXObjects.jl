@@ -55,11 +55,18 @@ using TestItemRunner
             @test value["tags"] == ["auc", "min_change"]
             @test value["typed"] === true
         end
-        for query in ("", "drawn_quantities=")
+        for (query, expected) in (("", ["auc", "min_change"]), ("drawn_quantities=", String[]))
             response = request(query; method)
             @test response.status == 200
-            @test JSON.parse(response.body)["drawn_quantities"] == ["auc", "min_change"]
+            @test JSON.parse(response.body)["drawn_quantities"] == expected
         end
+        response = request("drawn_quantities=&doses=&tags=&plain=&scalar="; method,
+                           fallback="?drawn_quantities=auc&doses=1")
+        @test response.status == 200
+        value = JSON.parse(response.body)
+        @test all(isempty(value[name]) for name in ("drawn_quantities", "doses", "tags", "plain"))
+        @test value["scalar"] == "auc"
+        @test value["typed"] === true
         for query in ("drawn_quantities=unknown", "drawn_quantities=disabled",
                       "drawn_quantities=auc&drawn_quantities=unknown",
                       "drawn_quantities=auc&drawn_quantities=disabled", "doses=4")
