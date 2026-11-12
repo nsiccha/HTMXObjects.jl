@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.112
+
+- A `Records` card has a fold control, the disclosures' chevron as the first
+  button in its head (`aria-expanded`, `aria-controls` naming its fields,
+  accessible name `Fields`, German `Felder`: the new `ErrorTexts` text
+  `record_fields`). Every card starts open. A folded card is its on/off box,
+  its label and a summary of its values in field order: a choice by its
+  option's label, a number after its field's label (`Age (years): 50`), a
+  checked box by its label, other text as entered, leaving out fields that
+  do not apply (`@relevant`); its fields, Duplicate and Remove give way until
+  it is unfolded. The fold changes no input, result or page address (the
+  fields are hidden by a stylesheet rule, not `hidden`). A new or duplicated
+  card opens, a fold follows its card when the cards are renumbered and when
+  the form's controls are drawn again, and a reload opens every card.
+  (`cb10946`)
+- A pill's option help (`radio_group`, a generated choice) is a
+  `span.htmxo-option-help` after the option's label, which it was in the same
+  text node before; it reads as before.
+
 ## 0.1.111
 
 - An input section (`semantic_app(…; presentation=:tabs, sections)`) that
