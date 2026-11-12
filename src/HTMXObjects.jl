@@ -10900,7 +10900,7 @@ conditions as the fields' own are; a refused value names
 `scenarios.<i>.<field>`. On an app page
 ([`semantic_app`](@ref)`(…; presentation=:tabs)`) the list is a card per record
 with an on/off box, an editable label, Duplicate and Remove, and Add, which
-copies the last record; see the API reference's *An app page*. A card shows
+copies the last record. A card shows
 every field, its controls set closer than a section's. A field's docstring help
 text, the same in every card, is shown once under the cards after the field's
 label (hidden while the field applies to no card); a `@help` text, computed
