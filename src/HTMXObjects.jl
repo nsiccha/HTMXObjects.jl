@@ -2176,7 +2176,7 @@ end
 _param_names(::Type) = ()
 
 """
-    _convert_params!(struct_expr) -> Vector{Symbol}
+    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets)
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
 to plain derived-property assignments that call
@@ -2208,17 +2208,20 @@ is its default, whatever was submitted. A `@relevant` parameter therefore needs
 a default.
 
 Returns the ordered list of declared param names for later `_param_names`
-emission, and the `@relevant` conditions by name for `_param_relevance`.
+emission, the `@relevant` conditions, and each `@resets` target's source names.
 """
-function _convert_params!(struct_expr)
+function _convert_params!(struct_expr; parent_params=())
     body = struct_expr.args[3]
     option_names = Set{Symbol}()
     relevance = Pair{Symbol,Any}[]
+    resets = Pair{Symbol,Tuple}[]
     for arg in body.args
         name = _option_parameter_name(arg)
         name === nothing || push!(option_names, name)
         declared = _relevance_declaration(arg)
         declared === nothing || push!(relevance, declared)
+        reset = _reset_declaration(arg)
+        reset === nothing || push!(resets, reset)
     end
     relevant_names = Set{Symbol}(first.(relevance))
     length(relevant_names) == length(relevance) || throw(ArgumentError(string(
@@ -2229,12 +2232,17 @@ function _convert_params!(struct_expr)
     allunique(helps) || throw(ArgumentError(string(
         "@htmx: a `@param` has two `@help` declarations: ",
         join(unique(n for n in helps if count(==(n), helps) > 1), ", "))))
+    reset_names = Set(first.(resets))
+    length(reset_names) == length(resets) || throw(ArgumentError(
+        "@htmx: an input has two `@resets` declarations; name its sources in one tuple"))
     names = Symbol[]
     new_args = Any[]
     process_line! = inner -> begin
         delegated = _rewrite_param_delegation(inner)
         if delegated !== nothing
             for (n, assign) in delegated
+                n in reset_names && throw(ArgumentError(
+                    "@htmx: declare `@resets($n)` where `$n` is extracted from the request"))
                 n in relevant_names && throw(ArgumentError(string(
                     "@htmx: `@relevant($n)` names a `@param` that delegates to another ",
                     "struct; declare the condition where `$n` is extracted from the request")))
@@ -2245,10 +2253,13 @@ function _convert_params!(struct_expr)
         end
         rewritten = _rewrite_param_line(inner, option_names, relevant_names)
         rewritten === nothing && return
+        rewritten[1] in reset_names && !Meta.isexpr(inner, :(=), 2) &&
+            throw(ArgumentError("@htmx: `@resets($(rewritten[1]))` needs a `@param` with a default"))
         push!(names, rewritten[1])
         push!(new_args, rewritten[2])
     end
     for arg in body.args
+        _reset_declaration(arg) === nothing || continue
         declared = _relevance_declaration(arg)
         if declared !== nothing
             # The condition, as a property of its own: DynamicObjects reads its
@@ -2321,61 +2332,63 @@ function _convert_params!(struct_expr)
             "@htmx: `@help($name)` names no `@param` of this struct; ",
             "declare `@param $name = <default>` next to it")))
     end
-    names, relevance
+    available = union(Set(names), Set(parent_params))
+    for (name, sources) in resets
+        name in names || throw(ArgumentError("@htmx: `@resets($name)` names no `@param` of this struct"))
+        for source in sources
+            source in available || throw(ArgumentError(
+                "@htmx: `@resets($name)` source `$source` names no `@param` of this struct or its parent"))
+        end
+    end
+    names, relevance, resets
 end
 
-# `@relevant(name) = condition` and `@relevant name = condition`, as
-# `name => condition`; `nothing` for any other line.
-function _relevance_declaration(arg)
+# Companion declarations share the two Julia parser shapes, including
+# `@marker(name) = value` and `@marker name = value`.
+function _param_declaration(arg, marker, value)
+    message = "@htmx: write `$marker(name) = $value` with the name of one `@param`"
     if Meta.isexpr(arg, :(=), 2) && Meta.isexpr(arg.args[1], :macrocall)
         lhs = arg.args[1]
         mname = lhs.args[1]
-        (mname isa GlobalRef ? mname.name : mname) === Symbol("@relevant") ||
+        (mname isa GlobalRef ? mname.name : mname) === marker ||
             return nothing
         payload = Any[x for x in lhs.args[2:end] if !(x isa LineNumberNode)]
-        length(payload) == 1 && only(payload) isa Symbol || throw(ArgumentError(
-            "@htmx: write `@relevant(name) = condition` with the name of one `@param`"))
+        length(payload) == 1 && only(payload) isa Symbol || throw(ArgumentError(message))
         return only(payload) => arg.args[2]
     end
     Meta.isexpr(arg, :macrocall) || return nothing
     mname = arg.args[1]
-    (mname isa GlobalRef ? mname.name : mname) === Symbol("@relevant") ||
+    (mname isa GlobalRef ? mname.name : mname) === marker ||
         return nothing
     payload = Any[x for x in arg.args[2:end] if !(x isa LineNumberNode)]
     length(payload) == 1 && Meta.isexpr(only(payload), :(=), 2) &&
-        only(payload).args[1] isa Symbol || throw(ArgumentError(
-            "@htmx: write `@relevant(name) = condition` with the name of one `@param`"))
+        only(payload).args[1] isa Symbol || throw(ArgumentError(message))
     only(payload).args[1] => only(payload).args[2]
 end
 
+_relevance_declaration(arg) = _param_declaration(arg, Symbol("@relevant"), "condition")
 _relevance_property(name::Symbol) = Symbol("__relevant_", name, "__")
 
 # `@help(name) = text` (and `@help name = text`), as `name => text`; `nothing`
 # for any other line. The text may read other properties and inputs.
-function _help_declaration(arg)
-    if Meta.isexpr(arg, :(=), 2) && Meta.isexpr(arg.args[1], :macrocall)
-        lhs = arg.args[1]
-        mname = lhs.args[1]
-        (mname isa GlobalRef ? mname.name : mname) === Symbol("@help") || return nothing
-        payload = Any[x for x in lhs.args[2:end] if !(x isa LineNumberNode)]
-        length(payload) == 1 && only(payload) isa Symbol || throw(ArgumentError(
-            "@htmx: write `@help(name) = text` with the name of one `@param`"))
-        return only(payload) => arg.args[2]
-    end
-    Meta.isexpr(arg, :macrocall) || return nothing
-    mname = arg.args[1]
-    (mname isa GlobalRef ? mname.name : mname) === Symbol("@help") || return nothing
-    payload = Any[x for x in arg.args[2:end] if !(x isa LineNumberNode)]
-    length(payload) == 1 && Meta.isexpr(only(payload), :(=), 2) &&
-        only(payload).args[1] isa Symbol || throw(ArgumentError(
-            "@htmx: write `@help(name) = text` with the name of one `@param`"))
-    only(payload).args[1] => only(payload).args[2]
-end
+_help_declaration(arg) = _param_declaration(arg, Symbol("@help"), "text")
 
 _help_property(name::Symbol) = Symbol("__help_", name, "__")
 
 # Default: no `@relevant` declarations.
 _param_relevance(::Type) = (;)
+
+# Reset policy belongs to generated forms, never to stateless request parsing.
+_param_resets(::Type) = (;)
+function _reset_declaration(arg)
+    declared = _param_declaration(arg, Symbol("@resets"), "source")
+    declared === nothing && return nothing
+    name, rhs = declared
+    sources = Meta.isexpr(rhs, :tuple) ? rhs.args : Any[rhs]
+    !isempty(sources) && all(source -> source isa Symbol, sources) ||
+        throw(ArgumentError("@htmx: `@resets($name)` needs a source input name or a tuple of names"))
+    name => Tuple(unique(sources))
+end
 
 # Read the parameter name from either supported declaration spelling before
 # DynamicObjects lowers it:
@@ -2585,7 +2598,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     reroute && _warn_redundant_req_decl!(struct_expr)
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
-    own_params, own_relevance = _convert_params!(struct_expr)
+    own_params, own_relevance, own_resets = _convert_params!(struct_expr; parent_params)
     own_headers = _convert_headers!(struct_expr)
     # Merge: parent params/headers first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -2651,6 +2664,13 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
             Expr(:call, _pr_fname, :(::Type{$type_name})),
             Expr(:tuple, Expr(:parameters,
                 (Expr(:kw, name, QuoteNode(condition)) for (name, condition) in own_relevance)...))))
+    end
+    if !isempty(own_resets)
+        _reset_fname = GlobalRef(@__MODULE__, :_param_resets)
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, _reset_fname, :(::Type{$type_name})),
+            Expr(:tuple, Expr(:parameters,
+                (Expr(:kw, name, QuoteNode(sources)) for (name, sources) in own_resets)...))))
     end
     # Emit _inline_struct_props for backward compat
     all_nested = Symbol[p for (p, _) in inline_props]
@@ -29870,10 +29890,17 @@ end
 
 # Whether `param`'s control follows its computed default: a request `@param`
 # (an operation argument's default is no property) the request does not name.
-_semantic_follows_default(obj, param) = _computed_default(param) &&
+_semantic_follows_default(obj, param) = (_computed_default(param) || haskey(param, :resets)) &&
     !_semantic_fixed_context(param) &&
     _param_declaring_object(obj, param.name) !== nothing &&
     !_semantic_request_names(obj, param.name, param.type)
+
+function _with_resets(obj, param)
+    source = _param_declaring_object(obj, param.name)
+    source === nothing && return param
+    sources = get(Base.invokelatest(_param_resets, typeof(source)), param.name, ())
+    isempty(sources) ? param : merge(param, (; resets=sources))
+end
 
 # The value a computed default takes for the request `obj` answers, or
 # `_NO_DEFAULT` when an input it reads is at fault (a caller fault, which that
@@ -30393,8 +30420,13 @@ function _semantic_control(obj, owner, param, values;
     # Shows its computed default until the reader sets it.
     param.name in _semantic_follows(values) &&
         (control = _with_field_attr(control, param.name, _FOLLOWS_ATTR, ""))
+    control = _with_reset_attr(control, param)
     _relevance_wrapped(control, obj, param)
 end
+
+_with_reset_attr(control, param) = haskey(param, :resets) ?
+    _with_field_attr(control, param.name, Symbol("data-htmxo-resets"),
+                     _semantic_names_attr(param.resets)) : control
 
 # --- Help text under a generated control (`@help`, docstring paragraphs) ---
 
@@ -30869,8 +30901,12 @@ _semantic_hidden_inputs(hidden) =
     Any[node for (name, value) in hidden for node in
         _hidden_input(name, value isa AbstractVector && isempty(value) ? "" : value)]
 
-_semantic_context_inputs(route, values) =
-    _semantic_hidden_inputs(_semantic_hidden_values(route, values))
+function _semantic_context_inputs(route, values)
+    params = Dict(param.name => param for param in route.params)
+    Any[_with_reset_attr(node, params[name])
+        for (name, value) in _semantic_hidden_values(route, values)
+        for node in _hidden_input(name, value)]
+end
 
 function _semantic_runtime_route(obj, route)
     params = NamedTuple[route.params...]
@@ -30920,7 +30956,7 @@ function _semantic_runtime_route(obj, route)
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
     merge(route, (params=NamedTuple[
-        _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param)))
+        _with_resets(obj, _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param))))
         for param in params],))
 end
 
@@ -31006,7 +31042,8 @@ function _semantic_param_dependencies(param)
     # default follows (`_with_default_reads`).
     defaulted = shown ? get(param, :default_reads, nothing) : nothing
     defaulted = isnothing(defaulted) ? nothing : Set{Symbol}(defaulted)
-    found = filter(!isnothing, Any[domain, read, explained, defaulted])
+    reset = shown && haskey(param, :resets) ? Set{Symbol}(param.resets) : nothing
+    found = filter(!isnothing, Any[domain, read, explained, defaulted, reset])
     isempty(found) ? nothing : union(found...)
 end
 
@@ -31138,7 +31175,7 @@ function _operation_refresh_values(req, route, base::Int, n_params::Int)
             value = _semantic_lookup_value(src, fallback, param)
             if value !== _NO_DEFAULT
                 values[param.name] = value
-            elseif !param.required && !_computed_default(param)
+            elseif !param.required && !_computed_default(param) && !haskey(param, :resets)
                 # A computed default is left to `_semantic_form_values`, which
                 # computes it for the inputs this refresh sends.
                 values[param.name] = param.default
@@ -34625,6 +34662,10 @@ sends, and the region that draws the field again (its default reads the input
 that changed) shows the new value. A field the reader typed in or chose is
 sent like any other from then on. Automatic — no consumer wiring. The `htmx()`
 shell installs it; include it once per page when building a `<head>` by hand.
+
+`@resets(threshold) = source` opts that input back into following its default
+when the reader changes the named source's value. A tuple names several
+sources. Equal values and changes in an unrelated form leave the edit intact.
 """
 semantic_refresh_script() = h.script(Raw(raw"""
 (function() {
@@ -34660,7 +34701,7 @@ semantic_refresh_script() = h.script(Raw(raw"""
   // The forms a request sends: the requesting element's own, and those its
   // `hx-include` names (a generated form names `closest …` and `#id`).
   function sentForms(elt) {
-    var found = [], form = elt.tagName === 'FORM' ? elt : elt.closest('form');
+    var found = [], form = elt.tagName === 'FORM' ? elt : elt.form || elt.closest('form');
     if (form) found.push(form);
     var host = elt.closest('[hx-include]');
     (host ? host.getAttribute('hx-include') : '').split(',').forEach(function(s) {
@@ -34676,6 +34717,62 @@ semantic_refresh_script() = h.script(Raw(raw"""
     });
     return found;
   }
+  // Compare the source's submitted value, not the fact that it emitted an
+  // event. Snapshots live on form owners, which survive controls refreshes.
+  var snapshots = new WeakMap();
+  function inputValues(form, submitted) {
+    var values = new Map();
+    Array.prototype.forEach.call(form.elements || form.querySelectorAll('input, select, textarea'), function(c) {
+      if (!c.name || c.disabled || /^(submit|reset|button|image|file)$/.test(c.type)) return;
+      if (submitted && c.hasAttribute(FOLLOWS)) return;
+      if (!values.has(c.name)) values.set(c.name, []);
+      var v = values.get(c.name);
+      if (c.type === 'radio') { if (c.checked) v.push(c.value); }
+      else if (c.type === 'checkbox') {
+        if (c.checked) v.push(c.value);
+        else if (c.value === 'true' && !c.closest('[data-htmxo-multiple]')) v.push('false');
+      } else if (c.type === 'select-multiple') {
+        Array.prototype.forEach.call(c.selectedOptions, function(o) { v.push(o.value); });
+      } else v.push(c.type === 'number' && c.value !== '' ? String(Number(c.value)) : c.value);
+    });
+    values.forEach(function(v, name) { values.set(name, JSON.stringify(v)); });
+    return values;
+  }
+  function rememberInputs(e) {
+    var root = e && e.target || document, forms = new Map();
+    function remember(c) {
+      if (!c.form || !c.name) return;
+      if (!forms.has(c.form)) forms.set(c.form, new Set());
+      forms.get(c.form).add(c.name);
+    }
+    if (root.matches && root.matches('input, select, textarea')) remember(root);
+    root.querySelectorAll('input, select, textarea').forEach(remember);
+    forms.forEach(function(names, form) {
+      var values = inputValues(form), old = snapshots.get(form);
+      if (!old) snapshots.set(form, values);
+      // A refreshed control establishes its new baseline. An unrelated
+      // result load must not absorb a reader's still-uncommitted edit.
+      else names.forEach(function(name) { old.set(name, values.get(name)); });
+    });
+  }
+  document.addEventListener('DOMContentLoaded', rememberInputs);
+  document.addEventListener('htmx:load', rememberInputs);
+  if (document.readyState !== 'loading') rememberInputs();
+  document.addEventListener('change', function(e) {
+    var t = e.target, form = t && t.form;
+    if (!form || !t.name) return;
+    var old = snapshots.get(form), values = inputValues(form), value = values.get(t.name);
+    if (!old) { snapshots.set(form, values); return; }
+    var previous = old.get(t.name);
+    old.set(t.name, value);
+    if (previous === value) return;
+    // Clear overrides before htmx's change listener collects any parameters.
+    // Includes form-associated placed controls and operation forms that read
+    // a shared sidebar; an unrelated form with the same names stays untouched.
+    document.querySelectorAll('[data-htmxo-resets~=' + quoted(t.name) + ']').forEach(function(c) {
+      if (sentForms(c).indexOf(form) >= 0) c.setAttribute(FOLLOWS, '');
+    });
+  }, true);
   document.addEventListener('htmx:configRequest', function(e) {
     var d = e.detail, elt = d && d.elt;
     if (!elt || !elt.closest || !d.parameters) return;
@@ -34689,6 +34786,33 @@ semantic_refresh_script() = h.script(Raw(raw"""
     Object.keys(follows).forEach(function(name) {
       if (!set[name]) delete d.parameters[name];
     });
+  });
+  // An edit made while a reset refresh is in flight is newer than its
+  // answer. Ask again with that edit before replacing the controls. Compare
+  // submission intent: other fields following defaults may redraw meanwhile.
+  var refreshInputs = new WeakMap();
+  function inputKey(form) {
+    return JSON.stringify(Array.from(inputValues(form, true)).sort());
+  }
+  document.addEventListener('htmx:beforeSend', function(e) {
+    var d = e.detail, config = d && d.requestConfig, target = d && d.target;
+    if (!config || !/[?&]__htmxo_form=/.test(config.path || '') || !target ||
+        !target.querySelector('[data-htmxo-resets]')) return;
+    refreshInputs.set(d.xhr, {elt: d.elt, forms: sentForms(d.elt).map(function(form) {
+      return {form: form, key: inputKey(form)};
+    })});
+  });
+  document.addEventListener('htmx:beforeSwap', function(e) {
+    var d = e.detail, prior = d && refreshInputs.get(d.xhr);
+    if (!prior || !d.shouldSwap || !prior.forms.some(function(v) {
+      return v.key !== inputKey(v.form);
+    })) return;
+    d.shouldSwap = false;
+    if (!prior.elt.isConnected) return;
+    // htmx queues this on the requesting element until its current request
+    // finishes. Both context-control and operation-form refreshes use it.
+    window.htmx.trigger(prior.elt,
+      prior.elt.getAttribute('hx-trigger') === 'htmxo-refresh' ? 'htmxo-refresh' : 'change');
   });
   document.addEventListener('change', function(e) {
     var t = e.target, name = t && t.name;

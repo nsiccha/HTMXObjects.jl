@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.109
+
+- `@resets(input) = source` (or a tuple of source inputs) restores a generated
+  form input's current default when a named source changes. Reader overrides
+  are cleared before controls, results and the page address refresh; later
+  edits persist until another source change. Initial explicit URL parameters
+  and direct requests retain their values. A delayed refresh preserves an edit
+  made after it started. (`e81f9f8`)
+
 ## 0.1.108
 
 - Vector choices render as checkbox pills up to `radio_max` and a searchable

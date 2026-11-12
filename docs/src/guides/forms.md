@@ -93,6 +93,39 @@ become hidden inputs; attributes such as `hx_target` configure the form.
 Use `obj=__self__` to forward an object's set `@param` values, with `skip` for
 parameters already supplied by visible controls.
 
+## Resetting dependent inputs
+
+From 0.1.109, a generated form can discard an edited input when one of its
+named source inputs changes:
+
+```julia
+@htmx struct Comparison
+    @param measure::String = "distance"
+    @options(measure) = ["distance", "duration"]
+    @param threshold::Float64 = measure == "distance" ? 10.0 : 30.0
+    @resets(threshold) = measure
+    @get result() = h.p(measure, ": ", threshold)
+    @get index() = semantic_app(__self__; presentation=:tabs,
+        select=entry -> entry.name !== :index)
+end
+```
+
+After the reader sets a threshold, changing `measure` restores the new
+measure's default. The input follows that default again until the next reader
+edit. The refreshed control, result and page address agree; reloading the
+address reproduces that state. An input without `@resets` keeps an edited
+value when other inputs change.
+
+Use a tuple for several sources: `@resets(threshold) = (measure, reference)`.
+The right side names `@param` inputs, not a computed expression, and the reset
+input must have a default. Repeated events with the same source value and
+changes to unrelated inputs leave the edit intact. The declaration applies to
+`semantic_app` and `operation_form`, including controls placed with `place=`.
+
+Explicit values in an opened URL remain intentional. A direct request also
+honors its explicit parameters: resetting is a transition in the generated
+form, which knows the previous source value.
+
 ## Multiple choices
 
 A vector input with `@options` uses checkbox pills for at most `radio_max`
