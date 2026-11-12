@@ -30457,7 +30457,8 @@ end
 # `help_id` names a help text shown elsewhere (once under a list's cards): the
 # control is described by it instead of carrying the text.
 function _semantic_control(obj, owner, param, values;
-        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto, help_id=nothing)
+        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto, help_id=nothing,
+        heading=nothing)
     value = get(values, param.name, nothing)
     doc_label, doc_help = _doc_label_help(param.doc)
     label = isnothing(doc_label) ? Long(param.name) : doc_label
@@ -30466,6 +30467,8 @@ function _semantic_control(obj, owner, param, values;
     default = _semantic_default_control(control_obj, ControlT, param, label, value, values;
                                         radio_max, presentation)
     default = help_id === nothing ? _with_help_text(default, help) : _with_help_ref(default, help_id)
+    # Alone in an input section whose heading already says its label.
+    isnothing(heading) || (default = _heading_named(default, heading))
     control = semantic_control(control_obj, Val(param.name),
                                (; name=param.name, label, value, param, default, help))
     # Shows its computed default until the reader sets it.
@@ -31157,8 +31160,8 @@ whole group, and the operation's hidden request context rides the URL, so the
 domain is evaluated exactly as the operation's own form would evaluate it.
 """
 function _semantic_context_control(obj, route, param, current, action, shared_names;
-        radio_max::Int=_RADIO_MAX, placed=nothing)
-    control = _semantic_control(obj, route.owner, param, current; radio_max)
+        radio_max::Int=_RADIO_MAX, placed=nothing, heading=nothing)
+    control = _semantic_control(obj, route.owner, param, current; radio_max, heading)
     # A control placed outside the group's form (`semantic_app(…; place)`)
     # still belongs to it: its fields name the form (`form=`).
     isnothing(placed) || (control = _with_form_owner(control, placed, param.name))
@@ -31171,6 +31174,8 @@ function _semantic_context_control(obj, route, param, current, action, shared_na
         (isnothing(lifted) ? (;) : (; __htmxo_lifted=_semantic_names_attr(lifted, ',')))...,
         (radio_max == _RADIO_MAX ? (;) : (; __htmxo_radio_max=radio_max))...,
         (isnothing(placed) ? (;) : (; __htmxo_placed=placed))...,
+        # The refreshed control is drawn under its section's heading again.
+        (isnothing(heading) ? (;) : (; __htmxo_heading=heading))...,
         _semantic_hidden_values(route, current)...)
     method_key = Symbol("hx_" * lowercase(string(route.verb)))
     h.div(control; class="htmxo-semantic-context-control",
@@ -31281,7 +31286,8 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
         current = _semantic_form_values(target.leaf, route, extracted.values)
         _semantic_context_control(target.leaf, route, route.params[index], current,
                                   request_path, shared_context; radio_max,
-                                  placed=_operation_form_setting(req, :__htmxo_placed))
+                                  placed=_operation_form_setting(req, :__htmxo_placed),
+                                  heading=_operation_form_setting(req, :__htmxo_heading))
     elseif controls_only
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
@@ -31370,13 +31376,20 @@ function _operation_form_controls(obj, route, current, action;
     # A swap would clear a chosen file, and a page cannot restore one, so a
     # refreshable form keeps its file controls after the swapped region.
     file_controls = Any[]
+    kept_apart(param) = refreshable && _is_upload_type(param.type)
+    # The inputs drawn in sections: a form's own, and the context inputs lifted
+    # into it; the others sit in "Model inputs".
+    sectioned = Set{Symbol}(param.name for param in control_params if !kept_apart(param) &&
+        (!isnothing(lifted) || get(param, :kind, nothing) !== :context))
+    headings = _input_section_headings(sections, sectioned)
     for param in control_params
-        control = _semantic_control(obj, route.owner, param, current; radio_max, presentation)
+        control = _semantic_control(obj, route.owner, param, current; radio_max, presentation,
+                                    heading=get(headings, param.name, nothing))
         if param.name in refresh_dependencies
             control = h.div(control;
                 _semantic_refresh_attrs(route, action, settings; context_selector)...)
         end
-        if refreshable && _is_upload_type(param.type)
+        if kept_apart(param)
             push!(file_controls, control)
         else
             short = !isempty(sections) && _semantic_short_field(obj, route.owner, param,
@@ -32136,15 +32149,19 @@ function _semantic_context_entries(items; names=nothing)
     context_entries
 end
 
-_semantic_context_controls(entries, shared_context; radio_max::Int=_RADIO_MAX) = Any[
-    _semantic_entry_control(entry, shared_context; radio_max) for entry in entries]
-_semantic_entry_control(entry, shared_context; radio_max::Int=_RADIO_MAX, placed=nothing) =
+_semantic_context_controls(entries, shared_context; radio_max::Int=_RADIO_MAX,
+        headings=Dict{Symbol,String}()) = Any[
+    _semantic_entry_control(entry, shared_context; radio_max,
+                            heading=get(headings, entry.param.name, nothing))
+    for entry in entries]
+_semantic_entry_control(entry, shared_context; radio_max::Int=_RADIO_MAX, placed=nothing,
+        heading=nothing) =
     _semantic_context_control(entry.object, entry.route, entry.param, entry.current,
         _semantic_context_refreshable(entry.route, entry.param) ?
             _operation_form_action(entry.route, entry.current,
                 _operation_form_target(entry.object, entry.route)) :
             nothing,
-        shared_context; radio_max, placed)
+        shared_context; radio_max, placed, heading)
 
 # --- Input sections (`semantic_app(…; presentation=:tabs, sections)`) ---
 
@@ -32157,6 +32174,10 @@ A headed group of inputs on an app page
 sidebar or in a tab. A section marked `settings=true` is drawn after the
 sections that are not. `heading => names` in `sections` is
 `InputSection(heading, names)`.
+
+A section that holds one input whose label reads as its heading (ignoring
+case) shows that text once: the input's own label, its legend or the text
+above its field, stays its accessible name but is not shown.
 
     semantic_app(app; presentation=:tabs, sections=[
         "Subjects" => [:basis, :subjects, :age, :weight],
@@ -32229,10 +32250,62 @@ function _sectioned_controls(fields, sections)
     out
 end
 
+# The heading of each input a section holds alone among `names`, the inputs a
+# form draws in its sections: that input's control does not show its own label
+# again when it reads as the heading (`_heading_named`).
+function _input_section_headings(sections, names)
+    headings = Dict{Symbol,String}()
+    for section in sections
+        held = [name for name in section.names if name in names]
+        length(held) == 1 && (headings[only(held)] = section.heading)
+    end
+    headings
+end
+
+# A control under a section heading that already says its label: the label it
+# shows above its field, its `<fieldset>`'s `<legend>` or the text its
+# `<label>` starts with, when that reads as `heading` (ignoring case and the
+# space around it). The label stays the field's accessible name but is not
+# shown (`.htmxo-heading-named`), so the page reads it once. Wrappers (help
+# text, `@relevant`, a refresh region) are looked through; a label after its
+# field (a checkbox's), one that reads otherwise, or any other control is left
+# as it is.
+_heading_named(control, heading) = something(_heading_named_node(control, heading), control)
+_heading_named_node(_, heading) = nothing
+function _heading_named_node(node::Node, heading)
+    tag = Symbol(lowercase(string(HTMX.tag(node))))
+    children = HTMX.children(node)
+    i = findfirst(child -> child isa Node, children)
+    if tag === :label
+        (isempty(children) || !_reads_as(children[1:1], heading)) && return nothing
+        return _with_child(node, 1, h.span(children[1]; class="htmxo-heading-named"))
+    end
+    i === nothing && return nothing
+    if tag === :fieldset
+        legend = children[i]
+        Symbol(lowercase(string(HTMX.tag(legend)))) === :legend &&
+            _reads_as(HTMX.children(legend), heading) || return nothing
+        return _with_child(node, i, _with_class(legend, "htmxo-heading-named"))
+    end
+    tag === :div || return nothing
+    inner = _heading_named_node(children[i], heading)
+    isnothing(inner) ? nothing : _with_child(node, i, inner)
+end
+_reads_as(texts, heading) = !isempty(texts) && all(text -> text isa AbstractString, texts) &&
+    lowercase(strip(join(texts))) == lowercase(strip(heading))
+_with_child(node, i, child) = Node(HTMX.tag(node), copy(HTMX.attrs(node)),
+    Any[j == i ? child : c for (j, c) in enumerate(HTMX.children(node))])
+function _with_class(node, class)
+    attrs = copy(HTMX.attrs(node))
+    attrs[:class] = haskey(attrs, :class) ? string(attrs[:class], " ", class) : class
+    Node(HTMX.tag(node), attrs, copy(HTMX.children(node)))
+end
+
 # One section: a `<fieldset>` whose `<legend>` is its heading. Its fields
 # stack, and short ones (a number, a checkbox, two pills) share a row
 # (`htmxo_utility_styles`); a field whose input does not apply is hidden, and
-# so is the section when none of its fields applies.
+# so is the section when none of its fields applies. A field alone in its
+# section whose label reads as the heading shows it once (`_heading_named`).
 _input_section_node(section, fields) = h.fieldset(
     h.legend(section.heading),
     h.div([h.div(field.control; class="htmxo-input-field",
@@ -32496,9 +32569,10 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     placements = _semantic_placements(place, shared_names, names, specs)
     placed_entries = [entry for entry in context_entries if haskey(placements, entry.param.name)]
     sidebar_entries = [entry for entry in context_entries if !haskey(placements, entry.param.name)]
-    sidebar_controls = _semantic_context_controls(sidebar_entries, shared_names; radio_max)
-    sidebar_sections = _input_sections_for(sections,
-        Set{Symbol}(entry.param.name for entry in sidebar_entries))
+    sidebar_names = Set{Symbol}(entry.param.name for entry in sidebar_entries)
+    sidebar_sections = _input_sections_for(sections, sidebar_names)
+    sidebar_controls = _semantic_context_controls(sidebar_entries, shared_names; radio_max,
+        headings=_input_section_headings(sidebar_sections, sidebar_names))
     sidebar_fields = [(; name=entry.param.name, control,
                          short=!isempty(sidebar_sections) && _semantic_short_field(
                              entry.object, entry.route.owner, entry.param, entry.current;
@@ -36074,6 +36148,12 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-input-section { margin: 0 0 var(--pico-spacing, 1rem); padding: 0; border: 0; min-width: 0; }
 /* Pico's unlayered `legend` rule reads its weight from this variable. */
 .htmxo-input-section > legend { --pico-form-label-font-weight: 700; font-weight: 700; }
+/* A field alone in its section, labelled as the heading: its own label is
+   read but not shown twice. */
+.htmxo-heading-named {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 .htmxo-input-section-fields {
     display: flex;
     flex-wrap: wrap;

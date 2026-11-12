@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.111
+
+- An input section (`semantic_app(…; presentation=:tabs, sections)`) that
+  holds one input whose label reads as the section's heading (ignoring case
+  and surrounding space) shows that text once: the input's own legend, or the
+  text its `<label>` starts with, stays its accessible name but is not shown
+  (class `htmxo-heading-named`). This holds after the input refreshes. A
+  checkbox's label, a label that reads otherwise, a section of several inputs
+  and an app's `semantic_control` override are unchanged.
+
 ## 0.1.110
 
 - `Records` cards are compact and show every field: a card field's docstring
