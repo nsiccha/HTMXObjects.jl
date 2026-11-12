@@ -20225,8 +20225,13 @@ _dispatch_body(::Nothing) = UInt8[]
 _dispatch_body(b::Vector{UInt8}) = b
 _dispatch_body(b::AbstractVector{UInt8}) = Vector{UInt8}(b)
 _dispatch_body(b::AbstractString) = Vector{UInt8}(codeunits(b))
+@static if isdefined(HTTP, :BytesBody)
+    # HTTP 2 serve! handlers receive buffered body objects. Conversion copies
+    # their unread bytes without advancing the caller's cursor.
+    _dispatch_body(b::Union{HTTP.EmptyBody,HTTP.BytesBody}) = Vector{UInt8}(b)
+end
 _dispatch_body(other) = throw(ArgumentError(
-    "dispatch takes the body as a String or a Vector{UInt8}; " *
+    "dispatch takes the body as a String, a Vector{UInt8}, or a buffered HTTP body; " *
     "got $(repr(typeof(other)))"))
 
 """
@@ -20277,8 +20282,9 @@ for a loopback request.
   accepted and their origin stripped; fragments strip.
 - `headers` — request headers as a `Vector` of pairs, a `Dict`, or a
   `NamedTuple` (`["Accept" => "text/markdown"]`).
-- `body` — request body as a `String` or `Vector{UInt8}` (for
-  `POST`/`PUT`/`PATCH` routes).
+- `body` — request body as a `String`, `Vector{UInt8}`, or HTTP.jl 2's
+  buffered `EmptyBody`/`BytesBody`. A handler can pass `body=req.body`
+  directly; buffered bodies copy their unread bytes without consuming them.
 - `parent` — an optional Treebars progress node. The route's compute hangs
   under it instead of rooting a fresh `__status__` tree, so a caller
   assembling a larger job (a PDF export fetching embeds, a batch warmup)
