@@ -10900,7 +10900,11 @@ conditions as the fields' own are; a refused value names
 `scenarios.<i>.<field>`. On an app page
 ([`semantic_app`](@ref)`(…; presentation=:tabs)`) the list is a card per record
 with an on/off box, an editable label, Duplicate and Remove, and Add, which
-copies the last record; see the API reference's *An app page*.
+copies the last record; see the API reference's *An app page*. A card shows
+every field, its controls set closer than a section's. A field's docstring help
+text, the same in every card, is shown once under the cards after the field's
+label (hidden while the field applies to no card); a `@help` text, computed
+per record, stays in each card.
 """
 struct Records <: AbstractVector{NamedTuple}
     fields::Vector{Symbol}
@@ -30163,8 +30167,10 @@ end
 The control of a [`Records`](@ref) list: a `<fieldset>` with a card per record
 and an Add button. A card has an on/off box, its label, Duplicate and Remove,
 and a control per field, drawn as the field's own control is (its `@options`,
-`@relevant` and help text evaluated for that record: [`record_view`](@ref)),
-named `name.<i>.<field>`. The page runtime (`semantic_follow_script`) adds,
+`@relevant` and `@help` text evaluated for that record: [`record_view`](@ref)),
+named `name.<i>.<field>`. A field's docstring help, the same in every card, is
+shown once, under the cards, after the field's label; each card's field names
+it in `aria-describedby`. The page runtime (`semantic_follow_script`) adds,
 duplicates and removes cards and numbers them again.
 """
 function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX)
@@ -30172,13 +30178,50 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
     name = string(param.name)
     texts = _error_texts(obj)
     fields = NamedTuple[_record_field_param(obj, T, field) for field in records.fields]
-    cards = Any[_record_card(obj, T, name, records, fields, i, entry, texts; radio_max)
+    values = [Dict{Symbol,Any}(field => getfield(entry, field) for field in records.fields)
+              for entry in records.entries]
+    views = [_record_view(obj, v) for v in values]
+    shared = _records_shared_help(fields)
+    help_ids = Dict{Symbol,String}(help.name => help.id for help in shared)
+    cards = Any[_record_card(T, name, records, fields, i, entry, views[i], values[i], texts;
+                             radio_max, help_ids)
                 for (i, entry) in enumerate(records.entries)]
     h.fieldset(h.legend(label), cards...,
         h.button(_fill_text(texts.record_add; label=records.label); type="button",
-                 class="outline secondary htmxo-record-add", data_htmxo_record_action="add");
+                 class="outline secondary htmxo-record-add", data_htmxo_record_action="add"),
+        Any[_records_help_note(help, views) for help in shared]...;
         class="htmxo-records", data_htmxo_records=name, data_htmxo_record_label=records.label,
         data_htmxo_record_copy=texts.record_copy)
+end
+
+# The fields of a list whose help text is their docstring's, the same in every
+# card, so the list shows it once: each with its label, help text, the id the
+# cards' fields name it by, and its `@relevant` condition. A `@help` text is
+# computed for each record and stays in its card.
+function _records_shared_help(fields)
+    shared = NamedTuple[]
+    for param in fields
+        get(param, :help, nothing) === nothing || continue
+        doc_label, doc_help = _doc_label_help(param.doc)
+        doc_help === nothing && continue
+        id = "htmxo-help-" * string(Base.Threads.atomic_add!(_HELP_SERIAL, UInt(1)) + UInt(1))
+        push!(shared, (; name=param.name, label=something(doc_label, Long(param.name)),
+                         help=doc_help, id, relevance=get(param, :relevance, nothing)))
+    end
+    shared
+end
+
+# A field's help text under a list's cards: hidden while the field applies to
+# no card (`@relevant`), and shown or hidden in the browser with the field
+# where its condition reads the page's own inputs.
+function _records_help_note(help, views)
+    note = h.small(h.strong(help.label), ": ", _help_nodes(help.help)...;
+                   id=help.id, class="htmxo-help")
+    help.relevance === nothing && return h.div(note; class="htmxo-record-help")
+    hidden_attrs = any(view -> _param_relevant(view, help.name), views) ? (;) : (; hidden=true)
+    client_attrs = isnothing(help.relevance.client) ? (;) :
+        (; data_show_when=_schema_json(help.relevance.client))
+    h.div(note; class="htmxo-record-help", hidden_attrs..., client_attrs...)
 end
 
 # A record's field as a visible request input of `T`, with what its control
@@ -30196,10 +30239,10 @@ function _record_field_param(obj, T, field::Symbol)
     _with_help(obj, _with_relevance(obj, param))
 end
 
-function _record_card(obj, T, name, records, fields, i, entry, texts; radio_max::Int=_RADIO_MAX)
-    values = Dict{Symbol,Any}(field => getfield(entry, field) for field in records.fields)
-    view = _record_view(obj, values)
+function _record_card(T, name, records, fields, i, entry, view, values, texts;
+                      radio_max::Int=_RADIO_MAX, help_ids=Dict{Symbol,String}())
     prefix = string(name, ".", i, ".")
+    kept = Set{String}(Base.values(help_ids))
     head = h.div(
         h.input(; type="hidden", name=prefix * "on", value="false"),
         h.label(h.input(; type="checkbox", name=prefix * "on", value="true",
@@ -30212,9 +30255,11 @@ function _record_card(obj, T, name, records, fields, i, entry, texts; radio_max:
         h.button(texts.record_remove; type="button", class="outline secondary",
                  data_htmxo_record_action="remove");
         class="htmxo-record-head")
-    # Its fields are laid out as a section's are: short ones share a row.
-    controls = Any[h.div(_record_scoped(_semantic_control(view, T, field, values; radio_max),
-                                        name, i, records.fields);
+    # Its fields are laid out as a section's are: short ones share a row. A
+    # help text the list shows once is named, not repeated.
+    controls = Any[h.div(_record_scoped(_semantic_control(view, T, field, values; radio_max,
+                                                          help_id=get(help_ids, field.name, nothing)),
+                                        name, i, records.fields, kept);
                          class="htmxo-input-field",
                          (_semantic_short_field(view, T, field, values; radio_max) ?
                              (; data_htmxo_width="short") : (;))...)
@@ -30226,9 +30271,11 @@ end
 # A field's control as the record `i` of the list `name` shows it: its fields
 # named `name.<i>.<field>`, the conditions the browser evaluates reading those
 # names, and every id (and what names one) suffixed `--name-<i>`, so cards
-# never share an id; the page runtime renumbers both when cards move.
-_record_scoped(node, name, i, fields) = node
-function _record_scoped(node::Node, name, i, fields)
+# never share an id; the page runtime renumbers both when cards move. The ids
+# in `kept` name what the list shows once, outside the cards, and stay as
+# they are.
+_record_scoped(node, name, i, fields, kept=()) = node
+function _record_scoped(node::Node, name, i, fields, kept=())
     field_names = Set(string.(fields))
     attrs = copy(HTMX.attrs(node))
     rename(v) = string(v) in field_names ? string(name, ".", i, ".", v) : v
@@ -30244,9 +30291,10 @@ function _record_scoped(node::Node, name, i, fields)
     for key in (:for, Symbol("aria-describedby"), Symbol("aria-controls"),
                 Symbol("aria-labelledby"), :popovertarget, :list)
         haskey(attrs, key) || continue
-        attrs[key] = join((token * suffix for token in split(string(attrs[key]))), " ")
+        attrs[key] = join((token in kept ? token : token * suffix
+                           for token in split(string(attrs[key]))), " ")
     end
-    Node(HTMX.tag(node), attrs, Any[_record_scoped(child, name, i, fields)
+    Node(HTMX.tag(node), attrs, Any[_record_scoped(child, name, i, fields, kept)
                                     for child in HTMX.children(node)])
 end
 _record_condition(c::AbstractDict, rename) = Dict{String,Any}(
@@ -30406,15 +30454,18 @@ function _semantic_control_owner(obj, owner, param)
     (source_obj, typeof(source_obj))
 end
 
+# `help_id` names a help text shown elsewhere (once under a list's cards): the
+# control is described by it instead of carrying the text.
 function _semantic_control(obj, owner, param, values;
-        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
+        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto, help_id=nothing)
     value = get(values, param.name, nothing)
     doc_label, doc_help = _doc_label_help(param.doc)
     label = isnothing(doc_label) ? Long(param.name) : doc_label
     help = _param_help(obj, param, doc_help)
     control_obj, ControlT = _semantic_control_owner(obj, owner, param)
-    default = _with_help_text(_semantic_default_control(control_obj, ControlT, param, label,
-                                  value, values; radio_max, presentation), help)
+    default = _semantic_default_control(control_obj, ControlT, param, label, value, values;
+                                        radio_max, presentation)
+    default = help_id === nothing ? _with_help_text(default, help) : _with_help_ref(default, help_id)
     control = semantic_control(control_obj, Val(param.name),
                                (; name=param.name, label, value, param, default, help))
     # Shows its computed default until the reader sets it.
@@ -30486,17 +30537,23 @@ _with_help_text(control, ::Nothing) = control
 function _with_help_text(control, help::AbstractString)
     id = "htmxo-help-" * string(Base.Threads.atomic_add!(_HELP_SERIAL, UInt(1)) + UInt(1))
     note = h.small(_help_nodes(help)...; id, class="htmxo-help")
-    control isa Node || return h.div(control, note; class="htmxo-helped")
-    tag = Symbol(lowercase(string(HTMX.tag(control))))
-    if tag === :label
-        children = Any[_described_field(child, id) for child in HTMX.children(control)]
-        return Node(HTMX.tag(control), copy(HTMX.attrs(control)), Any[children..., note])
-    elseif tag === :fieldset
-        attrs = copy(HTMX.attrs(control))
-        attrs[Symbol("aria-describedby")] = id
-        return Node(HTMX.tag(control), attrs, Any[HTMX.children(control)..., note])
+    _help_describable(control) || return h.div(control, note; class="htmxo-helped")
+    described = _with_help_ref(control, id)
+    Node(HTMX.tag(described), HTMX.attrs(described), Any[HTMX.children(described)..., note])
+end
+# The control described by the help text `id` names: the field in its
+# `<label>`, or its `<fieldset>`; another control as it is.
+_help_describable(control) = control isa Node &&
+    Symbol(lowercase(string(HTMX.tag(control)))) in (:label, :fieldset)
+function _with_help_ref(control, id)
+    _help_describable(control) || return control
+    attrs = copy(HTMX.attrs(control))
+    if Symbol(lowercase(string(HTMX.tag(control)))) === :label
+        return Node(HTMX.tag(control), attrs,
+                    Any[_described_field(child, id) for child in HTMX.children(control)])
     end
-    h.div(control, note; class="htmxo-helped")
+    attrs[Symbol("aria-describedby")] = id
+    Node(HTMX.tag(control), attrs, copy(HTMX.children(control)))
 end
 # Help text as nodes: a span between backticks is code (`100% q 24 x 14`).
 function _help_nodes(help::AbstractString)
@@ -30582,7 +30639,9 @@ carries `name`, `label` (the docstring's first paragraph, else the humanized
 name), `value` (the current value), `param` (the input's descriptor), `help`
 (the help text: what `@help(name)` gives, else the docstring's later
 paragraphs, else `nothing`) and `default`, the control the form would render,
-with the help text under it. The default method returns `default`.
+with the help text under it. In a card of a [`Records`](@ref) list, a
+docstring's help text is shown once under the cards instead, and `default`
+names it in `aria-describedby`. The default method returns `default`.
 
 Define a method for one input of your own struct to render it your way. Every
 generated form uses it, also when it re-renders the control after a change it
@@ -36053,15 +36112,22 @@ htmxo_utility_styles() = h.style(Raw("""
 [data-htmxo-follow][data-htmxo-stale] { opacity: 0.45; }
 /* A list of records (`Records`): a bordered card per record; its head holds
    the on/off box, the label, Duplicate and Remove on one row. Pico's
-   unlayered field and button rules read the spacing variables set here. A
-   record that is off is faded below its head. */
+   unlayered field and button rules read the spacing variables set here: a
+   card's fields sit closer, and its inputs are lower, than a section's, so
+   several cards fit in a sidebar with every field shown. Short fields,
+   a two-pill choice among them, share a row. A record that is off is faded
+   below its head. A field's help text the cards share is under them, once. */
 .htmxo-records { min-width: 0; }
 .htmxo-record {
     border: 1px solid var(--pico-muted-border-color, #d0d7de);
     border-radius: var(--pico-border-radius, 0.25rem);
     padding: 0.5rem 0.75rem 0;
     margin-bottom: 0.75rem;
+    --pico-spacing: 0.5rem;
+    --pico-form-element-spacing-vertical: 0.375rem;
+    --pico-form-element-spacing-horizontal: 0.625rem;
 }
+.htmxo-record .htmxo-input-section-fields { column-gap: 0.75rem; }
 .htmxo-record-head {
     display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.5rem;
     margin-bottom: 0.5rem;
@@ -36074,11 +36140,12 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-record-head > button { flex: 0 0 auto; width: auto; margin: 0; font-size: 0.85em; }
 .htmxo-semantic-inputs .htmxo-records { flex: 1 1 100%; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex-basis: 6rem; }
-.htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: 100%; }
+.htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
 .htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > :not(.htmxo-record-head) {
     opacity: 0.5;
 }
 .htmxo-record-add { width: auto; font-size: 0.85em; }
+.htmxo-record-help { margin-bottom: 0.25rem; }
 /* A choice drawn as a table: the legend is the first column's header, so it
    is read but not shown twice; a row is chosen by a click, and the chosen
    row is marked along its left edge and in bold. */
@@ -36585,6 +36652,14 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled),
 fieldset[data-htmxo-checkbox-group] > label:has(> input:disabled) {
     opacity: .5;
     cursor: not-allowed;
+}
+/* In a card of a list of records (`Records`) the pills are smaller and
+   closer, so a choice among a few options takes fewer rows. */
+.htmxo-record fieldset:not([role]) > label:has(> input[type="radio"]),
+.htmxo-record fieldset[data-htmxo-checkbox-group] > label {
+    margin: 0 .25rem .25rem 0;
+    padding: .1em .6em;
+    font-size: .875em;
 }
 
 /* A choice among many options (`choice_list`, and a generated single choice

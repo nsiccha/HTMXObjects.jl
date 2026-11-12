@@ -114,16 +114,23 @@ end
     @test contains(sidebar, "<input type=\"hidden\" name=\"scenarios.1.on\" value=\"false\"><label class=\"htmxo-record-on\"><input type=\"checkbox\" name=\"scenarios.1.on\" value=\"true\" checked=\"true\">Include</label><input name=\"scenarios.1.label\" value=\"Scenario 1\" aria-label=\"Label\" class=\"htmxo-record-label\">")
     @test contains(sidebar, "data-htmxo-record-action=\"duplicate\">Duplicate</button>")
     @test contains(sidebar, "data-htmxo-record-action=\"add\">Add Scenario</button>")
-    # Its fields as their own controls are, help text and `@relevant` included,
-    # renamed for the record, ids suffixed for the card.
+    # Its fields as their own controls are, `@relevant` included, renamed for
+    # the record, ids suffixed for the card.
     @test contains(sidebar, r"data-htmxo-relevant=\"scenarios\.1\.age\" data-show-when=\"[^\"]*basis")
-    help = match(r"name=\"scenarios\.1\.regimen\"[^>]*aria-describedby=\"(htmxo-help-\d+--scenarios-1)\"><small id=\"(htmxo-help-\d+--scenarios-1)\"", sidebar)
-    @test help !== nothing && help.captures[1] == help.captures[2]
+    # A docstring's help text is shown once, under the cards, after the
+    # field's label; the card's field names it, unsuffixed.
+    help = match(r"name=\"scenarios\.1\.regimen\"[^>]*aria-describedby=\"(htmxo-help-\d+)\"", sidebar)
+    @test help !== nothing
+    @test contains(sidebar, "data-htmxo-record-action=\"add\">Add Scenario</button><div class=\"htmxo-record-help\"><small id=\"$(help.captures[1])\" class=\"htmxo-help\"><strong>Regimen</strong>: Doses as <code>percent% q hours x count</code>.</small></div>")
     # Age and weight are short fields, sharing a row.
     @test contains(sidebar, r"<div class=\"htmxo-input-field\" data-htmxo-width=\"short\"><div class=\"htmxo-relevant\" data-htmxo-relevant=\"scenarios\.1\.age\""s)
     # The page shows the records its address names.
     two = sidebar_of(page("/?scenarios.1.label=Low&scenarios.2.label=High&scenarios.2.on=false&scenarios.2.age=30"))
     @test count("class=\"htmxo-record\"", two) == 2
+    # Both cards name the one help text.
+    @test count("Doses as", two) == 1
+    described = [m.captures[1] for m in eachmatch(r"name=\"scenarios\.\d\.regimen\"[^>]*aria-describedby=\"(htmxo-help-\d+)\"", two)]
+    @test length(described) == 2 && allequal(described) && contains(two, "<small id=\"$(described[1])\" class=\"htmxo-help\">")
     @test contains(two, "name=\"scenarios.2.label\" value=\"High\"")
     @test contains(two, "<input type=\"checkbox\" name=\"scenarios.2.on\" value=\"true\">Include")
     @test contains(two, r"name=\"scenarios\.2\.age\" type=\"number\" value=\"30\"")
@@ -154,6 +161,59 @@ end
     german = repr("text/html", semantic_app(GermanScenarioApp(); presentation=:tabs))
     @test contains(german, ">Szenario hinzufügen</button>") && contains(german, ">Duplizieren</button>") &&
           contains(german, "data-htmxo-record-copy=\"{label} (Kopie)\"")
+end
+
+@testitem "a card field's docstring help is shown once under the cards, its @help in each card" setup=[RecordsFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    using HTMXObjects.DynamicObjects: option_domain
+
+    @htmx struct HelpedCardsApp
+        "Basis"
+        @param basis::String = "a"
+        @options(basis) = option_domain(["a" => "A", "b" => "B"])
+        """
+        Dose
+
+        In mg.
+        """
+        @param dose::Float64 = 1.0
+        "Note"
+        @param note::String = ""
+        @help(note) = string("For dose ", dose)
+        """
+        Age
+
+        In years.
+        """
+        @param age::Float64 = 50.0
+        @relevant(age) = basis == "a"
+        "Cards"
+        @param cards::Records = Records(:dose, :note, :age; label="Card")
+        "One"
+        @get one() = h.p(length(cards), basis)
+        "Two"
+        @get two() = h.p(length(cards), basis)
+        @get index() = semantic_app(__self__; presentation=:tabs, select=entry -> entry.name !== :index)
+    end
+
+    route!(HelpedCardsApp(); operation_policy=:blocking)
+    page(url) = sidebar_of(body_of(dispatch(:GET, url; headers=["HX-Request" => "true"])))
+    two = page("/?cards.1.dose=2&cards.2.dose=3")
+    # The docstrings' help texts once each, in field order, after Add; each
+    # card's field names its text.
+    dose = match(r"<div class=\"htmxo-record-help\"><small id=\"(htmxo-help-\d+)\" class=\"htmxo-help\"><strong>Dose</strong>: In mg\.</small></div>", two)
+    age = match(r"<div class=\"htmxo-record-help\" data-show-when=\"[^\"]*basis[^\"]*\"><small id=\"(htmxo-help-\d+)\" class=\"htmxo-help\"><strong>Age</strong>: In years\.</small></div>", two)
+    @test dose !== nothing && age !== nothing && dose.offset < age.offset
+    @test count("In mg.", two) == 1 && count("In years.", two) == 1
+    for i in 1:2
+        @test contains(two, Regex("name=\"cards\\.$i\\.dose\"[^>]*aria-describedby=\"$(dose.captures[1])\""))
+        @test contains(two, Regex("name=\"cards\\.$i\\.age\"[^>]*aria-describedby=\"$(age.captures[1])\""))
+    end
+    # A `@help` text is computed for each record, and stays in its card.
+    @test count("For dose 2.0", two) == 1 && count("For dose 3.0", two) == 1
+    @test findfirst("For dose 3.0", two).start < findfirst("data-htmxo-record-action=\"add\"", two).start
+    # An Age that applies to no card hides its help text too.
+    @test contains(page("/?basis=b"), r"<div class=\"htmxo-record-help\" hidden(=\"[^\"]*\")? data-show-when=\"[^\"]*\"><small id=\"htmxo-help-\d+\" class=\"htmxo-help\"><strong>Age</strong>")
 end
 
 @testitem "cards are added, duplicated, switched off and removed in a browser" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
@@ -194,6 +254,10 @@ end
             await sleep(20);
             out.duplicate = cards().map(c => c.querySelector('.htmxo-record-label').value).join('|') ===
               'Scenario 1|Scenario 1 (copy)|Scenario 2' && field(3, 'age').value === '30';
+            // The regimen's help text stays once, under the cards, and every
+            // card's regimen still names it.
+            const helps = document.querySelectorAll('.htmxo-record-help small');
+            out.help = helps.length === 1 && [1, 2, 3].every(i => field(i, 'regimen').getAttribute('aria-describedby') === helps[0].id);
             document.querySelector('[name="scenarios.2.male"][value="true"]').click();
             await until(() => result().includes('Scenario 1 (copy)=100% q 24 x 14/true/50.0/70.0'), 'duplicate followed');
             out.own = document.querySelector('[name="scenarios.1.male"][value="false"]').checked;
@@ -247,7 +311,7 @@ end
                     @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
                     outcome = isready(receipt) ? Dict(HTTP.URIs.queryparams(HTTP.URI(take!(receipt)))) : Dict{String,String}()
                     @test get(outcome, "error", "") == ""
-                    for key in ("add", "duplicate", "own", "off", "remove", "last")
+                    for key in ("add", "duplicate", "help", "own", "off", "remove", "last")
                         @test (key => get(outcome, key, "missing")) == (key => "true")
                     end
                 finally
