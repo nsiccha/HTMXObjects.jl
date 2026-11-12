@@ -93,6 +93,28 @@ become hidden inputs; attributes such as `hx_target` configure the form.
 Use `obj=__self__` to forward an object's set `@param` values, with `skip` for
 parameters already supplied by visible controls.
 
+## Multiple choices
+
+A vector input with `@options` uses checkbox pills for at most `radio_max`
+options (8 by default). Larger domains use a searchable checkbox popover.
+The closed field shows the count and every selected label; labels wrap.
+Click or press Enter to toggle an option while keeping the popover open.
+Search filters the visible choices without changing the selection.
+
+For a hand-placed control, use `choice_list((; quantities), options;
+multiple=true)`, where `quantities` is a vector. Option records can supply
+`label`, `help`, `group` and `disabled`; disabled options cannot be submitted.
+Pass `required=true` to require at least one selection. The `htmx` shell
+supplies the styles and runtime, including native keyboard operation.
+
+Selections submit repeated names, such as `quantities=auc&quantities=maximum`.
+Clearing the group submits `quantities=`: an explicit empty vector, preserved
+on refresh and reload. Omitting `quantities` still uses its declared default.
+The same blank-versus-omitted distinction applies to typed vector query/form
+inputs; scalar blanks retain their default behavior. Markdown reads show all
+selected labels. Records vector fields and `set_inputs` use the same selection
+semantics.
+
 ## URLs
 
 ```@example forms

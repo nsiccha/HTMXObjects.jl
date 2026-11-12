@@ -4,9 +4,9 @@ using TestItemRunner
     using HTMXObjects
     css = repr("text/html", htmxo_utility_styles())
     pill = "fieldset:not([role]) > label:has(> input[type=\"radio\"])"
-    @test contains(css, pill * " {\n    position: relative;\n    display: inline-flex;")
+    @test contains(css, pill * ",\nfieldset[data-htmxo-checkbox-group] > label {\n    position: relative;\n    display: inline-flex;")
     @test contains(css, pill * " > input[type=\"radio\"] {\n    position: absolute;")
-    @test contains(css, "fieldset:not([role]) > label:has(> input[type=\"radio\"]:checked) {")
+    @test contains(css, "fieldset:not([role]) > label:has(> input[type=\"radio\"]:checked),\nfieldset[data-htmxo-checkbox-group] > label:has(> input:checked) {")
     @test contains(css, "background: var(--pico-contrast-background, CanvasText);")
     # Unlayered, like the other rules after the layer: Pico styles `label`
     # and radios unlayered, so a layered rule would lose to it.

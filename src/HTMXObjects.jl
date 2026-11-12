@@ -10518,11 +10518,11 @@ Low-level parameter lookup shared by `_extract_param` and the route-macro's
 generated `_extract_args` methods. Given a precomputed primary source dict and
 optional fallback dict (e.g. queryparams for POST), look up `name`, apply
 `_convert_submitted(value, T, name)` when present, or return the `_NO_DEFAULT`
-sentinel when the key is absent/empty so callers can decide between default or
-error.
+sentinel when the key is absent (or blank for a scalar). An explicit blank
+vector is empty; it overrides the fallback and default.
 """
 function _lookup_param(src, fallback, name, T)
-    v = _submitted_raw(src, fallback, name)
+    v = _submitted_raw(src, fallback, name; keep_empty=_vector_param(T))
     v === _NO_DEFAULT ? v : _convert_submitted(v, T, name)
 end
 function _lookup_param(src::_JSONParams, fallback, name, T)
@@ -10531,18 +10531,21 @@ function _lookup_param(src::_JSONParams, fallback, name, T)
     _convert_submitted((_, type) -> _convert_json_param(src.fields[key], type), src[key], T, name)
 end
 
-# The raw submitted value for `name`, or `_NO_DEFAULT` when it is absent or empty
-# in both the primary source and the fallback.
-function _submitted_raw(src, fallback, name)
+# The raw submitted value for `name`, or `_NO_DEFAULT` when absent. Scalar
+# blanks fall back; `keep_empty` preserves a vector’s explicit empty selection.
+_vector_param(T) = T isa Type && T <: AbstractVector
+
+function _submitted_raw(src, fallback, name; keep_empty=false)
     key = String(name)
     v = get(src, key, nothing)
-    if (v === nothing || v == "") && fallback !== nothing
+    if (v === nothing || (!keep_empty && v == "")) && fallback !== nothing
         v = get(fallback, key, nothing)
     end
-    (v === nothing || v == "") ? _NO_DEFAULT : v
+    (v === nothing || (!keep_empty && v == "")) ? _NO_DEFAULT : v
 end
-_submitted_raw(src::_JSONParams, fallback, name) = haskey(src, String(name)) ?
-    src[String(name)] : fallback === nothing ? _NO_DEFAULT : _submitted_raw(fallback, nothing, name)
+_submitted_raw(src::_JSONParams, fallback, name; keep_empty=false) = haskey(src, String(name)) ?
+    src[String(name)] : fallback === nothing ? _NO_DEFAULT :
+    _submitted_raw(fallback, nothing, name; keep_empty)
 
 _blank_submitted(src, value) = value == ""
 _blank_submitted(src::_JSONParams, value) = false
@@ -10775,7 +10778,7 @@ end
 # only one value. Resolve its elements against the live domain before returning
 # the declared vector, including options whose objects have no string parser.
 _convert_option_value(domain, val::AbstractString, name, T::Type{<:AbstractVector}) =
-    _convert_option_value(domain, [val], name, T)
+    _convert_option_value(domain, isempty(val) ? String[] : [val], name, T)
 function _convert_option_value(domain, vals::AbstractVector, name, ::Type{V}) where {V<:AbstractVector}
     convert(V, [_convert_option_value(domain, val, name, eltype(V)) for val in vals])
 end
@@ -10783,7 +10786,7 @@ _convert_option_value(_domain, val, name, T) = _convert_submitted(val, T, name)
 _convert_option_param(options, val, name, T) = _convert_submitted(val, T, name)
 
 function _lookup_option_param(options, src, fallback, name, T)
-    v = _submitted_raw(src, fallback, name)
+    v = _submitted_raw(src, fallback, name; keep_empty=_vector_param(T))
     v === _NO_DEFAULT ? v : _convert_option_param(options, v, name, T)
 end
 function _lookup_option_param(options, src::_JSONParams, fallback, name, T)
@@ -10911,10 +10914,11 @@ _record_entry(r::Records, label, on, values) =
     NamedTuple{(:label, :on, r.fields...)}((String(label), on, values...))
 
 # The records a request submits for `name` (`name.<i>.<key>`), in the order
-# of `i`, as raw values by key. A repeated key keeps its last value.
-function _submitted_records(src, fallback, name::Symbol)
+# of `i`, as raw values by key. Declared vector fields retain repeated values;
+# scalar fields, labels and on/off switches keep the last value.
+function _submitted_records(src, fallback, name::Symbol, vector_fields)
     prefix = string(name, ".")
-    found = Dict{Int,Dict{String,String}}()
+    found = Dict{Int,Dict{String,Any}}()
     for source in (fallback, src)
         source === nothing && continue
         for (key, value) in source
@@ -10922,10 +10926,11 @@ function _submitted_records(src, fallback, name::Symbol)
             startswith(key, prefix) || continue
             m = match(r"^(\d+)\.(.+)$", key[length(prefix)+1:end])
             m === nothing && continue
-            raw = value isa AbstractVector && !(value isa AbstractString) ?
-                (isempty(value) ? "" : last(value)) : value
-            raw isa AbstractString || continue
-            get!(found, parse(Int, m[1]), Dict{String,String}())[String(m[2])] = String(raw)
+            field = String(m[2])
+            repeated = value isa AbstractVector && !(value isa AbstractString)
+            raw = repeated && !(field in vector_fields) ? (isempty(value) ? "" : last(value)) : value
+            (raw isa AbstractString || (raw isa AbstractVector && all(v -> v isa AbstractString, raw))) || continue
+            get!(found, parse(Int, m[1]), Dict{String,Any}())[field] = raw
         end
     end
     [found[i] for i in sort!(collect(keys(found)))]
@@ -10938,7 +10943,12 @@ function _extract_records_param(obj, req, name::Symbol, _T, declared::Records)
     method = req.method
     src = _kwargs_source(req, method)
     fallback = method in _queryparams_verbs ? nothing : queryparams(req)
-    raw = _submitted_records(src, fallback, name)
+    vector_fields = Set{String}()
+    for field in declared.fields
+        info = _reflect_local_param(typeof(obj), field)
+        info !== nothing && _vector_param(info.type) && push!(vector_fields, string(field))
+    end
+    raw = _submitted_records(src, fallback, name, vector_fields)
     isempty(raw) && return _default_records(obj, declared)
     Records(declared.fields, declared.label,
             NamedTuple[_typed_record(obj, name, declared, i, entry) for (i, entry) in enumerate(raw)])
@@ -10993,7 +11003,10 @@ function _record_view(obj, values::AbstractDict)
     names = Set{String}(string(key) for key in keys(values))
     pairs = Pair{String,String}[p for p in _request_param_pairs(req) if !(first(p) in names)]
     for (field, value) in values
-        for v in (value isa AbstractVector && !(value isa AbstractString) ? value : (value,))
+        value === _NO_DEFAULT && continue
+        wire_values = value isa AbstractVector && !(value isa AbstractString) ?
+            (isempty(value) ? ("",) : value) : (value,)
+        for v in wire_values
             push!(pairs, string(field) => (v isa AbstractString ? String(v) : _option_wire_string(v)))
         end
     end
@@ -13747,6 +13760,7 @@ struct ErrorTexts
     loading_named::String              # ... by the option or link the reader chose
     choice_search::String              # a long choice list's search field
     choice_no_match::String            # ... when no option matches the search
+    choice_selected::String            # a multiple choice's selected count
     log_entry::String                  # a shown cause's log entry (`__show_error_cause__`)
     message_omitted::String            # ... a message too long for the page
     log_omitted::String                # ... a log entry too long for the page
@@ -13765,7 +13779,7 @@ const _ERROR_TEXT_PLACEHOLDERS = (
     unknown_params = (:names,), accepted_params = (:accepted,), unreadable_body = (:format,),
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
-    loading_named = (:label,), log_entry = (:path,), message_omitted = (:size,),
+    loading_named = (:label,), choice_selected = (:count,), log_entry = (:path,), message_omitted = (:size,),
     log_omitted = (:size,), record_add = (:label,), record_copy = (:label,),
 )
 
@@ -13799,6 +13813,7 @@ const _ERROR_TEXT_LOCALES = (
         loading_named = "Loading {label}…",
         choice_search = "Search…",
         choice_no_match = "No matching option",
+        choice_selected = "{count} selected",
         log_entry = "Log entry {path}",
         message_omitted = "The message is {size} long, too long for this page; the log entry holds it.",
         log_omitted = "The log entry is {size} long, too long for this page; open the file to read it.",
@@ -13839,6 +13854,7 @@ const _ERROR_TEXT_LOCALES = (
         loading_named = "{label} wird geladen…",
         choice_search = "Suchen…",
         choice_no_match = "Keine passende Auswahl",
+        choice_selected = "{count} ausgewählt",
         log_entry = "Protokolleintrag {path}",
         message_omitted = "Die Meldung ist {size} lang, zu lang für diese Seite; der Protokolleintrag enthält sie.",
         log_omitted = "Der Protokolleintrag ist {size} lang, zu lang für diese Seite; öffnen Sie die Datei, um ihn zu lesen.",
@@ -19472,6 +19488,9 @@ function _semantic_request_context_param(param, SourceT)
     domain = get(descriptor, :domain, nothing)
     domain === nothing && return nothing
     get(domain, :kind, :unrestricted) === :declared || return nothing
+    # A lowered @param property does not retain its output annotation in its
+    # domain descriptor. Its request parameter still knows the container type.
+    domain = merge(domain, (; multiple=get(domain, :multiple, false) || _vector_param(param.type)))
     merge(param, (
         kind=:context,
         domain,
@@ -20831,13 +20850,22 @@ end
 
 function _md_choice_list(node::Node)
     legend = _md_find(n -> _md_tag(n) === :legend, node)
-    checked = n -> _md_tag(n) === :input && _md_has(n, "checked")
-    option = _md_find(n -> _md_tag(n) === :label && !isnothing(_md_find(checked, n)), node)
-    label = isnothing(option) ? nothing : _md_find(n -> "htmxo-choice-label" in
-        split(something(_md_attr(n, "class"), "")), option)
+    checked = n -> _md_tag(n) === :input && _md_has(n, "checked") && !_md_has(n, "disabled")
+    labels = String[]
+    function collect_labels(n)
+        if _md_tag(n) === :label && !isnothing(_md_find(checked, n))
+            label = _md_find(c -> "htmxo-choice-label" in
+                split(something(_md_attr(c, "class"), "")), n)
+            isnothing(label) || push!(labels, strip(to_markdown_string(Any[HTMX.children(label)...])))
+            return
+        end
+        for child in HTMX.children(n)
+            child isa Node && collect_labels(child)
+        end
+    end
+    collect_labels(node)
     head = isnothing(legend) ? Any[] : _strip_md_chrome_children(HTMX.children(legend))
-    value = isnothing(label) ? Any[] :
-        Any[_md_mark(" " * strip(to_markdown_string(Any[HTMX.children(label)...])))]
+    value = isempty(labels) ? Any[] : Any[_md_mark(" " * join(labels, ", "))]
     Node(:p, empty(HTMX.attrs(node)), Any[head..., value...])
 end
 
@@ -29651,23 +29679,35 @@ end
 # One radio of a choice drawn as pills (`radio_group`, a generated choice up
 # to `radio_max` options): the radio inside its label, `disabled` when the
 # option is, and its help after the label.
-function _radio_option(name, option, checked::Bool; attrs...)
+_radio_option(name, option, checked::Bool; attrs...) =
+    _choice_option(name, option, checked; type="radio", attrs...)
+
+function _choice_option(name, option, checked::Bool; type="checkbox", attrs...)
     disabled_attrs = get(option, :disabled, false) ? (; disabled="true") : (;)
     help = get(option, :help, nothing)
     h.label(
-        h.input(; type="radio", name=string(name), value=_option_wire_string(option.value),
+        h.input(; type, name=string(name), value=_option_wire_string(option.value),
                 (checked ? (; checked="true") : (;))..., disabled_attrs..., attrs...),
         isnothing(help) ? option.label : "$(option.label) — $(help)")
 end
 
 """
     choice_list(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
-                required=false, texts=error_texts())
+                required=false, multiple=false, texts=error_texts())
 
 A single choice among many options: a field showing the chosen option that
 opens a list of them with a search field. Typing filters the list (ignoring
 case and accents), the arrow keys move through it, and Enter or a click
 chooses and closes it; Escape or a click elsewhere closes it unchanged.
+
+With `multiple=true`, `value` is a vector and the options are checkboxes.
+Enter or a click toggles one without closing the popover; Tab and Space also
+operate the native checkboxes. The closed field shows the selected count and
+all selected labels, wrapping them. `required=true` means at least one enabled
+option, not every checkbox. Clearing all choices submits `name=` as an empty
+vector; omitting the parameter still uses its default. Nonempty selections
+submit repeated values under the same name. Filtering never drops a selection,
+and `?plain` shows every chosen label.
 
 Each option is a plain value, a `value => label` pair, or a record: a
 `NamedTuple` with a `value` field and any of `label` (default `string(value)`),
@@ -29684,11 +29724,11 @@ second line under the label that the search also reads; options sharing a
                              (; value="v2", label="Bundle 2", group="Prepared",
                                 disabled=true, help="Its files are not on this host")])
 
-The list holds one radio button per option, so the choice submits with its
-form, validates and drives `show_when` exactly like a radio group, and a
+By default the list holds one radio button per option, so the choice submits
+with its form, validates and drives `show_when` like a radio group, and a
 `?plain` read shows the chosen option's label. The list opens as a popover, so
 no scroll box or table clips it. `texts` gives the search field's words
-(`choice_search`, `choice_no_match` of [`ErrorTexts`](@ref)); pass the app's
+(`choice_search`, `choice_no_match`, `choice_selected` of [`ErrorTexts`](@ref)); pass the app's
 `__error_texts__` for a page in another language:
 
     choice_list((; compound), compounds; label="Compound", texts=__error_texts__)
@@ -29697,14 +29737,15 @@ Every [`htmx`](@ref) page carries its script and styles
 ([`choice_list_script`](@ref), [`htmxo_utility_styles`](@ref)). A choice among
 a few options reads better as [`radio_group`](@ref)'s row of pills; generated
 forms ([`semantic_app`](@ref), [`operation_form`](@ref)) switch to this control
-past `radio_max` options.
+past `radio_max` options. Vector inputs use checkbox pills up to the same
+cutoff and this list with `multiple=true` above it.
 """
 choice_list(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
-        required::Bool=false, texts::ErrorTexts=_EN_ERROR_TEXTS) = begin
+        required::Bool=false, multiple::Bool=false, texts::ErrorTexts=_EN_ERROR_TEXTS) = begin
     entries = [merge(option, (; value=_option_wire_string(option.value)))
                for option in _option_records(options)]
-    selected = isnothing(value) ? nothing : _option_wire_string(value)
-    _choice_list(_aname(nv), label, entries, selected; required, texts,
+    selected = isnothing(value) ? nothing : multiple ? _option_wire_string.(value) : _option_wire_string(value)
+    _choice_list(_aname(nv), label, entries, selected; required, multiple, texts,
                  attrs=isnothing(show_when) ? (;) : _show_when_attrs(show_when))
 end
 
@@ -29809,14 +29850,14 @@ _computed_default(param) = !param.required && param.default isa Union{Expr,Symbo
     !get(param, :literal_default, false) &&
     param.source !== :path && !(param.type isa Type && param.type <: Records)
 
-# Whether the request `obj` answers names `name`. A blank value names nothing:
-# the input then takes its default, as `_lookup_param` reads it.
-function _semantic_request_names(obj, name)
+# Whether the request names this input. A vector’s explicit blank counts as
+# supplied, while a scalar blank takes its default, as `_lookup_param` reads it.
+function _semantic_request_names(obj, name, T)
     req = _req_of(obj)
     req isa HTTP.Request || return false
     src = _kwargs_source(req, req.method)
     fallback = req.method in _queryparams_verbs ? nothing : queryparams(req)
-    _submitted_raw(src, fallback, name) !== _NO_DEFAULT
+    _submitted_raw(src, fallback, name; keep_empty=_vector_param(T)) !== _NO_DEFAULT
 end
 
 # Whether `param`'s control follows its computed default: a request `@param`
@@ -29824,7 +29865,7 @@ end
 _semantic_follows_default(obj, param) = _computed_default(param) &&
     !_semantic_fixed_context(param) &&
     _param_declaring_object(obj, param.name) !== nothing &&
-    !_semantic_request_names(obj, param.name)
+    !_semantic_request_names(obj, param.name, param.type)
 
 # The value a computed default takes for the request `obj` answers, or
 # `_NO_DEFAULT` when an input it reads is at fault (a caller fault, which that
@@ -29866,7 +29907,7 @@ function _semantic_choice_default(obj, param, values)
     param.required && return _NO_DEFAULT
     source = _param_declaring_object(obj, param.name)
     source === nothing && return param.default isa Expr ? _NO_DEFAULT : param.default
-    view = _record_view(source, Dict(param.name => String[]))
+    view = _record_view(source, Dict(param.name => _NO_DEFAULT))
     closure = _dependency_closure(typeof(source), param.name)
     if closure !== nothing
         overrides = Pair{Symbol,Any}[name => value for (name, value) in values
@@ -29974,37 +30015,43 @@ function _semantic_select(name, label, domain, selected; required=false)
                  required_attrs..., multiple_attrs...))
 end
 
-# How many options a generated single choice shows as a row of pills; past
-# it, the choice is a searchable drop-down (`_choice_list`).
+# How many options a generated choice shows as radio or checkbox pills;
+# past it, the choice is a searchable drop-down (`_choice_list`).
 const _RADIO_MAX = 8
 
 const _CHOICE_LIST_SERIAL = Base.Threads.Atomic{UInt}(0)
 
 """
-    _choice_list(name, label, options, selected; required=false, texts, attrs=(;))
+    _choice_list(name, label, options, selected; required=false, multiple=false, texts, attrs=(;))
 
 A single choice among many options: a field showing the chosen option that
 opens a searchable list of them (`choice_list_script`). `options` are
 `(; value, label)` with optional `disabled`, `help` and `group`, as a resolved
-domain lists them. The list holds one radio per option, so the choice submits,
-validates and refreshes like any radio group; it opens as a popover, so no
-scroll box clips it. `texts` gives the search field's words.
+domain lists them. With `multiple=true`, checkboxes allow several choices and
+the field names them all. Native inputs submit, validate and refresh the
+choice; it opens as a popover, so no scroll box clips it. `texts` gives the
+control's words.
 """
-function _choice_list(name, label, options, selected; required=false,
+function _choice_list(name, label, options, selected; required=false, multiple=false,
         texts::ErrorTexts=_EN_ERROR_TEXTS, attrs=(;))
-    required_attrs = required ? (; required="true") : (;)
+    selected_values = Set(selected isa AbstractVector ? selected : (selected,))
+    chosen = [option for option in options if option.value in selected_values &&
+              !get(option, :disabled, false)]
+    first_enabled = findfirst(option -> !get(option, :disabled, false), options)
     serial = Base.Threads.atomic_add!(_CHOICE_LIST_SERIAL, UInt(1)) + UInt(1)
     panel_id = "htmxo-choice-$(serial)"
-    chosen = findfirst(option -> _is_selected(option.value, selected), options)
     option_node(option) = begin
-        checked = _is_selected(option.value, selected)
         disabled = get(option, :disabled, false)
+        checked = option.value in selected_values && !disabled
+        needs_value = required && (!multiple || (isempty(chosen) && first_enabled !== nothing &&
+                                                 option === options[first_enabled]))
         help = get(option, :help, nothing)
         h.label(
-            h.input(; type="radio", name=string(name),
+            h.input(; type=multiple ? "checkbox" : "radio", name=string(name),
                     value=_option_wire_string(option.value),
                     (checked ? (; checked="true") : (;))...,
-                    (disabled ? (; disabled="true") : (;))..., required_attrs...),
+                    (disabled ? (; disabled="true") : (;))...,
+                    (needs_value ? (; required="true") : (;))...),
             h.span(option.label; class="htmxo-choice-label"),
             (isnothing(help) ? () : (h.small(help),))...;
             class="htmxo-choice-option")
@@ -30023,10 +30070,10 @@ function _choice_list(name, label, options, selected; required=false,
     end
     groups = [h.div(h.div(string(group); class="htmxo-choice-heading"), grouped[group]...;
                     class="htmxo-choice-group") for group in group_order]
-    current = isnothing(chosen) ? "" : string(options[chosen].label)
+    current = multiple ? _choice_summary(chosen, texts) : isempty(chosen) ? "" : string(first(chosen).label)
     h.fieldset(
         h.legend(label),
-        # `title` shows a label the field's width cuts short in full.
+        (multiple ? (_choice_empty(name, isempty(chosen)),) : ())...,
         h.button(
             h.span(current; class="htmxo-choice-current"),
             h.span("▾"; class="htmxo-choice-caret", aria_hidden="true");
@@ -30042,7 +30089,30 @@ function _choice_list(name, label, options, selected; required=false,
             h.p(texts.choice_no_match; class="htmxo-choice-empty", hidden=true);
             id=panel_id, class="htmxo-choice-panel", popover="auto",
             role="dialog", aria_label=string(label));
-        class="htmxo-choice-list", data_htmxo_choice_list="", attrs...)
+        class="htmxo-choice-list", data_htmxo_choice_list="",
+        (multiple ? (; data_htmxo_multiple="", data_htmxo_required=string(required),
+                       data_htmxo_selected=texts.choice_selected) : (;))..., attrs...)
+end
+
+_choice_summary(chosen, texts) = replace(texts.choice_selected, "{count}" => string(length(chosen))) *
+    (isempty(chosen) ? "" : ": " * join((string(option.label) for option in chosen), ", "))
+
+# An empty selection must submit an explicit blank; an omitted vector takes
+# its default. The runtime disables this sentinel whenever a box is checked.
+_choice_empty(name, empty) = h.input(; type="hidden", name=string(name), value="",
+    data_htmxo_choice_empty="", (empty ? (;) : (; disabled="true"))...)
+
+function _semantic_checkboxes(name, label, domain, selected; required=false)
+    options = get(domain, :options, NamedTuple[])
+    values = Set(selected isa AbstractVector ? selected : (selected,))
+    checked = [option.value in values && !get(option, :disabled, false) for option in options]
+    empty = !any(checked)
+    first_enabled = findfirst(option -> !get(option, :disabled, false), options)
+    h.fieldset(h.legend(label), _choice_empty(name, empty),
+        [_choice_option(name, option, checked[index];
+            (required && empty && index == first_enabled ? (; required="true") : (;))...)
+         for (index, option) in enumerate(options)]...;
+        data_htmxo_multiple="", data_htmxo_checkbox_group="", data_htmxo_required=string(required))
 end
 
 # --- A list of records drawn as cards (`@param name::Records`) ---
@@ -30168,7 +30238,7 @@ function _records_wire_pairs(name, records::Records)
         push!(pairs, prefix * "on" => entry.on ? "true" : "false")
         for field in records.fields
             value = getfield(entry, field)
-            for v in (value isa AbstractVector && !(value isa AbstractString) ? value : (value,))
+            for v in (value isa AbstractVector ? (isempty(value) ? ("",) : value) : (value,))
                 push!(pairs, prefix * string(field) => _option_wire_string(v))
             end
         end
@@ -30231,7 +30301,8 @@ function _semantic_choice_table(name, label, domain, selected; required=false,
 end
 
 _semantic_choice_list(name, label, domain, selected; required=false, texts=_EN_ERROR_TEXTS) =
-    _choice_list(name, label, get(domain, :options, NamedTuple[]), selected; required, texts)
+    _choice_list(name, label, get(domain, :options, NamedTuple[]), selected;
+                 required, texts, multiple=get(domain, :multiple, false))
 
 function _semantic_radio(name, label, domain, selected; required=false)
     required_attrs = required ? (; required="true") : (;)
@@ -30425,13 +30496,13 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
         elseif !get(domain, :multiple, false) && length(options) <= radio_max
             return _semantic_radio(param.name, label, domain, value;
                                    required=param.required)
-        elseif !get(domain, :multiple, false)
+        elseif get(domain, :multiple, false) && length(options) <= radio_max
+            return _semantic_checkboxes(param.name, label, domain, value;
+                                        required=param.required)
+        else
             return _semantic_choice_list(param.name, label, domain, value;
                                          required=param.required,
                                          texts=_error_texts(control_obj))
-        else
-            return _semantic_select(param.name, label, domain, value;
-                                    required=param.required)
         end
     end
 
@@ -30782,7 +30853,8 @@ function _semantic_hidden_values(route, values)
 end
 
 _semantic_hidden_inputs(hidden) =
-    Any[node for (name, value) in hidden for node in _hidden_input(name, value)]
+    Any[node for (name, value) in hidden for node in
+        _hidden_input(name, value isa AbstractVector && isempty(value) ? "" : value)]
 
 _semantic_context_inputs(route, values) =
     _semantic_hidden_inputs(_semantic_hidden_values(route, values))
@@ -31327,7 +31399,8 @@ input remains focusable for keyboard use. Those structural styles live in
 The default `:auto` policy picks the control from the domain: a single choice
 among at most `radio_max` options (default 8) is a row of pills, a single
 choice among more is a searchable drop-down ([`choice_list`](@ref)), a
-`multiple` domain is a `<select multiple>`, and an `allow_custom` domain is
+`multiple` domain uses checkbox pills up to the same cutoff and a searchable
+checkbox list above it, and an `allow_custom` domain is
 [`sinput_custom`](@ref).
 
 Carrying the context is not the same as the child *owning* it. `@param`
@@ -32122,7 +32195,7 @@ function _semantic_follow_url(target, obj, route, current, names)
         param.name in _semantic_follows(current) && continue
         value = get(current, param.name, nothing)
         value === nothing && continue
-        for v in (value isa AbstractVector ? value : (value,))
+        for v in (value isa AbstractVector ? (isempty(value) ? ("",) : value) : (value,))
             v isa Upload && continue
             push!(query, HTTP.URIs.escapeuri(string(param.name)) * "=" *
                          HTTP.URIs.escapeuri(_option_wire_string(v)))
@@ -32145,7 +32218,8 @@ function _semantic_address_value(obj, param)
     req = _req_of(obj)
     req isa HTTP.Request || return _NO_DEFAULT
     query = queryparams(req)
-    _submitted_raw(query, nothing, param.name) === _NO_DEFAULT && return _NO_DEFAULT
+    _submitted_raw(query, nothing, param.name; keep_empty=_vector_param(param.type)) === _NO_DEFAULT &&
+        return _NO_DEFAULT
     get(param, :context_source, nothing) isa NamedTuple &&
         return _semantic_context_value(obj, param)
     src = _kwargs_source(req, req.method)
@@ -32215,7 +32289,8 @@ function _semantic_input_default(obj, param, bare)
     param.default isa Expr ? _NO_DEFAULT : param.default
 end
 _semantic_address_wire(::Nothing) = String[]
-_semantic_address_wire(value::AbstractVector) = String[_option_wire_string(v) for v in value]
+_semantic_address_wire(value::AbstractVector) =
+    isempty(value) ? [""] : String[_option_wire_string(v) for v in value]
 _semantic_address_wire(value) = String[_option_wire_string(value)]
 
 # A form's inputs the page's address keeps, with their defaults
@@ -32488,7 +32563,9 @@ page*.
 A single choice among at most `radio_max` options (default 8) is a row of
 pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
 cutoff applies to every control of the surface, the shared ones included, and
-survives their refreshes.
+survives their refreshes. Vector choices use checkbox pills up to the cutoff
+and a searchable checkbox list above it; its closed field shows the selected
+count and every selected label.
 
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` and `submit_attrs` may likewise be values or
@@ -32824,7 +32901,7 @@ show_when_script() = h.script(Raw(raw"""
                  : scope.querySelectorAll('input, select, textarea');
     var found = false, values = [];
     Array.prototype.forEach.call(controls, function(c) {
-      if (c.name !== name || typeof c.value !== 'string' || PRESSED.test(c.type)) return;
+      if (c.name !== name || c.disabled || typeof c.value !== 'string' || PRESSED.test(c.type)) return;
       found = true;
       if (c.type === 'radio' || c.type === 'checkbox') {
         if (c.checked) values.push(c.value);
@@ -32923,7 +33000,9 @@ chooses it. Typing on the closed field opens it with that letter searched, and
 `change` from it as a click on a radio does, closes the list and returns the
 focus to the field, which then shows the chosen label. The search field's own
 `input` and `change` events stop at it, so forms and htmx triggers never see
-the search.
+the search. Multiple lists toggle checkboxes and stay open; their field shows
+the selected count and all labels. The runtime also keeps the explicit-empty
+input and at-least-one validity of checkbox groups in sync.
 """
 choice_list_script() = h.script(Raw(raw"""
 (function() {
@@ -32943,7 +33022,7 @@ choice_list_script() = h.script(Raw(raw"""
   function optionsOf(p) {
     return Array.prototype.slice.call(p.panel.querySelectorAll('.htmxo-choice-option'));
   }
-  function radioOf(option) { return option.querySelector('input[type="radio"]'); }
+  function radioOf(option) { return option.querySelector('input'); }
   // The options a reader can reach: left by the search, and not disabled.
   function reachable(p) {
     return optionsOf(p).filter(function(o) {
@@ -32951,7 +33030,7 @@ choice_list_script() = h.script(Raw(raw"""
     });
   }
   function checkedOption(p) {
-    var radio = p.panel.querySelector('input[type="radio"]:checked');
+    var radio = p.panel.querySelector('input:checked:not(:disabled)');
     return radio ? radio.closest('.htmxo-choice-option') : null;
   }
   function activeOption(p) {
@@ -33036,29 +33115,51 @@ choice_list_script() = h.script(Raw(raw"""
   }
   function choose(p, option) {
     var radio = radioOf(option);
-    if (!radio.disabled && !radio.checked) {
-      radio.checked = true;
+    if (!radio.disabled && (radio.type === 'checkbox' || !radio.checked)) {
+      radio.checked = radio.type === 'checkbox' ? !radio.checked : true;
       radio.dispatchEvent(new Event('input', {bubbles: true}));
       radio.dispatchEvent(new Event('change', {bubbles: true}));
     }
-    close(p, true);
+    if (radio.type !== 'checkbox') close(p, true);
   }
-  // The field shows the chosen option's label.
+  // Keep native form submission and validity in step with the whole group.
+  function syncMultiple(group) {
+    var boxes = Array.from(group.querySelectorAll('input[type="checkbox"]:not(:disabled)'));
+    var empty = !boxes.some(function(c) { return c.checked; });
+    group.querySelector('[data-htmxo-choice-empty]').disabled = !empty;
+    boxes.forEach(function(c, i) {
+      c.required = group.getAttribute('data-htmxo-required') === 'true' && empty && i === 0;
+    });
+  }
+  // A multiple choice shows its count and every selected label, wrapped.
   function sync(list) {
     var p = partsOf(list), option = checkedOption(p);
     var label = option ? option.querySelector('.htmxo-choice-label').textContent : '';
+    if (list.hasAttribute('data-htmxo-multiple')) {
+      var labels = optionsOf(p).filter(function(o) {
+        var c = radioOf(o); return c.checked && !c.disabled;
+      }).map(function(o) { return o.querySelector('.htmxo-choice-label').textContent; });
+      label = list.getAttribute('data-htmxo-selected').split('{count}').join(labels.length) +
+        (labels.length ? ': ' + labels.join(', ') : '');
+    }
     p.field.querySelector('.htmxo-choice-current').textContent = label;
     p.field.title = label;
+    if (p.panel.matches(':popover-open')) place(p);
   }
-  document.addEventListener('change', function(e) {
-    var t = e.target, list = t && t.type === 'radio' ? listOf(t) : null;
+  function changed(e) {
+    var t = e.target;
+    if (!t || (t.type !== 'radio' && t.type !== 'checkbox')) return;
+    var group = t.closest('[data-htmxo-multiple]'), list = listOf(t);
+    if (group) syncMultiple(group);
     if (list) sync(list);
-  });
+  }
+  document.addEventListener('input', changed, true);
+  document.addEventListener('change', changed, true);
   // A click on an option chooses it; the list closes once the radio is checked.
   document.addEventListener('click', function(e) {
     var option = e.target && e.target.closest ? e.target.closest('.htmxo-choice-option') : null;
     var list = option ? listOf(option) : null;
-    if (!list || radioOf(option).disabled) return;
+    if (!list || radioOf(option).disabled || radioOf(option).type === 'checkbox') return;
     var p = partsOf(list);
     setTimeout(function() { close(p, true); }, 0);
   });
@@ -33102,9 +33203,13 @@ choice_list_script() = h.script(Raw(raw"""
     if (list) open(partsOf(list));
   }, true);
   // A page restored from the back/forward cache keeps its checked radios.
-  window.addEventListener('pageshow', function() {
+  function syncAll() {
+    document.querySelectorAll('[data-htmxo-multiple]').forEach(syncMultiple);
     document.querySelectorAll('.htmxo-choice-list').forEach(sync);
-  });
+  }
+  window.addEventListener('pageshow', syncAll);
+  document.addEventListener('htmx:afterSettle', syncAll);
+  document.addEventListener('reset', function() { setTimeout(syncAll, 0); });
   // A choice drawn as a table (an option record's `columns`): a click on a
   // row, or Enter or Space on a focused row, chooses its option. The radio
   // buttons keep the keyboard of a radio group; a click on a control or a
@@ -34715,7 +34820,8 @@ semantic_follow_script() = h.script(Raw(raw"""
         if (c.closest('[hidden]') || c.hasAttribute(FOLLOWS)) return;
         if (c.type === 'radio') { if (c.checked) pairs.push([c.name, c.value]); return; }
         if (c.type === 'checkbox') {
-          pairs.push([c.name, c.checked ? c.value : (c.value === 'true' ? 'false' : null)]);
+          pairs.push([c.name, c.checked ? c.value :
+            (c.value === 'true' && !c.closest('[data-htmxo-multiple]') ? 'false' : null)]);
           if (pairs[pairs.length - 1][1] === null) pairs.pop();
           return;
         }
@@ -34826,14 +34932,15 @@ semantic_follow_script() = h.script(Raw(raw"""
       values = values || [];
       if (c.type === 'radio') { if (c.checked) values.push(c.value); return; }
       if (c.type === 'checkbox') {
-        if (c.checked) values.push(c.value); else if (c.value === 'true') values.push('false');
+        if (c.checked) values.push(c.value);
+        else if (c.value === 'true' && !c.closest('[data-htmxo-multiple]')) values.push('false');
         return;
       }
       if (c.type === 'select-multiple') {
         Array.prototype.forEach.call(c.selectedOptions, function(o) { values.push(o.value); });
         return;
       }
-      if (c.value !== '') values.push(c.value);
+      if (c.value !== '' || c.hasAttribute('data-htmxo-choice-empty')) values.push(c.value);
     });
     return values;
   }
@@ -34858,7 +34965,7 @@ semantic_follow_script() = h.script(Raw(raw"""
     });
     var records = [];
     Array.prototype.forEach.call(form.elements, function(c) {
-      if (!c.name || c.name.indexOf(prefix) !== 0 || PRESSED.test(c.type)) return;
+      if (!c.name || c.disabled || c.name.indexOf(prefix) !== 0 || PRESSED.test(c.type)) return;
       var m = /^(\d+)\.(.+)$/.exec(c.name.slice(prefix.length));
       if (!m) return;
       var i = Number(m[1]), key = m[2], rec = records[i] = records[i] || {fields: {}};
@@ -34866,7 +34973,12 @@ semantic_follow_script() = h.script(Raw(raw"""
       if (key === 'label') { rec.label = c.value; return; }
       if (c.closest('[hidden]')) return;
       if (c.type === 'radio') { if (c.checked) rec.fields[key] = [c.value]; return; }
-      if (c.type === 'checkbox') { rec.fields[key] = [c.checked ? c.value : 'false']; return; }
+      if (c.type === 'checkbox') {
+        if (c.closest('[data-htmxo-multiple]')) {
+          if (c.checked) (rec.fields[key] = rec.fields[key] || []).push(c.value);
+        } else rec.fields[key] = [c.checked ? c.value : 'false'];
+        return;
+      }
       rec.fields[key] = [c.value];
       rec.numeric = rec.numeric || {};
       if (c.type === 'number') rec.numeric[key] = true;
@@ -35150,6 +35262,21 @@ semantic_follow_script() = h.script(Raw(raw"""
     // A setting is the reader's choice, even of the value a field already
     // shows as its computed default.
     function chosen() { controls.forEach(function(c) { c.removeAttribute(FOLLOWS); }); }
+    var group = first.closest('[data-htmxo-multiple]');
+    if (group) {
+      var boxes = Array.from(group.querySelectorAll('input[type="checkbox"]:not(:disabled)'));
+      var desired = new Set(values.length === 1 && values[0] === '' ? [] : values);
+      var available = new Set(boxes.map(function(c) { return c.value; }));
+      if (Array.from(desired).some(function(v) { return !available.has(v); })) return false;
+      chosen();
+      var changed = false;
+      boxes.forEach(function(c) {
+        var on = desired.has(c.value);
+        if (c.checked !== on) { c.checked = on; changed = true; }
+      });
+      if (changed) boxes[0].dispatchEvent(new Event('change', {bubbles: true}));
+      return true;
+    }
     if (first.type === 'radio') {
       var radio = controls.filter(function(c) { return c.value === value; })[0];
       if (!radio) return false;
@@ -36274,7 +36401,8 @@ div.htmxo-private::before { display: table; margin-block-end: .35rem; }
    contrast colours follow the theme; without Pico the pills take the text
    and page colours. An app restyles them in its own stylesheet with a
    selector at least as specific as these. */
-fieldset:not([role]) > label:has(> input[type="radio"]) {
+fieldset:not([role]) > label:has(> input[type="radio"]),
+fieldset[data-htmxo-checkbox-group] > label {
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -36301,19 +36429,23 @@ fieldset:not([role]) > label:has(> input[type="radio"]) > input[type="radio"] {
     clip-path: inset(50%);
     pointer-events: none;
 }
-fieldset:not([role]) > label:has(> input[type="radio"]:not(:disabled)):hover {
+fieldset:not([role]) > label:has(> input[type="radio"]:not(:disabled)):hover,
+fieldset[data-htmxo-checkbox-group] > label:has(> input:not(:disabled)):hover {
     border-color: var(--pico-contrast, currentColor);
 }
-fieldset:not([role]) > label:has(> input[type="radio"]:focus-visible) {
+fieldset:not([role]) > label:has(> input[type="radio"]:focus-visible),
+fieldset[data-htmxo-checkbox-group] > label:has(> input:focus-visible) {
     outline: 2px solid var(--pico-contrast, currentColor);
     outline-offset: 2px;
 }
-fieldset:not([role]) > label:has(> input[type="radio"]:checked) {
+fieldset:not([role]) > label:has(> input[type="radio"]:checked),
+fieldset[data-htmxo-checkbox-group] > label:has(> input:checked) {
     border-color: var(--pico-contrast-background, CanvasText);
     background: var(--pico-contrast-background, CanvasText);
     color: var(--pico-contrast-inverse, Canvas);
 }
-fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
+fieldset:not([role]) > label:has(> input[type="radio"]:disabled),
+fieldset[data-htmxo-checkbox-group] > label:has(> input:disabled) {
     opacity: .5;
     cursor: not-allowed;
 }
@@ -36328,8 +36460,7 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
    background ones), and sets every property Pico's button rules set through
    those. Without Pico it takes the page's colours. */
 /* As wide as its container, as a field is, whatever option is chosen (a
-   fieldset is otherwise as wide as its widest content); a long label ends
-   in an ellipsis. */
+   fieldset is otherwise as wide as its widest content); complete labels wrap. */
 .htmxo-choice-list { min-inline-size: 0; }
 .htmxo-choice-list > .htmxo-choice-field {
     display: flex;
@@ -36356,9 +36487,8 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
     flex: 1 1 auto;
     min-width: 0;
     min-height: 1.5em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    white-space: normal;
 }
 .htmxo-choice-list > .htmxo-choice-field > .htmxo-choice-caret { flex: none; opacity: .6; }
 .htmxo-choice-panel {
@@ -36410,6 +36540,18 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
     clip-path: inset(50%);
     pointer-events: none;
 }
+fieldset[data-htmxo-checkbox-group] > label > input[type="checkbox"],
+.htmxo-choice-panel .htmxo-choice-option > input[type="checkbox"] {
+    appearance: auto;
+    flex: none;
+    width: 1em;
+    height: 1em;
+    margin: 0 .35em 0 0;
+    background: none;
+    box-shadow: none;
+    accent-color: currentColor;
+}
+.htmxo-choice-panel .htmxo-choice-label { flex: 1; overflow-wrap: anywhere; }
 .htmxo-choice-panel .htmxo-choice-option > small { flex-basis: 100%; opacity: .75; }
 .htmxo-choice-panel .htmxo-choice-option:hover,
 .htmxo-choice-panel .htmxo-choice-option.htmxo-choice-active {
@@ -36419,15 +36561,15 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled) {
     outline: 2px solid color-mix(in srgb, currentColor 45%, transparent);
     outline-offset: -2px;
 }
-.htmxo-choice-panel .htmxo-choice-option:has(> input[type="radio"]:checked) {
+.htmxo-choice-panel .htmxo-choice-option:has(> input:checked) {
     background: var(--pico-contrast-background, CanvasText);
     color: var(--pico-contrast-inverse, Canvas);
 }
-.htmxo-choice-panel .htmxo-choice-option:has(> input[type="radio"]:focus-visible) {
+.htmxo-choice-panel .htmxo-choice-option:has(> input:focus-visible) {
     outline: 2px solid var(--pico-contrast, currentColor);
     outline-offset: -2px;
 }
-.htmxo-choice-panel .htmxo-choice-option:has(> input[type="radio"]:disabled) {
+.htmxo-choice-panel .htmxo-choice-option:has(> input:disabled) {
     opacity: .5;
     cursor: not-allowed;
 }
