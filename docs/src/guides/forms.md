@@ -98,7 +98,7 @@ parameters already supplied by visible controls.
 From 0.1.109, a generated form can discard an edited input when one of its
 named source inputs changes:
 
-```julia
+```@example forms
 @htmx struct Comparison
     @param measure::String = "distance"
     @options(measure) = ["distance", "duration"]
@@ -108,6 +108,11 @@ named source inputs changes:
     @get index() = semantic_app(__self__; presentation=:tabs,
         select=entry -> entry.name !== :index)
 end
+route!(Comparison(); prefix="/comparison", operation_policy=:blocking);
+response = dispatch(:GET, "/comparison/result?measure=duration";
+    headers=["HX-Request" => "true"]);
+@assert response.status == 200 # hide
+println(String(response.body))
 ```
 
 After the reader sets a threshold, changing `measure` restores the new
