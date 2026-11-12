@@ -157,7 +157,7 @@ end
     css = repr("text/html", htmxo_utility_styles())
     @test contains(css, ".htmxo-choice-list > .htmxo-choice-field {")
     @test contains(css, ".htmxo-choice-panel:popover-open { display: flex; flex-direction: column; }")
-    @test contains(css, ".htmxo-choice-panel .htmxo-choice-option:has(> input[type=\"radio\"]:checked) {")
+    @test contains(css, ".htmxo-choice-panel .htmxo-choice-option:has(> input:checked) {")
     # Unlayered: Pico styles buttons, labels and radios unlayered.
     @test findfirst(".htmxo-choice-list > .htmxo-choice-field {", css).start >
           findfirst("/* Unlayered so it beats", css).start

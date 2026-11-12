@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.108
+## 0.1.109
 
 - `@resets(input) = source` (or a tuple of source inputs) restores a generated
   form input's current default when a named source changes. Reader overrides
@@ -10,6 +10,22 @@
   edits persist until another source change. Initial explicit URL parameters
   and direct requests retain their values. A delayed refresh preserves an edit
   made after it started. (`e81f9f8`)
+
+## 0.1.108
+
+- Vector choices render as checkbox pills up to `radio_max` and a searchable
+  checkbox popover above it, also available as `choice_list(; multiple=true)`.
+  The closed field shows the selected count and complete, wrapping labels;
+  toggling keeps the popover open. Required groups need one enabled selection.
+- Promoted vector `@param` controls retain their multiple-choice domain instead
+  of becoming radios. Repeated values, filtered selections and explicit empty
+  selections survive submission, dependent refreshes and page reloads. In query
+  strings and form bodies, `name=` now means an empty vector; an omitted name
+  still uses its default, and scalar blank handling is unchanged.
+- Records vector fields and `set_inputs` retain complete selections, including
+  an explicit empty selection.
+- Choice-list Markdown includes every selected label. Built-in English and
+  German `ErrorTexts` include `choice_selected` with a `{count}` placeholder.
 
 ## 0.1.107
 

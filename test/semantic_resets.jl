@@ -15,7 +15,10 @@ using TestItemRunner
         @resets(threshold) = (output, offset)
         @param direction::String = output == "pk" ? "above" : "below"
         @options(direction) = ["above", "below"]
-        @resets(direction) = output
+        @resets(direction) = (output, choices)
+        @param choices::Vector{String} = ["a"]
+        @options(choices) = ["a", "true"]
+        @resets(choices) = output
         @param constant::Int = 4
         @resets(constant) = output
         @param legacy::Float64 = criterion
@@ -37,7 +40,8 @@ end
 
     @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
     @test HTMXObjects._param_resets(ResetPage) ==
-        (threshold=(:output, :offset), direction=(:output,), constant=(:output,))
+        (threshold=(:output, :offset), direction=(:output, :choices),
+         choices=(:output,), constant=(:output,))
     route!(ResetPage(); operation_policy=:blocking)
     page(url) = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
     html = page("/?tab=responding&threshold=0.5&direction=below&constant=9&legacy=77")
@@ -190,9 +194,23 @@ end
             await until(() => checked(form, 'direction') === 'below');
             if (checked(other, 'direction') !== 'above') throw new Error('unrelated form reset');
             choose('direction', 'above');
+            choose('choices', 'true');
+            await until(() => checked(form, 'direction') === 'below');
+            choose('direction', 'above');
+            const unchanged = form.querySelector('[name="direction"]');
+            form.querySelector('[name="choices"][value="true"]').dispatchEvent(new Event('change', {bubbles: true}));
+            await until(() => form.querySelector('[name="direction"]') !== unchanged);
+            if (checked(form, 'direction') !== 'above') throw new Error('equal vector source reset');
+            choose('choices', 'a');
+            await until(() => checked(form, 'direction') === 'below');
+            const emptied = form.querySelector('[name="direction"]');
+            choose('choices', 'true');
+            await until(() => form.querySelector('[name="direction"]') !== emptied);
+            if (form.querySelector('[name="choices"]:checked')) throw new Error('empty vector lost');
             const before = form.querySelector('[name="direction"]');
             choose('output', 'pk');
             await until(() => form.querySelector('[name="direction"]') !== before);
+            if (checked(form, 'choices') !== 'a') throw new Error('vector default not restored');
             choose('output', 'pbmc');
             await until(() => checked(form, 'direction') === 'below');
             form.querySelector('button[type="submit"]').click();
