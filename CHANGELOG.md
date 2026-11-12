@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.114
+
+- `dispatch(...; body=req.body)` accepts HTTP.jl 2's buffered `EmptyBody`
+  and `BytesBody`, so a plain `HTTP.serve!` handler can forward empty, form
+  and binary requests directly. Dispatch copies the unread bytes without
+  consuming the original body. String and byte-vector inputs remain supported.
+
 ## 0.1.113
 
 - Service plans include resource ownership, guarded operations and public/internal
