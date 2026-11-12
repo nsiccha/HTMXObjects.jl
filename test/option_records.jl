@@ -13,9 +13,10 @@ using TestItemRunner
                (; value="v3", label="Bundle 3", group="Archived")]
     domain = (; options=[merge((; group=nothing, help=nothing, disabled=false), r) for r in records])
 
-    # Pills: the unavailable option is a disabled radio with its help after the label.
+    # Pills: the unavailable option is a disabled radio with its help after the
+    # label, in a span of its own, so the label's own text is the option's label.
     pills = html(radio_group((; bundle="v1"), records; label="Bundle"))
-    @test contains(pills, "<label><input type=\"radio\" name=\"bundle\" value=\"v2\" disabled=\"true\">Bundle 2 — Its files are not on this host</label>")
+    @test contains(pills, "<label><input type=\"radio\" name=\"bundle\" value=\"v2\" disabled=\"true\">Bundle 2<span class=\"htmxo-option-help\"> — Its files are not on this host</span></label>")
     @test contains(pills, "<label><input type=\"radio\" name=\"bundle\" value=\"v1\" checked=\"true\">Bundle 1</label>")
     @test pills == html(HTMXObjects._semantic_radio(:bundle, "Bundle", domain, "v1"))
 
