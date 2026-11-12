@@ -180,42 +180,47 @@ end
           const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
           const form = document.getElementById('primary');
           const other = document.getElementById('independent');
+          let settledControls = form.querySelector('.htmxo-semantic-controls');
+          form.addEventListener('htmx:afterSettle', function(e) {
+            if (e.target.classList.contains('htmxo-semantic-controls')) settledControls = e.target;
+          });
           const choose = (name, value) => form.querySelector('[name="' + name + '"][value="' + value + '"]').click();
           const checked = (f, name) => f.querySelector('[name="' + name + '"]:checked').value;
-          async function until(check) {
+          async function until(check, label) {
             const end = Date.now() + 12000;
-            while (!check()) {
-              if (Date.now() > end) throw new Error('standalone form did not update');
+            while (!check() || form.querySelector('.htmxo-semantic-controls') !== settledControls) {
+              if (Date.now() > end) throw new Error(label + ': ' +
+                JSON.stringify(Array.from(new FormData(form))) + ' result=' + document.getElementById('answer').textContent);
               await sleep(25);
             }
           }
           try {
             choose('output', 'pbmc');
-            await until(() => checked(form, 'direction') === 'below');
+            await until(() => checked(form, 'direction') === 'below', 'first reset');
             if (checked(other, 'direction') !== 'above') throw new Error('unrelated form reset');
             choose('direction', 'above');
             choose('choices', 'true');
-            await until(() => checked(form, 'direction') === 'below');
+            await until(() => checked(form, 'direction') === 'below', 'vector changed');
             choose('direction', 'above');
             const unchanged = form.querySelector('[name="direction"]');
             form.querySelector('[name="choices"][value="true"]').dispatchEvent(new Event('change', {bubbles: true}));
-            await until(() => form.querySelector('[name="direction"]') !== unchanged);
+            await until(() => form.querySelector('[name="direction"]') !== unchanged, 'vector equal');
             if (checked(form, 'direction') !== 'above') throw new Error('equal vector source reset');
             choose('choices', 'a');
-            await until(() => checked(form, 'direction') === 'below');
+            await until(() => checked(form, 'direction') === 'below', 'vector removed a');
             const emptied = form.querySelector('[name="direction"]');
             choose('choices', 'true');
-            await until(() => form.querySelector('[name="direction"]') !== emptied);
+            await until(() => form.querySelector('[name="direction"]') !== emptied, 'vector emptied');
             if (form.querySelector('[name="choices"]:checked')) throw new Error('empty vector lost');
             const before = form.querySelector('[name="direction"]');
             choose('output', 'pk');
-            await until(() => form.querySelector('[name="direction"]') !== before);
+            await until(() => form.querySelector('[name="direction"]') !== before, 'output pk');
             if (checked(form, 'choices') !== 'a') throw new Error('vector default not restored');
             choose('output', 'pbmc');
-            await until(() => checked(form, 'direction') === 'below');
+            await until(() => checked(form, 'direction') === 'below', 'last reset');
             form.querySelector('button[type="submit"]').click();
             await until(() => document.getElementById('answer').textContent ===
-              'responding:pbmc:0:-50.0:below:4:77.0:a');
+              'responding:pbmc:0:-50.0:below:4:77.0:a', 'submitted result');
             if (checked(other, 'direction') !== 'above') throw new Error('unrelated form changed');
             await fetch('/complete?status=passed');
           } catch (error) {
