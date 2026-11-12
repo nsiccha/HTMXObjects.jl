@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.113
+
+- Service plans include resource ownership, guarded operations and public/internal
+  exposure in their descriptor. `service_topology` projects service blocks and
+  grouped forwarding connections. The reflection explorer has a compact Services
+  view, also available through `ReflectionRoutes(; plan)`.
+- `ServiceRuntime` collects bounded per-operation and per-destination request,
+  failure and latency summaries by default (`metrics=false` opts out).
+  `service_observations` reads local or authenticated peer snapshots with process
+  generation IDs and explicit failure states. `mount_service_monitor!` adds a
+  protected Services page and JSON endpoints, readable while draining;
+  `service_topology_view` embeds the same view with supplied observations.
+
 ## 0.1.112
 
 - A `Records` card has a fold control, the disclosures' chevron as the first

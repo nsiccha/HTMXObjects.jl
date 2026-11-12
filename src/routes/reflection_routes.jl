@@ -783,7 +783,8 @@ application_explorer_styles() = h.style(Raw("""
 
 """
     application_explorer_view(descriptor; selected="", query="", overlay=nothing,
-                              base="", live=false, live_available=overlay !== nothing)
+                              base="", live=false, live_available=overlay !== nothing,
+                              view=:auto, observations=())
 
 Render a server-side application architecture explorer with synchronized Map,
 Inspector and searchable Reference views. Every node is an ordinary link and
@@ -795,12 +796,27 @@ contribution metadata are rendered rather than abbreviated or discarded.
 
 When supplied, `overlay` is displayed in a separate live-observation panel; it
 is never merged into or substituted for the declaration graph.
+Descriptors with a service fragment open the compact Services view by default;
+`view=:map` opens the full architecture instead. A `selected` node deep link
+also opens the map. `observations` supplies optional service runtime snapshots.
 """
 function application_explorer_view(descriptor; selected="", query="",
         overlay=nothing, base="", live::Bool=false,
-        live_available::Bool=overlay !== nothing)
+        live_available::Bool=overlay !== nothing, view=:auto, observations=())
     descriptor.schema == _APPLICATION_DESCRIPTOR_SCHEMA || throw(ArgumentError(
         "expected $(_APPLICATION_DESCRIPTOR_SCHEMA), got $(repr(descriptor.schema))"))
+    view = string(view)
+    view in ("auto", "map", "services") || throw(ArgumentError("view must be auto, map or services"))
+    has_services = any(n -> n.fragment == "htmxobjects.services" && n.kind === :service, descriptor.nodes)
+    services_view = view == "services" || (view == "auto" && has_services && isempty(selected))
+    tabs = has_services ? h.nav(h.ul(
+        h.li(h.a("Services"; href=query_url(base; view="services"),
+            aria_current=services_view ? "page" : "false")),
+        h.li(h.a("Application map"; href=query_url(base; view="map"),
+            aria_current=services_view ? "false" : "page"))); aria_label="Architecture views") : ""
+    if services_view
+        return h.section(tabs, service_topology_view(service_topology(descriptor); observations))
+    end
     selected_id = isempty(selected) ? descriptor.root : selected
     _architecture_find_node(descriptor, selected_id)
     live_control = if live_available
@@ -816,6 +832,7 @@ function application_explorer_view(descriptor; selected="", query="",
     end
     h.section(
         application_explorer_styles(),
+        tabs,
         h.header(
             h.p("Application architecture"),
             h.h1("Map, Inspector, Reference"),
@@ -844,7 +861,7 @@ function application_explorer_view(descriptor; selected="", query="",
 end
 
 """
-    ReflectionRoutes(; root::Type, target=nothing, contributions=())
+    ReflectionRoutes(; root::Type, target=nothing, contributions=(), plan=nothing)
 
 Mount an inspectable reflection surface for an `@htmx` application with `@include`.
 
@@ -869,31 +886,35 @@ Provides:
 Distinct from [`SchemaRoutes`](@ref), which serves the flat `reflect(root)`
 route index at `/schema` and is unchanged by this bundle. Mount either, both,
 or neither.
+Supply `plan` to inspect its complete service descriptor and open the Services
+tab by default. `root` may then be omitted. Runtime observations are provided by
+[`mount_service_monitor!`](@ref), which also checks peers through their transport.
 """
 @htmx struct ReflectionRoutes
     root::Type = Any
     target::Any = nothing
     contributions::Any = ()
+    plan::Any = nothing
 
-    @get index(; selected::String="", q::String="", live::Bool=false) = begin
-        local app_graph = application_descriptor(root; contributions)
+    @get index(; selected::String="", q::String="", live::Bool=false, view::String="auto") = begin
+        local app_graph = plan === nothing ? application_descriptor(root; contributions) : plan.descriptor
         overlay = live ? begin
             target === nothing && throw(ArgumentError(
                 "live observations requested but ReflectionRoutes has no target object"))
             application_observations(target, app_graph)
         end : nothing
-        application_explorer_view(app_graph; selected, query=q, overlay,
+        application_explorer_view(app_graph; selected, query=q, overlay, view,
                                   base=__route__, live,
                                   live_available=target !== nothing)
     end
     @get graph() = MIMEResponse("application/json",
-                                _schema_json(semantic_descriptor(root).graph))
+                                _schema_json(semantic_descriptor(plan === nothing ? root : plan.root).graph))
     @get descriptor() = MIMEResponse("application/json",
-        _schema_json(application_descriptor(root; contributions)))
+        _schema_json(plan === nothing ? application_descriptor(root; contributions) : plan.descriptor))
     @get observations() = begin
         target === nothing && throw(ArgumentError(
             "ReflectionRoutes observations require an explicit target object"))
-        local app_graph = application_descriptor(root; contributions)
+        local app_graph = plan === nothing ? application_descriptor(root; contributions) : plan.descriptor
         MIMEResponse("application/json",
                      _schema_json(application_observations(target, app_graph)))
     end
