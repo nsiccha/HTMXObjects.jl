@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.110
+
+- `Records` cards are compact and show every field: a card field's docstring
+  help text, the same in every card, is shown once under the cards after the
+  field's label (each card's field names it in `aria-describedby`; it hides
+  while the field applies to no card), while a computed `@help` stays in each
+  card. Inside a card, fields sit closer, inputs are lower, pills are smaller,
+  and a two-pill choice may share a row with a short field. A
+  `semantic_control` override in a card receives `default` without the
+  docstring's help text. (`10311f9`)
+
 ## 0.1.109
 
 - `@resets(input) = source` (or a tuple of source inputs) restores a generated
