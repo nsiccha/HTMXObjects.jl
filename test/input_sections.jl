@@ -152,6 +152,92 @@ end
     @test contains(refreshed, "value=\"b\"")
 end
 
+@testitem "an input alone in its section, labelled as the heading, shows the label once" setup=[InputSectionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    route!(SectionPage(); operation_policy=:blocking)
+    once = ["Fit" => [:fit], "Subjects" => [:basis, :subjects], "Dosing" => [:regimen],
+            "seed" => [:seed], "Output" => [:output],
+            InputSection("Simulation settings", [:draws]; settings=true)]
+    sidebar = sidebar_of(section_page(; sections=once))
+    # Pills (their legend) and a number (the text its label starts with), the
+    # heading read ignoring case: the section's heading shows, and the field's
+    # own label is still its accessible name but is not shown.
+    @test sections_of(sidebar) == [("Fit", false), ("Subjects", false), ("Dosing", false),
+        ("seed", false), ("Output", false), ("Simulation settings", true)]
+    @test contains(sidebar, "<legend>Fit</legend><div class=\"htmxo-input-section-fields\"><div class=\"htmxo-input-field\" data-htmxo-width=\"short\"><fieldset><legend class=\"htmxo-heading-named\">Fit</legend><label><input type=\"radio\" name=\"fit\"")
+    @test contains(sidebar, "<legend>seed</legend><div class=\"htmxo-input-section-fields\"><div class=\"htmxo-input-field\" data-htmxo-width=\"short\"><label><span class=\"htmxo-heading-named\">Seed</span><input name=\"seed\"")
+    # A label that reads otherwise, and one of several inputs (the subjects'
+    # label is the heading too), show as before.
+    @test contains(sidebar, "<label>Regimen<input") && contains(sidebar, "<label>Draws<input")
+    @test contains(sidebar, "<label>Subjects<input")
+    # The output's relevance is the server's: the sidebar refreshes its control
+    # when the fit changes, and the refreshed control is drawn the same way.
+    @test contains(sidebar, "<label><span class=\"htmxo-heading-named\">Output</span><input name=\"output\"")
+    @test count("htmxo-heading-named", sidebar) == 3
+    refresh = match(r"hx-get=\"([^\"]*__htmxo_context_control=output[^\"]*)\"", sidebar)
+    @test refresh !== nothing
+    url = replace(refresh.captures[1], "&amp;" => "&")
+    @test contains(url, "__htmxo_heading=Output")
+    refreshed = String(dispatch(:GET, url * "&fit=two&output=b";
+        headers=["HX-Request" => "true"]).body)
+    @test contains(refreshed, "<label><span class=\"htmxo-heading-named\">Output</span><input name=\"output\"")
+    @test contains(refreshed, "value=\"b\"")
+    # In a tab, and after the tab's controls refresh.
+    tab = tab_of(section_page(; sections=once, shared=[:fit, :basis]), "dose_response")
+    @test contains(tab, "<legend>Output</legend>") &&
+        contains(tab, "<span class=\"htmxo-heading-named\">Output</span>")
+    region = match(r"<div class=\"htmxo-semantic-controls\" hx-get=\"([^\"]*)\""s, tab)
+    refreshed = String(dispatch(:GET, replace(region.captures[1], "&amp;" => "&") *
+        "&fit=two&basis=typical&output=b"; headers=["HX-Request" => "true"]).body)
+    @test contains(refreshed, "<label><span class=\"htmxo-heading-named\">Output</span><input name=\"output\"")
+
+    # The reporter's shape: a list of cards, its docstring's help kept.
+    @htmx struct OneListSection
+        "Age (years)"
+        @param age::Float64 = 50.0
+        """
+        Scenarios
+
+        Each scenario is simulated and overlaid in every view.
+        """
+        @param scenarios::Records = Records(:age; label="Scenario")
+        "Time course"
+        @get timecourse() = h.p(length(scenarios))
+        "Summary"
+        @get summary() = h.p(length(scenarios))
+    end
+    cards = sidebar_of(section_page(OneListSection(); sections=["Scenarios" => [:scenarios]]))
+    @test contains(cards, r"<legend>Scenarios</legend><div class=\"htmxo-input-section-fields\"><div class=\"htmxo-input-field\"><fieldset class=\"htmxo-records\"[^>]*><legend class=\"htmxo-heading-named\">Scenarios</legend>")
+    @test count(">Scenarios<", cards) == 2
+    @test contains(cards, "Each scenario is simulated and overlaid in every view.")
+
+    # An app's own control (`semantic_control`) is drawn as the app wrote it.
+    @htmx struct OwnLabel
+        "Seed"
+        @param seed::Int = 1
+        "Draws"
+        @param draws::Int = 1
+        "A"
+        @get a() = h.p(seed, draws)
+        "B"
+        @get b() = h.p(seed, draws)
+    end
+    HTMXObjects.semantic_control(::OwnLabel, ::Val{:seed}, control) =
+        h.label("Seed", h.input(; name="seed", value=string(control.value)))
+    own = sidebar_of(section_page(OwnLabel(); sections=["Seed" => [:seed]]))
+    @test contains(own, "<legend>Seed</legend>") && contains(own, "<label>Seed<input name=\"seed\"")
+    @test !contains(own, "htmxo-heading-named")
+
+    # Wrappers are looked through; a checkbox's label, after its box, is kept.
+    named(control, heading) = repr("text/html", HTMXObjects._heading_named(control, heading))
+    @test named(h.div(h.div(linput("x"; label="Dose"))), " dose ") ==
+        "<div><div><label><span class=\"htmxo-heading-named\">Dose</span><input name=\"x\" placeholder=\"x\"></label></div></div>"
+    box = cinput("x"; label="Advanced")
+    @test named(box, "Advanced") == repr("text/html", box)
+    @test named(linput("x"; label="Dose"), "Dosing") == repr("text/html", linput("x"; label="Dose"))
+end
+
 @testitem "input sections share rows and hide with their inputs in a browser" setup=[InputSectionFixtures, ChromeDump] tags=[:browser, :semantic] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
@@ -183,6 +269,12 @@ end
                     out.back = String(shown(section('Typical subject')) && shown(field('age')) && !shown(field('subjects')));
                     // A server-evaluated condition (the output) hides its field, not its section.
                     out.server = String(!shown(field('output')) && shown(section('View settings')));
+                    // The fit is alone in its section and labelled as its heading:
+                    // the heading shows, the field's own legend does not, its pills do.
+                    const fit = section('Fit').querySelector('.htmxo-input-field legend');
+                    out.once = String(fit.textContent === 'Fit' && fit.getBoundingClientRect().height <= 1 &&
+                        shown(section('Fit').querySelector('legend')) &&
+                        shown(document.querySelector('input[name="fit"]').closest('label')));
                 } catch (error) {
                     out.error = String(error);
                 }
@@ -217,7 +309,7 @@ end
             end
             @test contains(dom, "data-done=\"1\"")
             @test !contains(dom, "data-error=")
-            for marker in ("heading", "row", "hidden", "back", "server")
+            for marker in ("heading", "row", "hidden", "back", "server", "once")
                 @test contains(dom, "data-$marker=\"true\"")
             end
         end
