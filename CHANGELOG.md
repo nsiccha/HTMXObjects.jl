@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.115
+
+- The generated Services page preserves each request's `X-Forwarded-Prefix`
+  in its refresh link, so observations can be refreshed behind a path-stripping
+  reverse proxy.
+
 ## 0.1.114
 
 - `dispatch(...; body=req.body)` accepts HTTP.jl 2's buffered `EmptyBody`

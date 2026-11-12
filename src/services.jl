@@ -888,9 +888,10 @@ function mount_service_monitor!(service::ServiceRuntime; path="/services", timeo
     topology = service_topology(service.plan)
     service.monitors[path * "/topology"] = _ -> _service_json(topology)
     service.monitors[path * "/observations"] = _ -> _service_json(_service_all_observations(service, timeout))
-    service.monitors[path] = _ -> begin
+    service.monitors[path] = req -> begin
         observations = _service_all_observations(service, timeout)
-        page = pico_page(service_topology_view(topology; observations, refresh=path);
+        refresh = _request_prefix(req, "") * path
+        page = pico_page(service_topology_view(topology; observations, refresh);
             title="Services")
         HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8", "Cache-Control" => "no-store"],
             sprint(show, MIME"text/html"(), page))

@@ -377,6 +377,15 @@ end
     @test_throws ArgumentError mount_service_monitor!(runtime; path="/read")
     @test_throws ArgumentError mount_service_monitor!(runtime)
     @test runtime(HTTP.Request("GET", "/services/topology")).status == 200
+    direct = runtime(HTTP.Request("GET", "/services"))
+    @test occursin("href=\"/services\"", String(direct.body))
+    prefixed = runtime(HTTP.Request("GET", "/services",
+        ["X-Forwarded-Prefix" => "/p/example/"]))
+    @test occursin("href=\"/p/example/services\"", String(prefixed.body))
+    # Prefixes belong to each request, never to the retained runtime.
+    other_mount = runtime(HTTP.Request("GET", "/services",
+        ["X-Forwarded-Prefix" => "/p/another"]))
+    @test occursin("href=\"/p/another/services\"", String(other_mount.body))
     @test runtime(HTTP.Request("GET", "/services/observations", ["X-Fail" => "deny"])).status == 403
     @test !drain_service!(runtime; timeout=0.01)
     monitor = runtime(HTTP.Request("GET", "/services/observations"))
