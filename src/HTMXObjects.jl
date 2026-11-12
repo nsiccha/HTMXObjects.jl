@@ -15055,7 +15055,8 @@ function _declared_domain_object(obj, domain, values)
     overrides = Pair{Symbol,Any}[]
     for dep in get(declaration, :dependencies, Symbol[])
         haskey(values, dep) && hasproperty(obj, dep) || continue
-        submitted = values[dep]
+        submitted = _semantic_dependency_value(values, dep)
+        submitted === _NO_DEFAULT && continue
         isequal(submitted, getproperty(obj, dep)) && continue
         push!(overrides, dep => submitted)
     end
@@ -29838,9 +29839,16 @@ end
 # `_semantic_form_values` records the names that follow under this key.
 const _SEMANTIC_FOLLOWS = :__htmxo_follows__
 const _SEMANTIC_DOMAINS = :__htmxo_domains__
+const _SEMANTIC_CHOICE_DEFAULTS = :__htmxo_choice_defaults__
 const _FOLLOWS_ATTR = Symbol("data-htmxo-follows")
 
 _semantic_follows(values) = get(values, _SEMANTIC_FOLLOWS, ())
+
+# An unselected control has value `nothing`, but its parameter still has its
+# declared default (e.g. an empty String when no options exist). Dependencies
+# read that value, never the control's absence of a selection.
+_semantic_dependency_value(values, name) =
+    get(get(values, _SEMANTIC_CHOICE_DEFAULTS, (;)), name, values[name])
 
 # Expressions and bare identifiers need the declaring struct's property to
 # evaluate them. Runtime descriptors mark quoted Symbol defaults as literal
@@ -29910,8 +29918,9 @@ function _semantic_choice_default(obj, param, values)
     view = _record_view(source, Dict(param.name => _NO_DEFAULT))
     closure = _dependency_closure(typeof(source), param.name)
     if closure !== nothing
-        overrides = Pair{Symbol,Any}[name => value for (name, value) in values
-            if name !== param.name && name in closure && hasproperty(source, name)]
+        overrides = Pair{Symbol,Any}[name => _semantic_dependency_value(values, name)
+            for name in keys(values) if name !== param.name && name in closure &&
+            hasproperty(source, name) && _semantic_dependency_value(values, name) !== _NO_DEFAULT]
         isempty(overrides) || (view = Base.invokelatest(DynamicObjects.remake, view; overrides...))
     end
     _computed_default_value(view, param)
@@ -29946,6 +29955,8 @@ function _semantic_normalize_choices!(obj, route, values)
     follows = get!(values, _SEMANTIC_FOLLOWS, Set{Symbol}())
     domains = Dict{Symbol,Any}()
     values[_SEMANTIC_DOMAINS] = domains
+    defaults = Dict{Symbol,Any}()
+    values[_SEMANTIC_CHOICE_DEFAULTS] = defaults
     for param in route.params
         _semantic_single_choice(param) || continue
         owner, OwnerT = _semantic_control_owner(obj, typeof(obj), param)
@@ -29954,7 +29965,9 @@ function _semantic_normalize_choices!(obj, route, values)
         domain === nothing && continue
         selected = _semantic_choice_value(domain, get(values, param.name, _NO_DEFAULT), param)
         if selected === _NO_DEFAULT
-            selected = _semantic_choice_value(domain, _semantic_choice_default(obj, param, values), param)
+            default = _semantic_choice_default(obj, param, values)
+            selected = _semantic_choice_value(domain, default, param)
+            selected === _NO_DEFAULT && (defaults[param.name] = default)
             if selected !== _NO_DEFAULT && _computed_default(param)
                 push!(follows, param.name)
             end

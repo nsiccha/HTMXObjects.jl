@@ -33,6 +33,47 @@ using TestItemRunner
     end
 end
 
+@testitem "empty choices preserve typed defaults read by dependent relevance" tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    using HTMXObjects.DynamicObjects: option_domain
+
+    @htmx struct EmptyChoicesPage
+        available::Vector{String}
+        @param choice::String = isempty(available) ? "" : first(available)
+        @options(choice) = option_domain([
+            (; value=name, label=name, columns=(Name=name,)) for name in available])
+        fields = isempty(choice) ? () : (:detail,)
+        details = :detail in fields ? [choice * "-detail"] : String[]
+        @param detail::String = isempty(details) ? "" : first(details)
+        @options(detail) = option_domain([name => name for name in details])
+        @relevant(detail) = :detail in fields
+        @param direct::String = isempty(choice) ? "" : choice * "-direct"
+        @options(direct) = option_domain(isempty(choice) ? String[] : [choice * "-direct"])
+        @get result() = h.p("choice=", choice, ";detail=", detail, ";direct=", direct)
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            select=entry -> entry.name !== :index)
+    end
+
+    for available in (String[], ["one"])
+        app = EmptyChoicesPage(available)
+        route!(app; operation_policy=:blocking)
+        req = HTTP.Request("GET", "/")
+        response = first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
+        @test response.status == 200
+        html = String(response.body)
+        @test contains(html, "htmxo-semantic-page")
+        @test !contains(html, "value=\"nothing\"")
+        @test contains(html, "value=\"one\" checked=\"true\"") == !isempty(available)
+        @test app.choice == (isempty(available) ? "" : "one")
+        @test app.detail == (isempty(available) ? "" : "one-detail")
+        @test app.direct == (isempty(available) ? "" : "one-direct")
+        response = dispatch(:GET, "/result"; headers=["HX-Request" => "true"])
+        @test response.status == 200
+        @test contains(String(response.body), isempty(available) ?
+            "choice=;detail=;direct=" : "choice=one;detail=one-detail;direct=one-direct")
+    end
+end
+
 @testitem "choice recovery resolves object options and supplied dependencies" tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP
     using HTMXObjects.DynamicObjects: option_domain, remount

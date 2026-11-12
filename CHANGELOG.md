@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.107
+## 0.1.108
 
 - Vector choices render as checkbox pills up to `radio_max` and a searchable
   checkbox popover above it, also available as `choice_list(; multiple=true)`.
@@ -17,6 +17,13 @@
   an explicit empty selection.
 - Choice-list Markdown includes every selected label. Built-in English and
   German `ErrorTexts` include `choice_selected` with a `{count}` placeholder.
+
+## 0.1.107
+
+- Generated single-choice controls with no enabled default remain unselected
+  while dependent defaults, options and relevance conditions read the
+  parameter's declared default. Empty option lists no longer replace a typed
+  parameter with `nothing` while rendering a semantic application page.
 
 ## 0.1.106
 
