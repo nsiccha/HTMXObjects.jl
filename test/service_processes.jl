@@ -70,6 +70,15 @@ using TestItemRunner
             @test request(service, "/assess").status == 404
         end
         @test request(reader, "/append?sequence=3&value=6"; method="POST").status == 404
+        observed = payload(reader, "/services/observations")
+        reader_observation = only(filter(o -> o["service"] == "reader", observed))
+        writer_observation = only(filter(o -> o["service"] == "writer", observed))
+        @test writer_observation["status"] == "ok"
+        @test writer_observation["snapshot"]["generation"] == writer_ready["generation"]
+        @test only(reader_observation["snapshot"]["forwards"])["lifetime"]["requests"] >= 1
+        @test length(payload(reader, "/services/topology")["connections"]) == 1
+        @test isempty(payload(whole, "/services/topology")["connections"])
+        @test request(reader, "/services"; actor="denied").status == 401
 
         # Measure equivalent completed work before replacement. Each number is
         # process RSS, including Julia and shared library pages; sums may count
@@ -88,6 +97,9 @@ using TestItemRunner
         @test pending["drained"] === false
         @test pending["active"] >= 1
         @test request(reader, "/status").status == 503
+        draining = only(filter(o -> o["service"] == "reader", payload(reader, "/services/observations")))
+        @test draining["snapshot"]["accepting"] == false
+        @test draining["snapshot"]["active"] >= 1
         @test payload(writer, "/append?sequence=3&value=6"; method="POST")["sequence"] == 3
         writer_at_replacement = payload(writer, "/status")
         @test writer_at_replacement["pid"] == writer_before["pid"]
@@ -105,6 +117,9 @@ using TestItemRunner
         replacement_ready = ready(replacement)
         @test replacement_ready["pid"] != reader_ready["pid"]
         @test replacement_ready["generation"] != reader_ready["generation"]
+        replaced = only(filter(o -> o["service"] == "reader", payload(replacement, "/services/observations")))
+        @test replaced["snapshot"]["generation"] == replacement_ready["generation"]
+        @test all(o -> o["lifetime"]["requests"] == 0, replaced["snapshot"]["operations"])
         @test payload(replacement, "/status")["identity"] != reader_before["identity"]
         @test payload(writer, "/status") == writer_at_replacement
         @test payload(replacement, "/forecast?scale=3") ==

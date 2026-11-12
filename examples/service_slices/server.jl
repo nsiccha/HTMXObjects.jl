@@ -14,6 +14,8 @@ mkpath(control)
 runtime = ServiceExample.runtime(role; writer_url=length(ARGS) == 4 ? ARGS[4] : "",
     token=ENV["HTMXO_SERVICE_TOKEN"], gate_dir=control)
 compiled = precompile_routes!(runtime.plan, role)
+# Allow first-use compilation on the example's cold peer processes.
+mount_service_monitor!(runtime; timeout=30)
 server = serve(runtime; port, async=true, parallel=:interactive,
     runtime_tracking=false, access_log=nothing, operation_log=nothing)
 

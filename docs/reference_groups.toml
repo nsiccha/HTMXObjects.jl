@@ -33,6 +33,7 @@ names = [
     "hx_trigger",
     "internal_input",
     "is_htmx",
+    "mount_service_monitor!",
     "multipartparams",
     "navigation",
     "openapi",
@@ -53,6 +54,9 @@ names = [
     "serve",
     "service_plan",
     "service_owns",
+    "service_observations",
+    "service_topology",
+    "service_topology_view",
     "set_inputs",
     "terminate",
 ]

@@ -64,6 +64,7 @@ export poll_trigger, process_rss_bytes, system_load_panel,
     collect_and_measure!, last_memory_collection, memory_collect_panel
 export reflect, select_routes, precompile_routes!, prewarm_routes!, prewarm_workload!, dispatch, dispatch_parent
 export ServiceSlice, ServicePlan, ServiceRuntime, service_plan, service_owns, drain_service!
+export service_topology, service_topology_view, service_observations, mount_service_monitor!
 export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_observations, application_explorer_view,
     application_explorer_styles, navigation
@@ -40373,6 +40374,7 @@ end
 
 include("routes/editor_routes.jl")
 include("services.jl")
+include("routes/service_topology_view.jl")
 
 function __init__()
     # Per-process error log dir for caught route exceptions.

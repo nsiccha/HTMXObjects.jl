@@ -39,11 +39,10 @@ parameters and typed request parameters keep their ordinary route semantics.
 
 ## Local work and forwarding
 
-Each slice has an `execution` declaration selection and an independent
-`compilation` selection. DynamicObjects follows the declared dependency graph;
-HTMXObjects adds the operation and mount-construction edges. The result retains
-required declarations and containing context, reports external route boundaries,
-and preserves original records plus edge-based reasons for each selection.
+Each slice has `execution` and `compilation` declaration selections.
+DynamicObjects follows declared dependencies; HTMXObjects adds operation and
+mount edges. Selections retain required declarations, context, external
+boundaries, original records and edge-based reasons.
 
 ```@example service-plan
 [(s.name, local_declarations=length(s.execution.required),
@@ -125,6 +124,95 @@ terminating it. The runtime does not cancel or transfer outstanding operations.
 After a successful drain, stop the listener and start the replacement. Peers use
 the configured origin on their next call; no client poll token is reused.
 
+## Generated system view
+
+Service topology and request observations require HTMXObjects 0.1.113 or newer.
+The plan is also the source for the system view; no separate diagram inventory is
+needed. [`service_topology`](@ref) projects its descriptor into service blocks,
+one connection per source/destination pair, and resource ownership:
+
+```@example service-plan
+topology = service_topology(plan)
+[(c.source, c.destination, [string(o.verb, " ", o.path) for o in c.operations])
+ for c in topology.connections]
+```
+
+`plan.descriptor` uses `htmxobjects.application-descriptor/v1`. Its
+`htmxobjects.services` fragment contains service and resource nodes. A service's
+`depends_on` edges to route nodes carry `role=:local` or `role=:forward`,
+`exposure=:public` or `exposure=:internal`, and a forward's `destination`.
+`owns` edges link services to resources; `guards` edges link resources to every
+declared operation that accesses them. `service_topology(plan)` returns the
+versioned `htmxobjects.service-topology/v1` projection, with stable IDs and
+deterministic ordering. Neither accessor evaluates application properties.
+
+`application_explorer_view(plan.descriptor)` opens the compact Services view.
+Its Application map tab retains the full declaration explorer; `view=:map` or a
+`selected` node ID opens that view directly. Mount `ReflectionRoutes(; plan)`
+to expose the same tabs and descriptor JSON through an application's `@include`.
+
+For a runtime page with current observations, mount the monitor before serving:
+
+```@example service-plan
+import HTTP
+runtime = ServiceRuntime(plan, :forecast, Calculation(); token="example-only",
+    endpoints=Dict(:assessment => "http://127.0.0.1:9181"),
+    contract="calculation/v1", middleware=[next -> req -> begin
+        HTTP.header(req, "X-Actor", "") == "operator" || return HTTP.Response(403)
+        next(req)
+    end])
+mount_service_monitor!(runtime; path="/services", timeout=2)
+service_observations(runtime).snapshot.metrics
+```
+
+This adds `/services`, `/services/topology` and `/services/observations`, all
+protected by runtime middleware. The page shows operations, resources, forward
+arrows and statistics; operation details expand in place. Refresh takes a new
+snapshot; there is no background polling.
+Peers are read concurrently with the supplied timeout. A peer without an endpoint
+stays visibly unconfigured. Access denied, contract mismatch, unavailable peers
+and stale supplied snapshots are distinct from a responding but idle service.
+Monitor routes remain readable while the runtime drains.
+Cold compilation counts toward the timeout; the process example allows 30 seconds.
+
+## Request statistics
+
+`ServiceRuntime` collects bounded statistics by default; pass `metrics=false`
+to disable collection. Read local data with `service_observations(runtime)` or
+a peer with `service_observations(runtime; peer=:assessment,
+headers=["X-Actor" => "operator"], timeout=2)`. Peer reads use the deployment
+token and contract plus the peer's application middleware. Within a request,
+identity headers, audience and language propagate automatically. A peer may read
+observations without having a forwarded business operation. The internal
+observation endpoint requires deployment authentication even when no monitor
+page is mounted.
+
+Each result has a status, check time and optional snapshot. A snapshot carries
+the runtime's generation, start time, drain state, active requests, per-operation
+records and per-destination forward aggregates. Counters reset on restart; compare
+generation IDs before comparing totals. A failed peer read has no snapshot and
+does not manufacture zero counts. Remote snapshots have JSON string keys; local
+snapshots are named tuples. [`service_topology_view`](@ref) accepts a collection
+of either accessor's results when embedding a view yourself.
+
+Each operation records starts, completions, failures, active calls, last activity
+and latency (total, mean and maximum seconds). Counts include policy rejection,
+parameter errors, application failure and transport failure. A failure is an HTTP
+status of 400 or greater, or a thrown exception; client, server, exception and
+transport categories are also available. A transport failure returning 502 counts
+in both server and transport categories. Nested dispatch counts each operation it
+calls; totals are operation calls, not unique user requests. Failed deployment
+authentication, unknown routes and requests rejected by draining are outside the
+operation counters.
+
+Recent totals cover the current monotonic-clock second and preceding 59 seconds;
+starts and completions count in their respective seconds, so a long operation
+can complete in a window where it did not start. Latency covers middleware through buffered response creation, not
+socket delivery. Storage is fixed by selected route templates and 60 buckets per
+route, independent of request volume, URL parameters and body size. No raw URLs,
+bodies or identity headers are retained. Observation reads do not count themselves
+and never compute application properties.
+
 ## Runnable process example
 
 The repository's `examples/service_slices/application.jl` declares an ordered
@@ -142,6 +230,9 @@ The example's deliberately simple policy requires `X-Actor: demo`. Append with
 `GET /forecast?scale=3` on the reader. A colocated baseline uses `whole` on
 another port. Each control directory receives `ready.json`; touching `drain`
 requests a graceful stop. Use a fresh control directory for each generation.
+Each process mounts `/services`; send `X-Actor: demo` to inspect it. The reader's
+page reads the writer through its configured origin. The writer shows the reader
+as unconfigured until an endpoint is supplied for it.
 
 `test/service_processes.jl` verifies parity and reader replacement while the
 writer retains its PID, stream and cache. It records startup to listener readiness
