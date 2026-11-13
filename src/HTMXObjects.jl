@@ -25702,7 +25702,7 @@ function sortable_table(headers, rows;
     body_attrs = isnothing(id) ? (;) : (; id)
 
     grouped = isnothing(header_groups) ? nothing : _grouped_thead(th_nodes, header_groups)
-    thead = isnothing(grouped) ? h.thead(h.tr(th_nodes...)) : first(grouped)
+    thead = isnothing(grouped) ? h.thead(h.tr(th_nodes)) : first(grouped)
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
     # A `detail-<key>` companion is no row of the Markdown table.
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
@@ -25711,7 +25711,10 @@ function sortable_table(headers, rows;
     table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)...,
                          data_htmxo_columns="", kwargs...)(
         thead,
-        h.tbody(body_rows...; body_attrs...),
+        # Keep runtime-sized children as a collection. Splatting heterogeneous
+        # master/detail rows creates large tuples with row-count-dependent
+        # compilation and allocation costs; HTMX flattens collections directly.
+        h.tbody(body_rows; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
@@ -25726,7 +25729,7 @@ function sortable_table(headers, rows;
             isnothing(label) && (label = strip(repr("text/markdown", th_nodes[i])))
             h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
         end
-        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(body_rows...))
+        flat_table = h.table(h.thead(h.tr(flat_headers)), h.tbody(body_rows))
         h.div(; class="table-wrap")(html_only(table_node),
             markdown_only(repr("text/markdown", flat_table)))
     end
@@ -28867,7 +28870,7 @@ function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[]
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => JSON.json(groups))
     isempty(places) || push!(attrs, :data_htmxo_update_places =>
         JSON.json(JSON.Object(places)))
-    h.tbody(; attrs...)(rows...)
+    h.tbody(; attrs...)(rows)
 end
 
 # --- Formatting helpers ---
