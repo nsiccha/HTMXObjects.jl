@@ -110,6 +110,8 @@ import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
 import LibGit2
 import Sockets
 
+include("world_memo.jl")
+
 """
     ROUTER
 
@@ -3207,12 +3209,12 @@ function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
             _register_get_route!(route(file), handler)
         end
     end
-    # The runtime is rendered per request, so a Revise edit or a Treebars
+    # Resolve the catalog per request, so a source edit or a Treebars
     # extension loaded after this call is served as the shell links it.
     for name in keys(_runtime_blocks())
         file = _runtime_file(name)
-        handler = req -> let text = _runtime_text(name)
-            _vendor_file_response(req, file, text, _runtime_version(text), headers)
+        handler = req -> let asset = _runtime_asset(name)
+            _vendor_file_response(req, file, asset.text, asset.version, headers)
         end
         _register_get_route!(route("htmxo/" * file), handler)
     end
@@ -3447,150 +3449,7 @@ end
 
 # --- Page runtime: inline, or linked from the vendor mount ---
 #
-# The `htmx()` shell carries HTMXObjects' own CSS/JS runtime, plus the
-# Treebars poll assets while that extension is loaded. Each block has a
-# stable name and a producer returning ONE attribute-free `<style>`/`<script>`
-# of `Raw` text, so the same bytes ship either inline (the default) or as the
-# file `vendorfiles` serves at `<mount>/htmxo/<name>.<ext>`. The shell decides
-# which blocks a page carries; this table only names them. Producers resolve
-# at call time, so the file may name functions defined further down.
-_runtime_blocks() = (
-    preload_runtime = (:js, preload_runtime_js),
-    theme = (:css, htmxo_theme),
-    pico_bridge = (:css, pico_bridge),
-    request_feedback_style = (:css, request_feedback_style),
-    request_feedback_script = (:js, request_feedback_script),
-    compose_box_styles = (:css, compose_box_styles),
-    compose_box_script = (:js, compose_box_script),
-    toast_styles = (:css, toast_styles),
-    toast_script = (:js, toast_script),
-    live_thread_styles = (:css, live_thread_styles),
-    live_thread_script = (:js, live_thread_script),
-    utility_styles = (:css, htmxo_utility_styles),
-    tabset_styles = (:css, tabset_styles),
-    tabset_script = (:js, tabset_script),
-    comparison_styles = (:css, comparison_styles),
-    editor_styles = (:css, editor_styles),
-    comparison = (:js, comparison_js),
-    stream_probe = (:js, stream_probe_script),
-    redirect_history = (:js, redirect_history_script),
-    modifier_click = (:js, modifier_click_script),
-    live_region = (:js, live_region_script),
-    treebars_styles = (:css, () -> _polling_page_asset(1)),
-    treebars_script = (:js, () -> _polling_page_asset(2)),
-    live_refresh = (:js, live_refresh_script),
-    auto_terminal = (:js, auto_terminal_script),
-    mutation_poll = (:js, mutation_poll_script),
-    operation_stream = (:js, operation_stream_script),
-    sent_ahead = (:js, sent_ahead_script),
-    semantic_refresh = (:js, semantic_refresh_script),
-    semantic_follow = (:js, semantic_follow_script),
-    show_when = (:js, show_when_script),
-    choice_list = (:js, choice_list_script),
-    url_params = (:js, url_params_script),
-    url_anchor = (:js, url_anchor_script),
-    instance_scope = (:js, instance_scope_script),
-    glossary = (:js, glossary_script),
-    unit_styles = (:css, unit_styles),
-    unit_script = (:js, unit_script),
-    math_styles = (:css, math_styles),
-    math_script = (:js, math_script),
-    syntax_styles = (:css, syntax_styles),
-    syntax_script = (:js, syntax_script),
-    # The table runtime. `htmx(...; tables=true)` carries it together with
-    # `sortable_table_styles`, `caption_style` and `download_table` below.
-    table_runtime = (:js, _table_runtime_js),
-    # Page helpers an app may place itself, usually in `extra_head`. The
-    # shell leaves out a copy whose code it already carries and links the
-    # rest (`_shell_extra_head`).
-    sortable_table = (:js, sortable_table_js),
-    sortable_table_styles = (:css, sortable_table_styles),
-    caption_style = (:css, caption_style),
-    master_detail = (:js, master_detail_js),
-    download_table = (:js, download_table_js),
-    gallery_styles = (:css, htmxo_gallery_styles),
-    # Component assets: what `pdf_panel_assets()` and `card_deck_assets()`
-    # return, for a page that mounts the component with `assets=false`.
-    pdf_panel_styles = (:css, pdf_panel_styles),
-    pdf_panel_script = (:js, pdf_panel_script),
-    card_deck_styles = (:css, card_deck_styles),
-    card_deck_script = (:js, card_deck_script),
-)
-
-# The blocks whose text exists in this process: the Treebars poll assets only
-# while that extension is loaded.
-_available_runtime_names() = isempty(_polling_page_assets()) ?
-    filter(name -> !(name in (:treebars_styles, :treebars_script)), keys(_runtime_blocks())) :
-    keys(_runtime_blocks())
-
-_runtime_block(name::Symbol) = last(getfield(_runtime_blocks(), name))()
-_runtime_file(name::Symbol) = string(name, '.', first(getfield(_runtime_blocks(), name)))
-
-_runtime_tag(::Val{:css}) = :style
-_runtime_tag(::Val{:js}) = :script
-
-# The block's text — exactly what the inline element holds. Any other shape
-# would render differently inline than linked, so it is refused loudly.
-function _runtime_text(name::Symbol)
-    node = _runtime_block(name)
-    expected = _runtime_tag(Val(first(getfield(_runtime_blocks(), name))))
-    node isa Node && HTMX.tag(node) === expected && isempty(HTMX.attrs(node)) &&
-        all(child -> child isa Raw, HTMX.children(node)) || throw(ArgumentError(
-            "page runtime block $(repr(name)) must be an attribute-free <$expected> of Raw text; got $(repr(MIME"text/html"(), node))"))
-    join(String(child) for child in HTMX.children(node))
-end
-
-# Content-addressed: any change to a block's text changes its URL.
-_runtime_version(text::AbstractString) = string(hash(text); base=16)
-
-# One block as the shell carries it: the element itself (inline), or a link
-# to its versioned file on the vendor mount. The marker lets a static export
-# put the element back (`_static_walk`), so exported pages stay standalone.
-_runtime_head(name::Symbol, ::Nothing) = _runtime_block(name)
-function _runtime_head(name::Symbol, mount::AbstractString)
-    src = string(mount, "/htmxo/", _runtime_file(name), "?v=", _runtime_version(_runtime_text(name)))
-    _runtime_link(Val(first(getfield(_runtime_blocks(), name))), src, name)
-end
-_runtime_link(::Val{:css}, src, name) = h.link(rel="stylesheet", href=src, data_htmxo_runtime=string(name))
-_runtime_link(::Val{:js}, src, name) = h.script(src=src, data_htmxo_runtime=string(name))
-
-_runtime_heads(mount, names...) = map(name -> _runtime_head(name, mount), names)
-
-# The named runtime block an element is exactly — an attribute-free
-# `<style>`/`<script>` whose `Raw` text equals that block's — or `nothing`.
-_runtime_block_name(node, texts) = nothing
-function _runtime_block_name(node::Node, texts)
-    HTMX.tag(node) in (:style, :script) && isempty(HTMX.attrs(node)) &&
-        all(child -> child isa Raw, HTMX.children(node)) || return nothing
-    get(texts, (HTMX.tag(node), join(String(child) for child in HTMX.children(node))), nothing)
-end
-
-# The shell blocks whose code a runtime block consists of: the block itself,
-# or for a page helper that bundles shell code, those blocks.
-_runtime_parts(name::Symbol) = _runtime_parts(Val(name))
-_runtime_parts(::Val{name}) where {name} = (name,)
-_runtime_parts(::Val{:sortable_table}) = (:table_runtime, :comparison)
-_runtime_parts(::Val{:master_detail}) = (:comparison,)
-
-# `extra_head` as the shell carries it. An element that is exactly a named
-# runtime block — an app's own `sortable_table_js()`, say — is left out when
-# the shell already carries its code (`carried`, the shell's block names);
-# otherwise, linked, it becomes its link in the same place, like the shell's
-# blocks. Anything else stays as given.
-function _shell_extra_head(extra_head, mount, carried)
-    texts = nothing
-    filter(!isnothing, map(extra_head) do node
-        node isa Node && HTMX.tag(node) in (:style, :script) || return node
-        # Built once, and only for a head that has a candidate element.
-        isnothing(texts) && (texts = Dict(
-            (_runtime_tag(Val(first(getfield(_runtime_blocks(), name)))), _runtime_text(name)) => name
-            for name in _available_runtime_names()))
-        name = _runtime_block_name(node, texts)
-        isnothing(name) ? node :
-            all(in(carried), _runtime_parts(name)) ? nothing :
-            isnothing(mount) ? node : _runtime_head(name, mount)
-    end)
-end
+include("runtime_assets.jl")
 
 # `runtime` → the mount the shell links its runtime from, or `nothing` to
 # inline it. Linking needs a same-origin mount, which `assets` names.
@@ -14864,85 +14723,7 @@ function _effective_route_descriptor(descriptor)
     descriptor
 end
 
-# Per-type reflection memo. DO rebuilds every descriptor from `meta(T)` source
-# metadata — signature parsing, `Core.eval` of each argument type, per-property
-# dependency closures — so one build of a large route type costs milliseconds,
-# and the request path used to pay it twice per request (snag
-# `per-request-prop-096b23ad`). A type-level reflection result depends only on
-# `T` and on the method table, never on the request, so it is keyed on the
-# world counter: any (re)definition — a Revise edit, a struct redefinition —
-# rebuilds on the next read. The counter is read BEFORE the build, so a
-# definition racing a build stamps the entry stale rather than fresh. The
-# cached value is shared: callers must not mutate it, and anything handed to a
-# consumer gets its own outer container.
-struct _WorldMemo{V}
-    entries::IdDict{Any,Tuple{UInt,V}}
-    lock::ReentrantLock
-end
-_WorldMemo{V}() where {V} = _WorldMemo{V}(IdDict{Any,Tuple{UInt,V}}(), ReentrantLock())
-
-function _world_memo!(build, memo::_WorldMemo, T)
-    world = Base.get_world_counter()
-    cached = lock(() -> get(memo.entries, T, nothing), memo.lock)
-    cached !== nothing && first(cached) == world && return last(cached)
-    value = build()
-    lock(() -> memo.entries[T] = (world, value), memo.lock)
-    value
-end
-
-const _property_descriptors_memo = _WorldMemo{Vector{NamedTuple}}()
-
-_shared_property_descriptors(T) = _world_memo!(_property_descriptors_memo, T) do
-    NamedTuple[_effective_route_descriptor(
-        _mark_internal_inputs(descriptor)) for descriptor in
-        Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)]
-end
-
-# First-declaration-wins, like DO's `property_descriptor(T, name)`: that method
-# describes `metafirst(T, name)`, the first `meta(T)` entry of that name, and
-# `property_descriptors(T)` is `meta(T)` in declaration order.
-function _property_descriptor(T, name::Symbol)
-    isdefined(DynamicObjects, :property_descriptors) || return nothing
-    for descriptor in _shared_property_descriptors(T)
-        descriptor.name === name && return descriptor
-    end
-    nothing
-end
-
-# A fresh outer vector per call: the result escapes into consumer-facing
-# graphs (`semantic_descriptor`), and must not alias the memo.
-function _property_descriptors(T)
-    isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
-    copy(_shared_property_descriptors(T))
-end
-
-# Descriptor for one EXACT declaration. The `(T, name)` method resolves through
-# `metafirst` (first-declaration-wins), which collapses a name carrying several
-# declarations — `@get index`, `@post index` and `@include index(x)` can all
-# coexist under one key. Callers already holding the `info` that
-# `_walk_route_meta` handed them pass it here so they descriptor-ize the
-# declaration they actually walked.
-function _property_descriptor(T, name::Symbol, info::NamedTuple)
-    isdefined(DynamicObjects, :property_descriptor) || return nothing
-    _effective_route_descriptor(_mark_internal_inputs(Base.invokelatest(
-        getproperty(DynamicObjects, :property_descriptor), T, name, info)))
-end
-
-function _property_descriptor(T, name::Symbol, verb::Symbol)
-    isdefined(DynamicObjects, :property_descriptors) || return nothing
-    expected = Verb{verb}
-    for descriptor in _shared_property_descriptors(T)
-        descriptor.name === name || continue
-        inputs = get(descriptor, :inputs, NamedTuple[])
-        # Matches on the injected arg's TYPE, so it must not use
-        # `internal_input` — that says "injected", not "injected for THIS verb",
-        # and every verb's declaration carries an injected arg.
-        any(input -> input.name === :__verb__ &&
-                     get(input, :type, nothing) === expected, inputs) &&
-            return descriptor
-    end
-    _property_descriptor(T, name)
-end
+include("semantic_metadata.jl")
 
 function _operation_input_values(descriptor, idx_vals, kw_pairs)
     values = Dict{Symbol,Any}(kw_pairs)
@@ -19798,17 +19579,6 @@ semantic_descriptor(::Type{T}) where {T} = _build_semantic_descriptor(T)
 
 semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
 
-# The compiler's read of the same descriptor. `semantic_app` resolves every
-# operation of every rendered mount against its type's descriptor, so a table
-# of N same-type rows with M operations each would otherwise rebuild the
-# identical reflection N×(M+1) times — milliseconds each, dominating the render.
-# Shared and world-keyed like `_shared_property_descriptors`; the public
-# `semantic_descriptor` keeps returning a freshly built, caller-owned value.
-const _semantic_descriptor_memo = _WorldMemo{NamedTuple}()
-
-_shared_semantic_descriptor(T::Type) =
-    _world_memo!(() -> _build_semantic_descriptor(T), _semantic_descriptor_memo, T)
-
 function _build_semantic_descriptor(T)
     routes = NamedTuple[]
     # `_reflect_walk!` needs a route table to walk; `_semantic_graph` degrades to
@@ -22509,27 +22279,70 @@ function htmxoFilterTable(target) {
     if (query.length === 0) delete root.dataset.htmxoSearchCollapsed;
     const collapsed = query.length > 0 && 'htmxoSearchCollapsed' in root.dataset;
     const direct = new Set();
-    // A branch whose rows have not loaded yet also matches its rows' text.
-    const ownText = r => r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ');
-    const text = r => (ownText(r) + htmxoLazyLeaves(r).map(([, t]) => ' ' + t).join('')).toLocaleLowerCase();
-    rows.forEach(row => {
+    // Read each row's text at most once. Full ancestor text is only assembled
+    // when a custom predicate asks for ctx.text; ordinary phrase search carries
+    // a match flag and the short suffix that can overlap the next row's text.
+    const nodes = new Map(rows.map(row => [row, {row, parent: null}]));
+    nodes.forEach(node => { node.parent = nodes.get(byId.get(node.row.dataset.htmxoParent)); });
+    const order = [];
+    const ordered = new Set();
+    nodes.forEach(node => {
+        const path = [], visiting = new Set();
+        for (let n = node; n && !ordered.has(n) && !visiting.has(n); n = n.parent) {
+            visiting.add(n); path.push(n);
+        }
+        // Rows emitted by the server form a forest. Break a malformed cycle
+        // instead of hanging the browser on a hand-built table.
+        if (path.length && visiting.has(path[path.length - 1].parent)) path[path.length - 1].parent = null;
+        while (path.length) { const n = path.pop(); ordered.add(n); order.push(n); }
+    });
+    const ownText = node => node.own ??= (node.row.dataset.htmxoSearch ??
+        Array.from(node.row.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
+    const text = node => node.text ??= ownText(node) + htmxoLazyLeaves(node.row).map(([, t]) => ' ' + t.toLocaleLowerCase()).join('');
+    const fullText = node => {
         const path = [];
-        for (let r = row; r; r = byId.get(r.dataset.htmxoParent)) path.push(r);
-        // Ancestor text participates: a group match includes its descendants,
-        // and a leaf match retains the entire path needed to understand it.
-        const ctx = {query, input: raw, text: path.reverse().map(text).join(' ').replace(/\s+/g, ' ')};
-        const failed = filters.find(([, keep]) => !keep(row, ctx));
-        if (failed) rejectedBy.set(row, failed[0]);
-        else path.forEach(r => visible.add(r));
-        const own = {query, input: raw, text: text(row)};
-        if (collapsed && !failed && filters.every(([, keep]) => keep(row, own))) path.forEach(r => direct.add(r));
+        for (let n = node; n; n = n.parent) path.push(text(n));
+        return path.reverse().join(' ').replace(/\s+/g, ' ');
+    };
+    const context = (getText) => {
+        let value, ready = false;
+        return {query, input: raw,
+            get text() { if (!ready) { value = getText(); ready = true; } return value; },
+            set text(t) { value = t; ready = true; }};
+    };
+    const needle = unsigned(query);
+    const extend = (parent, own) => {
+        const joined = ((parent ? parent.suffix + ' ' : '') + unsigned(own)).replace(/\s+/g, ' ');
+        return {matches: Boolean(parent && parent.matches) || joined.includes(needle),
+            suffix: needle.length > 1 ? joined.slice(-(needle.length - 1)) : ''};
+    };
+    const defaultSearch = !registered.get('search');
+    order.forEach(node => {
+        node.ancestorsOpen = !node.parent || (node.parent.ancestorsOpen && node.parent.row.dataset.htmxoTreeOpen !== 'false');
+        if (defaultSearch && query.length) Object.assign(node, extend(node.parent, text(node)));
+        else { node.matches = true; node.suffix = ''; }
     });
     rows.forEach(row => {
-        let ancestorsOpen = true;
-        for (let p = byId.get(row.dataset.htmxoParent); p; p = byId.get(p.dataset.htmxoParent)) {
-            if (p.dataset.htmxoTreeOpen === 'false') ancestorsOpen = false;
+        const node = nodes.get(row);
+        const ctx = context(() => fullText(node));
+        const failed = filters.find(([name, keep]) => name === 'search' && defaultSearch ? !node.matches : !keep(row, ctx));
+        if (failed) rejectedBy.set(row, failed[0]);
+        else visible.add(row);
+        if (collapsed && !failed) {
+            const own = {query, input: raw, text: text(node)};
+            if (filters.every(([, keep]) => keep(row, own))) direct.add(row);
         }
-        row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen) || (collapsed && !direct.has(row));
+    });
+    // A leaf match retains its ancestors. One reverse walk propagates these
+    // flags regardless of the current DOM order after sorting or row updates.
+    for (let i = order.length - 1; i >= 0; i--) {
+        const node = order[i];
+        if (!node.parent) continue;
+        if (visible.has(node.row)) visible.add(node.parent.row);
+        if (direct.has(node.row)) direct.add(node.parent.row);
+    }
+    rows.forEach(row => {
+        row.hidden = !visible.has(row) || (query.length === 0 && !nodes.get(row).ancestorsOpen) || (collapsed && !direct.has(row));
         if (visible.has(row)) delete row.dataset.htmxoFiltered; else row.dataset.htmxoFiltered = '';
     });
     const shownParents = new Set(rows.filter(r => !r.hidden).map(r => r.dataset.htmxoParent));
@@ -22583,13 +22396,13 @@ function htmxoFilterTable(target) {
         }
         const leaves = htmxoLazyLeaves(row);
         if (!leaves.length) return;
-        const kept = visible.has(row), path = [ownText(row).toLocaleLowerCase()];
-        for (let r = byId.get(row.dataset.htmxoParent); r; r = byId.get(r.dataset.htmxoParent)) path.unshift(text(r));
+        const kept = visible.has(row), node = nodes.get(row);
+        const prefix = defaultSearch && query.length ? extend(node.parent, ownText(node)) : null;
         // The unloaded leaves this pass hides, for hover linking.
         row.htmxoLazyFiltered = new Set();
         leaves.forEach(([key, t]) => {
-            const ctx = {query, input: raw, text: (path.join(' ') + ' ' + t.toLocaleLowerCase()).replace(/\s+/g, ' ')};
-            const shown = kept && search(row, ctx);
+            const ctx = context(() => ((node.parent ? fullText(node.parent) + ' ' : '') + ownText(node) + ' ' + t.toLocaleLowerCase()).replace(/\s+/g, ' '));
+            const shown = kept && (defaultSearch ? !query.length || extend(prefix, t.toLocaleLowerCase()).matches : search(row, ctx));
             if (!shown) row.htmxoLazyFiltered.add(key);
             tally('leaf:' + key, shown, kept ? 'search' : rejectedBy.get(row));
         });
@@ -25702,7 +25515,7 @@ function sortable_table(headers, rows;
     body_attrs = isnothing(id) ? (;) : (; id)
 
     grouped = isnothing(header_groups) ? nothing : _grouped_thead(th_nodes, header_groups)
-    thead = isnothing(grouped) ? h.thead(h.tr(th_nodes...)) : first(grouped)
+    thead = isnothing(grouped) ? h.thead(h.tr(th_nodes)) : first(grouped)
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
     # A `detail-<key>` companion is no row of the Markdown table.
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
@@ -25711,7 +25524,10 @@ function sortable_table(headers, rows;
     table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)...,
                          data_htmxo_columns="", kwargs...)(
         thead,
-        h.tbody(body_rows...; body_attrs...),
+        # Keep runtime-sized children as a collection. Splatting heterogeneous
+        # master/detail rows creates large tuples with row-count-dependent
+        # compilation and allocation costs; HTMX flattens collections directly.
+        h.tbody(body_rows; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
@@ -25726,7 +25542,7 @@ function sortable_table(headers, rows;
             isnothing(label) && (label = strip(repr("text/markdown", th_nodes[i])))
             h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
         end
-        flat_table = h.table(h.thead(h.tr(flat_headers...)), h.tbody(body_rows...))
+        flat_table = h.table(h.thead(h.tr(flat_headers)), h.tbody(body_rows))
         h.div(; class="table-wrap")(html_only(table_node),
             markdown_only(repr("text/markdown", flat_table)))
     end
@@ -26957,323 +26773,26 @@ function master_detail_table(headers, items;
                              _detail_key=key,
                              texts::TableTexts=_EN_TABLE_TEXTS,
                              kwargs...)
-    # Refused: a link key with no link group would highlight nothing.
-    isnothing(link) && !isnothing(link_key) && throw(ArgumentError(
-        "master_detail_table: `link_key(item)` keys the rows of the link group `link`; give `link` too"))
-    # `id=nothing` is no id: no element is named after it, and the names a
-    # table without an id makes for itself are not overridden by it.
-    get(kwargs, :id, missing) === nothing && (kwargs = pairs(Base.structdiff(values(kwargs), NamedTuple{(:id,)})))
-    if !isnothing(groupings)
-        # A `name => :children` grouping regroups the leaves of the tree
-        # `children` builds: the other groupings list each leaf once.
-        tree = _md_tree_grouping(groupings, items, key, children, leaf_key, leaf_order)
-        return _grouped_master_detail_table(headers, isnothing(tree) ? items : tree.leaves;
-            key = isnothing(tree) ? key : tree.leaf, master, detail, detail_url, detail_instance, master_attrs, master_class, detail_class,
-            initially_open, initially_open_detail, outline=tree, branches_collapsible, detail_toggle, searchable,
-            search_text, selectable, select_form, select_value, select_submit,
-            expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-            group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
-    end
-    !group_masters && all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups,
-                    leaf_key, leaf_order)) || throw(ArgumentError(
-        "master_detail_table: group_by/group_master/group_by_url/group_rows_url/group_rows/group_summary/group_order/group_masters/update_groups/leaf_key/leaf_order require `groupings`"))
-    detail_toggle in (:button, :label) || throw(ArgumentError(
-        "master_detail_table: detail_toggle must be :button or :label"))
-    # Refused: without collapsible branches there is nothing to expand.
-    expand_controls && (isnothing(children) || !branches_collapsible) && throw(ArgumentError(
-        "master_detail_table: expand_controls needs `children` with collapsible branches"))
-    selecting = !isnothing(selectable)
-    selecting || all(isnothing, (select_form, select_value, select_submit)) || throw(ArgumentError(
-        "master_detail_table: select_form/select_value/select_submit require selectable=<input name>"))
-    ncols = length(headers)
-    (!isnothing(children) || !isnothing(detail_url) || !isnothing(detail)) || throw(ArgumentError(
-        "master_detail_table: supply `detail` (eager body) or `detail_url` (lazy URL)"))
-    # Refused: only content swapped in gets ids of its own, and an eager
-    # detail is rendered with the table.
-    detail_instance && isnothing(detail_url) && throw(ArgumentError(
-        "master_detail_table: `detail_instance=true` names the place of each row's lazy detail; give `detail_url`"))
-    # `detail_url` may be a per-item `item -> url` callback or a bare String
-    # (same URL for every row — unusual, but supported).
-    _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
-    rows = Any[]
-    # Columns whose sort keys the table computes: (column, functions).
-    sort_columns = [(i, Any[last(k) for k in hdr.sort_keys])
-                    for (i, hdr) in enumerate(headers) if _computed_sort_keys(hdr)]
-    _open = initially_open isa Function ? initially_open : (_ -> initially_open)
-    _open_detail = initially_open_detail isa Bool ? (_ -> initially_open_detail) : initially_open_detail
-    seen = Set{String}()
-    max_level = Ref(1)
-    # `update_rows`: render only these items' rows (see `_md_row_update`); the
-    # walk still visits every item, so levels, parents and each row's place
-    # among its siblings (`placed`) stay those of the full table.
-    update_keys = _md_update_keys(update_rows)
-    update = isnothing(update_rows) ? nothing : Set(update_keys)
-    placed = Pair{String,Tuple{String,String}}[]
-    # The leaves of lazy branches, which the search count counts unloaded.
-    pending = String[]
-    # The eager details Markdown writes after the table, each item's once
-    # (`_detail_key`: a leaf listed under several groups is one item).
-    details = Pair{Vector{Any},Any}[]
-    detail_rows = String[]      # the id of each detail's master row
-    detailed = Set{String}()
-    function visit(item, parent, level, ancestors_open)
-        item_key = key(item)
-        descendants = isnothing(children) ? () : children(item)
-        # A branch whose rows load on first expand (see `group_rows_url`).
-        lazy_rows = descendants isa _MDLazyRows ? descendants : nothing
-        descendants = isnothing(lazy_rows) ? collect(descendants) : ()
-        branch = !isnothing(lazy_rows) || !isempty(descendants)
-        open = isnothing(lazy_rows) && _open(item)
-        branch_open = branch && (!branches_collapsible || open)
-        safe = _md_safe_key(item_key)
-        if !isnothing(children)
-            safe in seen && throw(ArgumentError(
-                "master_detail_table: hierarchy keys must be unique after sanitisation; repeated $(repr(item_key))"))
-            push!(seen, safe)
-        end
-        isnothing(update) || string(item_key) in update ||
-            return visit_children(descendants, safe, level, ancestors_open && branch_open)
-        attrs = Dict{Symbol,Any}(Symbol(k) => v
-                                 for (k, v) in pairs(isnothing(master_attrs) ? (;) : master_attrs(item)))
-        # `link`: the row's item key for hover linking, `link_key(item)` else
-        # its `key` (a group row has none).
-        item_link = isnothing(link) ? nothing : something(link_key, key)(item)
-        if !isnothing(item_link)
-            any(k -> _md_attr_name(k) === Symbol("data-htmxo-link-key"), keys(attrs)) && throw(ArgumentError(
-                "master_detail_table: with `link`, a row's `data-htmxo-link-key` is its `link_key` (default: its `key`); `master_attrs` may not set it"))
-            attrs[Symbol("data-htmxo-link-key")] = string(item_link)
-        end
-        if !isnothing(children)
-            attrs[:data_htmxo_parent] = parent
-            attrs[:aria_level] = string(level)
-            ancestors_open || (attrs[:hidden] = true)
-            if branch && branches_collapsible
-                attrs[:data_htmxo_tree_open] = string(open)
-                attrs[:aria_expanded] = string(open)
-            end
-            if !isnothing(lazy_rows)
-                attrs[:data_htmxo_lazy_rows] = lazy_rows.url
-                append!(pending, lazy_rows.leaves)
-            end
-            max_level[] = max(max_level[], level)
-        end
-        isnothing(search_text) || (attrs[:data_htmxo_search] = string(search_text(item)))
-        # In lazy mode `detail(item)` (if given) is the per-row placeholder.
-        body = isnothing(detail) ? nothing : detail(item)
-        url  = isnothing(_url) ? nothing : _url(item)
-        has_detail = isnothing(children) || !isnothing(body) || !isnothing(url)
-        # `initially_open` opens what a click on the row opens, so a
-        # collapsible branch shows its child rows and keeps its own detail
-        # closed; `initially_open_detail`, when given, decides every detail.
-        detail_open = has_detail && (isnothing(_open_detail) ?
-            open && !(branch && branches_collapsible) : _open_detail(item))
-        cells, row_attrs = _md_master_row(master(item), texts)
-        # A group row (`_sort_item` gives `nothing`) sorts by its own value.
-        sort_item = isempty(sort_columns) ? nothing : _sort_item(item)
-        isnothing(sort_item) || _md_sort_values!(cells, sort_columns, sort_item, headers)
-        _md_merge_row_attrs!(attrs, row_attrs, master_class)
-        if branch && branches_collapsible && !selecting && !haskey(attrs, :onclick)
-            attrs[:onclick] = "htmxoTreeRow(this,event)"
-            attrs[:data_htmxo_tree_row_toggle] = ""
-        end
-        if selecting
-            # `master_attrs` or the master <tr> may preselect a row or give its
-            # value. The submitted value defaults to the caller's own key, not
-            # the sanitised row id the runtime keys its state by.
-            given = Set(_md_attr_name(k) for k in keys(attrs))
-            Symbol("aria-selected") in given || (attrs[Symbol("aria-selected")] = "false")
-            attrs[:tabindex] = "-1"
-            value = Symbol("data-htmxo-select-value")
-            if !isnothing(select_value)
-                attrs[value] = string(select_value(item))
-            elseif !(value in given)
-                attrs[value] = string(item_key)
-            end
-            isnothing(select_submit) || select_submit(item) ||
-                (attrs[Symbol("data-htmxo-select-submit")] = "false")
-        end
-        # Every expandable row carries a native detail control in its first
-        # cell, so keyboard and screen-reader users reach the detail too (the
-        # row click is a pointer-only shortcut). Sorting, search and CSV read
-        # the cell's own content from the `data-htmxo-row-label` span.
-        isempty(cells) && throw(ArgumentError("master_detail_table: rows require at least one cell"))
-        first_cell = first(cells)
-        first_cell isa Node || throw(ArgumentError(string("master_detail_table: the first ",
-            "master cell must be a <td> node, got ", typeof(first_cell))))
-        controls = Any[]
-        trailing_controls = Any[]
-        label = Any[HTMX.children(first_cell)...]
-        if !isnothing(body) && isnothing(url) && !(string(_detail_key(item)) in detailed)
-            push!(detailed, string(_detail_key(item)))
-            push!(details, label => body)
-            push!(detail_rows, "row-$safe")
-        end
-        if branch && branches_collapsible
-            # An update names the child rows it renders; the runtime then
-            # recomputes the list from the rows on the page.
-            child_ids = join(("row-$(_md_safe_key(key(child)))" for child in descendants
-                              if isnothing(update) || string(key(child)) in update), " ")
-            branch_attrs = (; type="button", data_htmxo_tree_toggle="",
-                (isempty(child_ids) ? (;) : (; aria_controls=child_ids))...,
-                aria_expanded=string(open),
-                onclick="htmxoTreeToggle(this); event.stopPropagation()")
-            if !(has_detail && detail_toggle === :label) && !any(_md_interactive_label, label)
-                label = Any[_LabelledControl(h.button(label...; branch_attrs...,
-                    data_htmxo_tree_label="", data_htmxo_label=""))]
-            else
-                push!(controls, h.button(_md_disclosure_glyph(open); branch_attrs...,
-                    aria_label=texts.toggle_children))
-            end
-        end
-        if has_detail
-            attrs[:data_htmxo_detail_open] = string(detail_open)
-            # Plain hierarchy leaves use their label as the keyboard detail
-            # control. Linked leaves and branches with their own details keep
-            # a separate icon, so links and child-row expansion remain distinct.
-            # Flat tables retain their compact disclosure control by default.
-            # `:label` makes every plain label the control; a label holding a
-            # control keeps the separate one in any mode (`_md_interactive_label`).
-            label_detail = !any(_md_interactive_label, label) &&
-                (detail_toggle === :label || (!isnothing(children) && !branch))
-            toggle_label, label_attrs =
-                label_detail ? (label, (; data_htmxo_label="")) :
-                isnothing(children) ? (Any[_md_disclosure_glyph(detail_open)],
-                                       (; data_htmxo_disclosure="", aria_label=texts.details)) :
-                (Any["ⓘ"], (; aria_label=texts.details, title=texts.details))
-            toggle = h.button(toggle_label...; type="button",
-                data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
-                aria_expanded=string(detail_open), onclick="htmxoMdControl(this,event)")
-            if label_detail
-                label = Any[_LabelledControl(toggle)]
-            else
-                push!(isnothing(children) ? controls : trailing_controls, toggle)
-            end
-        end
-        # Markdown has no indentation: with several grouping levels, a mark
-        # per level keeps the nesting readable there.
-        marks = _level_marks && level > 1 ? (markdown_only("› "^(level - 1)),) : ()
-        cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
-            Any[controls..., marks..., h.span(; data_htmxo_row_label="")(label...), trailing_controls...])
-        if !isnothing(children) && isnothing(body) && isnothing(url)
-            # Group rows need no placeholder or detail request. Their children
-            # are ordinary rows in this same tbody, visible from first paint.
-            isnothing(master_class) || (attrs[:class] = master_class)
-            push!(rows, h.tr(; id="row-$safe", attrs...)(cells...))
-        else
-            (m, d) = master_detail_pair(item_key, cells, body, ncols;
-                                    master_class, detail_class, master_attrs=attrs,
-                                    initially_open=detail_open && ancestors_open, detail_url=url, detail_instance,
-                                    row_toggle=!selecting, texts, _row_expanded=!isnothing(children))
-            push!(rows, m, d)
-        end
-        visit_children(descendants, safe, level, ancestors_open && branch_open)
-    end
-    visit_children(descendants, safe, level, open) =
-        visit_siblings(descendants, "row-$safe", level + 1, open)
-    function visit_siblings(siblings, parent, level, open)
-        isnothing(update) || _md_record_places!(placed, [string(key(s)) for s in siblings], update)
-        for item in siblings
-            visit(item, parent, level, open)
-        end
-    end
-    visit_siblings(items, "", 1, true)
-    # Every row this call renders (a whole table, a row update, lazy rows, the
-    # browser's group-row template) aligns the cells of an aligned column.
-    rows = _aligned_rows(rows, headers)
-    _rows_only && return rows
-    isnothing(update) || return _md_row_update(rows, get(kwargs, :id, nothing);
-        something(_update_scope, (; ids=["row-" * _md_safe_key(k) for k in update_keys]))...,
-        places=placed)
-    table_attrs = isnothing(children) ? (;) : (; data_htmxo_hierarchy="", role="treegrid")
-    selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
-    # The expand controls name the body they drive; a body without a caller id
-    # gets one from its root keys, which are unique on the page.
-    body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
-    expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
-    # The rows in the `default_sort` order, as `sortable_table` would write
-    # them, and the details written after the table in the same order. A
-    # column of interval cells has their five sort keys (`interval_cell`).
-    table_headers = _interval_headers(headers, _interval_columns(rows), texts)
-    ds = _resolve_default_sort(get(kwargs, :default_sort, nothing), table_headers)
-    if !isnothing(ds)
-        rows = _default_sort_rows(rows, ds, table_headers; hierarchy=haskey(table_attrs, :data_htmxo_hierarchy))
-        position = Dict(_row_id(r) => i for (i, r) in enumerate(rows))
-        perm = sortperm(detail_rows; by=id -> get(position, id, typemax(Int)), alg=MergeSort)
-        permute!(details, perm)
-    end
-    table = sortable_table(map(_sort_key_names_only, table_headers), rows; table_attrs..., texts, link, sticky,
-        _stamp_texts=false, _presorted=true, kwargs...)
-    # Depth is semantic row metadata, not per-row inline styling. The
-    # stylesheet covers the actual depth; its other rules style the row
-    # controls every master/detail table now carries. A narrow first column
-    # must not break between those controls and the label: the cell does not
-    # wrap, only the label's text (or its label button's) does, and
-    # `text-wrap-mode` leaves an app's `white-space` collapsing alone. Engines
-    # disagree on which style governs a break beside an atomic button, so a
-    # control after the label and a glyph before it are joined by U+2060.
-    rules = """
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle] { width: auto; margin: 0 .35em 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: inherit; vertical-align: baseline; }
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle] { width: auto; margin: 0 0 0 .5em; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
-    [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
-    .htmxo-tree-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
-    .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
-    .htmxo-tree-controls > label { display: inline-flex; align-items: baseline; gap: .5rem; margin: 0 .5rem 0 0; font-size: .875em; }
-    .htmxo-tree-controls > label > select { width: auto; margin: 0; padding-block: .15em; font-size: inherit; }
-    .htmxo-tree-controls > .htmxo-group-pills[role="group"] { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem; width: auto; margin: 0 .5rem 0 0; border-radius: 0; box-shadow: none; font-size: .875em; }
-    .htmxo-group-pills[role="group"] > * { flex: none; margin: 0; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill { display: inline-flex; align-items: center; border: 1px solid var(--pico-muted-border-color, GrayText); border-radius: 1em; color: inherit; cursor: grab; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-group-level] { border-color: var(--pico-contrast-background, CanvasText); background: var(--pico-contrast-background, CanvasText); color: var(--pico-contrast-inverse, Canvas); }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button { width: auto; margin: 0; padding: .1em .65em; border: 0; border-radius: 1em; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: 1.5; cursor: pointer; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button.htmxo-group-move { padding-inline: .3em; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button.htmxo-group-move:last-child { padding-inline-end: .6em; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button:disabled { opacity: .35; cursor: default; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button[aria-disabled="true"] { cursor: default; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill > button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-drop="before"] { box-shadow: -3px 0 0 var(--pico-contrast, CanvasText); }
-    .htmxo-group-pills[role="group"] > .htmxo-group-pill[data-htmxo-drop="after"] { box-shadow: 3px 0 0 var(--pico-contrast, CanvasText); }
-    .htmxo-group-pills .htmxo-group-level { margin-inline-end: .35em; font-size: .85em; opacity: .8; }
-    [data-htmxo-group] > td:first-child { white-space: nowrap; }
-    [data-htmxo-group] > td select { width: auto; margin: 0; padding-block: .15em; }
-    tr[aria-busy="true"] [data-htmxo-tree-toggle] { cursor: progress; opacity: .6; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; text-align: start; white-space: normal; font: inherit; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label]::before { content: "▸\\2060"; margin-right: .35em; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label][aria-expanded="true"]::before { content: "▾\\2060"; }
-    [data-htmxo-row-label] > [data-htmxo-tree-label]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
-    [data-htmxo-row-label] > [data-htmxo-detail-toggle] { width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-primary, LinkText); text-align: start; text-decoration: underline; white-space: normal; }
-    [data-htmxo-hierarchy] [data-htmxo-row-label] > [data-htmxo-detail-toggle] { color: inherit; text-decoration: none; font: inherit; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle]::before { content: "▸\\2060"; margin-right: .35em; }
-    [data-htmxo-hierarchy] tr:not([data-htmxo-tree-open]) [data-htmxo-row-label] > [data-htmxo-detail-toggle][aria-expanded="true"]::before { content: "▾\\2060"; }
-    [data-htmxo-row-label] > [data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .2em; }
-    td > button[data-htmxo-disclosure] { width: auto; margin: 0 .4em 0 0; padding: 0 .2em; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
-    td > button[data-htmxo-disclosure]:hover { color: var(--pico-primary, LinkText); }
-    td > button[data-htmxo-disclosure]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
-    td:has(> [data-htmxo-row-label]) { text-wrap-mode: nowrap; }
-    td > [data-htmxo-row-label]:not(:has(> [data-htmxo-label])) { text-wrap-mode: wrap; }
-    td > [data-htmxo-row-label]:has(+ button)::after { content: "\\2060"; }
-    """ * join(("[data-htmxo-hierarchy] > tbody > tr[aria-level=\"$level\"] > td:first-child { padding-inline-start: calc(var(--pico-spacing, 1rem) / 2 + $(level - 1) * var(--htmxo-tree-indent, 1.25rem)); }"
-                  for level in 2:max(max_level[], _max_level)), "\n")
-    table = h.div(h.style(Raw(rules)), table, (isempty(details) ? () : (_MDDetailsMarkdown(details),))...)
-    # A hierarchy always carries the (possibly hidden) search scaffold: its
-    # branch toggles and the search share one visibility pass.
-    tools = Any[_toolbar...]
-    expand_controls && push!(tools,
-        h.button(texts.expand_all; type="button", class="secondary outline", aria_controls=body_id,
-            onclick="htmxoTreeAll(this, true)"),
-        h.button(texts.collapse_all; type="button", class="secondary outline", aria_controls=body_id,
-            onclick="htmxoTreeAll(this, false)"))
-    controls = isempty(tools) ? nothing : h.p(; class="htmxo-tree-controls")(tools...)
-    scaffold = searchable || !isnothing(children) || !isnothing(controls)
-    # The selection bar joins the search toolbar when there is one.
-    bar = selecting && scaffold ? _selection_bar(rows; texts) : nothing
-    searched = scaffold ?
-        _searchable_table(table, rows; field=searchable, controls, query=search_query, texts, pending,
-            sticky, selection=bar) : table
-    _with_table_texts(selecting ?
-        _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!scaffold) :
-        searched, texts)
+    _master_detail_table(headers, items;
+        key=_md_callback(key), master=_md_callback(master), detail=_md_callback(detail),
+        detail_url=_md_function(detail_url), detail_instance, master_attrs=_md_callback(master_attrs),
+        master_class, detail_class, initially_open=_md_function(initially_open),
+        initially_open_detail=_md_function(initially_open_detail), children=_md_callback(children), branches_collapsible,
+        detail_toggle, searchable, search_text=_md_callback(search_text),
+        selectable, select_form, select_value=_md_callback(select_value),
+        select_submit=_md_function(select_submit), expand_controls, search_query,
+        groupings, group_by, group_master=_md_function(group_master),
+        group_by_url=_md_function(group_by_url), group_rows_url=_md_function(group_rows_url), group_rows=_md_function(group_rows),
+        group_summary, group_order, group_masters,
+        leaf_key=_md_callback(leaf_key), leaf_order=_md_callback(leaf_order), update_rows,
+        update_groups, link, link_key=_md_callback(link_key),
+        sticky, _rows_only, _sort_item=_md_callback(_sort_item),
+        _toolbar, _level_marks, _max_level,
+        _update_scope, _detail_key=_md_callback(_detail_key), texts,
+        kwargs...)
 end
+
+include("master_detail_render.jl")
 
 # --- Regroupable master/detail tables ---
 
@@ -27406,7 +26925,8 @@ function _md_group_ranks(items, names, by_name, group_order)
             # Refused: a key listed twice has no one place.
             allunique(listed) || throw(ArgumentError(
                 "master_detail_table: group_order lists a key of $(repr(name)) twice: $(repr(listed))"))
-            [listed; [k for k in present if !(k in listed)]]
+            membership = Set(listed)
+            [listed; [k for k in present if !(k in membership)]]
         elseif order isa Base.Callable
             sort(present; by=order, alg=MergeSort)
         else
@@ -28867,7 +28387,7 @@ function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[]
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => JSON.json(groups))
     isempty(places) || push!(attrs, :data_htmxo_update_places =>
         JSON.json(JSON.Object(places)))
-    h.tbody(; attrs...)(rows...)
+    h.tbody(; attrs...)(rows)
 end
 
 # --- Formatting helpers ---
@@ -31358,9 +30878,8 @@ end
 _operation_form_target(obj, route) = obj / route.path
 
 function _operation_route(T, name::Symbol, verb::Symbol)
-    candidates = [route for route in _shared_semantic_descriptor(T).routes
-                  if route.owner === T && route.name === name && route.verb === verb]
-    isempty(candidates) && throw(ArgumentError(
+    candidates = get(_shared_semantic_index(T).operations, (T, name, verb), nothing)
+    isnothing(candidates) && throw(ArgumentError(
         "no semantic $(verb) route $(repr(name)) on $(T)"))
     length(candidates) == 1 || throw(ArgumentError(
         "semantic route $(repr(name)) on $(T) is ambiguous for verb $(verb)"))
@@ -34385,7 +33904,7 @@ auto_terminal_script() = h.script(Raw(raw"""
 # holds). Names `_runtime_blocks` entries, so the shell inlines or links them.
 function _operation_page_blocks(treebars_assets::Bool)
     treebars_assets || return ()
-    isempty(_polling_page_assets()) ? () :
+    !haskey(_runtime_catalog().assets, :treebars_styles) ? () :
         (:treebars_styles, :treebars_script, :live_refresh, :auto_terminal,
          :mutation_poll, :operation_stream, :sent_ahead)
 end
@@ -40409,5 +39928,7 @@ end
 _wire_page_meta(meta) = (; lang=meta.lang, title=meta.title, progress_pause=meta.progress_pause,
                           route=meta.route, prefix=meta.prefix)
 _unwire_page_meta(plain) = merge(_NO_PAGE_META, plain)
+
+include("precompile.jl")
 
 end # module HTMXObjects
