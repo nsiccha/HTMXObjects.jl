@@ -39886,4 +39886,6 @@ _wire_page_meta(meta) = (; lang=meta.lang, title=meta.title, progress_pause=meta
                           route=meta.route, prefix=meta.prefix)
 _unwire_page_meta(plain) = merge(_NO_PAGE_META, plain)
 
+include("precompile.jl")
+
 end # module HTMXObjects
