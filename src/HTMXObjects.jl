@@ -22279,27 +22279,70 @@ function htmxoFilterTable(target) {
     if (query.length === 0) delete root.dataset.htmxoSearchCollapsed;
     const collapsed = query.length > 0 && 'htmxoSearchCollapsed' in root.dataset;
     const direct = new Set();
-    // A branch whose rows have not loaded yet also matches its rows' text.
-    const ownText = r => r.dataset.htmxoSearch ?? Array.from(r.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ');
-    const text = r => (ownText(r) + htmxoLazyLeaves(r).map(([, t]) => ' ' + t).join('')).toLocaleLowerCase();
-    rows.forEach(row => {
+    // Read each row's text at most once. Full ancestor text is only assembled
+    // when a custom predicate asks for ctx.text; ordinary phrase search carries
+    // a match flag and the short suffix that can overlap the next row's text.
+    const nodes = new Map(rows.map(row => [row, {row, parent: null}]));
+    nodes.forEach(node => { node.parent = nodes.get(byId.get(node.row.dataset.htmxoParent)); });
+    const order = [];
+    const ordered = new Set();
+    nodes.forEach(node => {
+        const path = [], visiting = new Set();
+        for (let n = node; n && !ordered.has(n) && !visiting.has(n); n = n.parent) {
+            visiting.add(n); path.push(n);
+        }
+        // Rows emitted by the server form a forest. Break a malformed cycle
+        // instead of hanging the browser on a hand-built table.
+        if (path.length && visiting.has(path[path.length - 1].parent)) path[path.length - 1].parent = null;
+        while (path.length) { const n = path.pop(); ordered.add(n); order.push(n); }
+    });
+    const ownText = node => node.own ??= (node.row.dataset.htmxoSearch ??
+        Array.from(node.row.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
+    const text = node => node.text ??= ownText(node) + htmxoLazyLeaves(node.row).map(([, t]) => ' ' + t.toLocaleLowerCase()).join('');
+    const fullText = node => {
         const path = [];
-        for (let r = row; r; r = byId.get(r.dataset.htmxoParent)) path.push(r);
-        // Ancestor text participates: a group match includes its descendants,
-        // and a leaf match retains the entire path needed to understand it.
-        const ctx = {query, input: raw, text: path.reverse().map(text).join(' ').replace(/\s+/g, ' ')};
-        const failed = filters.find(([, keep]) => !keep(row, ctx));
-        if (failed) rejectedBy.set(row, failed[0]);
-        else path.forEach(r => visible.add(r));
-        const own = {query, input: raw, text: text(row)};
-        if (collapsed && !failed && filters.every(([, keep]) => keep(row, own))) path.forEach(r => direct.add(r));
+        for (let n = node; n; n = n.parent) path.push(text(n));
+        return path.reverse().join(' ').replace(/\s+/g, ' ');
+    };
+    const context = (getText) => {
+        let value, ready = false;
+        return {query, input: raw,
+            get text() { if (!ready) { value = getText(); ready = true; } return value; },
+            set text(t) { value = t; ready = true; }};
+    };
+    const needle = unsigned(query);
+    const extend = (parent, own) => {
+        const joined = ((parent ? parent.suffix + ' ' : '') + unsigned(own)).replace(/\s+/g, ' ');
+        return {matches: Boolean(parent && parent.matches) || joined.includes(needle),
+            suffix: needle.length > 1 ? joined.slice(-(needle.length - 1)) : ''};
+    };
+    const defaultSearch = !registered.get('search');
+    order.forEach(node => {
+        node.ancestorsOpen = !node.parent || (node.parent.ancestorsOpen && node.parent.row.dataset.htmxoTreeOpen !== 'false');
+        if (defaultSearch && query.length) Object.assign(node, extend(node.parent, text(node)));
+        else { node.matches = true; node.suffix = ''; }
     });
     rows.forEach(row => {
-        let ancestorsOpen = true;
-        for (let p = byId.get(row.dataset.htmxoParent); p; p = byId.get(p.dataset.htmxoParent)) {
-            if (p.dataset.htmxoTreeOpen === 'false') ancestorsOpen = false;
+        const node = nodes.get(row);
+        const ctx = context(() => fullText(node));
+        const failed = filters.find(([name, keep]) => name === 'search' && defaultSearch ? !node.matches : !keep(row, ctx));
+        if (failed) rejectedBy.set(row, failed[0]);
+        else visible.add(row);
+        if (collapsed && !failed) {
+            const own = {query, input: raw, text: text(node)};
+            if (filters.every(([, keep]) => keep(row, own))) direct.add(row);
         }
-        row.hidden = !visible.has(row) || (query.length === 0 && !ancestorsOpen) || (collapsed && !direct.has(row));
+    });
+    // A leaf match retains its ancestors. One reverse walk propagates these
+    // flags regardless of the current DOM order after sorting or row updates.
+    for (let i = order.length - 1; i >= 0; i--) {
+        const node = order[i];
+        if (!node.parent) continue;
+        if (visible.has(node.row)) visible.add(node.parent.row);
+        if (direct.has(node.row)) direct.add(node.parent.row);
+    }
+    rows.forEach(row => {
+        row.hidden = !visible.has(row) || (query.length === 0 && !nodes.get(row).ancestorsOpen) || (collapsed && !direct.has(row));
         if (visible.has(row)) delete row.dataset.htmxoFiltered; else row.dataset.htmxoFiltered = '';
     });
     const shownParents = new Set(rows.filter(r => !r.hidden).map(r => r.dataset.htmxoParent));
@@ -22353,13 +22396,13 @@ function htmxoFilterTable(target) {
         }
         const leaves = htmxoLazyLeaves(row);
         if (!leaves.length) return;
-        const kept = visible.has(row), path = [ownText(row).toLocaleLowerCase()];
-        for (let r = byId.get(row.dataset.htmxoParent); r; r = byId.get(r.dataset.htmxoParent)) path.unshift(text(r));
+        const kept = visible.has(row), node = nodes.get(row);
+        const prefix = defaultSearch && query.length ? extend(node.parent, ownText(node)) : null;
         // The unloaded leaves this pass hides, for hover linking.
         row.htmxoLazyFiltered = new Set();
         leaves.forEach(([key, t]) => {
-            const ctx = {query, input: raw, text: (path.join(' ') + ' ' + t.toLocaleLowerCase()).replace(/\s+/g, ' ')};
-            const shown = kept && search(row, ctx);
+            const ctx = context(() => ((node.parent ? fullText(node.parent) + ' ' : '') + ownText(node) + ' ' + t.toLocaleLowerCase()).replace(/\s+/g, ' '));
+            const shown = kept && (defaultSearch ? !query.length || extend(prefix, t.toLocaleLowerCase()).matches : search(row, ctx));
             if (!shown) row.htmxoLazyFiltered.add(key);
             tally('leaf:' + key, shown, kept ? 'search' : rejectedBy.get(row));
         });
