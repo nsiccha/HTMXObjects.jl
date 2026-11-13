@@ -287,7 +287,10 @@ function _master_detail_table(headers, items;
     selecting && (table_attrs = (; table_attrs..., aria_multiselectable="true"))
     # The expand controls name the body they drive; a body without a caller id
     # gets one from its root keys, which are unique on the page.
-    body_id = string(get(kwargs, :id, "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)))
+    # Only expand controls need a generated target. Avoid walking all keys
+    # and hashing a row-count-sized tuple when that target is never used.
+    body_id = !expand_controls ? nothing : haskey(kwargs, :id) ? string(kwargs[:id]) :
+        "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
     # The rows in the `default_sort` order, as `sortable_table` would write
     # them, and the details written after the table in the same order. A
@@ -373,4 +376,3 @@ function _master_detail_table(headers, items;
         _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!scaffold) :
         searched, texts)
 end
-
