@@ -110,6 +110,8 @@ import HTMX: h, auto, Node, @__str, HyperscriptString, Raw
 import LibGit2
 import Sockets
 
+include("world_memo.jl")
+
 """
     ROUTER
 
@@ -3207,12 +3209,12 @@ function vendorfiles(mountdir::AbstractString="vendor"; headers::Vector=[])
             _register_get_route!(route(file), handler)
         end
     end
-    # The runtime is rendered per request, so a Revise edit or a Treebars
+    # Resolve the catalog per request, so a source edit or a Treebars
     # extension loaded after this call is served as the shell links it.
     for name in keys(_runtime_blocks())
         file = _runtime_file(name)
-        handler = req -> let text = _runtime_text(name)
-            _vendor_file_response(req, file, text, _runtime_version(text), headers)
+        handler = req -> let asset = _runtime_asset(name)
+            _vendor_file_response(req, file, asset.text, asset.version, headers)
         end
         _register_get_route!(route("htmxo/" * file), handler)
     end
@@ -3447,150 +3449,7 @@ end
 
 # --- Page runtime: inline, or linked from the vendor mount ---
 #
-# The `htmx()` shell carries HTMXObjects' own CSS/JS runtime, plus the
-# Treebars poll assets while that extension is loaded. Each block has a
-# stable name and a producer returning ONE attribute-free `<style>`/`<script>`
-# of `Raw` text, so the same bytes ship either inline (the default) or as the
-# file `vendorfiles` serves at `<mount>/htmxo/<name>.<ext>`. The shell decides
-# which blocks a page carries; this table only names them. Producers resolve
-# at call time, so the file may name functions defined further down.
-_runtime_blocks() = (
-    preload_runtime = (:js, preload_runtime_js),
-    theme = (:css, htmxo_theme),
-    pico_bridge = (:css, pico_bridge),
-    request_feedback_style = (:css, request_feedback_style),
-    request_feedback_script = (:js, request_feedback_script),
-    compose_box_styles = (:css, compose_box_styles),
-    compose_box_script = (:js, compose_box_script),
-    toast_styles = (:css, toast_styles),
-    toast_script = (:js, toast_script),
-    live_thread_styles = (:css, live_thread_styles),
-    live_thread_script = (:js, live_thread_script),
-    utility_styles = (:css, htmxo_utility_styles),
-    tabset_styles = (:css, tabset_styles),
-    tabset_script = (:js, tabset_script),
-    comparison_styles = (:css, comparison_styles),
-    editor_styles = (:css, editor_styles),
-    comparison = (:js, comparison_js),
-    stream_probe = (:js, stream_probe_script),
-    redirect_history = (:js, redirect_history_script),
-    modifier_click = (:js, modifier_click_script),
-    live_region = (:js, live_region_script),
-    treebars_styles = (:css, () -> _polling_page_asset(1)),
-    treebars_script = (:js, () -> _polling_page_asset(2)),
-    live_refresh = (:js, live_refresh_script),
-    auto_terminal = (:js, auto_terminal_script),
-    mutation_poll = (:js, mutation_poll_script),
-    operation_stream = (:js, operation_stream_script),
-    sent_ahead = (:js, sent_ahead_script),
-    semantic_refresh = (:js, semantic_refresh_script),
-    semantic_follow = (:js, semantic_follow_script),
-    show_when = (:js, show_when_script),
-    choice_list = (:js, choice_list_script),
-    url_params = (:js, url_params_script),
-    url_anchor = (:js, url_anchor_script),
-    instance_scope = (:js, instance_scope_script),
-    glossary = (:js, glossary_script),
-    unit_styles = (:css, unit_styles),
-    unit_script = (:js, unit_script),
-    math_styles = (:css, math_styles),
-    math_script = (:js, math_script),
-    syntax_styles = (:css, syntax_styles),
-    syntax_script = (:js, syntax_script),
-    # The table runtime. `htmx(...; tables=true)` carries it together with
-    # `sortable_table_styles`, `caption_style` and `download_table` below.
-    table_runtime = (:js, _table_runtime_js),
-    # Page helpers an app may place itself, usually in `extra_head`. The
-    # shell leaves out a copy whose code it already carries and links the
-    # rest (`_shell_extra_head`).
-    sortable_table = (:js, sortable_table_js),
-    sortable_table_styles = (:css, sortable_table_styles),
-    caption_style = (:css, caption_style),
-    master_detail = (:js, master_detail_js),
-    download_table = (:js, download_table_js),
-    gallery_styles = (:css, htmxo_gallery_styles),
-    # Component assets: what `pdf_panel_assets()` and `card_deck_assets()`
-    # return, for a page that mounts the component with `assets=false`.
-    pdf_panel_styles = (:css, pdf_panel_styles),
-    pdf_panel_script = (:js, pdf_panel_script),
-    card_deck_styles = (:css, card_deck_styles),
-    card_deck_script = (:js, card_deck_script),
-)
-
-# The blocks whose text exists in this process: the Treebars poll assets only
-# while that extension is loaded.
-_available_runtime_names() = isempty(_polling_page_assets()) ?
-    filter(name -> !(name in (:treebars_styles, :treebars_script)), keys(_runtime_blocks())) :
-    keys(_runtime_blocks())
-
-_runtime_block(name::Symbol) = last(getfield(_runtime_blocks(), name))()
-_runtime_file(name::Symbol) = string(name, '.', first(getfield(_runtime_blocks(), name)))
-
-_runtime_tag(::Val{:css}) = :style
-_runtime_tag(::Val{:js}) = :script
-
-# The block's text — exactly what the inline element holds. Any other shape
-# would render differently inline than linked, so it is refused loudly.
-function _runtime_text(name::Symbol)
-    node = _runtime_block(name)
-    expected = _runtime_tag(Val(first(getfield(_runtime_blocks(), name))))
-    node isa Node && HTMX.tag(node) === expected && isempty(HTMX.attrs(node)) &&
-        all(child -> child isa Raw, HTMX.children(node)) || throw(ArgumentError(
-            "page runtime block $(repr(name)) must be an attribute-free <$expected> of Raw text; got $(repr(MIME"text/html"(), node))"))
-    join(String(child) for child in HTMX.children(node))
-end
-
-# Content-addressed: any change to a block's text changes its URL.
-_runtime_version(text::AbstractString) = string(hash(text); base=16)
-
-# One block as the shell carries it: the element itself (inline), or a link
-# to its versioned file on the vendor mount. The marker lets a static export
-# put the element back (`_static_walk`), so exported pages stay standalone.
-_runtime_head(name::Symbol, ::Nothing) = _runtime_block(name)
-function _runtime_head(name::Symbol, mount::AbstractString)
-    src = string(mount, "/htmxo/", _runtime_file(name), "?v=", _runtime_version(_runtime_text(name)))
-    _runtime_link(Val(first(getfield(_runtime_blocks(), name))), src, name)
-end
-_runtime_link(::Val{:css}, src, name) = h.link(rel="stylesheet", href=src, data_htmxo_runtime=string(name))
-_runtime_link(::Val{:js}, src, name) = h.script(src=src, data_htmxo_runtime=string(name))
-
-_runtime_heads(mount, names...) = map(name -> _runtime_head(name, mount), names)
-
-# The named runtime block an element is exactly — an attribute-free
-# `<style>`/`<script>` whose `Raw` text equals that block's — or `nothing`.
-_runtime_block_name(node, texts) = nothing
-function _runtime_block_name(node::Node, texts)
-    HTMX.tag(node) in (:style, :script) && isempty(HTMX.attrs(node)) &&
-        all(child -> child isa Raw, HTMX.children(node)) || return nothing
-    get(texts, (HTMX.tag(node), join(String(child) for child in HTMX.children(node))), nothing)
-end
-
-# The shell blocks whose code a runtime block consists of: the block itself,
-# or for a page helper that bundles shell code, those blocks.
-_runtime_parts(name::Symbol) = _runtime_parts(Val(name))
-_runtime_parts(::Val{name}) where {name} = (name,)
-_runtime_parts(::Val{:sortable_table}) = (:table_runtime, :comparison)
-_runtime_parts(::Val{:master_detail}) = (:comparison,)
-
-# `extra_head` as the shell carries it. An element that is exactly a named
-# runtime block — an app's own `sortable_table_js()`, say — is left out when
-# the shell already carries its code (`carried`, the shell's block names);
-# otherwise, linked, it becomes its link in the same place, like the shell's
-# blocks. Anything else stays as given.
-function _shell_extra_head(extra_head, mount, carried)
-    texts = nothing
-    filter(!isnothing, map(extra_head) do node
-        node isa Node && HTMX.tag(node) in (:style, :script) || return node
-        # Built once, and only for a head that has a candidate element.
-        isnothing(texts) && (texts = Dict(
-            (_runtime_tag(Val(first(getfield(_runtime_blocks(), name)))), _runtime_text(name)) => name
-            for name in _available_runtime_names()))
-        name = _runtime_block_name(node, texts)
-        isnothing(name) ? node :
-            all(in(carried), _runtime_parts(name)) ? nothing :
-            isnothing(mount) ? node : _runtime_head(name, mount)
-    end)
-end
+include("runtime_assets.jl")
 
 # `runtime` → the mount the shell links its runtime from, or `nothing` to
 # inline it. Linking needs a same-origin mount, which `assets` names.
@@ -14864,85 +14723,7 @@ function _effective_route_descriptor(descriptor)
     descriptor
 end
 
-# Per-type reflection memo. DO rebuilds every descriptor from `meta(T)` source
-# metadata — signature parsing, `Core.eval` of each argument type, per-property
-# dependency closures — so one build of a large route type costs milliseconds,
-# and the request path used to pay it twice per request (snag
-# `per-request-prop-096b23ad`). A type-level reflection result depends only on
-# `T` and on the method table, never on the request, so it is keyed on the
-# world counter: any (re)definition — a Revise edit, a struct redefinition —
-# rebuilds on the next read. The counter is read BEFORE the build, so a
-# definition racing a build stamps the entry stale rather than fresh. The
-# cached value is shared: callers must not mutate it, and anything handed to a
-# consumer gets its own outer container.
-struct _WorldMemo{V}
-    entries::IdDict{Any,Tuple{UInt,V}}
-    lock::ReentrantLock
-end
-_WorldMemo{V}() where {V} = _WorldMemo{V}(IdDict{Any,Tuple{UInt,V}}(), ReentrantLock())
-
-function _world_memo!(build, memo::_WorldMemo, T)
-    world = Base.get_world_counter()
-    cached = lock(() -> get(memo.entries, T, nothing), memo.lock)
-    cached !== nothing && first(cached) == world && return last(cached)
-    value = build()
-    lock(() -> memo.entries[T] = (world, value), memo.lock)
-    value
-end
-
-const _property_descriptors_memo = _WorldMemo{Vector{NamedTuple}}()
-
-_shared_property_descriptors(T) = _world_memo!(_property_descriptors_memo, T) do
-    NamedTuple[_effective_route_descriptor(
-        _mark_internal_inputs(descriptor)) for descriptor in
-        Base.invokelatest(getproperty(DynamicObjects, :property_descriptors), T)]
-end
-
-# First-declaration-wins, like DO's `property_descriptor(T, name)`: that method
-# describes `metafirst(T, name)`, the first `meta(T)` entry of that name, and
-# `property_descriptors(T)` is `meta(T)` in declaration order.
-function _property_descriptor(T, name::Symbol)
-    isdefined(DynamicObjects, :property_descriptors) || return nothing
-    for descriptor in _shared_property_descriptors(T)
-        descriptor.name === name && return descriptor
-    end
-    nothing
-end
-
-# A fresh outer vector per call: the result escapes into consumer-facing
-# graphs (`semantic_descriptor`), and must not alias the memo.
-function _property_descriptors(T)
-    isdefined(DynamicObjects, :property_descriptors) || return NamedTuple[]
-    copy(_shared_property_descriptors(T))
-end
-
-# Descriptor for one EXACT declaration. The `(T, name)` method resolves through
-# `metafirst` (first-declaration-wins), which collapses a name carrying several
-# declarations — `@get index`, `@post index` and `@include index(x)` can all
-# coexist under one key. Callers already holding the `info` that
-# `_walk_route_meta` handed them pass it here so they descriptor-ize the
-# declaration they actually walked.
-function _property_descriptor(T, name::Symbol, info::NamedTuple)
-    isdefined(DynamicObjects, :property_descriptor) || return nothing
-    _effective_route_descriptor(_mark_internal_inputs(Base.invokelatest(
-        getproperty(DynamicObjects, :property_descriptor), T, name, info)))
-end
-
-function _property_descriptor(T, name::Symbol, verb::Symbol)
-    isdefined(DynamicObjects, :property_descriptors) || return nothing
-    expected = Verb{verb}
-    for descriptor in _shared_property_descriptors(T)
-        descriptor.name === name || continue
-        inputs = get(descriptor, :inputs, NamedTuple[])
-        # Matches on the injected arg's TYPE, so it must not use
-        # `internal_input` — that says "injected", not "injected for THIS verb",
-        # and every verb's declaration carries an injected arg.
-        any(input -> input.name === :__verb__ &&
-                     get(input, :type, nothing) === expected, inputs) &&
-            return descriptor
-    end
-    _property_descriptor(T, name)
-end
+include("semantic_metadata.jl")
 
 function _operation_input_values(descriptor, idx_vals, kw_pairs)
     values = Dict{Symbol,Any}(kw_pairs)
@@ -19797,17 +19578,6 @@ straight from `DynamicObjects.property_descriptor`.
 semantic_descriptor(::Type{T}) where {T} = _build_semantic_descriptor(T)
 
 semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
-
-# The compiler's read of the same descriptor. `semantic_app` resolves every
-# operation of every rendered mount against its type's descriptor, so a table
-# of N same-type rows with M operations each would otherwise rebuild the
-# identical reflection N×(M+1) times — milliseconds each, dominating the render.
-# Shared and world-keyed like `_shared_property_descriptors`; the public
-# `semantic_descriptor` keeps returning a freshly built, caller-owned value.
-const _semantic_descriptor_memo = _WorldMemo{NamedTuple}()
-
-_shared_semantic_descriptor(T::Type) =
-    _world_memo!(() -> _build_semantic_descriptor(T), _semantic_descriptor_memo, T)
 
 function _build_semantic_descriptor(T)
     routes = NamedTuple[]
@@ -27409,7 +27179,8 @@ function _md_group_ranks(items, names, by_name, group_order)
             # Refused: a key listed twice has no one place.
             allunique(listed) || throw(ArgumentError(
                 "master_detail_table: group_order lists a key of $(repr(name)) twice: $(repr(listed))"))
-            [listed; [k for k in present if !(k in listed)]]
+            membership = Set(listed)
+            [listed; [k for k in present if !(k in membership)]]
         elseif order isa Base.Callable
             sort(present; by=order, alg=MergeSort)
         else
@@ -31361,9 +31132,8 @@ end
 _operation_form_target(obj, route) = obj / route.path
 
 function _operation_route(T, name::Symbol, verb::Symbol)
-    candidates = [route for route in _shared_semantic_descriptor(T).routes
-                  if route.owner === T && route.name === name && route.verb === verb]
-    isempty(candidates) && throw(ArgumentError(
+    candidates = get(_shared_semantic_index(T).operations, (T, name, verb), nothing)
+    isnothing(candidates) && throw(ArgumentError(
         "no semantic $(verb) route $(repr(name)) on $(T)"))
     length(candidates) == 1 || throw(ArgumentError(
         "semantic route $(repr(name)) on $(T) is ambiguous for verb $(verb)"))
@@ -34388,7 +34158,7 @@ auto_terminal_script() = h.script(Raw(raw"""
 # holds). Names `_runtime_blocks` entries, so the shell inlines or links them.
 function _operation_page_blocks(treebars_assets::Bool)
     treebars_assets || return ()
-    isempty(_polling_page_assets()) ? () :
+    !haskey(_runtime_catalog().assets, :treebars_styles) ? () :
         (:treebars_styles, :treebars_script, :live_refresh, :auto_terminal,
          :mutation_poll, :operation_stream, :sent_ahead)
 end
