@@ -213,8 +213,12 @@ end
                     @test wait_for(b, "document.getElementById('delta-one')")
                     @test repeated(OWN) == ""
                     @test crossed(OWN) == ""
-                    click(tab("delta", "several"))
-                    @test wait_for(b, "document.getElementById('delta-several').checkVisibility()")
+                    # The fragment's tabs answer once hyperscript has processed
+                    # it, which can come after its elements appear; a click before
+                    # that is lost, so click until the tab opens (opening the open
+                    # tab again changes nothing).
+                    @test wait_for(b, "(document.querySelector('$(tab("delta", "several"))').click(), " *
+                        "document.getElementById('delta-several').checkVisibility())")
                     @test !seen("#delta-one") && seen("#alpha-one") && !seen("#alpha-several")
 
                     # A shared parameter opens the named tab of every tabset that has it.
