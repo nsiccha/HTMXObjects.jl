@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.117
+
+- An HTMX read whose answer swaps nowhere (`hx-swap="none"`) is answered with
+  its finished result under every `OperationPolicy`, as a swap-less mutation
+  already was: a progress poller in it would never poll. The page's
+  `mutation_poll_script()` now declares the swap (`HTMXO-Swap`) on `GET`s too;
+  a read that does not declare it polls as before. So `choice_list(nv, url)`
+  loads its options from a slow route under the default `:auto` policy, where
+  the list used to read the poller as a failed request; the options route
+  needs no `@direct`.
+
 ## 0.1.116
 
 - `choice_list(nv, url)` loads a long or shared option list from an address

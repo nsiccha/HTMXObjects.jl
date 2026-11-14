@@ -3318,6 +3318,28 @@ end
     end
     @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
                                     plain, Verb{:GET}()) === :polling
+    # A read whose answer swaps nowhere (`HTMXO-Swap: none`, which the shell's
+    # `mutation_poll_script` sends for an `hx-swap="none"` GET such as the
+    # options loader of `choice_list(nv, url)`) has no place for a poller: it
+    # is answered inline under every policy, memoized or `@fresh` (snag
+    # `choice-list-url-08d37738`). A read naming a swap, or none, polls as
+    # before, and the header counts only on an HTMX request.
+    swapless_read = HTTP.Request("GET", "/html?count=2",
+        ["HX-Request" => "true", "HTMXO-Swap" => "none"])
+    swapping_read = HTTP.Request("GET", "/html?count=2",
+        ["HX-Request" => "true", "HTMXO-Swap" => "innerHTML"])
+    for policy in (OperationPolicy(:auto), OperationPolicy(:polling)),
+            descriptor in (html_descriptor, fresh_descriptor)
+        @test _operation_execution_mode(policy, descriptor, swapless_read,
+                                        Verb{:GET}()) === :blocking
+        @test _operation_execution_mode(policy, descriptor, swapless_read,
+                                        Verb{:GET}(); page_shell=true) === :blocking
+        @test _operation_execution_mode(policy, descriptor, swapping_read,
+                                        Verb{:GET}()) === :polling
+    end
+    @test _operation_execution_mode(OperationPolicy(:polling), html_descriptor,
+        HTTP.Request("GET", "/html?count=2", ["HTMXO-Swap" => "none"]),
+        Verb{:GET}()) === :polling
 
     # Neither executor leaks its private `fetch` selector into the route body:
     # the inline one (a non-HTMX request) and the background one (an HTMX

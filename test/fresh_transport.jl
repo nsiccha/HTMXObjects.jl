@@ -11,7 +11,7 @@ using TestItemRunner
     export FreshReadApp, FreshPageApp, FreshMutationApp, SharedPathApp, RenamedPathApp,
         CoveredPathApp, FreshRetainedApp,
         FreshFailureApp, FreshDirectApp, FreshBrowserApp, FreshGates,
-        FreshStructuralApp, structural_row_html,
+        FreshStructuralApp, structural_row_html, SwaplessReadApp,
         reset_fresh!, fresh_runs, release_fresh!, hx_get, hx_post, plain,
         poll_url, poll_token, running, settle, settle_response, body_text
 
@@ -190,6 +190,19 @@ using TestItemRunner
         "Mark the card"
         @post structural_card() =
             (wait(gate(:structural)); h.div("card:done"; id="card"))
+    end
+
+    # Slow reads whose requester swaps nowhere (`hx-swap="none"`): a memoized
+    # one, a fresh one, and an options route a `choice_list(nv, url)` loads.
+    @htmx struct SwaplessReadApp
+        "Render the slow memoized read"
+        @get swapless_memo() = gated(:swapless_memo, "swapless_memo")
+        "Render the slow fresh read"
+        @fresh @get swapless_fresh() = gated(:swapless_fresh, "swapless_fresh")
+        "List the slow options"
+        @get swapless_options(; round::Int=0) = (fresh_hit!(:swapless_options);
+            wait(gate(:swapless_options));
+            choice_options(["alpha" => "Alpha", "beta" => "Beta", "gamma" => "Gamma"]))
     end
 
     function structural_row_html(which, state; live::Bool=false)
@@ -544,6 +557,48 @@ end
     running(healed) && (healed = settle(poll_url(healed)))
     @test contains(healed, "report-1:4")
     @test fresh_runs(:read) == 4
+end
+
+@testitem "a slow read whose answer swaps nowhere waits for its result" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, Treebars
+    import HTMXObjects: _clear_operation_polls!
+
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+    reset_fresh!()
+    _clear_operation_polls!()
+    route!(SwaplessReadApp())
+
+    # `mutation_poll_script` declares `HTMXO-Swap: none` for an
+    # `hx-swap="none"` GET, such as the options loader of
+    # `choice_list(nv, url)`. A poller swapped nowhere would never poll, so the
+    # request waits for the finished answer, memoized or fresh (snag
+    # `choice-list-url-08d37738`).
+    for key in (:swapless_memo, :swapless_fresh)
+        task = Threads.@spawn hx_get("/$(key)"; headers=["HTMXO-Swap" => "none"])
+        @test timedwait(() -> fresh_runs(key) == 1, 10.0; pollint=0.01) === :ok
+        sleep(0.3)  # past the grace budget, where a polled read answers its poller
+        @test !istaskdone(task)
+        release_fresh!(key)
+        inline = body_text(fetch(task))
+        @test contains(inline, "$(key):1") && !running(inline)
+    end
+    task = Threads.@spawn hx_get("/swapless_options"; headers=["HTMXO-Swap" => "none"])
+    @test timedwait(() -> fresh_runs(:swapless_options) == 1, 10.0; pollint=0.01) === :ok
+    sleep(0.3)
+    @test !istaskdone(task)
+    release_fresh!(:swapless_options)
+    options = body_text(fetch(task))
+    @test contains(options, "data-htmxo-choice-options") && !running(options)
+    @test count("class=\"htmxo-choice-option\"", options) == 3
+
+    # The same slow read declaring a swap target, or declaring none, polls.
+    for headers in (["HTMXO-Swap" => "innerHTML"], Pair{String,String}[])
+        reset_fresh!()
+        polled = body_text(hx_get("/swapless_fresh"; headers))
+        @test running(polled)
+        release_fresh!(:swapless_fresh)
+        @test contains(settle(poll_url(polled)), "swapless_fresh:1")
+    end
 end
 
 @testitem "a slow fresh page renders its shell and the load request joins the invocation" setup=[FreshTransportFixtures] tags=[:unit, :semantic] begin
@@ -1151,6 +1206,126 @@ end
         finally
             release_fresh!(:browser_read)
             release_fresh!(:browser_post)
+            close(server)
+        end
+    end
+end
+
+@testitem "a choice list loads its options from a slow auto route in a real browser" setup=[FreshTransportFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, Treebars
+        import HTMXObjects: _clear_operation_polls!, h, Raw
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        reset_fresh!()
+        _clear_operation_polls!()
+        route!(SwaplessReadApp())
+        htmx_js = read(HTMXObjects._vendor_file(:htmx), String)
+        receipt = Channel{String}(1)
+        requests = String[]
+        # The list's loader asks a route the default `:auto` policy would answer
+        # with a poller once it outlasts the grace budget (snag
+        # `choice-list-url-08d37738`): the list must wait for the options, not
+        # read the poller as a failed request.
+        driver = h.script(Raw(raw"""
+        window.addEventListener('error', function(event) {
+          fetch('/complete?status=' + encodeURIComponent('error: ' + event.message));
+        });
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(predicate, label) {
+            for (let i = 0; i < 400; i++) {
+              if (await predicate()) return;
+              await sleep(25);
+            }
+            throw new Error('timed out: ' + label);
+          }
+          const list = document.querySelector('.htmxo-choice-list');
+          const loader = list.querySelector('.htmxo-choice-loading');
+          const rows = () => list.querySelectorAll('.htmxo-choice-option input').length;
+          try {
+            list.querySelector('.htmxo-choice-field').click();
+            await until(async () => (await (await fetch('/asked')).text()) === '1', 'the options request');
+            await sleep(400);  // well past the grace budget
+            if (loader.classList.contains('htmxo-choice-failed'))
+              throw new Error('failed while the route ran: ' + loader.textContent);
+            if (rows() !== 0) throw new Error('rows before the answer: ' + rows());
+            await fetch('/release');
+            await until(() => rows() === 3, 'the options');
+            if (loader.classList.contains('htmxo-choice-failed') || !loader.hidden)
+              throw new Error('loader: ' + loader.className + ' ' + loader.textContent);
+            fetch('/complete?status=passed');
+          } catch (err) {
+            fetch('/complete?status=' + encodeURIComponent(String(err)));
+          }
+        });
+        """))
+        page = repr("text/html", htmx(h.main(
+                choice_list("pick", "/swapless_options?round=2"; label="Pick"),
+                driver);
+                assets="/test-assets", sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, hyperscript_version=nothing,
+                pico_version=nothing, feedback=false, compose=false,
+                overlay=false))
+        @test contains(page, "__htmxoMutationPolls")
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" &&
+                return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            path == "/test-assets/htmx.min.js" &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], htmx_js)
+            path == "/favicon.ico" && return HTTP.Response(204)
+            path == "/asked" && return HTTP.Response(200,
+                ["Content-Type" => "text/plain"], string(fresh_runs(:swapless_options)))
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            if path == "/release"
+                release_fresh!(:swapless_options)
+                return HTTP.Response(204)
+            end
+            push!(requests, string(req.method, " ", req.target, " swap=",
+                                   HTTP.header(req, "HTMXO-Swap", "")))
+            dispatch(req.method, String(req.target);
+                headers=collect(req.headers),
+                body=HTMXObjects._request_body_bytes(req))
+        end
+        try
+            # Compile the inline path before the browser's clock starts.
+            warm = Threads.@spawn hx_get("/swapless_options?round=1";
+                                         headers=["HTMXO-Swap" => "none"])
+            @test timedwait(() -> fresh_runs(:swapless_options) == 1, 10.0; pollint=0.01) === :ok
+            release_fresh!(:swapless_options)
+            @test contains(body_text(fetch(warm)), "data-htmxo-choice-options")
+            reset_fresh!()
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : "no receipt"
+                    @test outcome == "/complete?status=passed"
+                    outcome == "/complete?status=passed" ||
+                        @info "Browser requests" outcome requests=join(requests, "\n")
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+            # One request, declared swap-less, answered by the finished options:
+            # no poll followed it.
+            @test fresh_runs(:swapless_options) == 1
+            @test filter(r -> contains(r, "swapless_options"), requests) ==
+                  ["GET /swapless_options?round=2 swap=none"]
+            @test !any(r -> contains(r, "__htmxo_poll"), requests)
+        finally
+            release_fresh!(:swapless_options)
             close(server)
         end
     end
