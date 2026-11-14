@@ -3994,6 +3994,8 @@ _site_footer(footer, class) = (h.footer(class=class)(footer),)
 
 # --- Route registration and recording ---
 
+include("html_writer.jl")
+
 const _html_response = s -> HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body=s)
 
 """
@@ -5932,7 +5934,15 @@ already an `HTTP.Response` pass through unchanged. Values with no `text/html`
 `show` method render via [`generic_html`](@ref) instead of raising.
 """
 to_response(val::HTTP.Response) = val
-to_response(val) = auto(_html_value(val); wrap=_html_response)
+to_response(val) = _html_answer(_html_value(val))
+
+# The HTML answer for a value `_html_value` has normalized. A markup tree has no
+# `auto` method of its own, so `auto` would `repr` it; `_html_repr` writes the
+# same bytes without doubling a buffer (`html_writer.jl`). Every other shape
+# (text, fragment arrays, OOB pairs, this package's own `auto` methods, and a
+# consumer's) keeps `auto`'s dispatch.
+_html_answer(val) = auto(val; wrap=_html_response)
+_html_answer(val::Union{Node,HTMLDocument,SemanticNode}) = _html_response(_html_repr(val))
 
 """
     MIMEResponse(content_type, body)
@@ -6513,6 +6523,10 @@ error filter, Markdown chrome stripping and static export all descend into it.
 The `repr("text/html", value)` + `HTMX.Raw` recipe cannot do this: Raw bytes
 have no Markdown or error projection.
 
+Nested in a larger Node, its stored bytes are copied once, into a response
+allocated at its exact size; a snapshot of the whole page is not needed to keep
+that cost down.
+
 It is a value, not a cache. It holds no key, invalidation or request identity,
 and captures whatever context `value` was built under. Retain it only under the
 application-owned identity documented in "Reusing generated markup" (root and
@@ -6523,10 +6537,13 @@ stored bytes show [`private`](@ref Private) content for).
 struct HTMLSnapshot
     value::Any
     html::String
-    HTMLSnapshot(value) = new(value, repr(MIME"text/html"(), _html_value(value)))
+    HTMLSnapshot(value) = new(value, _html_repr(_html_value(value)))
 end
 
 Base.show(io::IO, ::MIME"text/html", s::HTMLSnapshot) = print(io, s.html)
+# Returned whole, the stored bytes are the answer: a `String` is immutable and
+# every HTTP.jl version keeps a String body read-only, so nothing is copied.
+_html_answer(s::HTMLSnapshot) = _html_response(s.html)
 Base.show(io::IO, ::MIME"text/markdown", s::HTMLSnapshot) =
     print(io, to_markdown_string(s.value))
 Base.show(io::IO, s::HTMLSnapshot) =
