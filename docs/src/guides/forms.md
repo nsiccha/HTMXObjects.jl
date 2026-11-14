@@ -193,6 +193,9 @@ time it opens.
 
 The request is an ordinary htmx GET that inherits no values, so a static export
 maps the address as it maps any fragment, and `export_site` writes its answer.
+It swaps nothing, so a slow options route answers it with the finished options
+under the default `:auto` policy too, never with a progress poller; the route
+needs no `@direct`.
 
 ## URLs
 

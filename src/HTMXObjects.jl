@@ -9904,7 +9904,8 @@ submission is answered by one only when its client declares such a swap: the
 `htmx()` shell's `mutation_poll_script()` sends `HTMXO-Swap`. A
 swap-less submission (`hx-swap="none"`), a page that does not declare it, and
 a non-HTMX submission (a classic form post, curl) are answered by their own
-response.
+response. A read that declares it swaps nowhere (`HTMXO-Swap: none`) is
+answered by its finished result too, since no poller could live in it.
 
 Direct handling is reserved for what genuinely needs it: declared
 `HTTP.Response`, `MIMEResponse` and `JSONResponse` outputs (a route whose answer
@@ -15008,11 +15009,19 @@ _operation_verb_transport(::Verb) = :direct
 _operation_verb_transport(::Verb{:GET}) = :read
 _operation_verb_transport(::_MutationVerb) = :mutation
 
+# The swap style an HTMX request says its answer goes in (`HTMXO-Swap`, sent
+# by `mutation_poll_script`), or `""` when it does not say.
+_operation_declared_swap(req::HTTP.Request) =
+    is_htmx(req) ? lowercase(strip(HTTP.header(req, "HTMXO-Swap", ""))) : ""
+
 function _operation_mutation_pollable(req::HTTP.Request)
-    is_htmx(req) || return false
-    swap = lowercase(strip(HTTP.header(req, "HTMXO-Swap", "")))
+    swap = _operation_declared_swap(req)
     !isempty(swap) && swap != "none"
 end
+
+# A request whose answer swaps nowhere (`hx-swap="none"`): a poller in it
+# would never poll, and its requester would read the poller as the answer.
+_operation_swapless(req::HTTP.Request) = _operation_declared_swap(req) == "none"
 
 # Whether an invocation can run in the background at all: a memoized route
 # through DynamicObjects' `Pending` cache cell, a fresh one (`@fresh`, or a
@@ -15075,6 +15084,10 @@ function _operation_execution_mode(policy::OperationPolicy, descriptor,
     # own response.
     transport === :mutation && !_operation_mutation_pollable(req) &&
         return :blocking
+    # A read that swaps nowhere (`hx-swap="none"`, as `choice_list(nv, url)`'s
+    # options loader asks) gets its finished answer for the same reason. A
+    # read that does not say keeps polling: its poller lives where htmx swaps.
+    transport === :read && _operation_swapless(req) && return :blocking
     policy.mode === :polling && return :polling
     _operation_background_capable(descriptor) || return :blocking
     # `:auto` deliberately polls on the capability alone: an ordinary route
@@ -29376,7 +29389,10 @@ time it opens. The request is an ordinary htmx GET that inherits no values
 (`hx-include` and `hx-vals` are `unset`), so a static export maps `url` as it
 maps a fragment address: [`export_site`](@ref) writes its answer, and the
 exported list loads it. An export that cannot serve `url` leaves the list its
-chosen rows.
+chosen rows. The request swaps nothing (`hx-swap="none"`), so under every
+[`OperationPolicy`](@ref) a slow route answers it with the finished options,
+never a poller (the page's `mutation_poll_script()` says so); the route needs
+no `@direct`.
 """
 choice_list(nv, url::AbstractString; label=Long(nv), value=_avalue(nv), show_when=nothing,
         required::Bool=false, multiple::Bool=false, texts::ErrorTexts=_EN_ERROR_TEXTS) = begin
@@ -34192,15 +34208,19 @@ end
 """
     mutation_poll_script()
 
-Declare, on every HTMX mutation request (`POST`/`PUT`/`PATCH`/`DELETE`), where
-its response will land: the `HTMXO-Swap` request header carries the effective
-swap style — `htmx.ajax`'s `swap` option, else the nearest `hx-swap`, else
+Declare, on every HTMX request, where its response will land: the
+`HTMXO-Swap` request header carries the effective swap style — `htmx.ajax`'s
+`swap` option, else the nearest `hx-swap`, else
 `htmx.config.defaultSwapStyle`. Under the default `:auto` policy a slow
 mutation is answered by a poller only when that header names a swap that can
 host one: a poller swapped nowhere (`hx-swap="none"`) would never poll, so the
 submission's real answer — its fragment, its `HX-Trigger`, the
 `hx-on::after-request` refresh it drives — would be lost. Without the header (a
-hand-built page, curl) a mutation is answered directly, as before.
+hand-built page, curl) a mutation is answered directly, as before. A `GET`
+whose header says `none` (the options loader of
+[`choice_list(nv, url)`](@ref choice_list), any `hx-swap="none"` read) is
+answered with its finished result for the same reason; a `GET` without the
+header polls as before.
 
 Automatic — no consumer wiring. The `htmx()` shell installs it alongside the
 Treebars assets; include it once per page when building a `<head>` by hand.
@@ -34211,7 +34231,7 @@ mutation_poll_script() = h.script(Raw(raw"""
   window.__htmxoMutationPolls = true;
   document.addEventListener('htmx:beforeRequest', function(e) {
     var d = e.detail, config = d.requestConfig || {}, verb = config.verb;
-    if (!verb || verb === 'get' || !d.xhr) return;
+    if (!verb || !d.xhr) return;
     var value = d.etc && d.etc.swapOverride;
     if (!value) {
       var elt = config.elt, source = elt && elt.closest &&
