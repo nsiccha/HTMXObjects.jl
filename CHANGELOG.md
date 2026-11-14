@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.116
+
+- `choice_list(nv, url)` loads a long or shared option list from an address
+  instead of carrying it in the page, and the new `choice_options(options)`
+  answers that address with the rows an inline list draws. The page carries
+  only the chosen option, as a row of the list, so the field shows, submits,
+  validates and reads in Markdown before any request. The list asks the
+  address when the reader first points at or focuses it, at the latest when it
+  opens; every list on the page naming the same address shares one request and
+  one parsed answer. A required list with nothing chosen still refuses an empty
+  submit, and a failed load says so in the list and is asked again on the next
+  open. A static export maps the address as a fragment. Inline
+  `choice_list(nv, options)` is unchanged.
+
 ## 0.1.115
 
 - The generated Services page preserves each request's `X-Forwarded-Prefix`

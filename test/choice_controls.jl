@@ -151,6 +151,263 @@ end
     @test contains(md(radio_group((; x="1"), ["1" => "One", "2" => "Two"])), "◉")
 end
 
+@testitem "choice_list(nv, url): the chosen rows, a loader for the rest, and choice_options' rows" tags=[:unit] begin
+    using HTMXObjects
+
+    html = repr("text/html", choice_list((; agent="Claude:ux"), "/agent_options"; label="Agent"))
+    @test startswith(html, "<fieldset class=\"htmxo-choice-list\" data-htmxo-choice-list=\"\" " *
+        "data-htmxo-choice-loads=\"\" data-htmxo-choice-name=\"agent\" data-htmxo-required=\"false\"><legend>Agent</legend>")
+    # The chosen option is a row of the list: the closed field shows it and
+    # the form sends it before any request.
+    @test contains(html, "<span class=\"htmxo-choice-current\">Claude:ux</span>")
+    @test contains(html, "<div class=\"htmxo-choice-options\"><label class=\"htmxo-choice-option\"><input type=\"radio\" " *
+        "name=\"agent\" value=\"Claude:ux\" checked=\"true\"><span class=\"htmxo-choice-label\">Claude:ux</span></label></div>")
+    @test count("type=\"radio\"", html) == 1
+    # The rest loads through an htmx GET the script triggers, which inherits
+    # no values, so every list naming the address asks the same one.
+    loader = match(r"<div class=\"htmxo-choice-loading\"[^>]*>", html).match
+    for attr in ("role=\"status\"", "hx-get=\"/agent_options\"", "hx-trigger=\"htmxo-choice-load\"", "hx-swap=\"none\"",
+                 "hx-include=\"unset\"", "hx-vals=\"unset\"", "data-htmxo-failed=\"Request failed\"")
+        @test contains(loader, attr)
+    end
+    @test contains(html, "\">Loading…</div><p class=\"htmxo-choice-empty\" hidden=\"true\">")
+    @test !contains(html, "htmxo-choice-placeholder")
+    # A pair or a record gives the chosen option's label (and group);
+    # `nothing` and "" choose nothing.
+    paired = repr("text/html", choice_list((; agent="a1"), "/o"; value="a1" => "Agent one"))
+    @test contains(paired, "<span class=\"htmxo-choice-current\">Agent one</span>") &&
+          contains(paired, "value=\"a1\" checked=\"true\"><span class=\"htmxo-choice-label\">Agent one</span>")
+    grouped = repr("text/html", choice_list("agent", "/o"; value=(; value="a2", label="Two", group="G", help="Second")))
+    @test contains(grouped, "<div class=\"htmxo-choice-group\"><div class=\"htmxo-choice-heading\">G</div><label class=\"htmxo-choice-option\">" *
+        "<input type=\"radio\" name=\"agent\" value=\"a2\" checked=\"true\"><span class=\"htmxo-choice-label\">Two</span><small>Second</small>")
+    for none in (nothing, "")
+        empty = repr("text/html", choice_list("agent", "/o"; value=none))
+        @test !contains(empty, "type=\"radio\"") && contains(empty, "<span class=\"htmxo-choice-current\"></span>")
+    end
+    # Required with nothing chosen: one hidden required input refuses an empty
+    # submit until the rows arrive; a chosen row is required itself.
+    required = repr("text/html", choice_list("agent", "/o"; required=true))
+    @test contains(required, "<div class=\"htmxo-choice-options\"><input type=\"radio\" name=\"agent\" value=\"\" required=\"true\" " *
+        "hidden=\"true\" tabindex=\"-1\" aria-hidden=\"true\" class=\"htmxo-choice-placeholder\"></div>")
+    @test contains(required, "data-htmxo-required=\"true\"")
+    chosen = repr("text/html", choice_list((; agent="x"), "/o"; required=true))
+    @test contains(chosen, "value=\"x\" checked=\"true\" required=\"true\"") && !contains(chosen, "htmxo-choice-placeholder")
+    # Several choices: checkboxes, the count and labels, the explicit empty.
+    many = repr("text/html", choice_list((; agents=["a", "b" => "Bee"]), "/o"; multiple=true, required=true))
+    @test contains(many, "data-htmxo-multiple=\"\" data-htmxo-required=\"true\" data-htmxo-selected=\"{count} selected\"")
+    @test count("type=\"checkbox\"", many) == 2 && contains(many, "<span class=\"htmxo-choice-current\">2 selected: a, Bee</span>")
+    @test contains(many, "data-htmxo-choice-empty=\"\" disabled=\"true\"")
+    none = repr("text/html", choice_list((; agents=String[]), "/o"; multiple=true, required=true))
+    @test contains(none, "<input type=\"checkbox\" name=\"agents\" value=\"\" required=\"true\" hidden=\"true\"")
+    # Another language's words, and the chosen label in Markdown.
+    german = repr("text/html", choice_list("agent", "/o"; texts=error_texts(:de)))
+    @test contains(german, "data-htmxo-failed=\"Anfrage fehlgeschlagen\"") && contains(german, "\">Wird geladen…</div>")
+    @test HTMXObjects.to_markdown_string(choice_list((; agent="a1"), "/o"; label="Agent", value="a1" => "Agent one")) ==
+          "Agent Agent one\n\n"
+
+    # The answer: the rows an inline list draws, without name or chosen state.
+    options = [(value="x", label="X", group="Group 1"), (value="y", label="Y", help="Why"),
+               (value="z", label="Z", group="Group 1", disabled=true)]
+    rows = repr("text/html", choice_options(options))
+    @test startswith(rows, "<div class=\"htmxo-choice-options\" data-htmxo-choice-options=\"\"><label class=\"htmxo-choice-option\">" *
+        "<input type=\"radio\" value=\"y\"><span class=\"htmxo-choice-label\">Y</span><small>Why</small></label>" *
+        "<div class=\"htmxo-choice-group\"><div class=\"htmxo-choice-heading\">Group 1</div>")
+    @test contains(rows, "<input type=\"radio\" value=\"z\" disabled=\"true\">")
+    @test !contains(rows, "name=") && !contains(rows, "checked") && !contains(rows, "required")
+    inline = repr("text/html", choice_list("pick", options; value=nothing))
+    drawn = match(r"<div class=\"htmxo-choice-options\">(.*)</div><p class=\"htmxo-choice-empty\""s, inline)[1]
+    @test replace(drawn, " name=\"pick\"" => "") == match(r"^<div[^>]*>(.*)</div>$"s, rows)[1]
+    @test repr("text/html", choice_options(["a" => "A"])) == repr("text/html", choice_options([(value="a", label="A")]))
+end
+
+@testitem "a static export maps where a choice list loads its options" tags=[:unit] begin
+    using HTMXObjects
+
+    loader(x) = match(r"<div class=\"htmxo-choice-loading\"[^>]*>", repr("text/html", x)).match
+    # Inside a form whose own request sends values: the loader inherits none.
+    form = h.form(; hx_get="/result", hx_include="#context", hx_vals="{\"k\": 1}")(
+        choice_list((; agent="a"), "/agent_options"))
+    @test contains(loader(static_transform(form; record_base="/r")), "hx-get=\"/r/hx/agent_options.html\"")
+    exported = loader(static_transform(form, StaticExport(; record_base="/r")))
+    @test contains(exported, "hx-get=\"/r/hx/agent_options\"") && !contains(exported, "data-static-disabled")
+    mapped = static_transform(form, StaticExport(; url_map=u -> u == "/agent_options" ? "agents.html" : nothing))
+    @test contains(loader(mapped), "hx-get=\"agents.html\"")
+    # An address the export cannot answer leaves the list its chosen row.
+    query = repr("text/html", static_transform(choice_list((; agent="a"), "/agent_options?kind=x"),
+                                               StaticExport(; controls=:remove)))
+    @test !contains(query, "htmxo-choice-loading") && contains(query, "value=\"a\" checked=\"true\"")
+end
+
+@testitem "a choice list loads its options once per address in a browser" tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
+            "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
+        options = [(value="a", label="Äpfel"), (value="b", label="Birnen"), (value="c", label="Kirschen", group="Steinobst"),
+                   (value="d", label="Datteln", help="getrocknet"), (value="e", label="Eicheln", disabled=true),
+                   (value="f", label="Feigen")]
+        receipt = Channel{String}(1)
+        asked = String[]
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label);
+              await sleep(25);
+            }
+          }
+          const fail = message => { throw new Error(message); };
+          const requests = async () => (await fetch('/asked')).json();
+          const css = e => getComputedStyle(e);
+          const list = id => document.getElementById(id).querySelector('.htmxo-choice-list');
+          const parts = l => ({field: l.querySelector('.htmxo-choice-field'), panel: l.querySelector('.htmxo-choice-panel'),
+                               search: l.querySelector('.htmxo-choice-search'), loader: l.querySelector('.htmxo-choice-loading'),
+                               empty: l.querySelector('.htmxo-choice-empty')});
+          const inputs = l => Array.from(l.querySelectorAll('.htmxo-choice-option input'));
+          const values = l => inputs(l).map(c => c.value).join();
+          const shown = l => Array.from(l.querySelectorAll('.htmxo-choice-option'))
+            .filter(o => css(o).display !== 'none').map(o => o.querySelector('input').value).join();
+          const open = l => parts(l).panel.matches(':popover-open');
+          const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}));
+          const type = (l, text) => { const s = parts(l).search; s.value = text; s.dispatchEvent(new Event('input', {bubbles: true})); };
+          const form = document.getElementById('form');
+          const submitted = [];
+          form.addEventListener('submit', e => { e.preventDefault(); submitted.push(new FormData(form)); });
+          try {
+            const a = list('a'), b = list('b'), c = list('c'), d = list('d');
+            await sleep(300);
+            // A page view asks nothing; the closed fields show and send their choices.
+            if ((await requests()).length) fail('asked on the page view');
+            const before = new FormData(form);
+            if (before.get('agent') !== 'b' || before.getAll('many').join() !== 'a' ||
+                parts(a).field.querySelector('.htmxo-choice-current').textContent !== 'b') fail('closed');
+            // A required list with nothing chosen refuses the submit and opens,
+            // saying its options load, then shows them.
+            form.requestSubmit();
+            await sleep(50);
+            if (submitted.length || !open(b)) fail('the empty required list did not open');
+            if (parts(b).loader.hidden || parts(b).loader.textContent !== 'Loading…' || !parts(b).empty.hidden) fail('loading');
+            await until(() => inputs(b).length === 6, 'the rows of b');
+            if (JSON.stringify(await requests()) !== '["/opts"]') fail('asked: ' + JSON.stringify(await requests()));
+            if (!inputs(b).every(x => x.type === 'radio' && x.name === 'other' && x.required) ||
+                b.querySelector('.htmxo-choice-placeholder') || !parts(b).loader.hidden || values(b) !== 'a,b,d,e,f,c') fail('b rows');
+            parts(b).panel.hidePopover();
+            await sleep(50);
+            // Pointing at another list naming the address asks nothing more; it
+            // copies the rows when it opens, its chosen one checked once and
+            // labelled as the answer labels it.
+            parts(a).field.dispatchEvent(new PointerEvent('pointerover', {bubbles: true}));
+            await sleep(100);
+            parts(a).field.click();
+            await sleep(50);
+            if (values(a) !== 'a,b,d,e,f,c' || !a.querySelector('input[value="b"]').checked ||
+                !parts(a).field.textContent.includes('Birnen') || !open(a)) fail('a rows: ' + values(a));
+            if (JSON.stringify(await requests()) !== '["/opts"]') fail('asked again');
+            // The search ignores case and accents; Enter chooses and closes.
+            type(a, 'APF');
+            if (shown(a) !== 'a') fail('search: ' + shown(a));
+            key(parts(a).search, 'Enter');
+            await sleep(50);
+            if (open(a) || new FormData(form).get('agent') !== 'a' || !parts(a).field.textContent.includes('Äpfel')) fail('chosen');
+            // Several choices: checkboxes that keep the chosen one and toggle more.
+            parts(c).field.click();
+            await sleep(50);
+            if (!inputs(c).every(x => x.type === 'checkbox' && x.name === 'many') || !c.querySelector('input[value="a"]').checked) fail('c rows');
+            c.querySelector('input[value="c"]').closest('.htmxo-choice-option').click();
+            await sleep(50);
+            if (new FormData(form).getAll('many').join() !== 'a,c' || !open(c) ||
+                !parts(c).field.textContent.includes('2 selected: Äpfel, Kirschen')) fail('c toggled: ' + parts(c).field.textContent);
+            parts(c).panel.hidePopover();
+            await sleep(50);
+            // Chosen, the required list lets the form submit.
+            parts(b).field.click();
+            await sleep(50);
+            type(b, 'feig');
+            key(parts(b).search, 'Enter');
+            await sleep(50);
+            form.requestSubmit();
+            await sleep(50);
+            if (submitted.length !== 1 || submitted[0].get('other') !== 'f' || submitted[0].get('agent') !== 'a') fail('submit');
+            // An address that fails: the open list says so where the rows would
+            // be, keeps its chosen row, and asks again when it opens again.
+            parts(d).field.click();
+            await until(() => parts(d).loader.classList.contains('htmxo-choice-failed'), 'the failure of d');
+            if (!parts(d).loader.textContent.startsWith('Request failed') || !parts(d).empty.hidden || values(d) !== 'x')
+              fail('d failure: ' + parts(d).loader.textContent);
+            parts(d).panel.hidePopover();
+            await sleep(50);
+            parts(d).field.click();
+            await sleep(500);
+            const all = await requests();
+            if (all.filter(x => x === '/broken').length !== 2 || all.filter(x => x === '/opts').length !== 1)
+              fail('asked: ' + JSON.stringify(all));
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        """))
+        content = h.main(; class="container")(
+            h.form(; id="form")(
+                # Values every request inside it would inherit: the loaders take none.
+                h.div(; hx_include="#form", hx_vals="{\"k\": 1}")(
+                    h.div(; id="a")(choice_list((; agent="b"), "/opts"; label="A")),
+                    h.div(; id="b")(choice_list("other", "/opts"; label="B", required=true)),
+                    h.div(; id="c")(choice_list((; many=["a"]), "/opts"; label="C", multiple=true)),
+                    h.div(; id="d")(choice_list((; broken="x"), "/broken"; label="D"))),
+                h.button("Send"; type="submit")),
+            driver)
+        page = repr("text/html", htmx(content; assets="/test-assets", sse_version=nothing, ws_version=nothing,
+            preload_version=nothing, pico_version=nothing, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+            haskey(assets, path) &&
+                return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
+            path == "/favicon.ico" && return HTTP.Response(204)
+            path == "/asked" && return HTTP.Response(200, ["Content-Type" => "application/json"],
+                "[" * join(("\"" * t * "\"" for t in asked), ",") * "]")
+            if path == "/complete"
+                isready(receipt) || put!(receipt, String(req.target))
+                return HTTP.Response(204)
+            end
+            push!(asked, String(req.target))
+            if path == "/opts"
+                sleep(0.3)  # long enough for the open list to show that it loads
+                return HTTP.Response(200, ["Content-Type" => "text/html"], repr("text/html", choice_options(options)))
+            end
+            HTTP.Response(500, ["Content-Type" => "text/plain"], "the options are gone")
+        end
+        try
+            mktempdir() do profile
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                browser_log = joinpath(profile, "browser.log")
+                process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                try
+                    @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint=0.05) === :ok
+                    outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                    @test outcome == "/complete?status=passed"
+                finally
+                    process_exited(process) || kill(process)
+                    wait(process)
+                end
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "every htmx page carries the choice list's script and styles" tags=[:unit] begin
     using HTMXObjects
 

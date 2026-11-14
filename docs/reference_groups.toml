@@ -145,6 +145,7 @@ names = [
     "ainput",
     "choice_list",
     "choice_list_script",
+    "choice_options",
     "cinput",
     "compose_box",
     "compose_box_assets",
