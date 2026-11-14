@@ -60,6 +60,33 @@
     @test built[] == 0
     @test startswith(id(deferred), "tabset-")
 
+    # What a call names a tabset by tells it apart too: its tab bar's `label`,
+    # its `url_param` and its tabs' `names` (snag rendered-two-htm-ccfd29cf:
+    # one model view in two cards, told apart only by `label`).
+    card(title) = tabset("Inputs" => h.p("y ~ x"), "Code" => h.p("model");
+        url_param=nothing, label="$title details")
+    @test id(card("Motorcycle")) != id(card("Centering"))
+    @test id(card("Motorcycle")) == id(card("Motorcycle"))
+    @test id(two(h.p("a"), h.p("b"); label="Bar")) != id(a)
+    @test id(two(h.p("a"), h.p("b"); url_param="x")) != id(two(h.p("a"), h.p("b"); url_param="y"))
+    @test id(two(h.p("a"), h.p("b"); url_param=nothing)) != id(a)
+    @test id(two(h.p("a"), h.p("b"); names=["e", "z"])) != id(two(h.p("a"), h.p("b"); names=["x", "y"]))
+    # One value is not the same when it names something else.
+    @test id(two(h.p("a"), h.p("b"); label="x", url_param=nothing)) != id(two(h.p("a"), h.p("b"); url_param="x"))
+    @test same(() -> two(h.p("a"), h.p("b"); label="Bar", url_param="x", names=["e", "z"]))
+    # A call that passes none of them, or the default parameter, keeps the id
+    # its labels and panels give it. Which tab is open and how a tab loads do
+    # not count: `active` may follow the request, and the id should not.
+    @test id(two(h.p("a"), h.p("b"); url_param="tab")) == id(a)
+    @test id(two(h.p("a"), h.p("b"); active=2)) == id(a)
+    @test id(two("/a", "/b"; preload=true)) == id(two("/a", "/b"))
+    # Every tab of a labelled card names its own card's panels.
+    cards = html(h.main(card("Motorcycle"), card("Centering")))
+    for c in ("Motorcycle", "Centering"), n in 1:2
+        @test count("id=\"$(id(card(c)))-tab-$n\"", cards) == 1
+        @test count("aria-controls=\"$(id(card(c)))-tab-$n\"", cards) == 1
+    end
+
     # An id the caller gives is the id.
     @test id(two(h.p("a"), h.p("b"); id="meine-tabs")) == "meine-tabs"
     # A lazy tab's link finds its panel from where it stands, so tabsets that
@@ -88,6 +115,9 @@ end
             twin("twin-2", "A" => h.p("same a"), "B" => h.p("same b"); url_param=nothing),
             twin("lazy-1", "A" => "/lazy/a", "B" => "/lazy/b"; url_param="lz"),
             twin("lazy-2", "A" => "/lazy/a", "B" => "/lazy/b"; url_param="lz"),
+            # Twins their tab bars' labels tell apart (snag rendered-two-htm-ccfd29cf).
+            twin("named-1", "A" => h.p("same a"), "B" => h.p("same b"); url_param=nothing, label="Erste"),
+            twin("named-2", "A" => h.p("same a"), "B" => h.p("same b"); url_param=nothing, label="Zweite"),
             h.div(; id="late", hx_get="/fragment", hx_trigger="load", hx_swap="innerHTML"))
         fragment = repr("text/html", composer("delta"))
         shell(; kw...) = htmx(body; assets=:vendor, feedback=false, compose=false, thread=false,
@@ -169,6 +199,13 @@ end
                         click(tabof("twin-2", 1))
                         @test wait_for(b, "document.querySelector('$(panel("twin-2", 1))').checkVisibility()")
                         @test seen(panel("twin-1", 1)) && !seen(panel("twin-1", 2))
+
+                        # Labelled twins have ids of their own, and each tab names its own panel.
+                        @test repeated("#main > [id^=named]") == ""
+                        @test crossed("#main > [id^=named]") == ""
+                        click(tabof("named-2", 2))
+                        @test wait_for(b, "document.querySelector('$(panel("named-2", 2))').checkVisibility()")
+                        @test seen(panel("named-1", 1)) && !seen(panel("named-1", 2))
                     end
 
                     # A fragment that arrives later with the same labels is no different.
