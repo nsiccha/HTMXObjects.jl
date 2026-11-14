@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.118
+
+- A `tabset`'s default `id` also reads what the call names the tabset by: its
+  tab bar's `label`, its `url_param` and its tabs' `names`. So two tabsets with
+  the same tabs and panels that a page tells apart by `label` (one model view in
+  two cards) get ids of their own, and each tab's `aria-controls` names its own
+  panel instead of the first card's. A tabset that passes none of them, or the
+  default `url_param="tab"`, keeps the id it had. Which tab is open (`active`)
+  and `preload` do not count. Tabsets alike in all of it still share an id;
+  give them a `label` or an `id` of their own.
+
 ## 0.1.117
 
 - An HTMX read whose answer swaps nowhere (`hx-swap="none"`) is answered with

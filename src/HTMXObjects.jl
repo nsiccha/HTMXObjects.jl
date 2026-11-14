@@ -38843,7 +38843,19 @@ function _tabset_key(x::SemanticNode, h::UInt)
     h
 end
 
-_tabset_default_id(tabs) = "tabset-" * string(_tabset_key(tabs, zero(UInt)); base=36)
+# What a call names the tabset by counts too: its tab bar's `label`, its
+# `url_param` and its tabs' `names`, so tabsets a page tells apart by one of
+# them have ids of their own. Each counts only when the call passes it (the
+# default `url_param="tab"` does not), so a tabset that passes none keeps the id
+# its tabs give it. Which tab is open (`active`, which may follow the request)
+# and `preload` do not count.
+function _tabset_default_id(tabs, label=nothing, url_param="tab", names=nothing)
+    key = _tabset_key(tabs, zero(UInt))
+    isnothing(label) || (key = _tabset_key(label, hash("label", key)))
+    isequal(url_param, "tab") || (key = _tabset_key(url_param, hash("url_param", key)))
+    isnothing(names) || (key = _tabset_key(names, hash("names", key)))
+    "tabset-" * string(key; base=36)
+end
 
 # After the value types its walk sees through (`_TabsetPart` above).
 include("glossary.jl")
@@ -38852,7 +38864,7 @@ include("content_units.jl")
 include("comparison.jl")
 
 """
-    tabset(tabs::Pair...; active=1, id=<from the labels and content>, preload=nothing,
+    tabset(tabs::Pair...; active=1, id=<from the labels, names and content>, preload=nothing,
            url_param="tab", names=nothing, label=nothing)
 
 Client-side tabs using Pico CSS nav + hyperscript.
@@ -38874,11 +38886,15 @@ Mixed (eager + lazy):
 [`hx_link`](@ref) for the other values and what the route does with it).
 
 Each tabset switches only its own panels, also beside tabsets with the same
-labels. `id` comes from the labels and from what the panels say, so it stays the
-same from one render to the next as long as they do, and it changes with them.
-[`private`](@ref Private) content does not count, only its public stand-in. Tabsets
-alike in all of it share an id, and still work. Pass `id="…"` for anything that
-has to name the tabset, such as a link to it.
+labels. `id` comes from the labels, from what the panels say and from the
+`label`, `url_param` and `names` the call passes, so it stays the same from one
+render to the next as long as they do, and it changes with them. Which tab is
+open (`active`) and `preload` do not count. [`private`](@ref Private) content
+does not count, only its public stand-in. Tabsets alike in all of it share an
+id, and still work, but assistive technology takes each one's tabs to the first
+one's panels: give each its own `label` (which also names its tab bar to that
+reader) or `id`. Pass `id="…"` for anything that has to name the tabset, such
+as a link to it.
 
 The open tab lives in the page URL: a tab click replaces the URL's `tab`
 parameter with the tab's name (no new history entry), and a page opened with
@@ -38925,8 +38941,9 @@ Plain text (`repr("text/plain", …)` of the semantic content holding the tabset
 writes the same without the markup: each label on its own line over its
 content, a lazy tab as `Details (/api/details)`.
 """
-function tabset(tabs::Pair...; active=1, id=_tabset_default_id(tabs), preload=nothing,
-                url_param="tab", names=nothing, label::Union{Nothing,AbstractString}=nothing)
+function tabset(tabs::Pair...; active=1, preload=nothing, url_param="tab", names=nothing,
+                label::Union{Nothing,AbstractString}=nothing,
+                id=_tabset_default_id(tabs, label, url_param, names)) # after what it reads
     tab_names = isnothing(url_param) && isnothing(names) && active isa Integer ? nothing :
         _tabset_checked_names(_tabset_names(tabs, names))
     active = _tabset_active_index(active, tab_names)
