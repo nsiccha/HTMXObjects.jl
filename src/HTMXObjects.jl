@@ -44,7 +44,7 @@ export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
 export CaptionTexts, caption_texts
 export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
-export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
+export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_options, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script, live_thread_texts, LiveThreadTexts
 export pdf_panel, pdf_ref, pdf_toggle, pdf_beside, pdf_overlay, pdf_panel_texts, PdfPanelTexts, pdf_panel_assets, pdf_panel_styles, pdf_panel_script
 export card_deck, card_deck_texts, CardDeckTexts, card_deck_assets, card_deck_styles, card_deck_script
@@ -29324,15 +29324,92 @@ a few options reads better as [`radio_group`](@ref)'s row of pills; generated
 forms ([`semantic_app`](@ref), [`operation_form`](@ref)) switch to this control
 past `radio_max` options. Vector inputs use checkbox pills up to the same
 cutoff and this list with `multiple=true` above it.
+
+A list with too many options to send with every page, or one shared by
+several forms, loads them from an address instead:
+[`choice_list(nv, url)`](@ref choice_list).
 """
 choice_list(nv, options; label=Long(nv), value=_avalue(nv), show_when=nothing,
         required::Bool=false, multiple::Bool=false, texts::ErrorTexts=_EN_ERROR_TEXTS) = begin
-    entries = [merge(option, (; value=_option_wire_string(option.value)))
-               for option in _option_records(options)]
+    entries = _choice_entries(_option_records(options))
     selected = isnothing(value) ? nothing : multiple ? _option_wire_string.(value) : _option_wire_string(value)
     _choice_list(_aname(nv), label, entries, selected; required, multiple, texts,
                  attrs=isnothing(show_when) ? (;) : _show_when_attrs(show_when))
 end
+
+_choice_entries(records) = [merge(option, (; value=_option_wire_string(option.value))) for option in records]
+
+"""
+    choice_list(nv, url::AbstractString; label=Long(nv), value=_avalue(nv), show_when=nothing,
+                required=false, multiple=false, texts=error_texts())
+
+A [`choice_list`](@ref) whose options load from `url`, an address of the app
+that answers with [`choice_options`](@ref). Use it for a list too long to send
+with every page, or one that several forms on a page share: the page carries
+only the chosen option, and the list asks `url` for the rest when the reader
+first points at or focuses it, at the latest when it opens. Every list on the
+page that names the same `url` shares one request and one parsed copy, so
+eight forms choosing among the same thousands of ids cost one request, made
+only when the reader reaches for one of them.
+
+```julia
+@get agent_options() = choice_options(agent_ids())
+@get policy_form() = post_form("/policy",
+    choice_list((; agent), route_url(__self__, :agent_options); label="Agent", required=true))
+```
+
+`value` names the chosen option as an option is spelled (a plain value, a
+`value => label` pair, or a record with `label`, `help` and `group`), or with
+`multiple=true` a vector of them, so the closed field shows its label before
+the options arrive. A plain `value` is its own label; `nothing` or `""` chooses
+nothing. The chosen option is drawn as a row of the list, so the field submits,
+validates, drives `show_when` and reads in `?plain` without any request, as an
+inline list does. Once the options arrive, the list is the inline list:
+the same rows, search, keyboard and filled chosen row. A chosen value that the
+answer no longer lists stays chosen, listed first. Only listed values can be
+chosen.
+
+`required=true` refuses an empty submit before the options arrive too, and
+opens the list. If the options cannot load, the list says so where they would
+be (with the app's error answer, when it gave one) and asks again the next
+time it opens. The request is an ordinary htmx GET that inherits no values
+(`hx-include` and `hx-vals` are `unset`), so a static export maps `url` as it
+maps a fragment address: [`export_site`](@ref) writes its answer, and the
+exported list loads it. An export that cannot serve `url` leaves the list its
+chosen rows.
+"""
+choice_list(nv, url::AbstractString; label=Long(nv), value=_avalue(nv), show_when=nothing,
+        required::Bool=false, multiple::Bool=false, texts::ErrorTexts=_EN_ERROR_TEXTS) = begin
+    chosen = _choice_entries(_chosen_records(value, multiple))
+    _choice_list(_aname(nv), label, chosen, [option.value for option in chosen]; required, multiple,
+                 texts, url, attrs=isnothing(show_when) ? (;) : _show_when_attrs(show_when))
+end
+
+# The options `value` chooses, spelled as options are: none for `nothing` or
+# `""`, else one, or with `multiple` each of a vector.
+_chosen_records(::Nothing, multiple::Bool) = NamedTuple[]
+_chosen_records(value, multiple::Bool) =
+    multiple ? _option_records(filter(v -> !isequal(v, ""), collect(value))) :
+    isequal(value, "") ? NamedTuple[] : _option_records((value,))
+
+"""
+    choice_options(options)
+
+The answer of the address a [`choice_list(nv, url)`](@ref choice_list) loads
+its options from: one row per option, drawn as an inline
+[`choice_list`](@ref) draws them. `options` are
+spelled as for `choice_list`: plain values, `value => label` pairs, records
+with `label`, `help`, `group` and `disabled`, or an `option_domain`. The rows
+carry no input name, kind or chosen state: each list that loads them gives
+them its own, so one answer serves single and multiple lists alike.
+
+```julia
+@get agent_options() = choice_options(agent_ids())
+```
+"""
+choice_options(options) =
+    h.div(_choice_rows(option -> _choice_row(nothing, option), _choice_entries(_option_records(options)))...;
+          class="htmxo-choice-options", data_htmxo_choice_options="")
 
 _semantic_values(values::NamedTuple) = Dict{Symbol,Any}(pairs(values))
 _semantic_values(values::AbstractDict) =
@@ -29637,43 +29714,26 @@ choice; it opens as a popover, so no scroll box clips it. `texts` gives the
 control's words.
 """
 function _choice_list(name, label, options, selected; required=false, multiple=false,
-        texts::ErrorTexts=_EN_ERROR_TEXTS, attrs=(;))
+        texts::ErrorTexts=_EN_ERROR_TEXTS, attrs=(;), url=nothing)
     selected_values = Set(selected isa AbstractVector ? selected : (selected,))
     chosen = [option for option in options if option.value in selected_values &&
               !get(option, :disabled, false)]
     first_enabled = findfirst(option -> !get(option, :disabled, false), options)
     serial = Base.Threads.atomic_add!(_CHOICE_LIST_SERIAL, UInt(1)) + UInt(1)
     panel_id = "htmxo-choice-$(serial)"
-    option_node(option) = begin
-        disabled = get(option, :disabled, false)
-        checked = option.value in selected_values && !disabled
+    type = multiple ? "checkbox" : "radio"
+    rows = _choice_rows(options) do option
         needs_value = required && (!multiple || (isempty(chosen) && first_enabled !== nothing &&
                                                  option === options[first_enabled]))
-        help = get(option, :help, nothing)
-        h.label(
-            h.input(; type=multiple ? "checkbox" : "radio", name=string(name),
-                    value=_option_wire_string(option.value),
-                    (checked ? (; checked="true") : (;))...,
-                    (disabled ? (; disabled="true") : (;))...,
-                    (needs_value ? (; required="true") : (;))...),
-            h.span(option.label; class="htmxo-choice-label"),
-            (isnothing(help) ? () : (h.small(help),))...;
-            class="htmxo-choice-option")
+        _choice_row(name, option; type, checked=option.value in selected_values, required=needs_value)
     end
-    ungrouped = Any[]
-    grouped = Dict{Any,Vector{Any}}()
-    group_order = Any[]
-    for option in options
-        group = get(option, :group, nothing)
-        if isnothing(group)
-            push!(ungrouped, option_node(option))
-        else
-            haskey(grouped, group) || (grouped[group] = Any[]; push!(group_order, group))
-            push!(grouped[group], option_node(option))
-        end
-    end
-    groups = [h.div(h.div(string(group); class="htmxo-choice-heading"), grouped[group]...;
-                    class="htmxo-choice-group") for group in group_order]
+    # Options loaded from `url` (`choice_list(nv, url)`): until they arrive,
+    # a required list with nothing chosen holds one required input of its
+    # kind, so the browser still refuses an empty submit and the list opens.
+    loads = !isnothing(url)
+    placeholder = loads && required && isempty(chosen) ?
+        (h.input(; type, name=string(name), value="", required="true", hidden=true,
+                 tabindex="-1", aria_hidden="true", class="htmxo-choice-placeholder"),) : ()
     current = multiple ? _choice_summary(chosen, texts) : isempty(chosen) ? "" : string(first(chosen).label)
     h.fieldset(
         h.legend(label),
@@ -29689,14 +29749,64 @@ function _choice_list(name, label, options, selected; required=false, multiple=f
                     autocomplete="off", spellcheck="false",
                     oninput="htmxoChoiceFilter(this);event.stopPropagation()",
                     onchange="event.stopPropagation()"),
-            h.div(ungrouped..., groups...; class="htmxo-choice-options"),
+            h.div(placeholder..., rows...; class="htmxo-choice-options"),
+            (loads ? (_choice_loader(url, texts),) : ())...,
             h.p(texts.choice_no_match; class="htmxo-choice-empty", hidden=true);
             id=panel_id, class="htmxo-choice-panel", popover="auto",
             role="dialog", aria_label=string(label));
         class="htmxo-choice-list", data_htmxo_choice_list="",
+        (loads ? (; data_htmxo_choice_loads="", data_htmxo_choice_name=string(name)) : (;))...,
         (multiple ? (; data_htmxo_multiple="", data_htmxo_required=string(required),
-                       data_htmxo_selected=texts.choice_selected) : (;))..., attrs...)
+                       data_htmxo_selected=texts.choice_selected) :
+         loads ? (; data_htmxo_required=string(required)) : (;))..., attrs...)
 end
+
+# The rows of a choice list, `row(option)` each: the ungrouped options, then
+# each group under its heading, in the order the groups first appear.
+function _choice_rows(row, options)
+    ungrouped = Any[]
+    grouped = Dict{Any,Vector{Any}}()
+    group_order = Any[]
+    for option in options
+        group = get(option, :group, nothing)
+        if isnothing(group)
+            push!(ungrouped, row(option))
+        else
+            haskey(grouped, group) || (grouped[group] = Any[]; push!(group_order, group))
+            push!(grouped[group], row(option))
+        end
+    end
+    Any[ungrouped...,
+        (h.div(h.div(string(group); class="htmxo-choice-heading"), grouped[group]...;
+               class="htmxo-choice-group") for group in group_order)...]
+end
+
+# One option of a choice list: its radio or checkbox, hidden inside the row,
+# then its label and its help. Without a `name` the list that takes the row in
+# names it (`choice_options`).
+function _choice_row(name, option; type="radio", checked::Bool=false, required::Bool=false)
+    disabled = get(option, :disabled, false)
+    help = get(option, :help, nothing)
+    h.label(
+        h.input(; type, (isnothing(name) ? (;) : (; name=string(name)))...,
+                value=_option_wire_string(option.value),
+                (checked && !disabled ? (; checked="true") : (;))...,
+                (disabled ? (; disabled="true") : (;))...,
+                (required ? (; required="true") : (;))...),
+        h.span(option.label; class="htmxo-choice-label"),
+        (isnothing(help) ? () : (h.small(help),))...;
+        class="htmxo-choice-option")
+end
+
+# Where a list whose options load from `url` asks for them: an htmx GET that
+# `choice_list_script` triggers, which inherits no values, so every list
+# naming `url` asks the same address (and a static export maps it as any
+# fragment address). Until the rows arrive it says they are loading; if they
+# cannot load, it says so instead.
+_choice_loader(url::AbstractString, texts::ErrorTexts) =
+    h.div(texts.loading; class="htmxo-choice-loading", role="status",
+          hx_get=url, hx_trigger="htmxo-choice-load", hx_swap="none",
+          hx_include="unset", hx_vals="unset", data_htmxo_failed=texts.request_failed)
 
 _choice_summary(chosen, texts) = replace(texts.choice_selected, "{count}" => string(length(chosen))) *
     (isempty(chosen) ? "" : ": " * join((string(option.label) for option in chosen), ", "))
@@ -32755,6 +32865,15 @@ focus to the field, which then shows the chosen label. The search field's own
 the search. Multiple lists toggle checkboxes and stay open; their field shows
 the selected count and all labels. The runtime also keeps the explicit-empty
 input and at-least-one validity of checkbox groups in sync.
+
+A list whose options load from an address
+([`choice_list(nv, url)`](@ref choice_list)) asks it, with htmx, the first
+time the reader points at or focuses the list, or at the latest opens it. The script
+asks each address once per page and parses its answer once; each list naming
+it copies the rows in when it first opens, giving them its name, its kind
+(radio or checkbox) and its chosen state. A list open while they load shows
+them when they arrive. If they cannot load, every list naming the address
+says so in place of the rows, and the next one to open asks again.
 """
 choice_list_script() = h.script(Raw(raw"""
 (function() {
@@ -32808,7 +32927,9 @@ choice_list_script() = h.script(Raw(raw"""
       g.classList.toggle('htmxo-choice-out',
         !g.querySelector('.htmxo-choice-option:not(.htmxo-choice-out)'));
     });
-    p.panel.querySelector('.htmxo-choice-empty').hidden = shown > 0;
+    // While its options load (or say why they did not), "no match" waits.
+    var loader = loaderOf(list);
+    p.panel.querySelector('.htmxo-choice-empty').hidden = shown > 0 || !!(loader && !loader.hidden);
     var left = reachable(p), checked = checkedOption(p);
     highlight(p, q === '' && checked && left.indexOf(checked) >= 0 ? checked : (left[0] || null));
   };
@@ -32825,6 +32946,147 @@ choice_list_script() = h.script(Raw(raw"""
   function coarse() {
     return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   }
+  // A list whose options load from an address (`choice_list(nv, url)`)
+  // holds only its chosen rows until the reader first points at or focuses
+  // it, at the latest until it opens; then its loader, an htmx GET, asks the
+  // address. Each address is asked once per page and its answer parsed once;
+  // every list naming it takes a copy of the rows when it opens.
+  var loads = {};
+  function loaderOf(list) {
+    return list.querySelector('.htmxo-choice-panel > .htmxo-choice-loading');
+  }
+  function eachLoader(url, f) {
+    document.querySelectorAll('[data-htmxo-choice-loads] > .htmxo-choice-panel > .htmxo-choice-loading')
+      .forEach(function(l) { if (l.getAttribute('hx-get') === url) f(l); });
+  }
+  function need(list, opening) {
+    if (!list.hasAttribute('data-htmxo-choice-loads') || list.__htmxoChoiceFilled) return;
+    var loader = loaderOf(list), url = loader && loader.getAttribute('hx-get');
+    if (!url) {
+      // A static export that cannot serve the address keeps the chosen rows.
+      if (loader) loader.hidden = true;
+      list.__htmxoChoiceFilled = true;
+      return;
+    }
+    var load = loads[url];
+    if (load && load.rows) {
+      if (opening) fill(partsOf(list), load.rows);
+      return;
+    }
+    // A failed address is asked again when a list sharing it opens.
+    if (load && (load.asking || !opening)) return;
+    loads[url] = {asking: true};
+    eachLoader(url, function(l) { says(l, null); });
+    if (!window.htmx) return failed(url, null, null);
+    htmx.process(loader);
+    htmx.trigger(loader, 'htmxo-choice-load');
+  }
+  function reach(e) {
+    var list = listOf(e.target);
+    if (list) need(list, false);
+  }
+  document.addEventListener('pointerover', reach);
+  document.addEventListener('focusin', reach);
+  // A loader says the options are loading, or why they did not load: its
+  // failure text, then the app's error answer when it gave one.
+  function says(loader, failure) {
+    if (loader.__htmxoLoading === undefined) loader.__htmxoLoading = loader.textContent;
+    loader.classList.toggle('htmxo-choice-failed', !!failure);
+    loader.textContent = failure ? failure.text : loader.__htmxoLoading;
+    if (failure && failure.answer) {
+      var answer = document.createElement('div');
+      answer.appendChild(failure.answer.cloneNode(true));
+      loader.appendChild(answer);
+      if (window.htmx) htmx.process(answer);
+    }
+  }
+  function failed(url, text, answer) {
+    loads[url] = {failed: true};
+    var seen = false;
+    eachLoader(url, function(l) {
+      says(l, {text: text || l.getAttribute('data-htmxo-failed'), answer: answer});
+      var panel = l.parentNode;
+      if (panel.matches(':popover-open')) {
+        seen = true;
+        window.htmxoChoiceFilter(partsOf(listOf(panel)).search);
+      }
+    });
+    return seen;
+  }
+  // How a loader's request ended, as the page shell's toasts read it
+  // (`htmxoRequestOutcome`), or by its status on a page without them.
+  function outcomeOf(e) {
+    if (window.htmxoRequestOutcome) return window.htmxoRequestOutcome(e);
+    var xhr = (e.detail || {}).xhr;
+    if (e.type !== 'htmx:afterRequest') return {state: 'failure'};
+    if (!xhr || !xhr.status) return {state: 'pending'};
+    return {state: xhr.status >= 200 && xhr.status < 300 ? 'success' : 'failure'};
+  }
+  function answered(e) {
+    var d = e.detail || {}, loader = d.elt;
+    if (!loader || !loader.classList || !loader.classList.contains('htmxo-choice-loading')) return;
+    var url = loader.getAttribute('hx-get'), load = loads[url];
+    if (!load || !load.asking) return;
+    var outcome = outcomeOf(e), xhr = d.xhr;
+    if (outcome.state === 'pending') return;
+    var answer = null, rows = null;
+    if (outcome.state === 'success') {
+      var parsed = document.createElement('template');
+      parsed.innerHTML = xhr.responseText || '';
+      // A fault the app recorded answers 200 with its error article.
+      if (xhr.getResponseHeader('X-HTMXO-Error-Id')) answer = parsed.content;
+      else rows = parsed.content.querySelector('[data-htmxo-choice-options]');
+    }
+    if (!rows) {
+      // Shown in an open list, the failure needs no toast besides.
+      if (failed(url, outcome.text, answer)) d.htmxoFailureShown = true;
+      return;
+    }
+    loads[url] = {rows: rows};
+    eachLoader(url, function(l) {
+      var panel = l.parentNode;
+      if (!panel.matches(':popover-open')) return;
+      var p = partsOf(listOf(panel));
+      fill(p, rows);
+      window.htmxoChoiceFilter(p.search);
+      place(p);
+    });
+  }
+  ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout'].forEach(function(name) {
+    document.addEventListener(name, answered);
+  });
+  // A list takes its own copy of the rows: each input gets the list's name
+  // and kind, a row the page drew for a chosen option gives way to its copy,
+  // which keeps its state, and a chosen option the answer no longer lists
+  // stays, first.
+  function fill(p, rows) {
+    var list = p.list, multiple = list.hasAttribute('data-htmxo-multiple');
+    var name = list.getAttribute('data-htmxo-choice-name');
+    var required = !multiple && list.getAttribute('data-htmxo-required') === 'true';
+    var box = p.panel.querySelector('.htmxo-choice-options'), drawn = {};
+    optionsOf(p).forEach(function(o) { drawn[radioOf(o).value] = o; });
+    var copy = rows.cloneNode(true);
+    copy.querySelectorAll('.htmxo-choice-option > input').forEach(function(c) {
+      c.type = multiple ? 'checkbox' : 'radio';
+      c.name = name;
+      c.required = required;
+      var own = drawn[c.value];
+      if (!own) return;
+      var was = radioOf(own);
+      c.defaultChecked = was.defaultChecked;
+      c.checked = was.checked && !c.disabled;
+      own.remove();
+    });
+    box.querySelectorAll('.htmxo-choice-placeholder').forEach(function(c) { c.remove(); });
+    box.querySelectorAll('.htmxo-choice-group').forEach(function(g) {
+      if (!g.querySelector('.htmxo-choice-option')) g.remove();
+    });
+    while (copy.firstChild) box.appendChild(copy.firstChild);
+    list.__htmxoChoiceFilled = true;
+    loaderOf(list).hidden = true;
+    if (multiple) syncMultiple(list);
+    sync(list);
+  }
   var shown = null;
   function follow() { if (shown) place(shown); }
   document.addEventListener('beforetoggle', function(e) {
@@ -32832,6 +33094,7 @@ choice_list_script() = h.script(Raw(raw"""
     if (!panel.classList || !panel.classList.contains('htmxo-choice-panel')) return;
     if (e.newState !== 'open') return;
     var p = partsOf(listOf(panel));
+    need(p.list, true);
     p.search.value = '';
     window.htmxoChoiceFilter(p.search);
     // Where it opens, before it is first drawn; `toggle` corrects the side.
@@ -36582,6 +36845,16 @@ fieldset[data-htmxo-checkbox-group] > label > input[type="checkbox"],
     opacity: .75;
 }
 .htmxo-choice-panel > .htmxo-choice-empty { margin: .3em .6em; opacity: .75; }
+/* Options loading from an address (`choice_list(nv, url)`), or why they did
+   not load: under the chosen rows, scrolling when an error answer is long. */
+.htmxo-choice-panel > .htmxo-choice-loading {
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    margin: .3em .6em;
+    opacity: .75;
+}
+.htmxo-choice-panel > .htmxo-choice-loading.htmxo-choice-failed { opacity: 1; }
 
 /* sortable_table header labels are native <button>s: read as heading text on
    every shell. Unlayered to beat Pico's `button`; no --pico-* colour tokens

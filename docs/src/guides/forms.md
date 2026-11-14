@@ -153,6 +153,33 @@ inputs; scalar blanks retain their default behavior. Markdown reads show all
 selected labels. Records vector fields and `set_inputs` use the same selection
 semantics.
 
+## Options loaded from an address
+
+A list with thousands of options, or one that several forms on a page share,
+need not travel with every page. Give `choice_list` the address of a route that
+answers with `choice_options` instead of the options themselves:
+
+```julia
+@get agent_options() = choice_options(agent_ids())
+@get policy_form() = post_form("/policy",
+    choice_list((; agent), route_url(__self__, :agent_options); label="Agent", required=true))
+```
+
+The page carries only the chosen option, drawn as a row of the list, so the
+field shows its label, submits, validates and reads in Markdown before any
+request. Pass `value=agent => label` (or a record) when the label is not the
+value itself. The list asks the address the first time the reader points at or
+focuses it, at the latest when it opens. Every list on the page naming the same
+address shares one request and one parsed answer, and each copies the rows in
+when it first opens. From then on it is the inline list: the same search,
+keyboard and filled chosen row, single or `multiple=true`. A `required` list
+with nothing chosen still refuses an empty submit and opens. If the address
+fails, the list says so where its options would be and asks again the next
+time it opens.
+
+The request is an ordinary htmx GET that inherits no values, so a static export
+maps the address as it maps any fragment, and `export_site` writes its answer.
+
 ## URLs
 
 ```@example forms
