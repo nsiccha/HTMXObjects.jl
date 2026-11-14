@@ -159,10 +159,24 @@ A list with thousands of options, or one that several forms on a page share,
 need not travel with every page. Give `choice_list` the address of a route that
 answers with `choice_options` instead of the options themselves:
 
-```julia
-@get agent_options() = choice_options(agent_ids())
-@get policy_form() = post_form("/policy",
-    choice_list((; agent), route_url(__self__, :agent_options); label="Agent", required=true))
+```@example forms
+@htmx struct Policies
+    @param agent::String = "Claude:ux"
+    @get agent_options() = choice_options(["Claude", "Claude:ux", "HTMXObjects"])
+    @get policy() = post_form("/policy",
+        choice_list((; agent), route_url(__self__, :agent_options); label="Agent"))
+end
+route!(Policies(); prefix="/policies", operation_policy=:blocking);
+fragment(path) = String(dispatch(:GET, path; headers=["HX-Request" => "true"]).body);
+form, answer = fragment("/policies/policy"), fragment("/policies/agent_options");
+rows(markup) = count("class=\"htmxo-choice-option\"", markup);
+checks = (
+    loads_from_route=occursin("hx-get=\"/policies/agent_options\"", form),
+    page_holds_chosen_only=rows(form) == 1,
+    answer_holds_every_option=rows(answer) == 3,
+)
+@assert all(checks) # hide
+foreach(println, pairs(checks))
 ```
 
 The page carries only the chosen option, drawn as a row of the list, so the
