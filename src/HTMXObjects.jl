@@ -21209,7 +21209,15 @@ const _PDF_REPORT_IMAGES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto"
 # not break across pages, so a table taller than a page overprinted the page
 # bottom. These rules set table cells ragged-right, hyphenate only a word wider
 # than its column, and let a captioned table break across pages.
+#
+# Pandoc gives a wide table equal column widths (from HTMX's equal `---`
+# separators), so a long label wrapped to 8–10 lines beside nearly empty number
+# columns, and a row could start at a page bottom and end on the next page. The
+# rules file's `pdf-report-table` sizes the columns by their content, as a
+# browser does, and keeps a row that fits on a page in one piece; the filter,
+# run after Quarto has written its table figures, hands each table to it.
 const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.typ")
+const _PDF_REPORT_TABLES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-tables.lua")
 
 # Quarto's Skylighting writes each token of a code block as an inline `raw` and
 # each line end as `raw("\n")`, which Typst tags as a Code element each: an empty
@@ -21524,6 +21532,8 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
         at: post-render
       - path: $(_yaml_string(_PDF_REPORT_LABELS_FILTER))
         at: post-render
+      - path: $(_yaml_string(_PDF_REPORT_TABLES_FILTER))
+        at: post-render
       - $(_yaml_string(_PDFUA_MATH_ALT_FILTER))
       - $(_yaml_string(_PDF_REPORT_IMAGES_FILTER))
       - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
@@ -21543,9 +21553,14 @@ PDF/A-2a, ISO 19005-2) at `pdf_path`. The input is Markdown, typically a page's 
 `h.article(...)` is converted with `to_markdown_string`, and the body of
 `dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"], report=true)`
 is passed as it is. Tables, figures and captions keep their structure: header rows become
-table header cells, captions stay attached to their table or figure. A table
+table header cells, captions stay attached to their table or figure. A table's
+columns are sized by their content, as a browser sizes an HTML table: each is at
+least as wide as its longest word, and the room left goes to the columns whose
+text would otherwise wrap, so a long label gets the width that short numbers do
+not need; a table that fits keeps its natural widths. A table
 longer than the rest of its page continues on the next, its header row
-repeated, and a caption above it moves along with its first rows. A code block
+repeated, and a caption above it moves along with its first rows; a row that
+fits on a page is not split between two (a taller one still is). A code block
 is one tagged Code element with a paragraph per line, in the colours of
 Quarto's `arrow` theme; a blank line in it is kept on the page and left out of
 the tags. Quarto's own highlighting tagged each token as a Code element of its
