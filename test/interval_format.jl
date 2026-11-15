@@ -203,9 +203,11 @@ end
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
         isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
         de = table_texts(:de)
-        table = (Name=["a", "b", "c", "d"],
+        # `e` and `f` have no value (a forecast before its issue time): they
+        # sort last in both directions and export empty fields.
+        table = (Name=["a", "b", "c", "d", "e", "f"],
                  Median=[IntervalEstimate(22.3, 13.1, 34.2), IntervalEstimate(3.2, 2.95, 3.48),
-                         IntervalEstimate(40.0, 39.0, 41.0), IntervalEstimate(missing, 1.0, 2.0)])
+                         IntervalEstimate(40.0, 39.0, 41.0), IntervalEstimate(missing, 1.0, 2.0), missing, nothing])
         t = render_table(table; texts=de, id="iv", download=false)
         driver = h.script(Raw(raw"""
             window.addEventListener('load', async function() {
@@ -239,11 +241,11 @@ end
         @test contains(dom, "data-done=\"1\"")
         attr(name) = let m = match(Regex("data-$name=\"([^\"]*)\""), dom); isnothing(m) ? nothing : m[1] end
         # By the upper bound: 41 > 34,2 > 3,48 > 2; by the width: 0,53 < 1 < 2 < 21,1.
-        @test attr("upper") == "c,a,b,d"
-        @test attr("width") == "b,d,c,a"
+        @test attr("upper") == "c,a,b,d,e,f"
+        @test attr("width") == "b,d,c,a,e,f"
         unescape(s) = replace(s, "&quot;" => "\"", "&#10;" => "\n", "&amp;" => "&", "&lt;" => "<", "&gt;" => ">")
         csv = split(unescape(something(attr("csv"), "")), '\n')
         @test csv[1] == "Name,Median,Median / Untergrenze,Median / Obergrenze"
-        @test csv[2:end] == ["b,3.2,2.95,3.48", "d,,1.0,2.0", "c,40.0,39.0,41.0", "a,22.3,13.1,34.2"]
+        @test csv[2:end] == ["b,3.2,2.95,3.48", "d,,1.0,2.0", "c,40.0,39.0,41.0", "a,22.3,13.1,34.2", "e,,,", "f,,,"]
     end
 end

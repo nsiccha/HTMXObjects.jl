@@ -116,6 +116,56 @@ end
     @test contains(repr("text/plain", st), "a\t1234.5\t3.81e-5\t2024")
 end
 
+@testitem "render_table writes no value as an empty number cell" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h, to_markdown_string
+    html(x) = repr("text/html", x)
+    cells(s) = [m.match for m in eachmatch(r"<td[^>]*>[^<]*</td>", s)]
+    attr(cell, name) = let m = match(Regex("$name=\"([^\"]*)\""), cell); isnothing(m) ? nothing : m[1] end
+    text(cell) = match(r">([^<]*)</td>", cell)[1]
+    # The snag's forecast table: an interval column with no forecast in some
+    # rows. Its empty cells show `–` with no sort value and an empty CSV
+    # field, and the column keeps its five interval sort keys.
+    rows = [(; a="x", e=IntervalEstimate(1.0, 0.5, 1.5)), (; a="y", e=nothing), (; a="z", e=missing)]
+    r = html(render_table(rows))
+    @test !contains(r, ">nothing<") && !contains(r, ">missing<")
+    empties = filter(c -> text(c) == "–", cells(r))
+    @test length(empties) == 2 && all(c -> attr(c, "data-htmxo-number") == "" && isnothing(attr(c, "data-sort-value")) &&
+        isnothing(attr(c, "data-htmxo-align")), empties)
+    @test contains(r, "data-htmxo-sort-keys=\"[&quot;Estimate&quot;") && contains(r, "data-htmxo-interval-csv=")
+    @test contains(to_markdown_string(render_table(rows)), "| y | – |")
+    # A float column's empty cells sit at the right with its numbers; a column
+    # of text or integers puts the dash where its text sits: the left, or its
+    # `ColumnSpec(align)`.
+    t = (f=[1.5, missing, nothing], s=["a", missing, nothing], i=[3, missing, nothing], c=["a", missing, "b"])
+    m = html(render_table(t; columns=["c" => ColumnSpec("c"; align=:center)]))
+    row2 = cells(match(r"<tr><td[^>]*>–</td>.*?</tr>"s, m).match)
+    @test all(c -> text(c) == "–" && attr(c, "data-htmxo-number") == "", row2)
+    @test [attr(c, "data-htmxo-align") for c in row2] == [nothing, "left", "left", "center"]
+    @test count(">–</td>", m) == 7 && !contains(m, ">missing<") && !contains(m, ">nothing<")
+    # The float column is still a column of number cells: its header is at the right.
+    @test occursin(r"<th onclick=\"sortTable\(0, this\)\"[^>]*data-htmxo-align=\"right\"", m)
+    @test !occursin(r"<th onclick=\"sortTable\([12], this\)\"[^>]*data-htmxo-align=", m)
+    # A custom cell renderer gets no value as it is.
+    custom = html(render_table(t; cell=(v, c, i) -> v === missing ? "n/a" : string(v)))
+    @test contains(custom, "<td>n/a</td>") && contains(custom, "<td>nothing</td>") && !contains(custom, "–")
+    # default_sort orders the empty rows as the browser does: in a column of
+    # one order an empty sort text comes first ascending (as any empty
+    # `number_cell` does), in a column of several orders last both ways.
+    order(s) = [m[1] for m in eachmatch(r"<tr><td>(\w)</td>", s)]
+    sorted(dir) = html(render_table((n=["a", "b", "c", "d"], x=[2.0, missing, 1.0, nothing]); default_sort=(col="x", dir=dir)))
+    @test order(sorted(:asc)) == ["b", "d", "c", "a"] && order(sorted(:desc)) == ["a", "c", "b", "d"]
+    iv = (n=["a", "b", "c"], e=[IntervalEstimate(2.0, 1.0, 3.0), missing, IntervalEstimate(1.0, 0.5, 4.0)])
+    ivsorted(key, dir) = html(render_table(iv; default_sort=(col="e", key=key, dir=dir)))
+    @test order(ivsorted("Upper bound", :desc)) == ["c", "a", "b"] && order(ivsorted("Estimate", :asc)) == ["c", "a", "b"]
+    # A SemanticTable's peers agree: Markdown shows the dash, the
+    # tab-separated text writes an empty field (three for an interval column).
+    st = SemanticTable((name=["a", "b"], x=[1.5, missing], e=[IntervalEstimate(1.0, 0.5, 1.5), nothing], s=["t", nothing]))
+    @test count(">–</td>", html(st)) == 3
+    @test contains(repr("text/markdown", st), "| b | – | – | – |")
+    @test repr("text/plain", st) == "name\tx\te\te / Lower bound\te / Upper bound\ts\na\t1.5\t1.0\t0.5\t1.5\tt\nb\t\t\t\t\t\n"
+end
+
 @testitem "a bare float among master cells is a number cell" tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
@@ -132,6 +182,16 @@ end
         contains(row, "<span data-htmxo-row-label=\"\">0,15623</span>")
     pair = html(h.tbody(master_detail_pair("a", Any[h.td("Alpha"), 0.15623], h.p("d"), 2; texts=de)...))
     @test contains(pair, ">0,15623</td>")
+    # A bare `missing` is an empty number cell, in either form; a bare
+    # `nothing` is no cell, as HTMX drops a `nothing` child.
+    gaps = [(id="a", name="Alpha", x=0.5), (id="b", name="Beta", x=missing)]
+    for master in (it -> (h.td(it.name), it.x), it -> h.tr(h.td(it.name), it.x))
+        g = html(master_detail_table(["Name", "x"], gaps; key=it -> it.id, master, detail=it -> h.p("d"), texts=de))
+        @test contains(g, "<td data-htmxo-number=\"\">–</td>") && !occursin(r">missing<|</td>missing", g)
+    end
+    none = html(master_detail_table(["Name", "x"], gaps; key=it -> it.id,
+        master=it -> (h.td(it.name), it.id == "b" ? nothing : h.td("x")), detail=it -> h.p("d")))
+    @test count("<td", match(r"<tr[^>]*id=\"row-b\".*?</tr>"s, none).match) == 1
     # The text a lazy group's search reaches is the text its rows show.
     tx = [(; id="p$i", party=isodd(i) ? "Acme" : "Bakery", amount=-1000.5 * i) for i in 1:4]
     lazy = html(master_detail_table(["Party", "Amount"], tx; key=t -> t.id,
