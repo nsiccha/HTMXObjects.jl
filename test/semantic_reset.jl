@@ -191,15 +191,16 @@ end
           const choose = (name, value) => document.querySelector('input[name="' + name + '"][value="' + value + '"]').click();
           const kept = () => ['a', 'b', 'show', 'extra'].filter(n => new URLSearchParams(location.search).has(n)).join(',');
           try {
-            await until(() => shown() === '3.0|5.0|2.0|0.5', 'first: ' + shown());
+            await until(() => shown() === '3|5|2|0.50', 'first: ' + shown());
             const slider = document.querySelector('input[data-htmxo-number-slider]');
             const start = slider.value;
             await fetch('/mark?phase=start');
             type('a', '3'); type('b', '4');
-            await until(() => shown() === '7.0|10.0|3.0|0.5', 'a=3 b=4: ' + shown());
+            await until(() => shown() === '7|10|3|0.50', 'a=3 b=4: ' + shown());
             await until(() => relevant('extra'), 'extra applies (a*b > 10)');
             type('extra', '0.125');
-            await until(() => shown() === '7.0|10.0|3.0|0.12', 'extra: ' + shown());
+            // `bound(extra; digits = 2)`: exactly two decimals, halves away from zero.
+            await until(() => shown() === '7|10|3|0.13', 'extra: ' + shown());
             choose('show', 'total');
             await until(() => shown() === '7.0', 'total view: ' + shown());
             await until(() => kept() === 'a,b,show,extra', 'address before: ' + location.search);
@@ -208,7 +209,7 @@ end
             if (!reset || reset.textContent !== 'Reset' || !reset.closest('.htmxo-semantic-tab'))
               throw new Error('no Reset under the tab: ' + (reset && reset.outerHTML));
             reset.click();
-            await until(() => shown() === '3.0|5.0|2.0|0.5', 'reset result: ' + shown());
+            await until(() => shown() === '3|5|2|0.50', 'reset result: ' + shown());
             if (Number(control('a').value) !== 2 || Number(control('b').value) !== 1 || Number(control('extra').value) !== 0.5)
               throw new Error('reset values: ' + ['a', 'b', 'extra'].map(n => control(n).value).join(','));
             if (!document.querySelector('input[name="show"][value="line"]').checked) throw new Error('show not reset');
@@ -218,7 +219,7 @@ end
             // A second Reset with nothing to reset changes nothing.
             reset.click();
             await sleep(400);
-            if (shown() !== '3.0|5.0|2.0|0.5' || kept() !== '') throw new Error('second reset: ' + shown());
+            if (shown() !== '3|5|2|0.50' || kept() !== '') throw new Error('second reset: ' + shown());
             await fetch('/mark?phase=end');
             await fetch('/complete?status=passed');
           } catch (error) {
