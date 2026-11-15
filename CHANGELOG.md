@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.125
+
+- A `semantic_app` result computed in the browser (`@browser`) follows an
+  input while it moves: each `input` event of an input it reads (a
+  `number_domain` slider held down, a number being typed) recomputes it, at
+  most once an animation frame and never while its previous computation still
+  runs, with the newest values. Before, it waited for the `change` on release,
+  like a result asked of the server. A result asked of the server and the page
+  address still follow the `change` (`semantic_follow_script`).
+
 ## 0.1.124
 
 - `format_date(d; texts = table_texts(), style = :long)` writes a `Date` in

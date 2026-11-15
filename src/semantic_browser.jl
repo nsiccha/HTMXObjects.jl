@@ -76,7 +76,9 @@ its `name` (`DomainError`, …). The page passes each argument by its name: a
 `@param` from its control (`Float64`, `Int64`, `Bool` and vectors of them, or
 text), any other from the property of that name, which must not read an input;
 its value goes into the page as data, `Inf`, `NaN` and `-0.0` included. The module is embedded in the page, so it
-must be one self-contained file.
+must be one self-contained file. The page imports it from an in-memory `blob:`
+address, once, on its first computation: a browser's request log lists that
+address, though nothing leaves the page.
 """
 function browser_module(path::AbstractString, entry)
     full = abspath(path)
@@ -596,8 +598,10 @@ end
 The runtime of the results a `semantic_app` page computes in the browser
 (`@browser`): it loads each property's module once, calls it with the page's
 inputs, shows the view of the finite inputs' values and writes the bound
-values into it. A page that has such a result carries it in that result;
-nothing to add by hand.
+values into it. [`semantic_follow_script`](@ref) calls it on each `input`
+event of an input the result reads, at most once an animation frame, so the
+result moves with a slider held down. A page that has such a result carries
+it in that result; nothing to add by hand.
 """
 semantic_browser_script() = h.script(Raw(raw"""
 (function() {
