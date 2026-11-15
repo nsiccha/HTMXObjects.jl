@@ -726,3 +726,86 @@ end
         @test length(results) == 20
     end
 end
+
+@testitem "a table's CSV, sort and search read a term's text, not its definition" setup=[ChromeDump] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, Test
+        import HTMXObjects: h, Raw
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # The reported shape (snag `table-csv-glossa-9d6a022c`): a
+        # `render_table` of plain labels under a glossary. Its cells' first
+        # uses of "Prior" and "median" became term links whose hidden box (the
+        # definition and its "Glossary →" link) went into the ⬇ CSV field, the
+        # sort key and the search text: the CSV read "PriorWhat a Bayesian
+        # model …Glossary →: individual reports", and ascending put "Prior:
+        # network median" before "Prior: individual reports" ("Prior:" sorts
+        # before "PriorW").
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function () {
+          const checks = [];
+          const check = (name, ok) => checks.push(name + ':' + Boolean(ok));
+          const body = document.getElementById('prior'), table = body.closest('table');
+          check('the cells link their terms', body.querySelectorAll('.htmxo-term > a + .htmxo-term-def').length === 2);
+          const order = () => Array.from(body.rows).map(r => r.cells[1].textContent).join('|');
+          const control = table.tHead.rows[0].cells[0].querySelector('.htmxo-sort-control');
+          control.click();
+          check('ascending by the text shown', order() === '9.5 [1.5, 110]|13 [0.024, 4300]|13 [0.30, 360]');
+          control.click();
+          check('descending by the text shown', order() === '13 [0.30, 360]|13 [0.024, 4300]|9.5 [1.5, 110]');
+          control.click();
+          const createURL = URL.createObjectURL, anchorClick = HTMLAnchorElement.prototype.click;
+          let blob = null;
+          URL.createObjectURL = b => { blob = b; return 'blob:test'; };
+          HTMLAnchorElement.prototype.click = function() {};
+          try { downloadTableCsv(body, 'prior.csv'); } finally {
+            URL.createObjectURL = createURL; HTMLAnchorElement.prototype.click = anchorClick;
+          }
+          const input = table.closest('.htmxo-searchable-table').querySelector('input[type="search"]');
+          const search = q => {
+            input.value = q;
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            return Array.from(body.rows).filter(r => !r.hidden).length;
+          };
+          check('a word only a definition holds finds no row', search('bayesian') === 0);
+          check('the entry link text finds no row', search('glossary') === 0);
+          check('a word a cell shows finds its row', search('individual') === 1);
+          check('a linked term finds its row', search('median') === 1);
+          check('an empty search shows every row', search('') === 3);
+          const out = document.createElement('pre'); out.id = 'checks';
+          out.textContent = checks.join('\n'); document.body.appendChild(out);
+          document.body.dataset.csv = blob ? await blob.text() : '';
+          document.body.dataset.done = '1';
+        });
+        """))
+        g = Glossary(["Prior" => "What a Bayesian model assumes about an unknown quantity before it sees the data.",
+                      "median" => "The middle value: half of the plausible values lie below it and half above."])
+        table = render_table((; quantity=["Prior: individual reports", "Prior: network median", "Observed reports"],
+                                interval=["13 [0.024, 4300]", "13 [0.30, 360]", "9.5 [1.5, 110]"]);
+            id="prior", columns=[:quantity => "Distribution", :interval => "Range"], searchable=true)
+        content = link_terms(h.main(table, driver), g)
+        dom = mktempdir() do dir
+            shell = joinpath(dir, "shell.html")
+            write(shell, repr("text/html", htmx(content; htmx_version=nothing, sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, hyperscript_version=nothing, katex_version=nothing, feedback=false)))
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$(joinpath(dir, "profile")) file://$shell`)
+        end
+        @test contains(dom, "data-done=\"1\"")
+        m = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+        @test !isnothing(m)
+        results = Dict(String(first(split(l, ':'))) => endswith(l, ":true") for l in split(m.captures[1], '\n'))
+        for (name, ok) in sort!(collect(results))
+            @test (name, ok) == (name, true)
+        end
+        @test length(results) == 8
+        csv = match(r"data-csv=\"([^\"]*)\"", dom)
+        @test !isnothing(csv)
+        unescape(s) = replace(s, "&quot;" => "\"", "&#10;" => "\n", "&amp;" => "&", "&lt;" => "<", "&gt;" => ">")
+        # Exported after a third click, sorted ascending as the reporter's was.
+        @test unescape(csv.captures[1]) == join(["Distribution,Range",
+            "Observed reports,\"9.5 [1.5, 110]\"",
+            "Prior: individual reports,\"13 [0.024, 4300]\"",
+            "Prior: network median,\"13 [0.30, 360]\""], "\n")
+    end
+end

@@ -444,7 +444,8 @@ shows the term's definition beside it, and screen readers read the definition
 as the link's description. On a touch screen a tap shows the definition, with
 a link to the entry, and stays on the page ([`glossary_script`](@ref)). A
 [`term`](@ref) always links. Markdown writes the link as
-`[text](href#term-<id>)`.
+`[text](href#term-<id>)`. A table's sort, search and ⬇ CSV read a linked use
+as its text alone, leaving the definition and its link to the entry out.
 
 The answers of a root that declares `__glossary__` are linked this way before
 they are sent, so an app rarely calls it. It walks HTML nodes, the semantic
