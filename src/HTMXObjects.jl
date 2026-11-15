@@ -3958,7 +3958,12 @@ reader who is not making a report.
 page_report() = _REPORT[]
 
 _with_report(f, ::Nothing) = f()
-_with_report(f, report::Bool) = ScopedValues.with(f, _REPORT => report)
+# A report's Markdown leaves out the `---` line HTMX.jl writes before a plain
+# `<section>` or `<article>` for a Markdown reader: Pandoc reads it as a
+# horizontal rule, so a `pdf_report` PDF would draw a line the page does not
+# have. Every other Markdown keeps it, `report=false` inside a report included.
+_with_report(f, report::Bool) =
+    HTMX.with_markdown_seams(() -> ScopedValues.with(f, _REPORT => report), !report)
 
 # `report=` of `dispatch` and `to_markdown_string`: `true`, `false`, or
 # `nothing` to keep the one of the answer it is called in.
@@ -6161,7 +6166,11 @@ Markdown keeps the language it is rendered in.
 `HTMXObjects.page_report()` give their report view, such as a figure's
 picture (see [`report_view`](@ref)). Without it, the Markdown is a report's
 when the answer it is rendered in is one, and an ordinary read's otherwise;
-`report=false` asks for an ordinary read inside a report.
+`report=false` asks for an ordinary read inside a report. A report's Markdown
+writes a plain `h.section` or `h.article` without the `---` line HTMX.jl puts
+before it for a Markdown reader (`HTMX.with_markdown_seams`): Pandoc reads
+that line as a horizontal rule, so the PDF would draw a line the page does not
+have. An `h.hr()` keeps its `---`.
 
 Library code that assembles a report from values it renders itself passes the
 report's audience and language, also when it runs inside a live request, which
@@ -11256,8 +11265,9 @@ function _register_handler(method, path, handler; resume_only::Bool=false,
         end
         # The whole answer renders for the request's audience (`private`), and
         # for a report when the request is one's (`page_report`).
-        ScopedValues.with(() -> handler(req),
-            _AUDIENCE => export_audience(req), _REPORT => _request_report(req))
+        _with_report(_request_report(req)) do
+            ScopedValues.with(() -> handler(req), _AUDIENCE => export_audience(req))
+        end
     end
     operation && (wrapped = _OperationRoute(wrapped))
     if http_method == "GET" && !resume_only
