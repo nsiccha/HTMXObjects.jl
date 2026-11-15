@@ -585,21 +585,24 @@ _link_terms(p::_TabsetPart, w::_TermWalk) = _TabsetPart(
 
 # Prose renders its Markdown to nodes, which are linked like any others. Linked
 # prose keeps that HTML and writes its Markdown from it; prose that links
-# nothing is left as it was.
+# nothing is left as it was. Both keep the prose's headings as written, since
+# the walk does not run where the prose renders: each peer places them there,
+# as `SemanticProse`'s peers do.
 struct _LinkedProse <: SemanticNode
     node::Node
     markdown::String
+    math::Bool
 end
-_semantic_html_node(prose::_LinkedProse) = prose.node
-Base.show(io::IO, mime::MIME"text/html", prose::_LinkedProse) = show(io, mime, prose.node)
-Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", prose::_LinkedProse) = show(io, mime, prose.node)
-Base.show(io::IO, ::MIME"text/markdown", prose::_LinkedProse) = print(io, prose.markdown)
+_semantic_html_node(prose::_LinkedProse) = _placed_heading_node(prose.node)
+Base.show(io::IO, mime::MIME"text/html", prose::_LinkedProse) = show(io, mime, _semantic_html_node(prose))
+Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", prose::_LinkedProse) = show(io, mime, _semantic_html_node(prose))
+Base.show(io::IO, ::MIME"text/markdown", prose::_LinkedProse) = print(io, _placed_prose_markdown(prose.markdown, prose.math))
 Base.show(io::IO, ::MIME"text/plain", prose::_LinkedProse) = print(io, prose.markdown)
 
 function _link_terms(prose::SemanticProse, w::_TermWalk)
     before = w.count
-    node = _link_terms(_semantic_prose_node(prose), w)
-    w.count == before ? prose : _LinkedProse(node, strip(to_markdown_string(_md_escaped(node))))
+    node = _link_terms(_prose_node(_prose_ast(prose.markdown, prose.math)), w)
+    w.count == before ? prose : _LinkedProse(node, strip(to_markdown_string(_md_escaped(node))), prose.math)
 end
 
 # The rendered prose writes its text verbatim into Markdown, where a character

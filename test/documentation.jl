@@ -36,7 +36,10 @@ using TestItemRunner
     html = repr("text/html", prose)
     source = repr("text/markdown", prose)
     @test string(doc) == before
-    @test repr("text/plain", prose) == source
+    # The plain peer is the source; the Markdown peer places its heading at the
+    # top of a page, `##`, and is otherwise the same text.
+    @test startswith(repr("text/plain", prose), "# Documentation\n")
+    @test source == "#" * repr("text/plain", prose)
     @test occursin("[`reduce`](/reduce)", source)
     @test occursin("[**named label**](/target)", source)
     @test occursin("[a heading](https://example.com/heading)", source)
@@ -64,7 +67,8 @@ using TestItemRunner
 
     # Authored strings retain their source contract, including literal @ref.
     authored = SemanticProse(before)
-    @test repr("text/markdown", authored) == before
+    @test repr("text/markdown", authored) == "#" * before   # its heading placed at `##`
+    @test repr("text/plain", authored) == before
     @test occursin("href=\"@ref\"", repr("text/html", authored))
     @test repr("text/markdown", SemanticProse("[x](@reference)")) == "[x](@reference)"
     @test occursin("href=\"@reference\"", repr("text/html", SemanticProse(Markdown.parse("[x](@reference)"))))
