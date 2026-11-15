@@ -30775,11 +30775,34 @@ end
 # --- What an operation reads ---
 
 # DynamicObjects' dependency closure of `name` on `T` (the property and every
-# property it reads, transitively); `nothing` on a DynamicObjects without it.
-_dependency_closure(T::Type, name::Symbol) =
-    isdefined(DynamicObjects, :_semantic_dependency_closure) ?
-        Base.invokelatest(getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,)) :
-        nothing
+# property it reads, transitively), in declaration order; `nothing` on a
+# DynamicObjects without the per-property `dependson` metadata. DynamicObjects
+# 0.5.21 (`878dd48`) removed its private `_semantic_dependency_closure`, which
+# this used to call, so the closure is walked here from that metadata, as it was
+# there; an older DynamicObjects keeps answering through its own helper.
+function _dependency_closure(T::Type, name::Symbol)
+    isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
+        getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,))
+    isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
+    metafirst = getproperty(DynamicObjects, :metafirst)
+    meta = getproperty(DynamicObjects, :meta)
+    Base.invokelatest(applicable, meta, T) || return nothing
+    closure = Set{Symbol}()
+    pending = Symbol[name]
+    while !isempty(pending)
+        current = pop!(pending)
+        current in closure && continue
+        info = Base.invokelatest(metafirst, T, current)
+        info === nothing && continue
+        push!(closure, current)
+        dependencies = get(info, :dependson, nothing)
+        dependencies === nothing && continue
+        for dependency in dependencies
+            dependency isa Symbol && push!(pending, dependency)
+        end
+    end
+    unique!(Symbol[n for (n, _) in Base.invokelatest(meta, T) if n in closure])
+end
 
 # The properties of `T` that hand `__self__` to other code, whose reads no
 # static scan follows.
