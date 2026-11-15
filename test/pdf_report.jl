@@ -24,7 +24,7 @@ end
         format:
           typst:
             from: markdown+autolink_bare_uris+tex_math_single_backslash-raw_tex
-            pdf-standard: [ua-1]
+            pdf-standard: [ua-1, a-2a]
             syntax-highlighting: idiomatic
             include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST)), $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_CODE_TYPST))]
         filters:
@@ -47,6 +47,60 @@ end
           isfile(HTMXObjects._PDF_REPORT_CODE_TYPST) && isfile(HTMXObjects._PDF_REPORT_LABELS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER)
+
+    # PDF/A-2a besides PDF/UA-1 by default; `archival` picks another PDF/A level,
+    # `nothing` PDF/UA-1 alone (snag pdf-report-pdfa-d81a2646, user design
+    # decision 0qdb7sa).
+    standard(; kw...) = match(r"\n    pdf-standard: (.*)\n",
+                              HTMXObjects._pdf_report_qmd("# R\n"; title="R", lang="de-DE", kw...)).captures[1]
+    @test standard() == "[ua-1, a-2a]"
+    @test standard(; archival="a-3a") == "[ua-1, a-3a]"
+    @test standard(; archival="a-2u") == "[ua-1, a-2u]"
+    @test standard(; archival=nothing) == "[ua-1]"
+end
+
+@testitem "pdf_report takes the PDF/A levels Typst writes with PDF/UA-1" tags=[:unit] begin
+    using HTMXObjects
+
+    attempt(archival) = try
+        pdf_report("# R\n", joinpath(tempdir(), "never.pdf"); title="R", lang="de-DE",
+                   quarto="htmxo-no-such-quarto", archival)
+    catch e
+        e
+    end
+    # These get past the checks to the missing Quarto.
+    for level in ("a-2a", "a-3a", "a-2u", "a-3u", "a-2b", "a-3b", SubString("xa-2ax", 2, 5), nothing)
+        err = attempt(level)
+        @test err isa ErrorException && occursin("Quarto not found", err.msg)
+    end
+    # refused, before Quarto runs: PDF/A-1 forbids transparency, which charts
+    # use; PDF/A-4 shares no PDF version with PDF/UA-1; Typst spells a level
+    # lower-case and with its part
+    for level in ("a-1a", "a-1b", "a-4", "a-4f", "A-2A", "pdf/a-2a", "2a", "")
+        err = attempt(level)
+        @test err isa ArgumentError && occursin("`archival` must be one of", err.msg) &&
+              occursin(repr(level), err.msg)
+    end
+    for level in (:a2a, 2, true)
+        err = attempt(level)
+        @test err isa ArgumentError && occursin("`archival` must be a PDF/A level", err.msg)
+    end
+
+    # The XMP entries Typst 0.15.1 writes into a PDF/A file of the level.
+    @test HTMXObjects._pdfa_markers("a-2a") ==
+          ("<pdfaid:part>2</pdfaid:part>", "<pdfaid:conformance>A</pdfaid:conformance>")
+    @test HTMXObjects._pdfa_markers("a-3u") ==
+          ("<pdfaid:part>3</pdfaid:part>", "<pdfaid:conformance>U</pdfaid:conformance>")
+
+    # A rule of PDF/A alone gets a hint at what to pass; a rule PDF/UA-1 shares,
+    # or a report without PDF/A, does not (Typst 0.15.1's messages).
+    hint(archival, log) = HTMXObjects._pdf_report_archival_hint(archival, log)
+    pua = "error: PDF/A-2a error: the PDF contains the codepoint `\"\\u{e000}\"`"
+    cmyk = "error: PDF/A-2b error: the PDF is missing a CMYK profile"
+    @test occursin("archival=\"a-2u\"", hint("a-2a", pua)) && occursin("(a-2a)", hint("a-2a", pua))
+    @test occursin("archival=nothing", hint("a-2b", cmyk)) && occursin("RGB", hint("a-2b", cmyk))
+    @test hint("a-2a", "error: PDF/A-2a, PDF/UA-1 error: missing alt text") == ""
+    @test hint(nothing, cmyk) == ""
 end
 
 @testitem "pdf_report hands base_url to the link filter" tags=[:unit] begin
@@ -220,6 +274,11 @@ end
         err = refusal(; metadata)
         @test err isa ArgumentError && occursin(says, err.msg)
     end
+    # the PDF/A level has a keyword of its own (snag pdf-report-pdfa-d81a2646)
+    for metadata in ((pdf_standard=["ua-1", "a-2a"],), Dict("format" => "typst"))
+        err = refusal(; metadata)
+        @test err isa ArgumentError && occursin("archival=", err.msg)
+    end
     @test refusal(; metadata=Dict("not a key" => 1)) isa ArgumentError
     @test refusal(; metadata=Dict(:toc => true, "toc" => false)) isa ArgumentError
     @test refusal(; metadata=(fontsize=Inf,)) isa ArgumentError
@@ -290,6 +349,31 @@ end
             @test pdfua(out)
             @test mediabox(out) == a4
 
+            # PDF/A-2a besides PDF/UA-1 by default; `archival` picks another
+            # PDF/A level or none (snag pdf-report-pdfa-d81a2646, user design
+            # decision 0qdb7sa).
+            declares(path, entries...) = let bytes = read(path, String)
+                all(entry -> occursin(entry, bytes), entries)
+            end
+            @test declares(out, "<pdfaid:part>2</pdfaid:part>", "<pdfaid:conformance>A</pdfaid:conformance>")
+            a3u = joinpath(dir, "out", "a3u.pdf")
+            @test pdf_report(page, a3u; title="Bericht", lang="de-DE", resources=dir, archival="a-3u") == a3u
+            @test pdfua(a3u) && declares(a3u, "<pdfaid:part>3</pdfaid:part>", "<pdfaid:conformance>U</pdfaid:conformance>")
+            ua = joinpath(dir, "out", "ua.pdf")
+            @test pdf_report(page, ua; title="Bericht", lang="de-DE", resources=dir, archival=nothing) == ua
+            @test pdfua(ua) && !occursin("<pdfaid:part>", read(ua, String))
+            if isnothing(Sys.which("verapdf"))
+                @test_skip "veraPDF checks both standards"
+            else
+                # The PDF/UA-1-only report is the control: veraPDF fails it on PDF/A.
+                verapdf(path, flavour) = startswith(read(ignorestatus(
+                    `$(Sys.which("verapdf")) --format text --flavour $flavour $path`), String), "PASS ")
+                @test verapdf(out, "ua1") && verapdf(out, "2a")
+                @test verapdf(a3u, "ua1") && verapdf(a3u, "3u")
+                @test verapdf(ua, "ua1") && !verapdf(ua, "2a")
+            end
+            rm(a3u); rm(ua)
+
             # Document options, and the paper each region uses unless one is given.
             opts = joinpath(dir, "out", "optionen.pdf")
             @test pdf_report("# A\n\nText.\n\n# B\n\nText.\n", opts; title="Bericht", lang="de-DE",
@@ -356,6 +440,18 @@ end
                 e
             end
             @test err isa ErrorException && occursin("missing alt text", err.msg)
+            @test sort(readdir(dir)) == ["bars.svg", "md.pdf", "out"]
+
+            # refused: PDF/A's `a` levels need every character to say what it
+            # is, and one from Unicode's private use area (an icon font's glyph)
+            # does not; pdf_report says what to pass, and PDF/A-2u accepts it.
+            icon, iconpdf = "# R\n\nEin Symbol .\n", joinpath(dir, "icon.pdf")
+            err = try pdf_report(icon, iconpdf; title="R", lang="de-DE") catch e e end
+            @test err isa ErrorException && occursin("PDF/A-2a error", err.msg) &&
+                  occursin("archival=\"a-2u\"", err.msg)
+            @test pdf_report(icon, iconpdf; title="R", lang="de-DE", archival="a-2u") == iconpdf
+            @test pdfua(iconpdf)
+            rm(iconpdf)
             @test sort(readdir(dir)) == ["bars.svg", "md.pdf", "out"]
 
             # Typographic quotes read as written, in the text and the title;

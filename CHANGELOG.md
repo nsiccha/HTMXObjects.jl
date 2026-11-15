@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.120
+
+- `pdf_report` writes PDF/A-2a, the archival standard, besides PDF/UA-1:
+  the file embeds its fonts, a colour profile and its metadata, and declares
+  both standards in its XMP metadata, which `pdf_report` checks after
+  rendering. `archival=` picks another PDF/A level Typst writes with PDF/UA-1
+  (`"a-3a"`, `"a-2u"`, `"a-3u"`, `"a-2b"`, `"a-3b"`), or `nothing` for
+  PDF/UA-1 alone; any other value is an `ArgumentError` before Quarto runs.
+  Before, every report was PDF/UA-1 only, and `metadata=` could not change
+  the standard. **Behaviour change:** PDF/A refuses two things PDF/UA-1 alone
+  accepts, so a report holding a CMYK image (any PDF/A level) or a character
+  from Unicode's private use area, such as an icon font's glyph (the `a`
+  levels), now fails with Typst's message and a hint: convert the image to
+  RGB, pass `archival="a-2u"` for the character, or `archival=nothing`.
+  veraPDF 1.30.3 passes the default on `--flavour ua1` and `--flavour 2a`.
+
 ## 0.1.119
 
 - `number_domain(lower .. upper; log, step, digits, unit)` declares, in a
