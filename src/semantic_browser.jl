@@ -59,7 +59,7 @@ const _BROWSER_FILES_LOCK = ReentrantLock()
 The ES module a `@browser` declaration computes its property with, read from
 the file `path` (relative to the working directory, read again when it
 changes) or given as `source` text, such as the string
-`ReactiveKernels.js_source` returns:
+`ReactiveKernels.js_source` returns.
 
 ```julia
 prediction = PREDICT(water, attenuation, density)

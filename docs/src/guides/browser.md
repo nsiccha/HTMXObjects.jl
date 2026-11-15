@@ -1,0 +1,73 @@
+# Browser results
+
+Compute a `presentation=:tabs` page's results in the browser from an emitted module, so the
+page follows its inputs with no server, also as a static export.
+
+A `presentation=:tabs` page asks the server again for a result when an input it
+reads changes. A property can instead have a browser twin: an ES module that
+computes the same value from the inputs, such as the one
+`ReactiveKernels.js_source` emits from the kernel the property calls. A result
+that shows that property only through `bound(...)` is then computed and redrawn
+in the browser, with no request, so the page keeps following its inputs as a
+static export (`export_site`) and offline:
+
+```@example browser
+using HTMXObjects
+const LINE_JS = """
+export function line(grid, a, b) {
+  return { y: grid.map(x => a * x + b), total: a + b };
+}
+export const INPUTS = [{ name: "grid", type: "Vector{Float64}" },
+  { name: "a", type: "Float64" }, { name: "b", type: "Float64" }];
+"""
+@htmx struct Line
+    "Slope"
+    @param a::Float64 = 2.0
+    "Intercept"
+    @param b::Float64 = 1.0
+    grid = [0.0, 1.0, 2.0]
+    fit = (; y = a .* grid .+ b, total = a + b)
+    @browser(fit) = browser_module(; source = LINE_JS, entry = :line)
+    "Line"
+    @get result() = h.p("total ", bound(fit.total), " at slope ", bound(a))
+    @get index() = semantic_app(__self__; presentation=:tabs,
+        select=entry -> entry.name !== :index)
+end
+route!(Line(); prefix="/line", operation_policy=:blocking);
+response = dispatch(:GET, "/line/result?a=3"; headers=["HX-Request" => "true"]);
+@assert response.status == 200 # hide
+println(String(response.body))
+```
+
+- **The module** is read from a file with `browser_module(path, entry)` or
+  given as text with `browser_module(; source, entry)`. It exports the function
+  `entry`, which takes positional arguments, and `INPUTS`, naming them and their
+  Julia types in order. The page passes each by name: a `@param` from its
+  control (numbers, `Bool`, text and vectors of them), any other from the
+  property of that name, which must not read an input (`grid` above); its value
+  goes into the page, non-finite numbers and `-0.0` included. A named tuple comes back as an object of named outputs.
+- **`bound`** marks where a view shows a browser value: the property, one of its
+  outputs (`bound(fit.total)`), an element of one (`bound(fit.y[2])`, the index
+  an integer literal) or a `@param` (`bound(a)`), rounded with `digits=`. The server shows
+  the value as Julia's `string` writes it, and so does the browser after each
+  change. `bound(fit; columns=(:x, :y))` is the outputs' table for a plot's
+  `data(...)`; give the element that draws it `bound_columns_attrs(...)`, and
+  the browser hands it the new rows through AlgebraOfVega's `AoV.updateData`
+  and an `htmxo:bound-columns` event.
+- **Finite inputs** (a `Bool`, an enum, `@options`) that a result reads are
+  views of their own: the page carries the result rendered for each value (at
+  most 64) and shows the one the inputs select.
+- **An error** the module throws is shown in the result under its name
+  (`DomainError: …`), which keeps its last answer faded until the next one.
+- **The page address**: a page applies the inputs its address names to its
+  controls when it loads, so a static page's shared link reopens them.
+- **`@relevant`** conditions with arithmetic of inputs (`a * b > 10`) are
+  evaluated in the browser, like comparisons with literals.
+
+`export_site` refuses a page with a browser result that would show something
+stale, naming each part: a view that shows an input outside `bound` (the export
+renders it with each continuous input changed and compares everything else), a
+result that reads inputs but computes nothing in the browser, and a control the
+server draws again (`@options`, `@help`, a computed default or a condition the
+browser cannot evaluate). Bind it, compute it in the module, or leave that
+operation out of the page with `semantic_app(…; select=…)`.
