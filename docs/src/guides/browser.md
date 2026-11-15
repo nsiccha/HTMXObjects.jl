@@ -56,6 +56,10 @@ println(String(response.body))
   and an `htmxo:bound-columns` event. The table is its own `Tables.columns`,
   so a plot's `data(...)` layer (AlgebraOfGraphics keeps `Tables.columns` of
   its data) still holds it, and a plotting package can mark the element itself.
+  Single-value outputs (a number, a `Bool`, text) make a table of one row,
+  `bound(fit; columns=(:half,))` with `half::Float64`, for a mark at that
+  value such as a rule. One table holds vectors of one length or single
+  values, not both, so a plot of both takes two: one per kind.
 - **Finite inputs** (a `Bool`, an enum, `@options`) that a result reads are
   views of their own: the page carries the result rendered for each value (at
   most 64) and shows the one the inputs select.

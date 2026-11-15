@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.130
+## 0.1.131
 
 - Requires HTMX.jl 1.2.1 (`[compat] HTMX = "1.2.1"`). Private block content
   written as Markdown is laid out by HTMX.jl's public `HTMX.markdown_div` and
@@ -15,6 +15,20 @@
   `- [*not public:* \` then `…]{.htmxo-private}` in a list item, the same
   inside a link, and `[*not public:* <br>…]{.htmxo-private}` in a table cell.
   Before, a heading, list item or link held a fence that broke it.
+
+## 0.1.130
+
+- `bound(x; columns=…)` of single-value outputs (a number, a `Bool`, text) is
+  a table of one row: `bound(prediction; columns=(:half,))` with
+  `half::Float64` gives `Tables.getcolumn(b, :half) == [half]`, so a plot can
+  draw a mark at a value the browser computes (a rule at `prediction.half`)
+  and the page keeps it following the inputs offline. In the browser each
+  such column becomes a one-value array (`n = 1`) for `AoV.updateData` and the
+  `htmxo:bound-columns` event; before, the server refused the output as not a
+  vector and the browser would have emptied the table. A table still does not
+  mix single values and vectors: the error names both kinds and the table the
+  single values can have. An output that is neither (a matrix) is refused
+  naming its type.
 
 ## 0.1.129
 

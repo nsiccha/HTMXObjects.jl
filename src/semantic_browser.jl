@@ -111,7 +111,9 @@ computes: a property declared `@browser`, one of its outputs or their elements
 Julia's `string` writes it (rounded to `digits` decimals); a page that computes
 the property in the browser rewrites it there after each change. With `columns`
 it is the property's equal-length vector outputs as a Tables.jl table, for a
-plot's `data(...)`; give the element showing it [`bound_columns_attrs`](@ref).
+plot's `data(...)`, or its single-value outputs (a number, a Boolean, text) as
+a table of one row, for a mark at a value such as a rule; one table does not
+mix the two. Give the element showing it [`bound_columns_attrs`](@ref).
 The table is its own `Tables.columns`, so a plotting package that keeps the
 columns of its data, as AlgebraOfGraphics' `data(...)` does, still holds it.
 
@@ -139,11 +141,13 @@ end
     BoundColumns
 
 What `bound(x; columns)` is on the server: the property's chosen equal-length
-vector outputs as a Tables.jl table, and the path a browser page reads them
-from. It is its own `Tables.columns`, so what a plotting package keeps of its
-data (the `Layer.data` of AlgebraOfGraphics' `data(b)`) is still `b`, and the
-element drawing it can take [`bound_columns_attrs`](@ref)`(b)`. Its columns are
-the chosen outputs only; the property's other outputs are not part of the table.
+vector outputs as a Tables.jl table, or its chosen single-value outputs as a
+table of one row (`Tables.getcolumn` gives `[v]`), and the path a browser page
+reads them from. It is its own `Tables.columns`, so what a plotting package
+keeps of its data (the `Layer.data` of AlgebraOfGraphics' `data(b)`) is still
+`b`, and the element drawing it can take [`bound_columns_attrs`](@ref)`(b)`.
+Its columns are the chosen outputs only; the property's other outputs are not
+part of the table.
 """
 struct BoundColumns{T}
     path::Vector{Any}
@@ -158,22 +162,39 @@ function _bound(path::Tuple, value; digits=nothing, columns=nothing)
     BoundValue(Any[path...], value, digits === nothing ? nothing : Int(digits))
 end
 
+# An output a table shows as its one row: what the browser's module returns as
+# a number, a Boolean or text, not a list.
+const _BoundSingle = Union{Number,AbstractString,Symbol}
+_bound_column(output::AbstractVector) = output
+_bound_column(output) = [output]
+
 function _bound_columns(path, value, columns)
     names = Symbol[Symbol(c) for c in (columns isa Union{Tuple,AbstractVector} ? columns : (columns,))]
     isempty(names) && throw(ArgumentError("bound(…; columns): name at least one column"))
-    lengths = map(names) do c
+    label = _bound_label(path)
+    outputs = map(names) do c
         hasproperty(value, c) || throw(ArgumentError(
-            "bound(…; columns): $(_bound_label(path)) has no output `$c`"))
-        column = getproperty(value, c)
-        column isa AbstractVector || throw(ArgumentError(
-            "bound(…; columns): $(_bound_label(path)).$c is not a vector"))
-        length(column)
+            "bound(…; columns): $label has no output `$c`"))
+        output = getproperty(value, c)
+        output isa Union{AbstractVector,_BoundSingle} || throw(ArgumentError(string(
+            "bound(…; columns): ", label, ".", c, " is a ", typeof(output),
+            ", neither a vector nor a single number or text")))
+        output
     end
+    single = [o isa _BoundSingle for o in outputs]
+    any(single) && !all(single) && throw(ArgumentError(string(
+        "bound(…; columns): the outputs ", _bound_names(names[single]), " (single values) and ",
+        _bound_names(names[.!single]), " (vectors) of ", label, " cannot share a table: its ",
+        "columns are vectors of one length, or single values (one row). Bind the single values ",
+        "in a table of their own: bound(", label, "; columns = (",
+        join((string(":", c) for c in names[single]), ", "), count(single) == 1 ? ",))" : "))")))
+    lengths = map(o -> o isa AbstractVector ? length(o) : 1, outputs)
     allequal(lengths) || throw(ArgumentError(string(
-        "bound(…; columns): the columns of ", _bound_label(path), " differ in length (",
+        "bound(…; columns): the columns of ", label, " differ in length (",
         join((string(c, " ", n) for (c, n) in zip(names, lengths)), ", "), ")")))
     BoundColumns(path, value, names)
 end
+_bound_names(cs) = join((string("`", c, "`") for c in cs), ", ")
 
 # The lowering's path holds symbols (`(:line, :x)`); a `QuoteNode` is taken too.
 _bound_label(path) = join((p isa Integer ? string("[", p, "]") :
@@ -187,15 +208,15 @@ Tables.columnaccess(::Type{<:BoundColumns}) = true
 # Not a `Tables.AbstractColumns`: that would make `b.path` a column lookup.
 Tables.columns(b::BoundColumns) = b
 Tables.columnnames(b::BoundColumns) = Tuple(b.columns)
-Tables.getcolumn(b::BoundColumns, i::Int) = getproperty(b.value, b.columns[i])
+Tables.getcolumn(b::BoundColumns, i::Int) = _bound_column(getproperty(b.value, b.columns[i]))
 function Tables.getcolumn(b::BoundColumns, c::Symbol)
     c in b.columns || throw(ArgumentError(string(
         "bound(…; columns): the table of ", _bound_label(b.path), " has the columns ",
         join(b.columns, ", "), ", not `", c, "`; name it in `columns`")))
-    getproperty(b.value, c)
+    _bound_column(getproperty(b.value, c))
 end
 Tables.schema(b::BoundColumns) = Tables.Schema(Tuple(b.columns),
-    Tuple(eltype(getproperty(b.value, c)) for c in b.columns))
+    Tuple(eltype(_bound_column(getproperty(b.value, c))) for c in b.columns))
 
 """
     bound_columns_attrs(b::BoundColumns; dataset="source_0") -> NamedTuple
@@ -206,7 +227,8 @@ what a plotting package kept of the table's columns is `b` too. After the
 browser computes the property again, a page calls
 `AoV.updateData(id, rows, dataset)` for an element with an `id`
 (AlgebraOfVega's runtime) and raises `htmxo:bound-columns` on it with the new
-columns in `event.detail`.
+columns in `event.detail`. Each column is an array, one value long for a
+single-value output, and `n` is the number of rows.
 """
 bound_columns_attrs(b::BoundColumns; dataset::AbstractString="source_0") =
     (; data_htmxo_bound_columns=JSON.json(Dict("path" => _bound_wire(b.path),
@@ -732,7 +754,9 @@ semantic_browser_script() = h.script(Raw(raw"""
       if (!has(results, spec.path[0])) return;
       var table = at(results[spec.path[0]], spec.path), columns = {}, n = 0;
       spec.columns.forEach(function(c) {
-        var column = Array.from(table[c]);
+        // A single value (a number, a Boolean, text) is the table's one row.
+        var value = table[c], single = value !== undefined && typeof value !== 'object';
+        var column = single ? [value] : Array.from(value);
         columns[c] = column;
         n = column.length;
       });
