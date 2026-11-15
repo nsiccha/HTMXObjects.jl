@@ -63,6 +63,41 @@ using TestItemRunner
     @test !contains(String(response.body), "results.Crossing")
 end
 
+@testitem "a caption without a title shows its summary alone" tags=[:unit] begin
+    using HTMXObjects
+
+    # snag caption-empty-ti-4b05b833: `title=""` with a summary rendered an
+    # empty bold and a leading " — " before the summary, in HTML and Markdown.
+    short = "Plasma warfarin after one dose: measurements and fitted curves."
+    html(node) = repr("text/html", node)
+    markdown(node) = HTMXObjects.to_markdown_string(node)
+
+    @test html(render_caption(CaptionSpec(; title="", short))) ==
+        "<figcaption class=\"caption\"><div class=\"caption-header\">" *
+        "<span>$short</span></div></figcaption>"
+    @test markdown(render_caption(CaptionSpec(; title="", short))) == short
+    # Whitespace is blank too, in either tier.
+    @test markdown(render_caption(CaptionSpec(; title="  ", short))) == short
+    @test markdown(render_caption(CaptionSpec(; title="Fig 1", short=" "))) == "**Fig 1**"
+
+    # The long tier joins onto the summary, and opens a caption with neither.
+    long = "Shape only."
+    @test markdown(render_caption(CaptionSpec(; title="", short, long))) == "$short — $long"
+    @test markdown(render_caption(CaptionSpec(; title="", long))) == long
+    @test !contains(html(render_caption(CaptionSpec(; title="", short, long))), "<strong>")
+
+    # Every caption entry point shares it, the figure and the table alike.
+    for node in (with_caption(CaptionSpec(; title="", short), h.p("Figure content.")),
+            render_table((dose=[1, 2], percent=[25, 75]);
+                caption=CaptionSpec(; title="", short), download=false))
+        @test !contains(html(node), "<strong></strong>")
+        @test !contains(html(node), "— $short")
+        @test !contains(markdown(node), "****")
+        @test !contains(markdown(node), "— $short")
+        @test contains(markdown(node), short)
+    end
+end
+
 @testitem "a plain string is a caption with only that title" tags=[:unit] begin
     using HTMXObjects
 
