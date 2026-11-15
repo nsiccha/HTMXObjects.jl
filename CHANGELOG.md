@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.130
+
+- Requires HTMX.jl 1.2.1 (`[compat] HTMX = "1.2.1"`). Private block content
+  written as Markdown is laid out by HTMX.jl's public `HTMX.markdown_div` and
+  `HTMX.markdown_block_context` instead of HTMX.jl's internal Markdown stream.
+  Where a block can start (top level, a `div`, `article`, `section`, `figure`,
+  `blockquote`, `header`, after a list, nested marks) its
+  `::: {.htmxo-private}` block is unchanged.
+- Elsewhere it is one span that holds its content on its line, its parts set
+  off by a line break: `## [*not public:* …]{.htmxo-private}` in a heading,
+  `- [*not public:* \` then `…]{.htmxo-private}` in a list item, the same
+  inside a link, and `[*not public:* <br>…]{.htmxo-private}` in a table cell.
+  Before, a heading, list item or link held a fence that broke it.
+
 ## 0.1.129
 
 - `numbered(content...)` numbers the sections, captioned figures and captioned
