@@ -15,9 +15,12 @@
 # of a figure as its caption), which would number a caption inside a captioned
 # figure before the figure's own. A caption is found again by identity: each
 # `render_caption` makes a slot object of its own, which every walk of the
-# tree passes on unchanged. A section is found again by its place in the
-# reading order, checked against its title: a section only one form shows
-# never takes the next section's number.
+# tree passes on unchanged. A section is found again by identity too, so the
+# second pass may show it more than once (HTMX writes a document's Markdown a
+# second time when a link in it points at an element id the first write did
+# not know of) and it keeps its number; a section built anew for this render
+# is found by its place in the reading order, checked against its title, so a
+# section only one form shows never takes the next section's number.
 #
 # Content that only one form shows (`html_only`, an alternative's collapsed
 # views) is not numbered, so both forms number the same elements.
@@ -153,6 +156,7 @@ mutable struct _NumberingState
     # static export), so an element the first pass met is met again in order.
     in_order::Bool
     sections::Vector{_SectionEntry}
+    section_index::IdDict{Any,Vector{Int}}  # a section => its entries, in reading order
     captions::Vector{_CaptionEntry}
     caption_index::IdDict{Any,Int}
     anchors::Dict{String,String}  # an id `ref` may cite => its words
@@ -165,7 +169,8 @@ mutable struct _NumberingState
 end
 
 _NumberingState(doc::_Numbered, texts::NumberingTexts) = _NumberingState(doc, texts, true, true,
-    _SectionEntry[], _CaptionEntry[], IdDict{Any,Int}(), Dict{String,String}(), 0, Int[], 0, 0, 0, 0)
+    _SectionEntry[], IdDict{Any,Vector{Int}}(), _CaptionEntry[], IdDict{Any,Int}(), Dict{String,String}(),
+    0, Int[], 0, 0, 0, 0)
 
 # The numbered document being rendered, and whether its numbers are paused for
 # content that only one form shows.
@@ -223,21 +228,48 @@ function _collect_section!(state::_NumberingState, section::SemanticSection, lev
     anchor = isempty(section.anchor) ? "section-" * join(state.counters, "-") : section.anchor
     entry = _SectionEntry(section.title, number, anchor, depth, level)
     push!(state.sections, entry)
+    push!(get!(Vector{Int}, state.section_index, section), length(state.sections))
     state.anchors[anchor] = _fill_text(state.texts.section; number)
     entry
 end
 
-# The entry the first pass gave this section: the next in reading order, or a
+# The entry the first pass gave this section. HTMX may call a section's `show`
+# more than once for one place in the document: when it writes the document a
+# second time (`_NumberingStart`), and inside a `<header>`, whose layout it
+# probes first. So a section the first pass met is found by identity, and gets
+# the same entry however often it is shown; one placed twice takes its next
+# entry in reading order. A section built anew for this render (a function's
+# private content) is found by its title: the next entry in reading order, or a
 # later one with its title when the first pass met a section this render does
 # not show. A section the first pass never met has none.
 function _find_section!(state::_NumberingState, section::SemanticSection)
-    for i in state.section_at+1:length(state.sections)
-        state.sections[i].title == section.title || continue
-        state.section_at = i
-        return state.sections[i]
+    entries = get(state.section_index, section, nothing)
+    i = if isnothing(entries)
+        something(findnext(e -> e.title == section.title, state.sections, state.section_at + 1), 0)
+    elseif length(entries) == 1
+        only(entries)
+    else
+        entries[something(findfirst(>(state.section_at), entries), 1)]
     end
+    i == 0 && return nothing
+    state.section_at = i
+    state.sections[i]
+end
+
+# HTMX writes a document's Markdown a second time when a link in a value's
+# output (a `ref` inside a section) points at an element id the first write met
+# without writing it, such as a captioned figure's. Each write then reads the
+# numbers from the start: this value, the first in the document's body, writes
+# nothing and starts the reading order again.
+struct _NumberingStart
+    state::_NumberingState
+end
+function Base.show(io::IO, ::MIME"text/markdown", start::_NumberingStart)
+    start.state.section_at = 0
+    start.state.caption_at = 0
     nothing
 end
+HTMX.markdown_block(::_NumberingStart) = false
 
 # The heading's number, then a space, before its title.
 _section_number_nodes(::Nothing) = ()
@@ -491,10 +523,11 @@ Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", doc::_Numbered) =
 # in it. A node inside the document would then be written outside its numbers.
 # So the document writes all of its Markdown to text while they hold, as one
 # node, so that HTMX still pairs a link in one child with its target in another.
+# HTMX may write that node twice; each write starts at `_NumberingStart`.
 function Base.show(io::IO, mime::MIME"text/markdown", doc::_Numbered)
     _shows_nothing(doc.children, _ambient_audience()) && return
     text = _with_numbers(doc; in_order=false) do
-        strip(sprint(show, mime, h.div(doc.children...)), '\n')
+        strip(sprint(show, mime, h.div(_NumberingStart(_NUMBERING[]), doc.children...)), '\n')
     end
     print(io, _NUMBERED_MARKER, "\n\n", text)
 end

@@ -171,6 +171,42 @@ end
         occursin("""<nav class="htmxo-contents" aria-label="Contents">""", exported)
 end
 
+@testitem "a section keeps its number however often HTMX writes it" tags=[:unit, :semantic] setup=[NumberedFixture] begin
+    using HTMXObjects
+    using .NumberedFixture: md, html, headings, html_headings
+
+    # A ref to a captioned figure inside a section is a link HTMX finds only in
+    # the section's own output, so HTMX writes the document's Markdown a second
+    # time (snag numbered-semanti-14da03de). Each section keeps its number, and
+    # an unanchored one its generated id, which a ref can cite.
+    doc = numbered(contents(),
+        SemanticSection("Results", h.p("See ", ref("model"), ", ", ref("section-2-1"), " and ", ref("fig-x"), "."),
+            with_caption(CaptionSpec(; title="A picture", short="Short."), h.p("FIGBODY"); id="fig-x")),
+        SemanticSection("Model", SemanticSection("Priors", h.p("pri")); anchor="model"))
+    m = md(doc; lang="en-GB")
+    @test occursin("\n## 1 Results {#section-1}\n", m) && occursin("\n## 2 Model {#model}\n", m) &&
+        occursin("\n### 2.1 Priors {#section-2-1}\n", m)
+    @test occursin("See [Section 2](#model), [Section 2.1](#section-2-1) and [Figure 1](#fig-x).", m)
+    @test md(doc; lang="en-GB", report=true) == m
+
+    # One section placed twice takes its next number each time, in both forms.
+    again = SemanticSection("Again", "x")
+    twice = numbered(again, SemanticSection("Mid", h.p(ref("fig")), with_caption("F", "f"; id="fig")), again)
+    @test headings(md(twice)) == ["## 1 Again", "## 2 Mid", "## 3 Again"]
+    @test html_headings(html(twice)) == ["1 Again", "2 Mid", "3 Again"]
+
+    # A section in a <header>, whose layout HTMX probes before writing it.
+    top = md(numbered(h.header(SemanticSection("Top", "t")), SemanticSection("Next", "n")))
+    @test occursin("1 Top {#section-1}", top) && occursin("\n## 2 Next {#section-2}\n", top)
+
+    # Content built anew for each render (a function's private content), first
+    # in a document HTMX writes twice.
+    built = numbered(private(() -> SemanticSection("Built", h.p(ref("fig-b")))),
+                     SemanticSection("Next", with_caption("F", "f"; id="fig-b")))
+    @test headings(md(built; audience=:private)) == ["## 1 Built", "## 2 Next"]
+    @test headings(md(built; audience=:public)) == ["## 1 Next"]
+end
+
 @testitem "outside a numbered document sections and captions render as before" tags=[:unit, :semantic] begin
     using HTMXObjects
     md(x) = HTMXObjects.to_markdown_string(x)
