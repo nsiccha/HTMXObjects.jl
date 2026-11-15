@@ -6596,22 +6596,20 @@ function _private_md_labelled(node::Node, label)
 end
 _private_md_in_place(x) = _private_in_place(x)
 _private_md_in_place(xs::AbstractVector) = !isempty(xs) && all(_private_in_place, xs)
-# HTMX.jl's Markdown stream knows where a block starts and a line ends, so the
-# fence is laid out as its own fenced divs (`_md_fenced_div`, which writes an
-# id and a language but no class). Outside a stream the mark enters one.
+# Block content is laid out by `HTMX.markdown_div`: a fenced div where a block
+# can start, else (a table cell, a list item, a link, a heading) a span holding
+# it on its line. The label reads as a block's first line or as a span's lead.
 function Base.show(io::IO, m::MIME"text/markdown", x::_PrivateMark)
-    io isa HTMX._MDStream || return show(io, m, h.div(x))
     label = _private_label(page_lang())
     _in_private_mark() do
         if _private_md_in_place(x.content)
             foreach(c -> show(io, m, c), vcat(_private_md_labelled(x.content, label)))
-        elseif _private_block(x.content) && !get(io, :md_table_cell, false)
-            HTMX._md_block_start(io)
-            HTMX._md_blank_line(io)
-            print(io, "::: {.htmxo-private}\n\n*", label, "*")
-            show(io, m, h.div(x.content))
-            HTMX._md_end_line(io)
-            print(io, ":::\n\n")
+        elseif _private_block(x.content)
+            block = HTMX.markdown_block_context(io)
+            HTMX.markdown_div(io; class="htmxo-private") do io
+                print(io, "*", label, block ? "*" : ":* ")
+                show(io, m, (block ? h.div : h.span)(x.content))
+            end
         else
             print(io, "[*", label, ":* ")
             show(io, m, h.span(x.content))

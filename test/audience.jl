@@ -211,6 +211,14 @@ end
     @test count("not public", md(private(h.div(h.p("o"), private(h.p("i")))))) == 1
     @test !occursin("not public", md(private(h.p("S"); mark=false)))
     @test !occursin("not public", to_markdown_string(private(h.p("S"); public=h.p("P")); audience=:public))
+    # Where a fence would break the line, block content is one span holding it
+    # on its line (HTMX.markdown_div): a heading, list item, link or table cell
+    # stays whole.
+    @test md(h.h2(private(h.div("SECRET")))) == "## [*not public:* SECRET]{.htmxo-private}\n"
+    @test md(h.ul(h.li(private(h.p("SECRET"))))) == "- [*not public:* \\\nSECRET]{.htmxo-private}\n"
+    @test md(h.a(private(h.p("SECRET")); href="/x")) == "[[*not public:* \\\nSECRET]{.htmxo-private}](/x)"
+    @test occursin("| [*not public:* <br>cell]{.htmxo-private} |",
+                   md(h.table(h.thead(h.tr(h.th("A"))), h.tbody(h.tr(h.td(private(h.p("cell"))))))))
     # The label follows the page's language.
     @test occursin("*nicht öffentlich*", _with_page_meta(() -> md(private(h.p("S"))), (; lang="de-DE", title=nothing)))
     # Code that renders Markdown itself names its language, as it names its
