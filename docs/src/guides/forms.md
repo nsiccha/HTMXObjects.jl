@@ -153,6 +153,52 @@ inputs; scalar blanks retain their default behavior. Markdown reads show all
 selected labels. Records vector fields and `set_inputs` use the same selection
 semantics.
 
+## Numbers from a range
+
+From 0.1.119, a number input declares the numbers it takes, and how a reader
+picks one, in its `@options`:
+
+```@example forms
+@htmx struct Shielding
+    "Attenuation per mm of snow water"
+    @param attenuation::Float64 = 0.004
+    @options(attenuation) = number_domain(0.001, 0.015; log=true, digits=4)
+    "Snow density"
+    @param density::Float64 = 300.0
+    @options(density) = number_domain(50, 600; step=10, unit="kg/m³")
+    @get curve() = h.p(attenuation, " per mm at ", density, " kg/m³")
+    @get index() = semantic_app(__self__; presentation=:tabs,
+        select=entry -> entry.name !== :index)
+end
+route!(Shielding(); prefix="/shielding", operation_policy=:blocking);
+refused = dispatch(:GET, "/shielding/curve?attenuation=0.5");
+@assert refused.status == 400 # hide
+println(refused.status)
+println(number_record(number_domain(0.001, 0.015; log=true, digits=4)))
+```
+
+The generated form draws each as a slider with a number field beside it,
+followed by the unit. A `log` domain spaces the slider evenly in ratio, for a
+positive quantity spanning orders of magnitude. A slider value lies on the
+`step` grid counted from the lower bound; without a step it keeps `digits`
+decimal places, or three significant digits. Typing in the field moves the
+slider. Results and the page address follow the field once the slider is
+released. Without JavaScript, the field alone still submits.
+
+A number outside the interval answers 400 at its field, for `@param`s,
+operation arguments and JSON bodies alike, as a value outside a finite
+`@options` list does. A bare interval, `@options(share) = 0 .. 1` (any
+IntervalSets interval of numbers, open ends included), is the same domain with
+no other settings. An interval with an infinite end gets a field without a
+slider. Ranges are never listed as choices.
+
+`number_record(domain)` returns the domain as plain data. Each generated
+control also carries it as JSON in its label's `data-htmxo-number`, so a page
+script computing in the browser reads the bounds, scale, step, decimal places
+and unit from the page, and follows the value through the field's `input`
+events. Place the same control by hand with
+`ninput((; attenuation); domain=number_domain(…))`.
+
 ## Options loaded from an address
 
 A list with thousands of options, or one that several forms on a page share,

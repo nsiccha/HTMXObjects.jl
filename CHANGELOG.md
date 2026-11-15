@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.119
+
+- `number_domain(lower .. upper; log, step, digits, unit)` declares, in a
+  number input's `@options`, which numbers it takes and how a reader picks
+  one. `semantic_app` and `operation_form` draw it as a slider with a number
+  field beside it and the unit after it; a `log` domain spaces the slider
+  evenly in ratio. A bare interval, `@options(x) = 0 .. 1`, is the same domain
+  without settings. A submitted number outside the interval answers 400 at its
+  field, for `@param`s, operation arguments and JSON bodies. Before, an
+  interval `@options` was ignored: any number was accepted and the field had
+  no bounds. A form value outside the range recovers the default, as an
+  unavailable choice does.
+- `number_record(domain)` gives the domain as plain data, and each generated
+  control carries it as JSON in `data-htmxo-number`, for page scripts that
+  compute in the browser.
+- `ninput(nv; domain)` draws the same control by hand. The `htmx()` shell
+  carries the new `number_control_script()`, which keeps the slider and the
+  field on one value; the field alone still works without it.
+
 ## 0.1.118
 
 - A `tabset`'s default `id` also reads what the call names the tabset by: its
