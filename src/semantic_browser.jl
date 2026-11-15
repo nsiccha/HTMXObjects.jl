@@ -110,6 +110,8 @@ Julia's `string` writes it (rounded to `digits` decimals); a page that computes
 the property in the browser rewrites it there after each change. With `columns`
 it is the property's equal-length vector outputs as a Tables.jl table, for a
 plot's `data(...)`; give the element showing it [`bound_columns_attrs`](@ref).
+The table is its own `Tables.columns`, so a plotting package that keeps the
+columns of its data, as AlgebraOfGraphics' `data(...)` does, still holds it.
 
 The `@htmx` macro recognizes `bound(...)` calls in its struct and records which
 value each names, so `bound` needs no import there; it has no meaning outside
@@ -136,7 +138,10 @@ end
 
 What `bound(x; columns)` is on the server: the property's chosen equal-length
 vector outputs as a Tables.jl table, and the path a browser page reads them
-from.
+from. It is its own `Tables.columns`, so what a plotting package keeps of its
+data (the `Layer.data` of AlgebraOfGraphics' `data(b)`) is still `b`, and the
+element drawing it can take [`bound_columns_attrs`](@ref)`(b)`. Its columns are
+the chosen outputs only; the property's other outputs are not part of the table.
 """
 struct BoundColumns{T}
     path::Vector{Any}
@@ -168,23 +173,38 @@ function _bound_columns(path, value, columns)
     BoundColumns(path, value, names)
 end
 
-_bound_label(path) = join((p isa Integer ? string("[", p, "]") : string(i == 1 ? "" : ".", p.value)
+# The lowering's path holds symbols (`(:line, :x)`); a `QuoteNode` is taken too.
+_bound_label(path) = join((p isa Integer ? string("[", p, "]") :
+                           string(i == 1 ? "" : ".", p isa QuoteNode ? p.value : p)
                            for (i, p) in enumerate(path)), "")
 _bound_wire(path) = Any[p isa QuoteNode ? string(p.value) : p for p in path]
 
 Tables.istable(::Type{<:BoundColumns}) = true
 Tables.columnaccess(::Type{<:BoundColumns}) = true
-Tables.columns(b::BoundColumns) =
-    NamedTuple{Tuple(b.columns)}(Tuple(getproperty(b.value, c) for c in b.columns))
+# Its own columns, so the path survives `Tables.columns` (a plot's `data(...)`).
+# Not a `Tables.AbstractColumns`: that would make `b.path` a column lookup.
+Tables.columns(b::BoundColumns) = b
+Tables.columnnames(b::BoundColumns) = Tuple(b.columns)
+Tables.getcolumn(b::BoundColumns, i::Int) = getproperty(b.value, b.columns[i])
+function Tables.getcolumn(b::BoundColumns, c::Symbol)
+    c in b.columns || throw(ArgumentError(string(
+        "bound(…; columns): the table of ", _bound_label(b.path), " has the columns ",
+        join(b.columns, ", "), ", not `", c, "`; name it in `columns`")))
+    getproperty(b.value, c)
+end
+Tables.schema(b::BoundColumns) = Tables.Schema(Tuple(b.columns),
+    Tuple(eltype(getproperty(b.value, c)) for c in b.columns))
 
 """
     bound_columns_attrs(b::BoundColumns; dataset="source_0") -> NamedTuple
 
 The attributes of the element that shows the table `bound(x; columns)` made,
-such as the element of a plot drawn from it. After the browser computes the
-property again, a page calls `AoV.updateData(id, rows, dataset)` for an element
-with an `id` (AlgebraOfVega's runtime) and raises `htmxo:bound-columns` on it
-with the new columns in `event.detail`.
+such as the element of a plot drawn from it. Since `Tables.columns(b) === b`,
+what a plotting package kept of the table's columns is `b` too. After the
+browser computes the property again, a page calls
+`AoV.updateData(id, rows, dataset)` for an element with an `id`
+(AlgebraOfVega's runtime) and raises `htmxo:bound-columns` on it with the new
+columns in `event.detail`.
 """
 bound_columns_attrs(b::BoundColumns; dataset::AbstractString="source_0") =
     (; data_htmxo_bound_columns=JSON.json(Dict("path" => _bound_wire(b.path),

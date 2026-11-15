@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.125
+
+- The table `bound(x; columns)` makes is its own `Tables.columns`, so it
+  stays bound inside a plot's data: AlgebraOfGraphics' `data(b)` keeps
+  `Tables.columns(b)`, which is now `b` itself and no longer a plain named
+  tuple of its columns, so a plotting package reading a layer's data back can
+  call `bound_columns_attrs` on it for the element that draws it. Its columns
+  are only the chosen outputs: asking it for another output is an
+  `ArgumentError` naming the columns it has.
+- `bound(x; columns)` naming an output `x` lacks, an output that is not a
+  vector, or outputs of different lengths raises the `ArgumentError` naming
+  `x` that it was written to raise, where it raised
+  `type Symbol has no field value`.
+
 ## 0.1.124
 
 - `format_date(d; texts = table_texts(), style = :long)` writes a `Date` in
