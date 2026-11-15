@@ -54,6 +54,8 @@ using TestItemRunner
                   h.p("second ", bound(line.at[2]); class = "second"),
                   h.p("slope ", bound(a), " extra ", bound(extra; digits = 2)),
                   h.div(; id = "plot1", bound_columns_attrs(bound(line; columns = (:x, :y)))...),
+                  # A single value: a table of one row, such as a rule's.
+                  h.div(; id = "rule1", bound_columns_attrs(bound(line; columns = (:total,)))...),
                   h.p(bound(line.lim), " ", bound(line.z), " ", bound(line.ok[1]), bound(line.ok[2]);
                       class = "echo")) :
             h.p("total only ", bound(line.total; digits = 1); class = "total")
@@ -245,6 +247,48 @@ end
     @test e2 isa ArgumentError && occursin("line.fit has no output `nope`", e2.msg)
 end
 
+@testitem "bound(…; columns) of single-value outputs is a table of one row" tags=[:unit, :semantic] begin
+    using HTMXObjects, Tables
+    m = Module()
+    Core.eval(m, :(using HTMXObjects))
+    Core.eval(m, :(@htmx struct Ruled
+        grid = [0.0, 1.0, 2.0]
+        prediction = (; water = grid, share = 2 .* grid, half = 1.5, n = 3, label = "half")
+        curves = bound(prediction; columns = (:water, :share))
+        rule = bound(prediction; columns = (:half,))
+        marks = bound(prediction; columns = (:half, :n, :label))
+    end))
+    rule = Core.eval(m, :(Ruled().rule))
+    @test rule isa HTMXObjects.BoundColumns
+    @test Tables.columns(rule) === rule
+    @test Tables.columnnames(rule) == (:half,)
+    @test Tables.getcolumn(rule, :half) == [1.5]
+    @test Tables.getcolumn(rule, 1) == [1.5]
+    @test Tables.schema(rule) == Tables.Schema((:half,), (Float64,))
+    @test Tables.rowtable(rule) == [(half = 1.5,)]
+    # The same table as a length-1 vector output gives, which a plot already draws.
+    @test Tables.columntable(rule) ==
+          Tables.columntable(HTMXObjects._bound((:prediction,), (; half = [1.5]); columns = (:half,)))
+    @test occursin("\"columns\":[\"half\"]", bound_columns_attrs(rule).data_htmxo_bound_columns)
+    marks = Core.eval(m, :(Ruled().marks))
+    @test Tables.schema(marks) == Tables.Schema((:half, :n, :label), (Float64, Int, String))
+    @test Tables.rowtable(marks) == [(half = 1.5, n = 3, label = "half")]
+    # Vector outputs are unchanged beside it.
+    @test Tables.rowtable(Core.eval(m, :(Ruled().curves)))[3] == (water = 2.0, share = 4.0)
+    # A table does not mix single values and vectors: the error names both and
+    # the table the single values can have.
+    value = (; water = [1.0, 2.0], share = [0.5, 0.25], half = 1.5, n = 3, grid = [1 2; 3 4])
+    e = try; HTMXObjects._bound((:prediction,), value; columns = (:water, :half, :share, :n)); nothing; catch err; err; end
+    @test e isa ArgumentError
+    @test e !== nothing && occursin("the outputs `half`, `n` (single values) and `water`, `share` (vectors) of prediction cannot share a table", e.msg)
+    @test e !== nothing && occursin("bound(prediction; columns = (:half, :n))", e.msg)
+    e1 = try; HTMXObjects._bound((:prediction,), value; columns = (:half, :water)); nothing; catch err; err; end
+    @test e1 !== nothing && occursin("bound(prediction; columns = (:half,))", e1.msg)
+    # An output that is neither a vector nor a single number or text is refused.
+    e2 = try; HTMXObjects._bound((:prediction,), value; columns = (:grid,)); nothing; catch err; err; end
+    @test e2 isa ArgumentError && occursin("prediction.grid is a Matrix{Int64}, neither a vector nor a single number or text", e2.msg)
+end
+
 @testitem "export_site writes a browser page and names what a static page would show stale" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects
     route!(Lines(); operation_policy = :blocking)
@@ -314,14 +358,19 @@ end
             const floats = ($(repr(floats))).map(window.__htmxoJuliaFloat).join(' ');
             if (floats !== $(repr(join(expected_floats, " "))))
               throw new Error('julia floats: ' + floats);
-            let columns = null;
-            document.addEventListener('htmxo:bound-columns', e => { columns = e.detail; });
+            let columns = null, rule = null;
+            document.addEventListener('htmxo:bound-columns', e => {
+              if (e.target.id === 'rule1') rule = e.detail; else columns = e.detail;
+            });
             await fetch('/mark?phase=start');
             type('a', '3'); type('b', '4');
             await until(() => shown() === '7.0|10.0|3.0|0.5', 'a=3 b=4: ' + shown());
             // Computed in the browser from embedded Inf and -0.0, both intact.
             if (echo() !== 'Inf|-0.0|1|1') throw new Error('non-finite data: ' + echo());
             if (!columns || columns.columns.y.join(',') !== '4,7,10') throw new Error('columns: ' + JSON.stringify(columns));
+            // A single value's table keeps its one row: the new value, not none.
+            if (!rule || rule.n !== 1 || JSON.stringify(rule.columns) !== '{"total":[7]}')
+              throw new Error('one-row columns: ' + JSON.stringify(rule));
             await until(() => relevant('extra'), 'extra applies (a*b > 10)');
             type('extra', '0.125');
             await until(() => shown() === '7.0|10.0|3.0|0.12', 'extra digits: ' + shown());
