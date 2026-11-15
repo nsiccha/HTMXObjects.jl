@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.1.134
+
+- `number_domain(…; digits=k)` sets how many decimals the generated number
+  field **shows** while the reader is not editing it, written as
+  `format_number(x; digits=k)` writes it: with `digits=4` a fitted default of
+  0.003035586062774531 shows as `0.0030` (0.004 as `0.0040`) instead of the
+  full value clipped by the field. Only the text is rounded: the field keeps
+  the exact value, so the form submits it, `@browser` results read it, the
+  page address leaves out a value equal to its default, Reset writes the
+  default back, and clicking or tabbing into the field shows the value in
+  full for typing. The rounded text is drawn over the field (`<span
+  class="htmxo-number-value">` around the field holds a
+  `.htmxo-number-shown` text, hidden from assistive technology) and
+  `number_control_script` keeps it on the field's value; a page without the
+  script shows the field's own text. `digits` is 0 to 10.
+- **Behaviour change:** a value picked on the slider of a domain without
+  `step` keeps three significant digits whether or not `digits` is given, as
+  the explainer pictures pick them. Before, `digits` rounded slider values to
+  that many decimals (0.0039 for `digits=4` where three significant digits give
+  0.00387), which made a `log` slider jump in 10 % steps at its low end, and
+  `digits` did not change what the field showed.
+
 ## 0.1.133
 
 - Requires HTMX.jl 1.3 (`[compat] HTMX = "1.3"`). A report's Markdown

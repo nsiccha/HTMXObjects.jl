@@ -29998,7 +29998,7 @@ end
 
 The numbers an input takes, with how a reader picks one: an interval of
 numbers, whether the reader moves through it evenly in ratio (`log`), the
-`step` between values, the decimal places a value picked on the slider keeps
+`step` between values, the decimal places the field shows its value with
 (`digits`) and the `unit`. Construct it with [`number_domain`](@ref).
 
 It is a domain, as DynamicObjects reads one: `in` tells whether a number lies
@@ -30059,9 +30059,18 @@ domain with no other settings. The label and help text stay where they are
 - `step` is the spacing of the values the slider and the field offer, counted
   from the lower bound (the field's `step`). The server checks only the
   interval. Without it the field takes any number and a value picked on the
-  slider keeps `digits` decimal places, or three significant digits. An
-  integer input takes whole numbers either way.
-- `digits` is the number of decimal places a value picked on the slider keeps.
+  slider keeps three significant digits, as the explainer pictures pick
+  them. An integer input takes whole numbers either way.
+- `digits` is the number of decimal places (0 to 10) the field shows its
+  value with while the reader is not editing it, as
+  [`format_number`](@ref)`(x; digits)` writes it: with `digits=4` a default
+  of 0.003035586062774531 shows as `0.0030`, and 0.004 as `0.0040`. Only the
+  text is rounded. The value stays exact: the form submits it, a result
+  computed in the browser reads it, the page address leaves out a value equal
+  to its default, Reset writes the default back, and clicking or tabbing into
+  the field shows it in full for typing. A typed number is kept as typed and
+  shown rounded once the field is left. Without `digits` the field shows the
+  value as its shortest exact text.
 - `unit` is written after the field.
 
 An interval with an infinite end has no slider: its field takes the finite
@@ -30081,8 +30090,9 @@ function number_domain(interval::IntervalSets.AbstractInterval; log::Bool=false,
         "number_domain(…; log=true) is for a positive quantity with finite bounds; got ", repr(interval))))
     step === nothing || (step isa Real && isfinite(step) && step > 0) || throw(ArgumentError(string(
         "number_domain: step must be a positive number; got ", repr(step))))
-    digits === nothing || (digits isa Integer && digits >= 0) || throw(ArgumentError(string(
-        "number_domain: digits must be a whole number of decimal places, 0 or more; got ", repr(digits))))
+    digits === nothing || (digits isa Integer && 0 <= digits <= length(_SUMMARY_POW10) - 1) || throw(ArgumentError(string(
+        "number_domain: digits must be a whole number of decimal places from 0 to ",
+        length(_SUMMARY_POW10) - 1, "; got ", repr(digits))))
     unit === nothing || unit isa AbstractString || throw(ArgumentError(string(
         "number_domain: unit must be text; got ", repr(unit))))
     NumberDomain(interval, log, step, digits === nothing ? nothing : Int(digits),
@@ -30179,6 +30189,7 @@ function _number_control(name, label, domain::NumberDomain, value;
         value isa Real ? _number_control_value(value) : string(value)
     field = h.input(; type="number", name=string(name), value=shown, field_attrs...,
                     data_htmxo_number_field="", kwargs...)
+    domain.digits === nothing || (field = _number_shown_field(field, domain.digits, value))
     unit = domain.unit === nothing ? () : (h.span(domain.unit; class="htmxo-number-unit"),)
     slider = if _number_has_slider(domain)
         first_position, last_position = _number_slider_ends(domain)
@@ -30193,6 +30204,23 @@ function _number_control(name, label, domain::NumberDomain, value;
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     h.label(label, h.span(field, unit..., slider...; class="htmxo-number");
             data_htmxo_number=JSON.json(record), show_attrs...)
+end
+
+# The field of a domain with `digits`, which shows its value to that many
+# decimals while the reader is not editing it (`format_number(x; digits)`:
+# `0.0030` for 0.003035586062774531 with `digits=4`). The field keeps the
+# exact value, so the form, a result computed in the browser, the page
+# address and Reset read it unchanged; the rounded text is drawn over the
+# field (`.htmxo-number-shown`, hidden from assistive technology, which reads
+# the field) and `number_control_script` keeps it on the field's value. A box
+# whose text is current carries `data-htmxo-number-shown`; without it (no
+# value yet) the field shows its own text, and so does a page without the
+# script, whose styles draw the text only once the script has marked the page.
+function _number_shown_field(field, digits::Int, value)
+    x = value isa Real ? value : value isa AbstractString ? tryparse(Float64, value) : nothing
+    text = x !== nothing && isfinite(x) ? format_number(x; digits) : nothing
+    h.span(field, h.span(something(text, ""); class="htmxo-number-shown", aria_hidden="true");
+           class="htmxo-number-value", (text === nothing ? (;) : (; data_htmxo_number_shown=""))...)
 end
 
 """
@@ -34444,9 +34472,13 @@ The control is a `<label data-htmxo-number>` holding the number field, which
 is the named input the form submits, the unit, and an unnamed slider over
 positions 0…500. Moving the slider writes its value into the field, spaced
 evenly in ratio for a `log` domain, on the `step` grid from the lower bound,
-else to `digits` decimal places, else to three significant digits (as the
-explainer pictures pick slider values). Typing a number in the field moves the
-slider. The slider's own `input` and `change` events stop at it, and the field
+else to three significant digits (as the explainer pictures pick slider
+values). Typing a number in the field moves the slider. A domain with `digits`
+shows the field's value rounded to them while the reader is not editing it,
+written as [`format_number`](@ref) writes it, and the text follows every
+change the field announces (typing, the slider, Reset, the page address) and
+the values the browser fills in again on returning to a page; the field itself
+keeps the exact value. The slider's own `input` and `change` events stop at it, and the field
 sends them instead, so a form, an htmx trigger, a result that follows its
 inputs and the page address each see one change of the field: while dragging,
 `input` events; on release, one `change`. A result computed in the browser
@@ -34478,7 +34510,8 @@ number_control_script() = h.script(Raw(raw"""
       (d.closed[1] ? v <= d.upper : v < d.upper);
   }
   // The number at a slider position: evenly in ratio for a log domain; on the
-  // step grid, else to its decimal places, else to three significant digits.
+  // step grid, else to three significant digits (the explainer pictures'
+  // `fromSlider`). `digits` rounds only the text the field shows (`show`).
   function fromSlider(d, position) {
     var share = position / STEPS;
     var raw = d.log ? d.lower * Math.pow(d.upper / d.lower, share) : d.lower + (d.upper - d.lower) * share;
@@ -34487,8 +34520,6 @@ number_control_script() = h.script(Raw(raw"""
       var k = Math.round((raw - d.lower) / d.step);
       v = Number((d.lower + k * d.step).toPrecision(12));
       if (!inside(d, v)) v = Number((d.lower + (v > raw ? k - 1 : k + 1) * d.step).toPrecision(12));
-    } else if (d.digits !== null && d.digits !== undefined) {
-      v = Number(raw.toFixed(d.digits));
     } else {
       v = Number(raw.toPrecision(3));
     }
@@ -34523,6 +34554,56 @@ number_control_script() = h.script(Raw(raw"""
   }
   document.addEventListener('input', follow);
   document.addEventListener('change', follow);
+  // A field with `digits` shows its value rounded to them while the reader is
+  // not editing it: the text over it (`.htmxo-number-shown`) follows every
+  // announced change of the field, written as `format_number(x; digits)`
+  // writes it (`htmxoNumberText`, in the language of the nearest
+  // `data-htmxo-texts`). The field keeps the exact value. The page's styles
+  // draw the text only on a page this script marked, so a page without it
+  // shows the field's own text.
+  document.documentElement.setAttribute('data-htmxo-number-display', '');
+  function show(field) {
+    var box = field.parentNode, out = box && box.querySelector && box.querySelector(':scope > .htmxo-number-shown');
+    var holder = field.closest && field.closest('[data-htmxo-number]');
+    if (!out || !holder) return;
+    var spec;
+    try { spec = JSON.parse(holder.getAttribute('data-htmxo-number')); } catch (_) { return; }
+    var x = Number(field.value);
+    if (spec.digits === null || spec.digits === undefined || field.value === '' || !isFinite(x)) {
+      box.removeAttribute('data-htmxo-number-shown');
+      return;
+    }
+    out.textContent = typeof htmxoNumberText === 'function' ?
+      htmxoNumberText(x, {digits: spec.digits, texts: typeof htmxoTexts === 'function' ? htmxoTexts(field) : undefined}) :
+      x.toFixed(spec.digits);
+    // The text sits where the field writes its own: the field's font, and its
+    // padding plus border on either side (the styles assume Pico's until then).
+    if (!out.htmxoAligned) {
+      var cs = getComputedStyle(field);
+      ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing'].forEach(function(k) { out.style[k] = cs[k]; });
+      out.style.paddingLeft = 'calc(' + cs.paddingLeft + ' + ' + cs.borderLeftWidth + ')';
+      out.style.paddingRight = 'calc(' + cs.paddingRight + ' + ' + cs.borderRightWidth + ')';
+      out.htmxoAligned = true;
+    }
+    box.setAttribute('data-htmxo-number-shown', '');
+  }
+  function shown(e) {
+    var t = e.target;
+    if (t && t.matches && t.matches('input[data-htmxo-number-field]')) show(t);
+  }
+  document.addEventListener('input', shown);
+  document.addEventListener('change', shown);
+  // Fields drawn by the page or swapped in, and fields the browser filled
+  // again on returning to the page, without announcing it.
+  function showAll(root) {
+    if (!root || !root.querySelectorAll) return;
+    Array.prototype.forEach.call(root.querySelectorAll('.htmxo-number-value > input[data-htmxo-number-field]'), show);
+  }
+  if (document.readyState === 'loading')
+    document.addEventListener('DOMContentLoaded', function() { showAll(document); });
+  else showAll(document);
+  window.addEventListener('pageshow', function() { showAll(document); });
+  document.addEventListener('htmx:load', function(e) { showAll(e.target); });
 })();
 """))
 
@@ -38459,6 +38540,22 @@ tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain:
 .htmxo-number > input[type="range"] { order: 0; flex: 1 1 6rem; width: auto; min-width: 5rem; }
 .htmxo-number > input[type="number"] { order: 1; flex: 0 0 7rem; width: 7rem; }
 .htmxo-number > .htmxo-number-unit { order: 2; white-space: nowrap; }
+/* A field with `digits` (`.htmxo-number-value`): while the reader is not
+   editing it, its value rounded to them is drawn over it and the field's own
+   text is hidden; the field keeps the exact value. Only on a page that
+   `number_control_script` marked, which keeps the text on the field. */
+.htmxo-number > .htmxo-number-value { order: 1; flex: 0 0 7rem; width: 7rem; position: relative; display: flex; }
+/* No colour transition (Pico fades `color`): editing shows the value at once. */
+.htmxo-number-value > input[type="number"] { width: 100%; margin: 0;
+  transition: background-color var(--pico-transition), border-color var(--pico-transition), box-shadow var(--pico-transition); }
+.htmxo-number-value > .htmxo-number-shown { display: none; }
+:root[data-htmxo-number-display] .htmxo-number-value[data-htmxo-number-shown]:not(:focus-within) > input[type="number"] { color: transparent; }
+:root[data-htmxo-number-display] .htmxo-number-value[data-htmxo-number-shown]:not(:focus-within) > .htmxo-number-shown {
+  display: flex; align-items: center; position: absolute; inset: 0; pointer-events: none;
+  padding: 0 calc(var(--pico-form-element-spacing-horizontal, 1rem) + var(--pico-border-width, 1px));
+  overflow: hidden; white-space: nowrap; color: var(--pico-color, inherit); font-size: 1rem;
+  font-weight: var(--pico-font-weight, 400);
+}
 
 /* A numbered document's contents list (`contents`): a bordered box, each line
    a section number in a column of its own and the title linking to the
