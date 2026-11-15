@@ -2,7 +2,7 @@ using TestItemRunner
 
 @testmodule BrowserFixtures begin
     using HTMXObjects
-    export Lines, StaleCaption, ServerTwin, OpaqueHelp, Shield, TOY_JS, browser_region, bound_texts
+    export Lines, StaleCaption, ServerTwin, OpaqueHelp, Shield, Grid, TOY_JS, browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -150,6 +150,62 @@ using TestItemRunner
             render_table(bound(shield; columns = (:half,)); columns = [:half => ColumnSpec("Half (mm)"; digits = 0)]))
     end
 
+    # Matrix data in the shape `ReactiveKernels.js_source` modules take
+    # (RK 0.1.264, decision `1r7ufgm`): the array of its rows, rows of one
+    # length (arrays or typed arrays), and a matrix without rows as an empty
+    # array whose `cols` is its column count. The module checks its inputs as
+    # RK's `_rk_matrix` does, so a page that passed columns, a flat run or a
+    # bare `[]` for `zeros(0, 3)` would read other numbers or raise.
+    const GRID_JS = """
+    export class JuliaError extends Error {
+      constructor(type, message) { super(message); this.name = type; }
+    }
+    function cols(name, x, element) {
+      if (!Array.isArray(x)) throw new JuliaError("ArgumentError", "the input `" + name + "` must be an array of rows; got " + x);
+      for (let i = 0; i < x.length; i++) {
+        const r = x[i];
+        if (!(Array.isArray(r) || ArrayBuffer.isView(r)) || r.length !== x[0].length)
+          throw new JuliaError("ArgumentError", "the input `" + name + "` must have rows of one length");
+        for (let j = 0; j < r.length; j++)
+          if (typeof r[j] !== element) throw new JuliaError("ArgumentError", "the input `" + name + "` must hold " + element + "s");
+      }
+      if (x.length === 0 && x.cols !== undefined && !Number.isInteger(x.cols))
+        throw new JuliaError("ArgumentError", "the input `" + name + "` has no rows and a column count of " + x.cols);
+      return x.length > 0 ? x[0].length : Number.isInteger(x.cols) ? x.cols : 0;
+    }
+    export function grid(m, none, wide, flags, scale) {
+      const n = cols("m", m, "number"), nn = cols("none", none, "number"), nw = cols("wide", wide, "number");
+      cols("flags", flags, "boolean");
+      return { corner: m[0][1] * scale, last: m[m.length - 1][n - 1] * scale, size: [m.length, n],
+               none: [none.length, nn], wide: [wide.length, nw],
+               inf: m[1][0] === Infinity ? 1 : 0, flag: flags[1][0] ? 1 : 0 };
+    }
+    export const INPUTS = [{ name: "m", type: "Matrix{Float64}" }, { name: "none", type: "Matrix{Float64}" },
+      { name: "wide", type: "Matrix{Float64}" }, { name: "flags", type: "Matrix{Bool}" }, { name: "scale", type: "Float64" }];
+    """
+
+    @htmx struct Grid
+        "Scale"
+        @param scale::Float64 = 1.0
+        # Read by rows `m[1, 2]` is 2; a column-major page would hand the
+        # module 5 there, and `flags[2, 1]` would read false.
+        m = [1.0 2.0 3.0; Inf 5.0 6.0]
+        none = zeros(0, 3)
+        wide = zeros(2, 0)
+        flags = [false false; true false]
+        grid = (; corner = m[1, 2] * scale, last = m[end, end] * scale, size = [size(m)...],
+                none = [size(none)...], wide = [size(wide)...],
+                inf = m[2, 1] == Inf ? 1 : 0, flag = flags[2, 1] ? 1 : 0)
+        @browser(grid) = browser_module(; source = GRID_JS, entry = :grid)
+        __page__(content) = HTMXObjects.htmx(content; title = "Grid", assets = "assets/vendor", runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Result"
+        @get result() = h.p(bound(grid.corner), " ", bound(grid.last), " ", bound(grid.size[1]), "x",
+                            bound(grid.size[2]), " ", bound(grid.none[1]), "x", bound(grid.none[2]), " ",
+                            bound(grid.wide[1]), "x", bound(grid.wide[2]), " ", bound(grid.inf), bound(grid.flag);
+                            class = "grid")
+    end
+
     browser_region(html) = match(r"<div id=\"[^\"]*-result\"[^>]*data-htmxo-browser=[^>]*>", html)
     bound_texts(html) = [m.captures[1] for m in eachmatch(r"<span data-htmxo-bound=\"[^\"]*\"[^>]*>([^<]*)</span>", html)]
 end
@@ -245,6 +301,33 @@ end
     @test occursin(r"total 7(?![.\d])", plain) && occursin(r"second 10(?![.\d])", plain) && occursin(r"slope 3(?![.\d])", plain)
     @test HTMXObjects._browser_skeleton("<p><span data-htmxo-bound=\"[&quot;a&quot;]\" data-htmxo-kind=\"float\">2.0</span> <div id=\"p\" data-htmxo-bound-columns=\"x\"><div><script>var s = '</div>';</script>1</div></div></p>") ==
           "<p><span data-htmxo-bound=\"[&quot;a&quot;]\" data-htmxo-kind=\"float\"></span> <div id=\"p\" data-htmxo-bound-columns=\"x\"></div></p>"
+end
+
+@testitem "a browser module takes matrix data as the array of its rows" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, JSON
+    # Snag browser-module-m-1d4c9b53: a Matrix argument was refused with a 500.
+    route!(Grid(); operation_policy = :blocking)
+    response = dispatch(:GET, "/"; headers = ["HX-Request" => "true"])
+    @test response.status == 200
+    html = String(HTMXObjects._response_bytes(response))
+    binding = JSON.parse(match(r"<script type=\"application/json\" id=\"[^\"]*\" data-htmxo-browser-binding=\"\">([^<]*)</script>", html).captures[1])
+    values = Dict(i["name"] => get(i, "value", nothing) for i in binding["inputs"])
+    # Rows in order, `m[i][j]` Julia's `m[i+1, j+1]`; Inf tagged inside a row.
+    @test values["m"] == Any[Any[1.0, 2.0, 3.0], Any[Dict("\$f" => "Inf"), 5.0, 6.0]]
+    # No rows: the column count, which `[]` cannot carry; no columns: empty rows.
+    @test values["none"] == Dict("\$cols" => 3)
+    @test values["wide"] == Any[Any[], Any[]]
+    @test values["flags"] == Any[Any[false, false], Any[true, false]]
+    @test binding["inputs"][end]["param"] == "scale"
+    @test bound_texts(html) == ["2", "6", "2", "3", "0", "3", "2", "0", "1", "1"]
+    # Any AbstractMatrix, by its axes; 0×0 is `[]`.
+    @test HTMXObjects._browser_data([1 2; 3 4]', "x") == Any[Any[1, 3], Any[2, 4]]
+    @test HTMXObjects._browser_data(zeros(0, 0), "x") == Any[]
+    @test HTMXObjects._browser_data(BitMatrix([1 0]), "x") == Any[Any[true, false]]
+    # Higher dimensions stay refused, naming what the page passes.
+    err = try HTMXObjects._browser_data(zeros(2, 2, 2), "cube"); nothing catch e; e end
+    @test err isa ArgumentError && occursin("`cube` is a Array{Float64, 3}", err.msg) &&
+          occursin("vectors and matrices of them", err.msg)
 end
 
 @testitem "bound(…; columns) stays bound inside a plot's data: it is its own Tables.columns" tags=[:unit, :semantic] begin
@@ -498,6 +581,82 @@ end
             stop = findfirst(==("/mark?phase=end"), requests)
             @test start !== nothing && stop !== nothing
             @test start !== nothing && stop !== nothing && stop == start + 1
+        end
+    end
+end
+
+@testitem "a static page hands its browser module matrix data as rows, offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(Grid(); operation_policy = :blocking)
+        HTMXObjects.vendorfiles("assets/vendor")
+        driver = """
+        <script>
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const region = () => document.querySelector('[data-htmxo-browser]');
+          const shown = () => region().querySelector(':scope > .htmxo-browser-view .grid').textContent;
+          const fault = () => { const n = region().querySelector('.htmxo-browser-fault'); return n ? n.textContent : ''; };
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + label + ' [' + shown() + '] ' + fault()); await sleep(25); }
+          }
+          try {
+            await until(() => shown() === '2 6 2x3 0x3 2x0 11', 'server view');
+            const c = document.querySelector('input[name="scale"]');
+            c.value = '3';
+            c.dispatchEvent(new Event('change', {bubbles: true}));
+            // Computed in the browser from the rows: m[1, 2] * 3, m[2, 3] * 3,
+            // both shapes kept (0×3 through its `cols`), Inf and the Bool intact.
+            await until(() => shown() === '6 18 2x3 0x3 2x0 11' && fault() === '', 'scale=3');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        </script>
+        """
+        mktempdir() do dir
+            site = joinpath(dir, "site")
+            export_site(site; pages = ["/"])
+            receipt = Channel{String}(1)
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose = false) do req
+                path = HTTP.URI(req.target).path
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                file = joinpath(site, lstrip(path == "/" ? "/index.html" : HTTP.URIs.unescapeuri(path), '/'))
+                isfile(file) || return HTTP.Response(404)
+                body = read(file, String)
+                endswith(file, "index.html") && (body = replace(body, "</body>" => driver * "</body>"))
+                type = endswith(file, ".js") ? "application/javascript" : endswith(file, ".css") ? "text/css" : "text/html"
+                HTTP.Response(200, ["Content-Type" => type], body)
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/index.html`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout = devnull, stderr = browser_log); wait = false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint = 0.05) === :ok
+                        outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                        @test HTTP.URIs.unescapeuri(outcome) == "/complete?status=passed"
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
         end
     end
 end

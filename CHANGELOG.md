@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.138
+
+- A `@browser` module's data argument may be a matrix. The page passes a
+  `Matrix` (any `AbstractMatrix`) property as the array of its rows, `m[i][j]`
+  holding Julia's `m[i+1, j+1]`, which is the shape `ReactiveKernels.js_source`
+  modules take (RK 0.1.264, RK decision `1r7ufgm`); one without rows arrives
+  as an empty array whose `cols` is its column count
+  (`Object.assign([], { cols: 3 })` for `zeros(0, 3)`), and `[]` is 0×0.
+  Entries travel as vector entries do: `Inf`, `NaN` and `-0.0` intact, `Bool`s
+  as booleans. Such a page answered HTTP 500 before, an `ArgumentError` that
+  the argument is a `Matrix{Float64}` (snag `browser-module-m-1d4c9b53`).
+  Arrays of three or more dimensions stay refused.
+
 ## 0.1.137
 
 - A number field drawn from a `number_domain` with a `step` takes any number

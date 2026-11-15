@@ -75,7 +75,12 @@ tuple, or a number or array. An error it throws is shown in the result, under
 its `name` (`DomainError`, …). The page passes each argument by its name: a
 `@param` from its control (`Float64`, `Int64`, `Bool` and vectors of them, or
 text), any other from the property of that name, which must not read an input;
-its value goes into the page as data, `Inf`, `NaN` and `-0.0` included. The module is embedded in the page, so it
+its value goes into the page as data, `Inf`, `NaN` and `-0.0` included: a
+number, a `Bool`, text, or a vector or matrix of them. A matrix is the array of
+its rows, `m[i][j]` holding Julia's `m[i+1, j+1]`, as
+`ReactiveKernels.js_source` modules take it; one without rows is an empty array
+whose `cols` is its column count (`zeros(0, 3)` arrives as
+`Object.assign([], { cols: 3 })`). The module is embedded in the page, so it
 must be one self-contained file. The page imports it from an in-memory `blob:`
 address, once, on its first computation: a browser's request log lists that
 address, though nothing leaves the page.
@@ -559,9 +564,17 @@ _browser_data(x::Real, _) = x
 _browser_data(x::AbstractFloat, _) = isfinite(x) ? x :
     Dict("\$f" => isnan(x) ? "NaN" : x > 0 ? "Inf" : "-Inf")
 _browser_data(x::AbstractVector, name) = Any[_browser_data(v, name) for v in x]
+# A matrix is an array of its rows, `m[i][j]` holding Julia's `m[i+1, j+1]`,
+# as a `ReactiveKernels.js_source` module takes it (RK decision `1r7ufgm`).
+# One without rows keeps its column count, which an empty JSON array cannot
+# carry: it travels as `{"$cols": n}`, and the runtime makes it
+# `Object.assign([], {cols: n})`, as such a module reads it; `[]` is 0×0.
+_browser_data(x::AbstractMatrix, name) = size(x, 1) == 0 && size(x, 2) > 0 ?
+    Dict("\$cols" => size(x, 2)) :
+    Any[Any[_browser_data(x[i, j], name) for j in axes(x, 2)] for i in axes(x, 1)]
 _browser_data(x, name) = throw(ArgumentError(string(
     "the browser module argument `", name, "` is a ", typeof(x), "; the page passes numbers, ",
-    "booleans, text and vectors of them")))
+    "booleans, text, and vectors and matrices of them")))
 
 # --- What a static export of a browser page cannot serve ---
 
@@ -767,10 +780,13 @@ semantic_browser_script() = h.script(Raw(raw"""
     if (type === 'Bool') return s === 'true';
     return s;
   }
-  // Embedded data: a non-finite float arrives as `{"$f": "Inf"}` (JSON has none).
+  // Embedded data: a non-finite float arrives as `{"$f": "Inf"}` (JSON has none),
+  // a matrix as its rows, and one without rows as `{"$cols": n}`: the empty
+  // array that keeps its column count as `cols`, as a module reads it.
   function decoded(v) {
     if (Array.isArray(v)) return v.map(decoded);
     if (v !== null && typeof v === 'object' && has(v, '$f')) return NONFINITE[v.$f];
+    if (v !== null && typeof v === 'object' && has(v, '$cols')) return Object.assign([], {cols: v.$cols});
     return v;
   }
   function argument(input, values) {
