@@ -22420,7 +22420,9 @@ The JS finds the `<tbody>` relative to the clicked header (no hardcoded ID),
 so multiple sortable tables can coexist on the same page. A cell sorts by its
 `data-sort-value`, else by its `data-htmxo-number` (the exact number a
 [`number_cell`](@ref) or a group sum carries), else by its text (a
-master/detail row's label, without its controls). Two values that both start
+master/detail row's label, without its controls; a glossary term's use by its
+text, without the definition [`link_terms`](@ref) places beside it, as the
+search and the ⬇ CSV read it too). Two values that both start
 with a number sort numerically, and when it is the same number by their whole
 texts, each run of digits read as its number (`2 x 5` before `2 x 10`);
 everything else uses `localeCompare`. Rows
@@ -22469,6 +22471,22 @@ sortable_table_js() = h.script(Raw(string(_table_runtime_text(),
 # its `table_runtime` block (`htmx(...; tables=true)`).
 _table_runtime_js() = h.script(Raw(_table_runtime_text()))
 _table_runtime_text() = raw"""
+// The text a cell shows, as its sort key and the search read it: its
+// `textContent` without a glossary term's definition box (`.htmxo-term-def`
+// beside the term's link, `link_terms`), which opens only on hover, focus or a
+// tap. The ⬇ CSV (`downloadTableCsv`'s `lines`) leaves the box out too.
+function htmxoShownText(node) {
+    if (!node.querySelector('.htmxo-term-def')) return node.textContent;
+    let out = '';
+    const walk = n => {
+        for (const c of n.childNodes) {
+            if (c.nodeType === Node.TEXT_NODE) out += c.nodeValue;
+            else if (c.nodeType === Node.ELEMENT_NODE && !c.classList.contains('htmxo-term-def')) walk(c);
+        }
+    };
+    walk(node);
+    return out;
+}
 // The cell that starts at a column. A cell spanning columns counts under its
 // first, and a row has none at the others, so it is not ordered by them.
 function htmxoCellAt(row, col) {
@@ -22520,8 +22538,11 @@ function sortTable(col, th) {
     // visible text. This lets callers force a semantic order (e.g. status:
     // proposed → approved → rejected) without re-encoding the displayed text.
     // `sortable_table(...; default_sort)` writes its rows in this same order
-    // on the server (`_default_sort_rows`): change the two together.
-    const sortKey = cell => (cell.dataset.sortValue ?? cell.dataset.htmxoNumber ?? (cell.querySelector(':scope > [data-htmxo-row-label]') || cell).textContent).trim();
+    // on the server (`_default_sort_rows`): change the two together. The
+    // server reads a cell before the answer's glossary links its terms
+    // (`_glossary_answer`), so it never sees the definition box
+    // `htmxoShownText` leaves out.
+    const sortKey = cell => (cell.dataset.sortValue ?? cell.dataset.htmxoNumber ?? htmxoShownText(cell.querySelector(':scope > [data-htmxo-row-label]') || cell)).trim();
     // A column with several sort keys (`ColumnSpec(...; sort_keys)`) sorts by
     // its active key: the value at that place in each cell's
     // `data-htmxo-sort-keys`. A missing value sorts last in both directions.
@@ -22820,7 +22841,7 @@ function htmxoFilterTable(target) {
         while (path.length) { const n = path.pop(); ordered.add(n); order.push(n); }
     });
     const ownText = node => node.own ??= (node.row.dataset.htmxoSearch ??
-        Array.from(node.row.cells).map(c => (c.querySelector(':scope > [data-htmxo-row-label]') || c).textContent).join(' ')).toLocaleLowerCase();
+        Array.from(node.row.cells).map(c => htmxoShownText(c.querySelector(':scope > [data-htmxo-row-label]') || c)).join(' ')).toLocaleLowerCase();
     const text = node => node.text ??= ownText(node) + htmxoLazyLeaves(node.row).map(([, t]) => ' ' + t.toLocaleLowerCase()).join('');
     const fullText = node => {
         const path = [];
@@ -24913,7 +24934,11 @@ indicator arrows (` ▲`/` ▼`) and a [`ColumnSpec`](@ref)'s `ⓘ` marker are l
 A cell exports the lines it shows: a `<br>` or the edge of a block element (`div`,
 `p`, `li`, …) ends a line, so `h.td(h.strong("6,28"), h.br(), h.small("6,01–6,55"))`
 exports the quoted two-line field `"6,28\\n6,01–6,55"`, not `6,286,01–6,55`. A header's lines
-join with a space, since a column name stays one name. A cell with a
+join with a space, since a column name stays one name. A glossary term's use
+([`link_terms`](@ref)) exports its text alone: the definition beside it and its
+link to the entry show only on hover, focus or a tap, so `Prior: individual
+reports` exports as itself, not as `PriorWhat a Bayesian model …Glossary →:
+individual reports`. A cell with a
 `data-htmxo-number` attribute exports that number instead of the text it shows:
 a [`number_cell`](@ref) (`3.81e-5` for a cell that shows `3,81·10⁻⁵`, an empty
 field for one that shows `–`) and a group summary of [`ColumnSummary`](@ref)
@@ -24939,13 +24964,16 @@ function downloadTableCsv(btn, filename) {
     // (`<strong>6,28</strong><br><small>6,01–6,55</small>` reads
     // "6,286,01–6,55"), so a `<br>` and the edges of a block element end a
     // line, and white space inside a line collapses as the browser shows it.
+    // A glossary term's use (`link_terms`) shows its text: the box beside it
+    // (`.htmxo-term-def`, the definition and its link to the entry) opens only
+    // on hover, focus or a tap, so it is no part of the cell's text.
     const BLOCK = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|SUMMARY|TABLE|TR|UL)$/;
     const lines = node => {
         let out = '';
         const walk = n => {
             for (const c of n.childNodes) {
                 if (c.nodeType === Node.TEXT_NODE) out += c.nodeValue.replace(/\s+/g, ' ');
-                else if (c.nodeType !== Node.ELEMENT_NODE) continue;
+                else if (c.nodeType !== Node.ELEMENT_NODE || c.classList.contains('htmxo-term-def')) continue;
                 else if (c.tagName === 'BR') out += '\n';
                 else if (BLOCK.test(c.tagName)) { out += '\n'; walk(c); out += '\n'; }
                 else walk(c);
@@ -25870,8 +25898,9 @@ that fits its column drops that scroll box so its header can stay in view
 Other keyword arguments behave the same as in [`render_table`](@ref).
 
 # Client-side search
-The search matches a case-insensitive phrase against a row's visible cell text,
-or against its `data-htmxo-search` attribute when the row sets one (for
+The search matches a case-insensitive phrase against a row's visible cell text
+(a glossary term's use by its text, not the definition [`link_terms`](@ref)
+places beside it), or against its `data-htmxo-search` attribute when the row sets one (for
 metadata absent from its cells; it does not affect sorting). A `detail-<key>`
 companion row is never matched or counted; it hides with its master and keeps
 its place through a sort, and sorting a filtered table keeps the filter. The
