@@ -13869,7 +13869,9 @@ failed-request toasts (`request_failed`, `no_response`, `timed_out`,
 that a running request will replace (`loading`, `loading_named`; see
 [`request_feedback_script`](@ref)), and the search field of a long choice
 list (`choice_search`, its placeholder, and `choice_no_match`, shown when no
-option matches; see [`choice_list`](@ref)). Build one with
+option matches; see [`choice_list`](@ref)), and the button of a
+`semantic_app(…; presentation=:tabs)` page that returns every input to its
+default (`reset_inputs`). Build one with
 [`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
@@ -13941,6 +13943,7 @@ struct ErrorTexts
     record_include::String             # ... its on/off box
     record_label::String               # ... the accessible name of its label field
     record_fields::String              # ... the accessible name of its fold control
+    reset_inputs::String               # a semantic_app page's Reset: every input to its default
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -13995,6 +13998,7 @@ const _ERROR_TEXT_LOCALES = (
         record_include = "Include",
         record_label = "Label",
         record_fields = "Fields",
+        reset_inputs = "Reset",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -14037,6 +14041,7 @@ const _ERROR_TEXT_LOCALES = (
         record_include = "Einbeziehen",
         record_label = "Bezeichnung",
         record_fields = "Felder",
+        reset_inputs = "Zurücksetzen",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -32952,27 +32957,63 @@ _semantic_address_wire(value::AbstractVector) =
 _semantic_address_wire(value) = String[_option_wire_string(value)]
 
 # A form's inputs the page's address keeps, with their defaults
-# (`semantic_follow_script` writes them).
-function _semantic_address_attrs(defaults, params)
+# (`semantic_follow_script` writes them). A page whose address keeps none
+# (`url_state=false`) names the same defaults for its Reset alone, as
+# `data-htmxo-defaults`.
+function _semantic_address_attrs(defaults, params; key::Symbol=:data_htmxo_address)
     isnothing(defaults) && return (;)
     kept = Dict{String,Any}(string(param.name) => defaults[param.name]
                             for param in params if haskey(defaults, param.name))
-    isempty(kept) ? (;) : (; data_htmxo_address=_schema_json(kept))
+    isempty(kept) ? (;) : NamedTuple{(key,)}((_schema_json(kept),))
+end
+
+# The inputs a page's Reset returns to following their default rather than to
+# a value: those whose control follows it while the request names none
+# (`_semantic_follows_default`), a computed default or a `@resets` target,
+# unless `values=` gives the input its value.
+function _semantic_reset_follows(specs, routes, defaults)
+    names = Set{Symbol}()
+    for (spec, route) in zip(specs, routes)
+        provided = _semantic_values(spec.operation_values)
+        for param in route.params
+            haskey(defaults, param.name) && !haskey(provided, param.name) || continue
+            _computed_default(param) || haskey(param, :resets) || continue
+            _semantic_fixed_context(param) && continue
+            _param_declaring_object(spec.mounted, param.name) === nothing && continue
+            push!(names, param.name)
+        end
+    end
+    names
+end
+
+# A `:tabs` page's Reset (`parts.reset`): one button that returns every input
+# of the forms it names (`data-htmxo-reset`, their selectors) to what the page
+# shows when its address names nothing, in the browser, so a static page
+# resets offline too (`semantic_follow_script`). The inputs that then follow
+# their default again are named in `data-htmxo-reset-follows`.
+function _semantic_reset_button(obj, forms, follows)
+    isempty(forms) && return nothing
+    h.button(_error_texts(obj).reset_inputs; type="button",
+             class="outline secondary htmxo-semantic-reset",
+             data_htmxo_reset=join(forms, ' '),
+             (isempty(follows) ? (;) :
+                 (; data_htmxo_reset_follows=_semantic_names_attr(follows)))...)
 end
 
 """
     _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
-                   render_operation, layout, url_state)
+                   render_operation, layout, url_state, reset)
 
 `semantic_app(obj; presentation=:tabs)`: the inputs several operations read in
 a sidebar, one tab per operation with the inputs only it reads above its result,
 and every read's result following its inputs (`semantic_follow_script`). With
 `url_state`, the page's address keeps every input the reader set: the page
-shows the values it names, and the script writes the inputs into it.
+shows the values it names, and the script writes the inputs into it. With
+`reset`, a Reset button returns every one of those inputs to its default.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
-        sections=InputSection[], place=nothing)
+        reset::Bool=true, sections=InputSection[], place=nothing)
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places. The fields of
@@ -33033,7 +33074,10 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         _semantic_address_current(spec.mounted, routes[i], spec.current,
                                   follows[i] ? nothing : sidebar)
     end
-    defaults = url_state ? _semantic_address_defaults(specs, routes) : nothing
+    defaults = url_state || reset ? _semantic_address_defaults(specs, routes) : nothing
+    defaults_key = url_state ? :data_htmxo_address : :data_htmxo_defaults
+    # The forms whose inputs the page's Reset returns to their defaults.
+    reset_forms = String[]
 
     context_entries = _semantic_context_entries(
         [(spec.mounted, routes[i], currents[i]) for (i, spec) in enumerate(specs)];
@@ -33059,12 +33103,13 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         push!(get!(placed_controls, placements[entry.param.name], Any[]),
               _semantic_entry_control(entry, shared_names; radio_max, placed=context_id))
     end
+    sidebar_defaults = _semantic_address_attrs(defaults,
+        [entry.param for entry in context_entries]; key=defaults_key)
     sidebar_form = isempty(context_entries) ? nothing :
         h.form(_sectioned_controls(sidebar_fields, sidebar_sections)...;
                id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
-               autocomplete="off", onsubmit="return false",
-               _semantic_address_attrs(defaults,
-                   [entry.param for entry in context_entries])...)
+               autocomplete="off", onsubmit="return false", sidebar_defaults...)
+    isnothing(sidebar_form) || isempty(sidebar_defaults) || push!(reset_forms, "#" * context_id)
     selector = isnothing(sidebar_form) ? nothing : "#" * context_id
     refreshes = any(entry -> _semantic_context_refreshable(entry.route, entry.param),
                     context_entries)
@@ -33084,11 +33129,12 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 radio_max, sections)
             inputs_id = base.target_id * "-inputs"
             own_params = _operation_control_params(route, shared_names)
+            own_defaults = _semantic_address_attrs(defaults, own_params; key=defaults_key)
             form = isempty(own_params) ? nothing :
                 h.form(controls...; id=inputs_id,
                        class="htmxo-semantic-operation-form htmxo-semantic-inputs",
-                       autocomplete="off", onsubmit="return false",
-                       _semantic_address_attrs(defaults, own_params)...)
+                       autocomplete="off", onsubmit="return false", own_defaults...)
+            isnothing(form) || isempty(own_defaults) || push!(reset_forms, "#" * inputs_id)
             selectors = String[s for s in (selector, isnothing(form) ? nothing : "#" * inputs_id)
                                if !isnothing(s)]
             # Its own arguments are inputs of its tab, and it reads them all.
@@ -33128,6 +33174,17 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         merge(base, (; form, result, tab=names[i], follows=follows[i],
                       placed=get(placed_controls, names[i], Any[])))
     end
+    # One Reset for the page: the sidebar's, or, on a page without one, each
+    # tab that shows inputs draws it under them (`entry.reset`).
+    reset_button = reset && !isnothing(defaults) ?
+        _semantic_reset_button(obj, reset_forms, _semantic_reset_follows(specs, routes, defaults)) :
+        nothing
+    operations = map(operations) do entry
+        in_tab = !isnothing(reset_button) && isempty(sidebar_entries) &&
+            ("#" * entry.target_id * "-inputs" in reset_forms ||
+             (!isempty(entry.placed) && "#" * context_id in reset_forms))
+        merge(entry, (; reset=in_tab ? reset_button : nothing))
+    end
     # A static export of a page that computes in the browser: whatever else on
     # it still needs the server is reported, not shipped stale.
     if browser_page.static !== nothing && any(browser_regions)
@@ -33141,6 +33198,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     # all placed in tabs stays on the page as their owner (`parts.context`).
     parts = (; object=obj, title, id=page_id,
                sidebar=isempty(sidebar_entries) ? nothing : sidebar_form, context=sidebar_form,
+               reset=reset_button,
                tabs=Pair[entry.title => render_operation(entry) for entry in operations],
                tab_names=names, active=open, operations)
     layout(parts)
@@ -33166,26 +33224,32 @@ function _semantic_placements(place, shared_names, names, specs)
     placements
 end
 
-# A tab: the inputs placed in it, the operation's own inputs, then its result.
+# A tab: the inputs placed in it, the operation's own inputs, the page's Reset
+# when the page has no sidebar to hold it, then its result.
 function _default_semantic_tab(entry)
     entry.form === nothing && entry.verb in (:WEBSOCKET, :SSE) && throw(ArgumentError(string(
         "semantic_app has no default control for ",
         entry.verb === :SSE ? "SSE" : "WebSocket", " operation ",
         "$(entry.verb) $(entry.path); pass `render_operation` and render this ",
         "entry explicitly")))
+    reset = get(entry, :reset, nothing)
     h.div(get(entry, :placed, Any[])..., (isnothing(entry.form) ? () : (entry.form,))...,
+          (isnothing(reset) ? () : (reset,))...,
           entry.result; class="htmxo-semantic-tab", data_operation=entry.name,
           data_verb=entry.verb, data_path=entry.path)
 end
 
-# The page: the title, then the sidebar beside the tabs (the tabs alone when
-# no input is shared).
+# The page: the title, then the sidebar, ending in the page's Reset, beside
+# the tabs (the tabs alone when no input is shared; each tab with inputs then
+# draws the Reset).
 function _default_semantic_tabs_layout(parts)
     heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
     tabs = tabset(parts.tabs...; id=parts.id * "-tabs", names=parts.tab_names,
                   active=parts.active)
+    reset = get(parts, :reset, nothing)
     body = !isnothing(parts.sidebar) ?
-        app_layout(h.aside(parts.sidebar), tabs; content_id=parts.id * "-content") :
+        app_layout(h.aside(parts.sidebar, (isnothing(reset) ? () : (reset,))...), tabs;
+                   content_id=parts.id * "-content") :
         isnothing(parts.context) ? tabs : h.div(parts.context, tabs)
     h.section(heading..., body; id=parts.id, class="htmxo-semantic-app htmxo-semantic-page")
 end
@@ -33195,8 +33259,8 @@ end
                  render_operation=_default_semantic_operation, compact=false,
                  results=:each, layout=_default_semantic_layout,
                  select=entry -> true, presentation=:stacked, radio_max=8,
-                 shared=nothing, active=nothing, url_state=true, sections=nothing,
-                 place=nothing)
+                 shared=nothing, active=nothing, url_state=true, reset=true,
+                 sections=nothing, place=nothing)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -33229,7 +33293,17 @@ read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
 the one it opens on), and results that follow their inputs. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
-reopens the same page; `url_state=false` keeps only the tab. `sections=`
+reopens the same page; `url_state=false` keeps only the tab. Its Reset button
+(`reset=true`, the default; words: `__error_texts__`'s `reset_inputs`)
+returns every one of those inputs, each tab's included, to what the page shows
+when its address names nothing: a `values=` entry or the declared default, a
+computed default or `@resets` target following its default again, a list of
+records back to its one default record. It does so in the browser, so a static
+export resets offline, and the results and the address follow as after a
+change the reader made; the open tab stays. The Reset ends the sidebar, or, on
+a page without one, follows each tab's inputs. A custom `layout(parts)` places
+`parts.reset`, a custom `render_operation(entry)` `entry.reset` (`nothing`
+where the default draws none); `reset=false` draws none. `sections=`
 groups its inputs under headings wherever they are placed, a list of
 [`InputSection`](@ref)s or `heading => names` pairs. `place=(fit = :upload,)`
 draws a sidebar input's control in an operation's tab instead, still an
@@ -33360,7 +33434,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
-        sections=nothing, place=nothing)
+        reset=nothing, sections=nothing, place=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -33378,6 +33452,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app active= chooses the open tab of presentation=:tabs"))
         isnothing(url_state) || throw(ArgumentError(
             "semantic_app url_state= keeps the inputs of presentation=:tabs in the page address"))
+        isnothing(reset) || throw(ArgumentError(
+            "semantic_app reset= draws the Reset button of presentation=:tabs"))
         isnothing(sections) || throw(ArgumentError(
             "semantic_app sections= groups the inputs of presentation=:tabs"))
         isnothing(place) || throw(ArgumentError(
@@ -33386,6 +33462,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
         "semantic_app url_state must be true or false, got $(repr(url_state))"))
+    isnothing(reset) || reset isa Bool || throw(ArgumentError(
+        "semantic_app reset must be true or false, got $(repr(reset))"))
     descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
@@ -33433,7 +33511,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
-        sections=input_sections, place,
+        reset=something(reset, true), sections=input_sections, place,
         render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
@@ -35584,7 +35662,9 @@ semantic_refresh_script() = h.script(Raw(raw"""
   var FOLLOWS = 'data-htmxo-follows';
   function setByReader(e) {
     var t = e.target;
-    if (!t || !t.hasAttribute || !t.hasAttribute(FOLLOWS)) return;
+    // The page's Reset announces the changes it makes (`htmxoReset`,
+    // `semantic_follow_script`); a field it returned to its default follows it.
+    if (e.htmxoReset || !t || !t.hasAttribute || !t.hasAttribute(FOLLOWS)) return;
     Array.prototype.forEach.call(t.form ? t.form.elements : [t], function(c) {
       if (c.name === t.name) c.removeAttribute(FOLLOWS);
     });
@@ -36512,6 +36592,132 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   document.addEventListener('htmx:load', function(e) { collectWanted(e.target); });
   document.addEventListener('htmx:afterSettle', function() { if (wanted.length) settleWanted(); });
+  // A page's Reset (`semantic_app(…; reset)`): every input of the forms the
+  // button names (`data-htmxo-reset`) takes what the page shows when its
+  // address names nothing (`data-htmxo-address`, or `data-htmxo-defaults` on
+  // a page whose address keeps none): its default as its control sends it,
+  // nothing for an input without one, a list of records its one default
+  // card. An input named in `data-htmxo-reset-follows` follows its default
+  // again, so it is not sent and the server draws a default computed from
+  // other inputs. Then the page follows the change as one the reader made
+  // (results, the page address), with no request of its own.
+  function recordsGroup(form, name) {
+    return Array.prototype.filter.call(document.querySelectorAll('[data-htmxo-records]'), function(g) {
+      if (g.getAttribute('data-htmxo-records') !== name) return false;
+      var field = g.querySelector('input, select, textarea');
+      return g.closest('form') === form || !!(field && field.form === form);
+    })[0];
+  }
+  // Set the fields of one input; one field that changed announces it (the
+  // checked radio of a group).
+  function assignInput(form, name, wanted, changed) {
+    var fields = [];
+    setControls(form, name, wanted, fields);
+    if (!fields.length) return;
+    changed.push(fields.filter(function(c) { return c.type !== 'radio' || c.checked; })[0] || fields[0]);
+  }
+  function resetRecords(form, name, spec, changed) {
+    var group = recordsGroup(form, name);
+    if (!group) return;
+    var cards = cardsOf(group), card = cards[0];
+    if (!card) return;
+    var moved = cards.length > 1;
+    cards.slice(1).forEach(function(c) { c.remove(); });
+    var label = card.querySelector('.htmxo-record-label');
+    if (label && label.value !== spec.label + ' 1') { label.value = spec.label + ' 1'; moved = true; }
+    var on = card.querySelector('.htmxo-record-on input');
+    if (on && !on.checked) { on.checked = true; moved = true; }
+    var before = changed.length;
+    Object.keys(spec.fields).forEach(function(key) {
+      assignInput(form, name + '.1.' + key, spec.fields[key], changed);
+    });
+    fold(card, false);
+    keepFolds(group);
+    if (moved && changed.length === before) changed.push(group);
+  }
+  function ownerOf(c) { return c.form || (c.closest && c.closest('form')) || null; }
+  // The region that draws a control again (`semantic_refresh_script`).
+  function holderOf(c) {
+    return c.closest('.htmxo-semantic-context-control[hx-trigger], .htmxo-semantic-controls[hx-trigger]');
+  }
+  // Whether a change among `changed` already draws `holder` again: one of the
+  // inputs it reads, or, for a region that refreshes on any change in it, a
+  // field inside it.
+  function redrawn(holder, changed) {
+    var reads = (holder.getAttribute('data-htmxo-depends') || '').split(' ');
+    return changed.some(function(c) {
+      return (c.name && reads.indexOf(c.name) >= 0) ||
+        (holder.getAttribute('hx-trigger') === 'change' && holder.contains(c));
+    });
+  }
+  function resetInputs(button) {
+    var follows = (button.getAttribute('data-htmxo-reset-follows') || '').split(' ').filter(Boolean);
+    var changed = [], following = [], computed = [];
+    (button.getAttribute('data-htmxo-reset') || '').split(' ').filter(Boolean).forEach(function(s) {
+      var form = document.querySelector(s), defaults;
+      if (!form) return;
+      try {
+        defaults = JSON.parse(form.getAttribute('data-htmxo-address') ||
+                              form.getAttribute('data-htmxo-defaults'));
+      } catch (_) { return; }
+      if (!defaults) return;
+      Object.keys(defaults).forEach(function(name) {
+        var d = defaults[name];
+        if (d && d.records) { resetRecords(form, name, d.records, changed); return; }
+        if (follows.indexOf(name) >= 0) {
+          var fields = Array.prototype.filter.call(form.elements, function(c) {
+            return c.name === name && !PRESSED.test(c.type) && !c.hasAttribute(FOLLOWS);
+          });
+          if (!fields.length) return;
+          // Marked before any change is announced, so no request sends it.
+          fields.forEach(function(c) { c.setAttribute(FOLLOWS, ''); following.push(c); });
+          // A default computed from other inputs: the server draws it.
+          if (d === null) { computed.push(fields[0]); return; }
+        }
+        assignInput(form, name, d === null ? [''] : d, changed);
+      });
+    });
+    var forms = [];
+    changed.concat(following).forEach(function(c) {
+      var form = ownerOf(c);
+      if (form && forms.indexOf(form) < 0) forms.push(form);
+    });
+    // Every result that reads these forms is asked again, also one whose
+    // inputs only went back to following their defaults.
+    forms.forEach(function(form) {
+      readers(form).forEach(function(r) { r.setAttribute('data-htmxo-shown', '*'); });
+    });
+    // Announced as changes the reader made, which the page follows (results,
+    // dependent controls, the page address); the mark keeps a following field
+    // following (`semantic_refresh_script`).
+    changed.forEach(function(c) {
+      var e = new Event('change', {bubbles: true});
+      e.htmxoReset = true;
+      c.dispatchEvent(e);
+    });
+    var holders = [];
+    computed.forEach(function(c) {
+      var holder = holderOf(c);
+      if (holder && holders.indexOf(holder) < 0 && !redrawn(holder, changed)) holders.push(holder);
+    });
+    holders.forEach(function(holder) {
+      if (!window.htmx || !holder.isConnected) return;
+      window.htmx.process(holder);
+      window.htmx.trigger(holder, holder.getAttribute('hx-trigger') === 'htmxo-refresh' ? 'htmxo-refresh' : 'change');
+    });
+    // An input that only went back to following its default announces no
+    // change: its results and the address follow from here.
+    forms.forEach(function(form) {
+      readers(form).forEach(function(r) { if (visible(r)) later(r); });
+      if (kept(form)) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
+    });
+  }
+  document.addEventListener('click', function(e) {
+    var button = e.target && e.target.closest && e.target.closest('button[data-htmxo-reset]');
+    if (!button) return;
+    e.preventDefault();
+    resetInputs(button);
+  });
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function() { arm(document.body); });
   } else {
@@ -37146,6 +37352,7 @@ htmxo_utility_styles() = h.style(Raw("""
     opacity: 0.5;
 }
 .htmxo-record-add { width: auto; font-size: 0.85em; }
+.htmxo-semantic-reset { width: auto; font-size: 0.85em; }
 .htmxo-record-help { margin-bottom: 0.25rem; }
 /* A card's fold control, first in its head, is a button showing the chevron
    the disclosures draw (`pico_bridge`): down while the card is open, right
