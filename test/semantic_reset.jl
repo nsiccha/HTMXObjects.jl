@@ -2,7 +2,7 @@ using TestItemRunner
 
 @testmodule SemanticResetFixtures begin
     using HTMXObjects
-    export OneTab, GermanTabs, reset_button, form_ids
+    export OneTab, GermanTabs, ConstantPage, reset_button, form_ids
 
     # Inputs read by one operation only: no sidebar, so its tab draws the Reset.
     @htmx struct OneTab
@@ -13,6 +13,21 @@ using TestItemRunner
         @param density::Float64 = 300.0
         "Reading"
         @get reading() = h.p("reading:", attenuation, ":", density; class="result")
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            select=entry -> entry.name !== :index)
+    end
+
+    # A default named by a constant follows it, with no control to draw again:
+    # only the page keeps it following after a Reset.
+    const RESET_LEVEL = 3
+    @htmx struct ConstantPage
+        "Level"
+        @param level::Int = RESET_LEVEL
+        "Mode"
+        @param mode::String = "a"
+        @options(mode) = ["a", "b"]
+        "View"
+        @get view() = h.p("view:", level, ":", mode; class="result")
         @get index() = semantic_app(__self__; presentation=:tabs,
             select=entry -> entry.name !== :index)
     end
@@ -478,5 +493,55 @@ end
         for key in ("values", "follow", "literal", "address")
             @test (key => get(outcome, key, "missing")) == (key => "true")
         end
+    end
+end
+
+@testitem "the Reset keeps a default named by a constant following, with nothing drawn again, in a browser" setup=[SemanticResetFixtures, RecordsFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        route!(ConstantPage(); operation_policy=:blocking)
+        html = String(dispatch(:GET, "/"; headers=["HX-Request" => "true"]).body)
+        @test reset_button(html).attrs["data-htmxo-reset-follows"] == "level"
+        outcome = browser_outcome(raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + label + ' showing ' + shown()); await sleep(25); }
+          }
+          const shown = () => document.querySelector('[id$="-get-view-result"]').textContent;
+          const level = () => document.querySelector('input[name="level"]');
+          const kept = () => Array.from(new URLSearchParams(location.search).keys()).sort().join(',');
+          const out = {};
+          try {
+            await until(() => shown() === 'view:3:a', 'first');
+            out.before = level().hasAttribute('data-htmxo-follows');
+            level().value = '7';
+            level().dispatchEvent(new Event('change', {bubbles: true}));
+            document.querySelector('input[name="mode"][value="b"]').click();
+            await until(() => shown() === 'view:7:b', 'set');
+            await until(() => kept() === 'level,mode', 'set address');
+            const asked = [];
+            document.addEventListener('htmx:configRequest', e => asked.push(e.detail.path));
+            document.querySelector('button[data-htmxo-reset]').click();
+            await until(() => shown() === 'view:3:a', 'reset');
+            await until(() => kept() === '', 'reset address');
+            await sleep(400);
+            out.value = level().value === '3';
+            out.follows = level().hasAttribute('data-htmxo-follows');
+            // Nothing drew the control again: the page kept it following.
+            out.redrawn = asked.some(p => p.indexOf('__htmxo_form=') >= 0);
+          } catch (e) { out.error = String(e); }
+          fetch('/complete?' + new URLSearchParams(Object.entries(out).map(([k, v]) => [k, String(v)])));
+        });
+        """)
+        @test get(outcome, "error", "") == ""
+        @test get(outcome, "before", "missing") == "true"
+        @test get(outcome, "value", "missing") == "true"
+        @test get(outcome, "follows", "missing") == "true"
+        @test get(outcome, "redrawn", "missing") == "false"
     end
 end
