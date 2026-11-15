@@ -53,7 +53,9 @@ println(String(response.body))
   change. `bound(fit; columns=(:x, :y))` is the outputs' table for a plot's
   `data(...)`; give the element that draws it `bound_columns_attrs(...)`, and
   the browser hands it the new rows through AlgebraOfVega's `AoV.updateData`
-  and an `htmxo:bound-columns` event.
+  and an `htmxo:bound-columns` event. The table is its own `Tables.columns`,
+  so a plot's `data(...)` layer (AlgebraOfGraphics keeps `Tables.columns` of
+  its data) still holds it, and a plotting package can mark the element itself.
 - **Finite inputs** (a `Bool`, an enum, `@options`) that a result reads are
   views of their own: the page carries the result rendered for each value (at
   most 64) and shows the one the inputs select.
