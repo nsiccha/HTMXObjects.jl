@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.1.132
+
+- **Breaking:** `bound(x)` writes a number as `format_number` writes it,
+  on the server and after each browser computation alike: `2.0` writes `2`,
+  `3.81e-5` writes `3.81·10⁻⁵` and an integer takes the thousands separator
+  (`1,234`). `bound(x; digits=k)` writes exactly `k` decimals, halves away
+  from zero (`0.120` for `digits=3`, `45` for `digits=0`), where it wrote
+  Julia's `string(round(x; digits=k))` (`0.12`, `45.0`). A page that showed
+  `bound(x; digits)` text changes to that; the value in the graph is never
+  rounded.
+- `bound(x; sigdigits, percent, texts)`: significant digits, a share as a
+  percent (`percent=true` writes 0.45 as `45%`, `45 %` with
+  `texts=table_texts(:de)`) and the table language's marks (`0,120`).
+- `render_table(bound(p; columns))` on a `semantic_app` page that computes
+  `p` in the browser is written again after each computation, offline and in
+  a static `export_site` page: each cell as the server writes it (its sort
+  value and ⬇ CSV value the unrounded number), with the reader's sort, the
+  search, the row count and the hover-link keys following. Such a table
+  refuses `cell`, `search_text`, `selectable`, a function `link_key` and sort
+  keys computed by functions, which the browser cannot run.
+- `ColumnSpec(label; digits, sigdigits, percent)` says how `render_table`
+  writes the column's numbers (`"share" => ColumnSpec("Share"; digits=3)`);
+  integers are number cells in such a column. `sortable_table` and
+  `master_detail_table`, whose cells are built already, refuse it.
+- `render_table(…; link_key=:column)` keys each row by its value in that
+  column, a number as the browser's `String(x)` writes it (`20` for 20.0), as
+  AlgebraOfVega keys a plot's marks by the same column.
+- `format_number` and `number_cell` take `percent=true`; `TableTexts` has a
+  `percent` text (`{number}%`, German `{number} %` with a no-break space).
+  The percent is 100x with the decimal point moved, so 0.145 is 14.5 and
+  rounds to `15%`.
+
 ## 0.1.131
 
 - Requires HTMX.jl 1.2.1 (`[compat] HTMX = "1.2.1"`). Private block content

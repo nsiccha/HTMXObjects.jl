@@ -102,20 +102,32 @@ browser_module(; source::AbstractString, entry) = BrowserModule(source, entry)
     bound(x)
     bound(x.field)
     bound(x.field[i])
-    bound(x; digits=n)
+    bound(x; digits=nothing, sigdigits=nothing, percent=false, texts=table_texts())
     bound(x; columns=(:a, :b, …))
 
 Inside an `@htmx` struct, marks where a route's view shows a value the browser
 computes: a property declared `@browser`, one of its outputs or their elements
-(`i` an integer literal), or a `@param`. On the server it shows the value, as
-Julia's `string` writes it (rounded to `digits` decimals); a page that computes
-the property in the browser rewrites it there after each change. With `columns`
-it is the property's equal-length vector outputs as a Tables.jl table, for a
-plot's `data(...)`, or its single-value outputs (a number, a Boolean, text) as
-a table of one row, for a mark at a value such as a rule; one table does not
-mix the two. Give the element showing it [`bound_columns_attrs`](@ref).
-The table is its own `Tables.columns`, so a plotting package that keeps the
-columns of its data, as AlgebraOfGraphics' `data(...)` does, still holds it.
+(`i` an integer literal), or a `@param`. A page that computes the property in
+the browser rewrites it there after each change, as the server wrote it.
+
+A number is written as [`format_number`](@ref) writes it, with the same
+keywords, in the language of `texts` (a [`TableTexts`](@ref)): `digits=3`
+writes exactly three decimals (`0.120`), `digits=0` a whole number (`45`),
+`sigdigits=k` `k` significant digits, `percent=true` the share 0.45 as `45%`
+(`45 %` with `table_texts(:de)`, which also writes `0,120`). Without them a
+float keeps every digit, `2.0` writes `2` and `3.81e-5` writes `3.81·10⁻⁵`, and
+an integer takes the thousands separator (`1,234`). The value in the graph is
+never rounded. A `Bool` writes `true` or `false`, and text is shown as it is.
+
+With `columns` it is the property's equal-length vector outputs as a Tables.jl
+table, or its single-value outputs (a number, a Boolean, text) as a table of
+one row, for a mark at a value such as a rule; one table does not mix the two.
+It is for a plot's `data(...)`, whose element takes
+[`bound_columns_attrs`](@ref), or for [`render_table`](@ref), which the page
+then writes again after each computation (*A table the browser computes* in
+its docstring). The table is its own `Tables.columns`, so a plotting package
+that keeps the columns of its data, as AlgebraOfGraphics' `data(...)` does,
+still holds it.
 
 The `@htmx` macro recognizes `bound(...)` calls in its struct and records which
 value each names, so `bound` needs no import there; it has no meaning outside
@@ -128,13 +140,16 @@ bound(_x...; _kw...) = throw(ArgumentError(string(
 """
     BoundValue
 
-What `bound(x)` is on the server: the value, shown as text, and the path that
-tells a browser page where its value comes from.
+What `bound(x)` is on the server: the value, shown as text, the path that
+tells a browser page where its value comes from, and how a number is written
+(`format_number`'s rounding, `percent` and language).
 """
 struct BoundValue{T}
     path::Vector{Any}
     value::T
-    digits::Union{Nothing,Int}
+    rounding::Union{Nothing,_FixedDigits,_SigDigits}
+    percent::Bool
+    texts::TableTexts
 end
 
 """
@@ -155,11 +170,19 @@ struct BoundColumns{T}
     columns::Vector{Symbol}
 end
 
-function _bound(path::Tuple, value; digits=nothing, columns=nothing)
-    columns === nothing || return _bound_columns(Any[path...], value, columns)
-    digits === nothing || digits isa Integer || throw(ArgumentError(
-        "bound: `digits` must be an integer, got $(repr(digits))"))
-    BoundValue(Any[path...], value, digits === nothing ? nothing : Int(digits))
+function _bound(path::Tuple, value; digits=nothing, sigdigits=nothing, percent::Bool=false,
+                texts::TableTexts=_EN_TABLE_TEXTS, columns=nothing)
+    if columns !== nothing
+        digits === sigdigits === nothing && !percent && texts === _EN_TABLE_TEXTS || throw(ArgumentError(string(
+            "bound(…; columns) is a table; say how a column's numbers are written in the ",
+            "`ColumnSpec` of `render_table`'s `columns` (`ColumnSpec(label; digits, sigdigits, percent)`) ",
+            "and its language with `render_table(…; texts)`")))
+        return _bound_columns(Any[path...], value, columns)
+    end
+    for (name, k) in (("digits", digits), ("sigdigits", sigdigits))
+        k === nothing || k isa Integer || throw(ArgumentError("bound: `$name` must be an integer, got $(repr(k))"))
+    end
+    BoundValue(Any[path...], value, _number_rounding(digits, sigdigits, "bound"), percent, texts)
 end
 
 # An output a table shows as its one row: what the browser's module returns as
@@ -234,20 +257,72 @@ bound_columns_attrs(b::BoundColumns; dataset::AbstractString="source_0") =
     (; data_htmxo_bound_columns=JSON.json(Dict("path" => _bound_wire(b.path),
         "columns" => string.(b.columns), "dataset" => String(dataset))))
 
+# `render_table(bound(x; columns))`: the description of the rows the page
+# writes again after each browser computation, as the `<table>`'s
+# `data-htmxo-bound-table` (the browser runtime's `boundTable`): where it comes from, and
+# for each column its name, what its values are (`kind`), how its numbers are
+# written (`ColumnSpec` digits, sigdigits, percent), its cells' alignment and
+# where an empty cell sits; and the column whose value keys a row's hover link.
+# The browser runs no Julia, so the table's functions are refused.
+function _bound_table_attrs(b::BoundColumns, cols, headers, formats, empty_aligns; cell, search_text, link_key, kwargs)
+    refuse(what, instead) = throw(ArgumentError(string("render_table: the table of ", _bound_label(b.path),
+        " is written again in the browser, which runs no Julia, so it takes no ", what, "; ", instead)))
+    isnothing(cell) || refuse("`cell` function",
+        "say how a column's numbers are written with `columns = [name => ColumnSpec(label; digits, sigdigits, percent)]`")
+    isnothing(search_text) || refuse("`search_text` function", "the search reads the cells' text")
+    link_key isa Union{Nothing,Symbol} || refuse("`link_key` function",
+        "name the column whose value keys each row (`link_key = :$(first(cols))`)")
+    isnothing(get(kwargs, :selectable, nothing)) || refuse("`selectable`", "its rows change with each computation")
+    for hdr in headers
+        _computed_sort_keys(hdr) && refuse("sort keys computed by functions (column $(repr(_header_label(hdr))))",
+            "it sorts by each cell's value")
+    end
+    columns = map(enumerate(cols)) do (j, c)
+        values = Tables.getcolumn(b, c)
+        known = findfirst(v -> !(v === nothing || v === missing), values)
+        column = Dict{String,Any}("name" => string(c),
+            "kind" => isnothing(known) ? "float" : _bound_kind(values[known]))
+        format = formats[j]
+        if !isnothing(format)
+            isnothing(format.digits) || (column["digits"] = format.digits)
+            isnothing(format.sigdigits) || (column["sigdigits"] = format.sigdigits)
+            format.percent && (column["percent"] = true)
+        end
+        align = _header_align(headers[j])
+        isnothing(align) || (column["align"] = String(align))
+        isnothing(empty_aligns[j]) || (column["empty"] = empty_aligns[j])
+        column
+    end
+    (; data_htmxo_bound_table=JSON.json(Dict("path" => _bound_wire(b.path), "columns" => columns,
+        "link_key" => isnothing(link_key) ? nothing : string(link_key))))
+end
+
 _bound_kind(::Bool) = "bool"
 _bound_kind(::Integer) = "int"
-_bound_kind(::AbstractFloat) = "float"
+_bound_kind(::Real) = "float"
 _bound_kind(_) = "text"
-_bound_text(b::BoundValue) = _bound_text(b.value, b.digits)
-_bound_text(x::Bool, _) = string(x)
-_bound_text(x::Integer, _) = string(x)
-_bound_text(x::AbstractFloat, digits) =
-    string(Float64(digits === nothing ? x : round(x; digits=digits)))
-_bound_text(x, _) = string(x)
+# A number as `format_number` writes it; a Bool and text as `string` does.
+_bound_text(b::BoundValue) = _bound_text(b.value, b)
+_bound_text(x::Bool, b) = string(x)
+_bound_text(x::Real, b) = _format_number(_number_value(x), b.texts, b.rounding, b.percent)
+_bound_text(x::Union{Nothing,Missing}, b) = _format_number(nothing, b.texts, b.rounding, b.percent)
+_bound_text(x, b) = string(x)
+
+# How the browser writes the value again: the rounding, `percent` and the
+# language's number texts (`htmxoNumberText`), left out where they are the
+# defaults (no rounding, English).
+function _bound_format(b::BoundValue)
+    fields = Dict{String,Any}()
+    b.rounding === nothing || merge!(fields, Dict(string(k) => v for (k, v) in pairs(_summary_rounding_fields(b.rounding))))
+    b.percent && (fields["percent"] = true)
+    b.texts === _EN_TABLE_TEXTS || b.texts == _EN_TABLE_TEXTS ||
+        (fields["texts"] = Dict(string(n) => getfield(b.texts, n) for n in (:decimal, :thousands, :minus, :percent)))
+    isempty(fields) ? (;) : (; data_htmxo_format=JSON.json(fields))
+end
 
 _bound_node(b::BoundValue) = h.span(_bound_text(b);
     data_htmxo_bound=JSON.json(_bound_wire(b.path)), data_htmxo_kind=_bound_kind(b.value),
-    (b.digits === nothing ? (;) : (; data_htmxo_digits=string(b.digits)))...)
+    _bound_format(b)...)
 
 Base.show(io::IO, m::MIME"text/html", b::BoundValue) = show(io, m, _bound_node(b))
 Base.show(io::IO, ::MIME"text/markdown", b::BoundValue) = print(io, _bound_text(b))
@@ -487,15 +562,19 @@ _browser_data(x, name) = throw(ArgumentError(string(
 # --- What a static export of a browser page cannot serve ---
 
 # The markup of a result with the values it shows through `bound` taken out:
-# the text of each bound value, and everything inside an element that shows
-# bound columns (a plot's data). What remains must not change with an input
-# the browser computes from, or the static page would show it stale.
+# the text of each bound value, everything inside an element that shows bound
+# columns (a plot's data) or is a table of them (`render_table`), and a
+# table's row count, which the page writes when it loads. What remains must
+# not change with an input the browser computes from, or the static page would
+# show it stale.
 const _BOUND_SPAN = r"(<span data-htmxo-bound=\"[^\"]*\"[^>]*>)[^<]*(</span>)"
+const _TABLE_COUNT = r"(<small data-htmxo-table-count=\"[^\"]*\"[^>]*>)[^<]*(</small>)"
+const _BOUND_ELEMENT = r"data-htmxo-bound-(?:columns|table)="
 function _browser_skeleton(html::AbstractString)
-    s = replace(String(html), _BOUND_SPAN => s"\1\2")
+    s = replace(String(html), _BOUND_SPAN => s"\1\2", _TABLE_COUNT => s"\1\2")
     out = IOBuffer()
     i = firstindex(s)
-    marker = "data-htmxo-bound-columns="
+    marker = _BOUND_ELEMENT
     while true
         j = findnext(marker, s, i)
         j === nothing && (write(out, SubString(s, i)); break)
@@ -640,7 +719,8 @@ end
 The runtime of the results a `semantic_app` page computes in the browser
 (`@browser`): it loads each property's module once, calls it with the page's
 inputs, shows the view of the finite inputs' values and writes the bound
-values into it. [`semantic_follow_script`](@ref) calls it on each `input`
+values into it, numbers as `format_number` writes them, and the rows of each
+`render_table` of bound columns. [`semantic_follow_script`](@ref) calls it on each `input`
 event of an input the result reads, at most once an animation frame, so the
 result moves with a slider held down. A page that has such a result carries
 it in that result; nothing to add by hand.
@@ -707,12 +787,8 @@ semantic_browser_script() = h.script(Raw(raw"""
     }
     return value;
   }
-  // Julia's `round(x; digits)`, ties to even, and `string(::Float64)`.
-  function roundDigits(x, d) {
-    var p = Math.pow(10, d), y = x * p, r = Math.round(y);
-    if (Math.abs(y % 1) === 0.5) r = 2 * Math.round(y / 2);
-    return r / p;
-  }
+  // Julia's `string(::Float64)`: the exact value a number cell sorts by and
+  // the ⬇ CSV writes (`_number_key`).
   function juliaFloat(x) {
     if (x !== x) return 'NaN';
     if (x === Infinity) return 'Inf';
@@ -728,15 +804,75 @@ semantic_browser_script() = h.script(Raw(raw"""
     return sign + digits[0] + '.' + (digits.slice(1) || '0') + 'e' + e;
   }
   window.__htmxoJuliaFloat = juliaFloat;
-  function text(value, kind, digits) {
-    if (value === undefined || value === null) return null;
+  function numberKey(x, integer) {
+    if (integer) return String(x);
+    return x === Infinity ? 'Infinity' : x === -Infinity ? '-Infinity' : juliaFloat(x);
+  }
+  // A number from the module, or from a control's wire text.
+  function number(value) {
+    return typeof value === 'number' ? value : has(NONFINITE, value) ? NONFINITE[value] : Number(value);
+  }
+  // A bound value as the server wrote it (`_bound_text`): a number as
+  // `format_number` writes it, with the span's rounding, percent and language.
+  function text(value, kind, format) {
+    var numeric = kind === 'float' || kind === 'int';
+    if (value === undefined || (value === null && !numeric)) return null;
     if (kind === 'bool') return String(value === true || value === 'true');
-    if (kind === 'float') {
-      var n = typeof value === 'number' ? value : Number(value);
-      return juliaFloat(digits === null || digits === '' ? n : roundDigits(n, Number(digits)));
-    }
-    if (kind === 'int') return String(typeof value === 'number' ? value : Number(value));
+    if (numeric) return htmxoNumberText(value === null ? null : number(value), format, kind === 'int');
     return String(value);
+  }
+  function formatOf(el) {
+    return el.__htmxoFormat || (el.__htmxoFormat = JSON.parse(el.getAttribute('data-htmxo-format') || '{}'));
+  }
+  // A cell of a bound table as `render_table` writes it (`_render_table_cell`):
+  // a number cell (its value the sort value and the ⬇ CSV's) for a float, or
+  // for any number of a column whose `ColumnSpec` says how its numbers are
+  // written; an empty number cell for no value; else the value's text.
+  function boundCell(v, c, texts) {
+    var td = document.createElement('td'), integer = c.kind === 'int';
+    var formatted = c.digits !== undefined || c.sigdigits !== undefined || c.percent;
+    if (v === null || v === undefined) {
+      td.setAttribute('data-htmxo-number', '');
+      if (c.empty) td.setAttribute('data-htmxo-align', c.empty);
+      td.textContent = '–';
+    } else if (typeof v === 'number' && (c.kind === 'float' || (integer && formatted))) {
+      var key = numberKey(v, integer);
+      td.setAttribute('data-sort-value', key);
+      td.setAttribute('data-htmxo-number', key);
+      td.textContent = htmxoNumberText(v, {digits: c.digits, sigdigits: c.sigdigits, percent: c.percent, texts: texts}, integer);
+    } else td.textContent = String(v);
+    if (c.align && !td.hasAttribute('data-htmxo-align')) td.setAttribute('data-htmxo-align', c.align);
+    return td;
+  }
+  // One column of `bound(x; columns)`: a single value (a number, a Boolean,
+  // text) is the table's one row.
+  function boundColumn(value) {
+    var single = value !== undefined && typeof value !== 'object';
+    return single ? [value] : Array.from(value);
+  }
+  // `render_table(bound(x; columns))`: its rows written again from the new
+  // columns, then the reader's sort, search and hover links applied to them.
+  function boundTable(table, results) {
+    var spec = table.__htmxoBound || (table.__htmxoBound = JSON.parse(table.getAttribute('data-htmxo-bound-table')));
+    if (!has(results, spec.path[0])) return;
+    var data = at(results[spec.path[0]], spec.path);
+    if (data === null || data === undefined) return;
+    var columns = spec.columns.map(function(c) { return boundColumn(data[c.name]); });
+    var n = columns.reduce(function(m, c) { return Math.max(m, c.length); }, 0);
+    var keyed = spec.columns.findIndex(function(c) { return c.name === spec.link_key; });
+    var texts = htmxoTexts(table), rows = [];
+    for (var i = 0; i < n; i++) {
+      var tr = document.createElement('tr');
+      spec.columns.forEach(function(c, j) { tr.appendChild(boundCell(columns[j][i], c, texts)); });
+      // As AlgebraOfVega keys a plot's marks by the same column (`_link_key_text`).
+      if (keyed >= 0) tr.setAttribute('data-htmxo-link-key', String(columns[keyed][i]));
+      rows.push(tr);
+    }
+    var body = table.tBodies[0];
+    body.replaceChildren.apply(body, rows);
+    if (typeof htmxoResort === 'function') htmxoResort(table);
+    if (typeof htmxoFilterTable === 'function' && table.closest('.htmxo-searchable-table')) htmxoFilterTable(table);
+    if (typeof htmxoLinkApply === 'function' && table.dataset.htmxoLink) htmxoLinkApply(table, false);
   }
   function patch(view, results, values, defaults) {
     view.querySelectorAll('[data-htmxo-bound]').forEach(function(el) {
@@ -746,17 +882,16 @@ semantic_browser_script() = h.script(Raw(raw"""
         var wire = values[root] && values[root].length ? values[root] : defaults[root];
         value = wire && wire.length ? wire[0] : undefined;
       }
-      var shown = text(value, el.getAttribute('data-htmxo-kind'), el.getAttribute('data-htmxo-digits'));
+      var shown = text(value, el.getAttribute('data-htmxo-kind'), formatOf(el));
       if (shown !== null && el.textContent !== shown) el.textContent = shown;
     });
+    view.querySelectorAll('table[data-htmxo-bound-table]').forEach(function(table) { boundTable(table, results); });
     view.querySelectorAll('[data-htmxo-bound-columns]').forEach(function(el) {
       var spec = JSON.parse(el.getAttribute('data-htmxo-bound-columns'));
       if (!has(results, spec.path[0])) return;
       var table = at(results[spec.path[0]], spec.path), columns = {}, n = 0;
       spec.columns.forEach(function(c) {
-        // A single value (a number, a Boolean, text) is the table's one row.
-        var value = table[c], single = value !== undefined && typeof value !== 'object';
-        var column = single ? [value] : Array.from(value);
+        var column = boundColumn(table[c]);
         columns[c] = column;
         n = column.length;
       });
