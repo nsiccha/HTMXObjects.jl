@@ -93,6 +93,45 @@ become hidden inputs; attributes such as `hx_target` configure the form.
 Use `obj=__self__` to forward an object's set `@param` values, with `skip` for
 parameters already supplied by visible controls.
 
+## Resetting every input
+
+From 0.1.127, a `presentation=:tabs` page has a Reset button. It returns every
+input, in the sidebar and in each tab, to what the page shows when its address
+names nothing: its `values=` entry or its declared default. An input with a
+computed default, or one with `@resets` (next section), follows its default
+again, and a list of records goes back to its one default record. The open tab
+stays.
+
+```@example forms
+@htmx struct Probe
+    "Attenuation"
+    @param attenuation::Float64 = 0.004
+    @options(attenuation) = number_domain(0.001, 0.015; log=true, digits=4)
+    "Density"
+    @param density::Float64 = 300.0
+    @get reading() = h.p(attenuation, " at ", density)
+    @get index() = semantic_app(__self__; presentation=:tabs,
+        select=entry -> entry.name !== :index)
+end
+route!(Probe(); prefix="/probe", operation_policy=:blocking);
+page = String(dispatch(:GET, "/probe"; headers=["HX-Request" => "true"]).body);
+reset = match(r"<button[^>]*data-htmxo-reset[^>]*>[^<]*</button>", page);
+@assert reset !== nothing # hide
+println(reset.match)
+```
+
+The browser sets the controls, and the results, bound values, sliders and page
+address follow as after the reader's own change. A page from `export_site`
+therefore resets offline, with no request. Only a default computed from other
+inputs is drawn by the server, as when one of those inputs changes.
+
+The button ends the sidebar; a page without one draws it under each tab's
+inputs, as here. A custom `layout(parts)` places `parts.reset`, a custom
+`render_operation(entry)` places `entry.reset` (`nothing` where the default
+draws none), and `semantic_app(…; reset=false)` draws none. Its label is the
+`reset_inputs` text of `__error_texts__`. Files and fixed fields shown as
+inputs keep their values, as the page address does not keep them either.
+
 ## Resetting dependent inputs
 
 From 0.1.109, a generated form can discard an edited input when one of its
@@ -182,8 +221,10 @@ followed by the unit. A `log` domain spaces the slider evenly in ratio, for a
 positive quantity spanning orders of magnitude. A slider value lies on the
 `step` grid counted from the lower bound; without a step it keeps `digits`
 decimal places, or three significant digits. Typing in the field moves the
-slider. Results and the page address follow the field once the slider is
-released. Without JavaScript, the field alone still submits.
+slider. A result computed in the browser (`@browser`) follows the field while
+the slider moves, redrawn once an animation frame at most; a result asked of
+the server and the page address follow it once the slider is released.
+Without JavaScript, the field alone still submits.
 
 A number outside the interval answers 400 at its field, for `@param`s,
 operation arguments and JSON bodies alike, as a value outside a finite

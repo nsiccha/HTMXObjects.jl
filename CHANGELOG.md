@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.127
+## 0.1.129
 
 - `numbered(content...)` numbers the sections, captioned figures and captioned
   tables inside it, with the same numbers in the HTML page, its Markdown and a
@@ -25,6 +25,33 @@
 - `html_only(content)` renders its content in HTML as an element's child does:
   plain text, a vector or `nothing` inside it no longer throws a `MethodError`,
   and text is escaped. Content that rendered before renders the same bytes.
+
+## 0.1.128
+
+- A `semantic_app` result computed in the browser (`@browser`) follows an
+  input while it moves: each `input` event of an input it reads (a
+  `number_domain` slider held down, a number being typed) recomputes it, at
+  most once an animation frame and never while its previous computation still
+  runs, with the newest values. Before, it waited for the `change` on release,
+  like a result asked of the server. A result asked of the server and the page
+  address still follow the `change` (`semantic_follow_script`).
+
+## 0.1.127
+
+- A `semantic_app(…; presentation=:tabs)` page has a Reset button that returns
+  every input to what the page shows when its address names nothing: the
+  sidebar's and each tab's, to its `values=` entry or declared default; a
+  computed default or `@resets` target follows its default again, and a list
+  of records goes back to its one default record. The browser does it, so a
+  static `export_site` page resets offline, with no request. Results, bound
+  values, number sliders, choice lists and the page address follow as after a
+  change the reader made. The open tab stays.
+- The Reset ends the sidebar, or, on a page without one, follows each tab's
+  inputs. A custom `layout(parts)` places `parts.reset` and a custom
+  `render_operation(entry)` `entry.reset` (`nothing` where the default draws
+  none). `semantic_app(…; reset=false)` draws none; on a page with
+  `url_state=false` its forms carry `data-htmxo-defaults` for it. Its words are
+  `ErrorTexts`' new `reset_inputs` (`Reset`, German `Zurücksetzen`).
 
 ## 0.1.126
 
