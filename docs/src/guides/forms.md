@@ -174,7 +174,7 @@ println(String(response.body))
   Julia types in order. The page passes each by name: a `@param` from its
   control (numbers, `Bool`, text and vectors of them), any other from the
   property of that name, which must not read an input (`grid` above); its value
-  goes into the page. A named tuple comes back as an object of named outputs.
+  goes into the page, non-finite numbers and `-0.0` included. A named tuple comes back as an object of named outputs.
 - **`bound`** marks where a view shows a browser value: the property, one of its
   outputs (`bound(fit.total)`), an element of one (`bound(fit.y[2])`, the index
   an integer literal) or a `@param` (`bound(a)`), rounded with `digits=`. The server shows

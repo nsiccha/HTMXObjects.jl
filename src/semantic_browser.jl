@@ -75,7 +75,7 @@ tuple, or a number or array. An error it throws is shown in the result, under
 its `name` (`DomainError`, …). The page passes each argument by its name: a
 `@param` from its control (`Float64`, `Int64`, `Bool` and vectors of them, or
 text), any other from the property of that name, which must not read an input;
-its value goes into the page as data. The module is embedded in the page, so it
+its value goes into the page as data, `Inf`, `NaN` and `-0.0` included. The module is embedded in the page, so it
 must be one self-contained file.
 """
 function browser_module(path::AbstractString, entry)
