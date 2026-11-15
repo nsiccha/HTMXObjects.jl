@@ -11,14 +11,18 @@ using TestItemRunner
     export class JuliaError extends Error {
       constructor(type, message) { super(message); this.name = type; }
     }
-    export function toy(grid, a, b) {
+    export function toy(grid, a, b, lim, z) {
       if (b < 0) throw new JuliaError("DomainError", "toy was called with b = " + b + "; it must be nonnegative");
       const n = grid.length, x = new Array(n), y = new Array(n);
       for (let i = 0; i < n; i++) { x[i] = grid[i]; y[i] = a * grid[i] + b; }
-      return { x, y, total: a + b, at: [a + b, 2 * a + b] };
+      // `lim` and `z` echo embedded data that JSON alone cannot carry: Inf and -0.0.
+      return { x, y, total: a + b, at: [a + b, 2 * a + b], lim, z,
+               ok: [lim === Infinity ? 1 : 0, Object.is(z, -0) ? 1 : 0] };
     }
-    export const INPUTS = [{ name: "grid", type: "Vector{Float64}" }, { name: "a", type: "Float64" }, { name: "b", type: "Float64" }];
-    export const OUTPUTS = [{ name: "x" }, { name: "y" }, { name: "total" }, { name: "at" }];
+    export const INPUTS = [{ name: "grid", type: "Vector{Float64}" }, { name: "a", type: "Float64" },
+      { name: "b", type: "Float64" }, { name: "lim", type: "Float64" }, { name: "z", type: "Float64" }];
+    export const OUTPUTS = [{ name: "x" }, { name: "y" }, { name: "total" }, { name: "at" }, { name: "lim" },
+      { name: "z" }, { name: "ok" }];
     """
 
     @htmx struct Lines
@@ -36,7 +40,10 @@ using TestItemRunner
         # Arithmetic of inputs: evaluated in the browser.
         @relevant(extra) = a * b > 10
         grid = [0.0, 1.0, 2.0]
-        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b])
+        lim = Inf    # an unbounded limit: data, not a missing value
+        z = -0.0
+        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b], lim, z,
+                ok = [lim == Inf ? 1 : 0, signbit(z) ? 1 : 0])
         @browser(line) = browser_module(; source = TOY_JS, entry = :toy)
         __page__(content) = HTMXObjects.htmx(content; title = "Lines", assets = "assets/vendor",
                                              runtime = :linked)
@@ -46,7 +53,9 @@ using TestItemRunner
             h.div(h.p("total ", bound(line.total); class = "total"),
                   h.p("second ", bound(line.at[2]); class = "second"),
                   h.p("slope ", bound(a), " extra ", bound(extra; digits = 2)),
-                  h.div(; id = "plot1", bound_columns_attrs(bound(line; columns = (:x, :y)))...)) :
+                  h.div(; id = "plot1", bound_columns_attrs(bound(line; columns = (:x, :y)))...),
+                  h.p(bound(line.lim), " ", bound(line.z), " ", bound(line.ok[1]), bound(line.ok[2]);
+                      class = "echo")) :
             h.p("total only ", bound(line.total; digits = 1); class = "total")
     end
 
@@ -57,7 +66,10 @@ using TestItemRunner
         "Intercept"
         @param b::Float64 = 1.0
         grid = [0.0, 1.0]
-        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b])
+        lim = Inf    # an unbounded limit: data, not a missing value
+        z = -0.0
+        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b], lim, z,
+                ok = [lim == Inf ? 1 : 0, signbit(z) ? 1 : 0])
         @browser(line) = browser_module(; source = TOY_JS, entry = :toy)
         @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
         "Result"
@@ -71,7 +83,10 @@ using TestItemRunner
         "Intercept"
         @param b::Float64 = 1.0
         grid = [0.0, 1.0]
-        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b])
+        lim = Inf    # an unbounded limit: data, not a missing value
+        z = -0.0
+        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b], lim, z,
+                ok = [lim == Inf ? 1 : 0, signbit(z) ? 1 : 0])
         @browser(line) = browser_module(; source = TOY_JS, entry = :toy)
         @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
         "Result"
@@ -88,7 +103,10 @@ using TestItemRunner
         @param b::Float64 = 1.0
         @help(b) = string("now ", a)
         grid = [0.0, 1.0]
-        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b])
+        lim = Inf    # an unbounded limit: data, not a missing value
+        z = -0.0
+        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b], lim, z,
+                ok = [lim == Inf ? 1 : 0, signbit(z) ? 1 : 0])
         @browser(line) = browser_module(; source = TOY_JS, entry = :toy)
         @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
         "Result"
@@ -106,7 +124,8 @@ end
     m = getproperty(Lines(), HTMXObjects._browser_property(:line))
     @test m isa BrowserModule
     @test m.entry == "toy"
-    @test m.inputs == [("grid", "Vector{Float64}"), ("a", "Float64"), ("b", "Float64")]
+    @test m.inputs == [("grid", "Vector{Float64}"), ("a", "Float64"), ("b", "Float64"),
+                       ("lim", "Float64"), ("z", "Float64")]
     # The operation reads its browser property and the inputs it is computed from.
     reads = HTMXObjects._operation_reads(Lines, :result)
     @test reads.complete
@@ -170,7 +189,10 @@ end
     # The binding: the module's arguments in its order, data embedded once.
     binding = JSON.parse(match(r"<script type=\"application/json\" id=\"[^\"]*\" data-htmxo-browser-binding=\"\">([^<]*)</script>", html).captures[1])
     @test binding["entry"] == "toy"
-    @test [i["name"] for i in binding["inputs"]] == ["grid", "a", "b"]
+    @test [i["name"] for i in binding["inputs"]] == ["grid", "a", "b", "lim", "z"]
+    # Non-finite data travels tagged (JSON has no Inf); -0.0 keeps its sign.
+    @test binding["inputs"][4]["value"] == Dict("\$f" => "Inf")
+    @test binding["inputs"][5]["value"] == 0.0 && signbit(binding["inputs"][5]["value"])
     @test binding["inputs"][1]["value"] == [0.0, 1.0, 2.0]
     @test binding["inputs"][2]["param"] == "a" && binding["inputs"][2]["default"] == ["2.0"]
     @test count("data-htmxo-browser-module=\"\"", html) == 1
@@ -237,7 +259,8 @@ end
             while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + label); await sleep(25); }
           }
           const region = () => document.querySelector('[data-htmxo-browser]');
-          const shown = () => Array.from(region().querySelectorAll(':scope > .htmxo-browser-view [data-htmxo-bound]')).map(e => e.textContent).join('|');
+          const shown = () => Array.from(region().querySelectorAll(':scope > .htmxo-browser-view [data-htmxo-bound]:not(.echo *)')).map(e => e.textContent).join('|');
+          const echo = () => Array.from(region().querySelectorAll(':scope > .htmxo-browser-view .echo [data-htmxo-bound]')).map(e => e.textContent).join('|');
           const control = name => document.querySelector('input[name="' + name + '"]');
           const relevant = name => !document.querySelector('[data-htmxo-relevant="' + name + '"]').hidden;
           function type(name, value) { const c = control(name); c.value = value; c.dispatchEvent(new Event('change', {bubbles: true})); }
@@ -260,6 +283,8 @@ end
             await fetch('/mark?phase=start');
             type('a', '3'); type('b', '4');
             await until(() => shown() === '7.0|10.0|3.0|0.5', 'a=3 b=4: ' + shown());
+            // Computed in the browser from embedded Inf and -0.0, both intact.
+            if (echo() !== 'Inf|-0.0|1|1') throw new Error('non-finite data: ' + echo());
             if (!columns || columns.columns.y.join(',') !== '4,7,10') throw new Error('columns: ' + JSON.stringify(columns));
             await until(() => relevant('extra'), 'extra applies (a*b > 10)');
             type('extra', '0.125');

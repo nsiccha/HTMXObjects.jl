@@ -426,13 +426,15 @@ function _browser_scripts!(page::_BrowserPage, ids)
     nodes
 end
 
-# A module argument that is data, as JSON carries it.
+# A module argument that is data, as JSON carries it. JSON has no Inf or NaN,
+# and a reader's data may legitimately hold them (an unbounded limit is not a
+# missing one), so a non-finite float travels as `{"$f": "Inf"}` and the
+# runtime turns it back into the JavaScript number; -0.0 keeps its sign.
 _browser_data(x::Bool, _) = x
 _browser_data(x::Union{AbstractString,Symbol}, _) = string(x)
-function _browser_data(x::Real, name)
-    isfinite(x) || throw(ArgumentError("the browser module argument `$name` is $x, which JSON cannot carry"))
-    x
-end
+_browser_data(x::Real, _) = x
+_browser_data(x::AbstractFloat, _) = isfinite(x) ? x :
+    Dict("\$f" => isnan(x) ? "NaN" : x > 0 ? "Inf" : "-Inf")
 _browser_data(x::AbstractVector, name) = Any[_browser_data(v, name) for v in x]
 _browser_data(x, name) = throw(ArgumentError(string(
     "the browser module argument `", name, "` is a ", typeof(x), "; the page passes numbers, ",
@@ -494,7 +496,8 @@ function _browser_closing(s, i, tag)
 end
 
 # The probes of an input's value: changed values its route should accept.
-_browser_probes(x::AbstractFloat) = (x * 1.1 + 1e-3, x * 0.9 - 1e-3, x * 1.01, x * 0.99, x + 1, x - 1)
+_browser_probes(x::AbstractFloat) = isfinite(x) ?
+    (x * 1.1 + 1e-3, x * 0.9 - 1e-3, x * 1.01, x * 0.99, x + 1, x - 1) : (0.0, 1.0, -1.0)
 _browser_probes(x::Integer) = (x + 1, x - 1, x + 2)
 _browser_probes(x::AbstractString) = (string(x, "x"), "")
 _browser_probes(_) = ()
@@ -625,14 +628,23 @@ semantic_browser_script() = h.script(Raw(raw"""
     return parsed(el);
   }
   // A module argument from the wire strings a control sends, by its Julia type.
+  // Julia writes non-finite floats `Inf`, `-Inf` and `NaN`.
+  var NONFINITE = {'Inf': Infinity, '+Inf': Infinity, '-Inf': -Infinity, 'NaN': NaN,
+                   'Infinity': Infinity, '+Infinity': Infinity, '-Infinity': -Infinity};
   function scalar(type, s) {
     if (/^(Float16|Float32|Float64|AbstractFloat|Real|Number|U?Int(8|16|32|64|128)?|Integer)$/.test(type))
-      return s === '' ? NaN : Number(s);
+      return s === '' ? NaN : has(NONFINITE, s) ? NONFINITE[s] : Number(s);
     if (type === 'Bool') return s === 'true';
     return s;
   }
+  // Embedded data: a non-finite float arrives as `{"$f": "Inf"}` (JSON has none).
+  function decoded(v) {
+    if (Array.isArray(v)) return v.map(decoded);
+    if (v !== null && typeof v === 'object' && has(v, '$f')) return NONFINITE[v.$f];
+    return v;
+  }
   function argument(input, values) {
-    if (has(input, 'value')) return input.value;
+    if (has(input, 'value')) return decoded(input.value);
     var given = values[input.param];
     var strings = given && given.length ? given : (input['default'] || []);
     var vector = /^(?:Abstract)?Vector\{(.+)\}$/.exec(input.type);
