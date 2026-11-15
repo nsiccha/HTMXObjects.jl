@@ -144,7 +144,9 @@ using TestItemRunner
             render_table(bound(shield; columns = (:water, :depth, :share));
                 columns = [:water => ColumnSpec("Snow water (mm)"; digits = 0), :depth => ColumnSpec("Depth (cm)"; digits = 0),
                            :share => ColumnSpec("Share passing"; digits = 3)],
-                link = "shield", link_key = :water))
+                link = "shield", link_key = :water),
+            # A single-value output is a table of one row, redrawn the same way.
+            render_table(bound(shield; columns = (:half,)); columns = [:half => ColumnSpec("Half (mm)"; digits = 0)]))
     end
 
     browser_region(html) = match(r"<div id=\"[^\"]*-result\"[^>]*data-htmxo-browser=[^>]*>", html)
@@ -529,7 +531,7 @@ end
     html = String(HTMXObjects._response_bytes(dispatch(:GET, "/picture"; headers = ["HX-Request" => "true"])))
     # The first rows, as any render_table writes them, each column with its rounding.
     @test [m[1] for m in eachmatch(r"<td[^>]*>([^<]*)</td>", html)] ==
-          ["0", "0", "1.000", "20", "8", "0.833", "50", "20", "0.667", "100", "40", "0.500"]
+          ["0", "0", "1.000", "20", "8", "0.833", "50", "20", "0.667", "100", "40", "0.500", "100"]
     @test occursin("data-sort-value=\"0.8333333333333334\" data-htmxo-number=\"0.8333333333333334\">0.833<", html)
     # Keyed for hover linking as AlgebraOfVega keys a plot's marks: `20`, not `20.0`.
     @test [m[1] for m in eachmatch(r"data-htmxo-link-key=\"([^\"]*)\"", html)] == ["0", "20", "50", "100"]
@@ -537,6 +539,8 @@ end
     @test spec["path"] == ["shield"] && spec["link_key"] == "water"
     @test [c["name"] for c in spec["columns"]] == ["water", "depth", "share"]
     @test all(c -> c["kind"] == "float", spec["columns"]) && [c["digits"] for c in spec["columns"]] == [0, 0, 3]
+    one = JSON.parse(replace(collect(eachmatch(r"data-htmxo-bound-table=\"([^\"]*)\"", html))[2][1], "&quot;" => "\""))
+    @test [c["name"] for c in one["columns"]] == ["half"] && one["columns"][1]["kind"] == "float"
     # The text peer shows the rows the server computes.
     plain = String(HTMXObjects._response_bytes(dispatch(:GET, "/picture?attenuation=0.02&plain=1")))
     @test occursin("0.714", plain) && occursin("0.333", plain)
@@ -597,6 +601,8 @@ end
           const column = j => rows().map(r => r.cells[j].textContent).join(',');
           const fact = name => Array.from(document.querySelectorAll('.' + name + ' [data-htmxo-bound]')).map(e => e.textContent).join('|');
           const facts = () => [fact('half'), fact('at'), fact('de')].join(' ');
+          // The one-row table of the single value `half`.
+          const halfRow = () => Array.from(document.querySelectorAll('table[data-htmxo-bound-table]')[1].tBodies[0].rows).map(r => r.textContent).join(',');
           const field = () => document.querySelector('input[name="attenuation"]');
           function typed(v) { const c = field(); c.value = v; c.dispatchEvent(new Event('input', {bubbles: true})); }
           try {
@@ -607,6 +613,7 @@ end
             await until(() => table() && rows().length === 4, 'table');
             const server = snapshot();
             if (facts() !== '100 83%|50% 0,833') throw new Error('first facts: ' + facts());
+            if (halfRow() !== '100') throw new Error('first one-row table: ' + halfRow());
             // The reader sorts by the share, ascending.
             const th = table().tHead.rows[0].cells[2];
             sortTable(th);
@@ -615,6 +622,7 @@ end
             typed('0.02');
             await until(() => facts() === '50 71%|33% 0,714', () => 'typed facts: ' + facts());
             await until(() => column(2) === '0.333,0.500,0.714,1.000', () => 'typed table: ' + column(2));
+            await until(() => halfRow() === '50', () => 'typed one-row table: ' + halfRow());
             // The reader's sort holds for the new rows.
             if (column(0) !== '100,50,20,0' || th.getAttribute('aria-sort') !== 'ascending')
               throw new Error('sort kept: ' + column(0) + ' ' + th.getAttribute('aria-sort'));
@@ -632,6 +640,7 @@ end
             slider.dispatchEvent(new Event('input', {bubbles: true}));
             await until(() => fact('half') === '200', () => 'held slider: ' + facts());
             await until(() => column(2) === '0.667,0.800,0.909,1.000', () => 'held slider table: ' + column(2));
+            await until(() => halfRow() === '200', () => 'held slider one-row table: ' + halfRow());
             // Back at the first value, the browser's rows are the server's, cell by cell.
             typed('0.01');
             await until(() => facts() === '100 83%|50% 0,833', () => 'back: ' + facts());
