@@ -21630,6 +21630,9 @@ not part of the spec: it comes from the renderer's `texts=` ([`caption_texts`](@
 In markdown the three tiers join with `" — "` into a single paragraph; a
 blank or absent `long` leaves the compact title/short caption.
 
+A blank tier is left out with its `" — "`: `CaptionSpec(; title="", short=text)`
+is a caption of `text` alone, with no bold heading and no leading dash.
+
 A plain string works wherever a caption is taken ([`render_caption`](@ref),
 [`with_caption`](@ref) and the `caption` keyword of [`render_table`](@ref),
 [`sortable_table`](@ref) and [`master_detail_table`](@ref)). It is a caption with
@@ -21779,7 +21782,11 @@ this function returns just the `<figcaption>` so it can be embedded in a
 custom layout if needed.
 """
 function render_caption(spec::CaptionSpec; actions=(), texts::CaptionTexts=_EN_CAPTION_TEXTS)
-    header_kids = Any[h.span(h.strong(spec.title), isempty(spec.short) ? "" : " — ", spec.short)]
+    # A blank title or short is left out, with its " — ": a caption of `short`
+    # alone shows just that text, never an empty bold and a leading dash.
+    has_title, has_short = !_caption_blank(spec.title), !_caption_blank(spec.short)
+    header_kids = Any[h.span(has_title ? h.strong(spec.title) : "",
+        has_title && has_short ? " — " : "", has_short ? spec.short : "")]
     if !isempty(actions)
         push!(header_kids, h.span(; class="caption-actions")(actions...))
     end
@@ -21791,10 +21798,13 @@ function render_caption(spec::CaptionSpec; actions=(), texts::CaptionTexts=_EN_C
     # paragraph stays in the caption paragraph Quarto numbers. HTMX.jl starts
     # every block (a `<p>` in a Node long) on its own line, so the join is
     # written from the long's own markdown instead of the `<details>` above.
-    # A blank long emits no separator, so the caption never trails " — ".
+    # A blank long emits no separator, so the caption never trails " — ", and
+    # with no title or short the long opens the caption without one.
     long_md = lstrip(to_markdown_string(long))
-    h.figcaption(; class="caption")(header, isempty(long_md) ? "" : markdown_only(" — " * long_md), body)
+    sep = has_title || has_short ? " — " : ""
+    h.figcaption(; class="caption")(header, isempty(long_md) ? "" : markdown_only(sep * long_md), body)
 end
+_caption_blank(s::AbstractString) = all(isspace, s)
 render_caption(title::AbstractString; kwargs...) = render_caption(CaptionSpec(; title); kwargs...)
 
 _as_children(content) = (content,)

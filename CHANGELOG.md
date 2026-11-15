@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.125
+## 0.1.127
 
 - A `semantic_app(…; presentation=:tabs)` page has a Reset button that returns
   every input to what the page shows when its address names nothing: the
@@ -18,6 +18,31 @@
   none). `semantic_app(…; reset=false)` draws none; on a page with
   `url_state=false` its forms carry `data-htmxo-defaults` for it. Its words are
   `ErrorTexts`' new `reset_inputs` (`Reset`, German `Zurücksetzen`).
+
+## 0.1.126
+
+- A caption without a title shows its summary alone: `CaptionSpec(; title="",
+  short=text)` renders `text`, in HTML and Markdown, through `render_caption`,
+  `with_caption`, the tables' `caption=` and AoV's `with_plot_caption`. Before,
+  it rendered an empty `<strong></strong>` (`****` in Markdown) and a leading
+  ` — `. A blank tier (whitespace only) is left out with its ` — ` in general:
+  a blank summary leaves the title alone, and a long text with neither title
+  nor summary opens the Markdown caption without a dash. Captions with a
+  title are unchanged (snag `caption-empty-ti-4b05b833`).
+
+## 0.1.125
+
+- The table `bound(x; columns)` makes is its own `Tables.columns`, so it
+  stays bound inside a plot's data: AlgebraOfGraphics' `data(b)` keeps
+  `Tables.columns(b)`, which is now `b` itself and no longer a plain named
+  tuple of its columns, so a plotting package reading a layer's data back can
+  call `bound_columns_attrs` on it for the element that draws it. Its columns
+  are only the chosen outputs: asking it for another output is an
+  `ArgumentError` naming the columns it has.
+- `bound(x; columns)` naming an output `x` lacks, an output that is not a
+  vector, or outputs of different lengths raises the `ArgumentError` naming
+  `x` that it was written to raise, where it raised
+  `type Symbol has no field value`.
 
 ## 0.1.124
 
