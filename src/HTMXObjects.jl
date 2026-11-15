@@ -35466,7 +35466,12 @@ that is written into the address (`history.replaceState`, no new history
 entry); one back at it, an empty one, one that does not apply (its
 control is hidden) and one that shows its computed default are left out. Other parameters, such as the tab's `?tab=`,
 stay. The page shows the values its address names, so a reload or a shared
-link reopens the same inputs and results.
+link reopens the same inputs and results: the server applies them to a page
+it renders, and the script applies them to the controls when the page loads,
+which is what a static page (`export_site`) needs.
+
+A result that reads a `@browser` property is computed in the browser
+([`semantic_browser_script`](@ref)) instead of asked for, under the same rules.
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
 once per page when building a `<head>` by hand.
 """
