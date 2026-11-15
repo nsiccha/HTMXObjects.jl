@@ -5645,6 +5645,7 @@ end
 _semantic_table_cell(value) =
     replace(replace(strip(string(value)), r"\s*\n\s*" => "<br>"), "|" => "\\|")
 _semantic_table_cell(value::AbstractFloat) = format_number(value)
+_semantic_table_cell(::Union{Nothing,Missing}) = format_number(nothing)
 
 function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
     cells = _semantic_table_columns(table.source)
@@ -5737,7 +5738,8 @@ Base.show(io::IO, ::MIME"text/plain", artifact::SemanticArtifact) = print(
     isnothing(artifact.target) ? "" : " ($(artifact.target))")
 
 # The tab-separated peer keeps exact values, as the ⬇ CSV does: a column of
-# `IntervalEstimate`s is three columns, the estimate and its two bounds.
+# `IntervalEstimate`s is three columns, the estimate and its two bounds, and
+# no value (`missing`, `nothing`) is an empty field.
 function Base.show(io::IO, mime::MIME"text/plain", table::SemanticTable)
     cells = _semantic_table_columns(table.source)
     isnothing(cells) && return _semantic_show_leaf(io, mime, table.source)
@@ -5747,11 +5749,13 @@ function Base.show(io::IO, mime::MIME"text/plain", table::SemanticTable)
     print(io, join((w ? join((n, "$n / $(texts.sort_lower)", "$n / $(texts.sort_upper)"), '\t') : string(n)
                     for (n, w) in zip(names, wide)), '\t'), '\n')
     for row in eachindex(first(columns))
-        print(io, join((w ? _semantic_interval_fields(column[row]) : string(column[row])
+        print(io, join((w ? _semantic_interval_fields(column[row]) : _semantic_plain_field(column[row])
                         for (column, w) in zip(columns, wide)), '\t'), '\n')
     end
 end
-_semantic_interval_fields(x) = string(x, "\t\t")
+_semantic_plain_field(x) = string(x)
+_semantic_plain_field(::Union{Nothing,Missing}) = ""
+_semantic_interval_fields(x) = string(_semantic_plain_field(x), "\t\t")
 
 function Base.show(io::IO, mime::MIME"text/plain", section::SemanticSection)
     print(io, section.title)
@@ -24970,6 +24974,10 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   `3.81e-5` shows `3,81·10⁻⁵`, and the cell sorts and exports to CSV by its
   exact value. Any other value shows as `string(value)`, integers included,
   since an integer column is as often a year, an id or a postcode as a count.
+  No value, `missing` or `nothing`, shows `–` with no sort value and an
+  empty CSV field (an empty `number_cell`), in any column: at the right in
+  a column of numbers, and where the text sits in a column of text or
+  integers. A custom `cell` gets `missing` and `nothing` as they are.
 - `class`: table CSS class (default `"striped"`)
 - `searchable`: client-side search over the rows (default `false`); see
   [`sortable_table`](@ref)
@@ -24996,12 +25004,16 @@ page = htmx(h.main(render_table(df; download=true, caption=cap)); pico_version="
 function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, columns=nothing, kwargs...)
     isnothing(link) == isnothing(link_key) || throw(ArgumentError(
         "render_table: `link` names the group and `link_key(row)` keys each row; give both or neither"))
-    cols = Tables.columnnames(Tables.columns(table))
+    tcols = Tables.columns(table)
+    cols = Tables.columnnames(tcols)
     texts = get(kwargs, :texts, _EN_TABLE_TEXTS)
     headers = _render_table_headers(columns, cols)
+    # Where each column's empty cells (`missing`, `nothing`) sit.
+    empty_aligns = Any[isnothing(cell) ? _render_empty_align(Tables.getcolumn(tcols, c), headers[j]) : nothing
+                       for (j, c) in enumerate(cols)]
 
     body_rows = [
-        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts), row)
+        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts, empty_aligns[j]), row)
               for (j, c) in enumerate(cols)]...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
              (isnothing(link_key) ? (;) : (; data_htmxo_link_key=string(link_key(row))))...)
@@ -25042,11 +25054,26 @@ function _render_sort_values(hdr::ColumnSpec, td, row)
         HTMX.children(td))
 end
 
-# A `render_table` cell: a float is a number cell in the table's language,
-# any other value its `string`; a custom `cell` renders the content.
-_render_table_cell(::Nothing, value::AbstractFloat, c, ri, texts) = number_cell(value; texts)
-_render_table_cell(::Nothing, value, c, ri, texts) = h.td(string(value))
-_render_table_cell(cell, value, c, ri, texts) = h.td(cell(value, c, ri))
+# A `render_table` cell: a float is a number cell in the table's language, no
+# value (`missing`, `nothing`) an empty number cell (`–`, no sort value, an
+# empty ⬇ CSV field) placed as `empty_align` says, any other value its
+# `string`; a custom `cell` renders the content, no value included.
+_render_table_cell(::Nothing, value::AbstractFloat, c, ri, texts, empty_align) = number_cell(value; texts)
+_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, ::Nothing) = number_cell(nothing; texts)
+_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, empty_align::String) =
+    number_cell(nothing; texts, data_htmxo_align=empty_align)
+_render_table_cell(::Nothing, value, c, ri, texts, empty_align) = h.td(string(value))
+_render_table_cell(cell, value, c, ri, texts, empty_align) = h.td(cell(value, c, ri))
+
+# Where a column's empty cells sit: at the right, as a number cell does
+# (`nothing`: no alignment of their own), in a column of numbers (floats,
+# `IntervalEstimate`s) or of no values at all; in a column that shows text
+# (strings, integers, any other value), where that text sits: its
+# `ColumnSpec(align)`, else the left.
+_render_empty_align(values, hdr) =
+    any(_render_shows_text, values) ? String(something(_header_align(hdr), :left)) : nothing
+_render_shows_text(_) = true
+_render_shows_text(::Union{Nothing,Missing,AbstractFloat}) = false
 
 # --- The row order `default_sort` writes ---
 # `sortable_table` writes its rows in the order a click on the `default_sort`
@@ -26264,7 +26291,9 @@ end
 # layout splatting `parts.action_attrs` onto the row. The helper keeps those
 # attributes on the row it builds. Its copy of the cells is its own, so
 # relabelling the first cell leaves the caller's row untouched. A bare float
-# among the cells becomes a number cell in the table's language.
+# among the cells becomes a number cell in the table's language, and a bare
+# `missing` an empty one. A bare `nothing` is no cell: HTMX drops a `nothing`
+# child, so a `<tr>` holding one never shows it to us either.
 _md_master_row(row::Node, texts::TableTexts) = HTMX.tag(row) === :tr ?
     (_md_master_cells(HTMX.children(row), texts), HTMX.attrs(row)) :
     throw(ArgumentError(string("master/detail: the master cells must be the row's ",
@@ -26272,6 +26301,7 @@ _md_master_row(row::Node, texts::TableTexts) = HTMX.tag(row) === :tr ?
 _md_master_row(cells, texts::TableTexts) = (_md_master_cells(cells, texts), ())
 _md_master_cells(cells, texts) = Any[_md_master_cell(c, texts) for c in cells]
 _md_master_cell(x::AbstractFloat, texts) = number_cell(x; texts)
+_md_master_cell(::Missing, texts) = number_cell(missing; texts)
 _md_master_cell(x, texts) = x
 
 # Whether a first cell's content holds a control of its own. A native button
@@ -26559,7 +26589,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   allows it). HTMXObjects ≥ 0.1.35.
 - `master(item)`: function returning the master row's `<td>` cells
   (vector or tuple of nodes), or one `<tr>` holding them. A bare float among
-  them becomes a [`number_cell`](@ref) in the table's language (`texts`). A row's attributes
+  them becomes a [`number_cell`](@ref) in the table's language (`texts`), and
+  a bare `missing` an empty one (`–`). A bare `nothing` is no cell at all, as
+  HTMX drops a `nothing` child: write a missing number as `missing`. A row's attributes
   stay on the master row the helper builds, so attributes computed together
   with the cells need no second callback: a [`semantic_app`](@ref) layout can
   return `h.tr(cells...; parts.action_attrs...)`, with the shared result host
@@ -27545,7 +27577,8 @@ A table cell, `<td>`, that shows `format_number(x; texts, digits, sigdigits)`
 `missing` and `nothing` show `–`, with no sort value and an empty CSV field.
 `attrs` are further attributes of the `<td>`. [`render_table`](@ref) and the
 master cells of [`master_detail_table`](@ref) make a float this cell by
-themselves; pass the table's `texts` to cells you build for
+themselves, and `missing` (in `render_table` also `nothing`) the empty one;
+pass the table's `texts` to cells you build for
 [`sortable_table`](@ref).
 """
 number_cell(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Integer}=nothing,
@@ -27940,7 +27973,8 @@ _interval_csv_json(values...) = JSON.json(map(v -> isnothing(v) ? "" : _number_k
 # An `IntervalEstimate` is its cell wherever a table makes a float a
 # `number_cell`: a `render_table` column, a bare `master` cell, and the text
 # in a `SemanticTable`'s Markdown.
-_render_table_cell(::Nothing, value::IntervalEstimate, c, ri, texts) = interval_cell(value; texts)
+_render_table_cell(::Nothing, value::IntervalEstimate, c, ri, texts, empty_align) = interval_cell(value; texts)
+_render_shows_text(::IntervalEstimate) = false
 _md_master_cell(x::IntervalEstimate, texts) = interval_cell(x; texts)
 _semantic_table_cell(x::IntervalEstimate) = format_interval(x)
 _semantic_interval_fields(x::IntervalEstimate) =
