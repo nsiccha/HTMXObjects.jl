@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 0.1.135
+
+- A `semantic_app(…; presentation=:tabs)` page's Markdown (`?plain`,
+  `Accept: text/markdown`, `to_markdown_string`, and a report:
+  `dispatch(…; report=true)`, `pdf_report`) writes each tab's **result**: its
+  label, then what the result's own address answers as Markdown at the page's
+  inputs (the report view in a report), as `/result` read alone answers it.
+  A result computed in the browser (`@browser`) is drawn by the server, so a
+  PDF gets its figures as pictures and its facts and tables as text, without
+  its buttons. Before, such a tab wrote the view's HTML as one line of raw
+  HTML, which a PDF drops, and a result the server computes wrote nothing
+  but its label (snag semantic-app-tab-91e9c1d6). A result takes no number in
+  a `numbered` document, as on the page. The HTML page is unchanged and asks
+  no result it does not show; a Markdown read asks each tab's result once.
+- Each tab's result there starts with a line naming the inputs it reads and
+  their values as their controls show them: "Shown at: Slope (per day) 0.20;
+  Intercept 80 units" (a number range's `digits` and `unit`, an option's
+  label, yes/no for a checkbox, each switched-on record of a `Records` list).
+  New `ErrorTexts` texts `shown_at` ("Shown at", German "Dargestellt bei"),
+  `shown_yes` and `shown_no` ("yes"/"no", "ja"/"nein").
+- `semantic_app(…; presentation=:tabs, report_states=["Steep" => (a = 0.5,),
+  (b = 20.0,)])`: in a report only, each tab is written again for each
+  declared state that names an input it reads, with that state's values in
+  place of the page's, its own "Shown at" line and, before it, its caption
+  when it has one. A state names inputs of the page (else an
+  `ArgumentError`), and a value an input refuses makes the report throw.
+  The page and an ordinary Markdown read are unchanged.
+
 ## 0.1.134
 
 - `number_domain(…; digits=k)` sets how many decimals the generated number
