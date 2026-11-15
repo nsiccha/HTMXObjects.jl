@@ -209,6 +209,42 @@ end
           "<p><span data-htmxo-bound=\"[&quot;a&quot;]\" data-htmxo-kind=\"float\"></span> <div id=\"p\" data-htmxo-bound-columns=\"x\"></div></p>"
 end
 
+@testitem "bound(…; columns) stays bound inside a plot's data: it is its own Tables.columns" tags=[:unit, :semantic] begin
+    using HTMXObjects, Tables
+    # Made by the macro's lowering of `bound`, as a view writes it.
+    m = Module()
+    Core.eval(m, :(using HTMXObjects))
+    Core.eval(m, :(@htmx struct Plotted
+        grid = [0.0, 1.0, 2.0]
+        line = (; x = grid, y = 2 .* grid .+ 1, total = 9.0)
+        table = bound(line; columns = (:x, :y))
+    end))
+    b = Core.eval(m, :(Plotted().table))
+    @test b isa HTMXObjects.BoundColumns
+    # AlgebraOfGraphics' `data(b)` keeps `Columns(Tables.columns(b))`: that is `b`,
+    # so a plotting package reading the layer's data back can mark its element.
+    cols = Tables.columns(b)
+    @test cols === b
+    @test bound_columns_attrs(cols; dataset = "d") == bound_columns_attrs(b; dataset = "d")
+    @test occursin("\"path\":[\"line\"]", bound_columns_attrs(cols).data_htmxo_bound_columns)
+    # The Tables.jl column interface AlgebraOfGraphics (`getcolumn`,
+    # `columnnames`, `rows`) and AlgebraOfVega (`rowtable`) read it through.
+    @test Tables.istable(b) && Tables.columnaccess(b)
+    @test Tables.columnnames(cols) == (:x, :y)
+    @test Tables.getcolumn(cols, :y) == [1.0, 3.0, 5.0]
+    @test Tables.getcolumn(cols, 1) == [0.0, 1.0, 2.0]
+    @test Tables.schema(b) == Tables.Schema((:x, :y), (Float64, Float64))
+    @test Tables.columntable(b) == (x = [0.0, 1.0, 2.0], y = [1.0, 3.0, 5.0])
+    @test Tables.rowtable(b) == [(x = 0.0, y = 1.0), (x = 1.0, y = 3.0), (x = 2.0, y = 5.0)]
+    @test length(Tables.rows(cols)) == 3
+    # Its columns are the chosen outputs only, and an error names the property.
+    e = try; Tables.getcolumn(b, :total); nothing; catch err; err; end
+    @test e isa ArgumentError && occursin("the table of line has the columns x, y, not `total`", e.msg)
+    # The path the lowering passes holds symbols: errors name it too.
+    e2 = try; HTMXObjects._bound((:line, :fit), (; x = [1.0]); columns = (:x, :nope)); nothing; catch err; err; end
+    @test e2 isa ArgumentError && occursin("line.fit has no output `nope`", e2.msg)
+end
+
 @testitem "export_site writes a browser page and names what a static page would show stale" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects
     route!(Lines(); operation_policy = :blocking)
