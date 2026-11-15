@@ -4405,12 +4405,24 @@ end
     SemanticProse(doc::Base.Docs.DocStr; references=Dict(), math=true)
 
 A run of prose, authored as Markdown. The Markdown and plain-text projections
-are the source itself; the HTML projection renders it through
+are the source itself, apart from heading levels (below); the HTML projection
+renders it through
 [`render_markdown`](@ref) (CommonMark plus bare-URL linking and TeX math),
 which escapes inline markup, so prose cannot smuggle HTML through. Its
 `\$…\$` / `\$\$…\$\$` math, and any other delimiter `render_markdown` takes, is
 typeset in the browser and in a [`pdf_report`](@ref); `math=false` shows every
 `\$` as text in the browser.
+
+The prose's own headings follow the nesting, as a [`SemanticSection`](@ref)'s
+do: its shallowest heading is at the level a section opens where the prose
+renders (`##` / `<h2>` at the top of a page, one level below each enclosing
+section or card heading), each other heading at most one level below the
+heading before it, and none deeper than the sixth. So a docstring's `# Examples`
+inside a section headed `###` is `####`, its outline never skips a level, and a
+`pdf_report` of it passes PDF/UA-1. The Markdown projection rewrites only the
+heading lines (a `Title` over `=====` becomes one `#` line), and prose whose
+headings already sit there is unchanged. The plain-text and Hyperview
+projections keep the headings as written.
 
 Pass a Julia doc object directly (`SemanticProse(@doc sum)`) to display
 documentation outside Documenter. Its `@ref` links use `references`, a map
@@ -5491,8 +5503,19 @@ end
 # Prose is authored as Markdown, so the HTML peer RENDERS it rather than showing
 # its source. `render_markdown` builds real nodes (never `Raw` markup), and `h`
 # escapes ordinary text children exactly once, so prose cannot smuggle HTML in.
-_semantic_prose_node(prose::SemanticProse) = h.div(
-    render_markdown(prose.markdown; math=prose.math); class="htmxo-semantic-prose")
+# Its headings take the levels the nesting gives them here (`_placed_levels`).
+function _semantic_prose_node(prose::SemanticProse)
+    ast = _prose_ast(prose.markdown, prose.math)
+    headings = _prose_headings(ast)
+    for (heading, level) in zip(headings, _placed_levels(_heading_levels(headings)))
+        heading.t.level = level
+    end
+    _prose_node(ast)
+end
+# The prose's nodes with its headings as written (glossary linking places them
+# when the linked prose renders, `_LinkedProse`).
+_prose_node(ast::CommonMark.Node) = h.div(render_markdown(ast); class="htmxo-semantic-prose")
+_prose_ast(markdown::AbstractString, math::Bool) = markdown_parser(; math)(String(markdown))
 
 # Delegates to the one table renderer rather than hand-building a second
 # `h.table`. Sorting and download are interactive chrome, not part of a semantic
@@ -5584,6 +5607,106 @@ _semantic_card_level() = _SEMANTIC_UNDER_HEADING[] ?
 # HTML and Markdown have six heading levels; a deeper division keeps the sixth.
 _semantic_heading_tag(level) = Symbol(:h, min(level, 6))
 _semantic_heading_sigil(level) = "#"^min(level, 6)
+
+# A prose's own headings (`levels`, as written, in document order) where it
+# renders: each one level below the nearest earlier heading written shallower
+# than it, or, when no earlier heading is, at the level a section opens here.
+# So the prose keeps its outline, moved under the heading it renders below;
+# where it skips a level (`#` then `###`, or `##` before `#`) the skipped level
+# is closed up, as PDF/UA-1 requires, and headings written at one level stay
+# siblings. None is deeper than the sixth.
+function _placed_levels(levels::AbstractVector)
+    opening = _semantic_heading_level()
+    open = Pair{Int,Int}[]  # written => placed, of the headings still open
+    placed = Vector{Int}(undef, length(levels))
+    for (i, written) in enumerate(levels)
+        while !isempty(open) && first(last(open)) >= written
+            pop!(open)
+        end
+        level = isempty(open) ? opening : last(last(open)) + 1
+        push!(open, written => level)
+        placed[i] = min(level, 6)
+    end
+    placed
+end
+_heading_levels(headings::Vector{CommonMark.Node}) = Int[node.t.level for node in headings]
+
+# The heading nodes of a parsed prose, in document order: the parse the HTML
+# peer renders, so a `#` in a code block or an HTML block is never a heading.
+function _prose_headings(ast::CommonMark.Node)
+    headings = CommonMark.Node[]
+    for (node, entering) in ast
+        entering && node.t isa CommonMark.Heading && push!(headings, node)
+    end
+    headings
+end
+
+# A prose's Markdown with its headings at the levels `_placed_levels` gives them
+# here. Only a heading's own lines change. A heading is found by its line
+# (CommonMark's column numbers are not used): an ATX heading's `#` run is the
+# first on its line, since no container prefix (`>`, a list marker) holds a `#`,
+# and a setext heading's text lines and underline become one ATX line, since a
+# setext underline writes only levels 1 and 2. Markdown without a `#` or an
+# underline-like line has no heading and is returned without parsing.
+function _placed_prose_markdown(markdown::AbstractString, math::Bool)
+    occursin('#', markdown) || occursin(_SETEXT_UNDERLINE, markdown) || return String(markdown)
+    headings = _prose_headings(_prose_ast(markdown, math))
+    written = _heading_levels(headings)
+    levels = _placed_levels(written)
+    levels == written && return String(markdown)
+    lines = String.(split(markdown, '\n'))
+    keep = trues(length(lines))
+    for (heading, level) in zip(headings, levels)
+        (top, _), (bottom, _) = heading.sourcepos
+        line = lines[top]
+        if top == bottom
+            run = match(r"#+", line)
+            lines[top] = string(SubString(line, 1, prevind(line, run.offset)), "#"^level,
+                                SubString(line, run.offset + ncodeunits(run.match)))
+        else
+            prefix = match(_SETEXT_PREFIX, line).match
+            text = String[strip(SubString(line, ncodeunits(prefix) + 1));
+                          [strip(replace(lines[k], _SETEXT_CONTINUATION => "")) for k in top+1:bottom-1]]
+            # A `\` ending a line before the last is a hard break, which one
+            # line cannot hold; on the last line it is text and stays.
+            text[1:end-1] .= replace.(text[1:end-1], r"\\$" => "")
+            lines[top] = string(prefix, "#"^level, " ", join(text, " "))
+            keep[top+1:bottom] .= false
+        end
+    end
+    join(lines[keep], '\n')
+end
+const _SETEXT_UNDERLINE = r"(?m)^[ \t>]*(?:=+|-+)[ \t]*\r?$"
+# What stands before a setext heading's text on its first line: block quote and
+# list markers and indentation. Its later lines may carry quote markers too.
+const _SETEXT_PREFIX = r"^(?:[ ]{0,3}(?:>[ ]?|(?:[-+*]|\d{1,9}[.)])(?:[ ]+|$)))*[ ]{0,3}"
+const _SETEXT_CONTINUATION = r"^[ \t]*(?:>[ \t]?)*"
+
+# A rendered prose's heading elements at the levels `_placed_levels` gives them
+# here: glossary-linked prose (`_LinkedProse`) is rendered once, with its
+# headings as written, and placed wherever it is shown. Every `h1`…`h6` in it
+# is one of the prose's headings, since raw HTML in prose stays text.
+function _placed_heading_node(node::Node)
+    written = Int[]
+    _collect_heading_levels!(written, node)
+    isempty(written) && return node
+    placed = _placed_levels(written)
+    placed == written ? node : _relevel_headings(node, Iterators.Stateful(placed))
+end
+_heading_tag_level(tag::Symbol) = tag in (:h1, :h2, :h3, :h4, :h5, :h6) ? parse(Int, String(tag)[2:2]) : nothing
+_collect_heading_levels!(levels, x) = levels
+function _collect_heading_levels!(levels, node::Node)
+    level = _heading_tag_level(HTMX.tag(node))
+    isnothing(level) || push!(levels, level)
+    foreach(c -> _collect_heading_levels!(levels, c), HTMX.children(node))
+    levels
+end
+_relevel_headings(x, placed) = x
+function _relevel_headings(node::Node, placed)
+    tag = HTMX.tag(node)
+    tag = isnothing(_heading_tag_level(tag)) ? tag : _semantic_heading_tag(popfirst!(placed))
+    Node(tag, copy(HTMX.attrs(node)), Any[_relevel_headings(c, placed) for c in HTMX.children(node)])
+end
 
 _semantic_html_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)), card.children...;
@@ -5766,7 +5889,7 @@ Base.show(io::IO, ::MIME"text/markdown", unavailable::SemanticUnavailable) =
         isempty(unavailable.reason) ? "" : " — $(unavailable.reason)")
 
 Base.show(io::IO, ::MIME"text/markdown", prose::SemanticProse) =
-    print(io, prose.markdown)
+    print(io, _placed_prose_markdown(prose.markdown, prose.math))
 
 Base.show(io::IO, ::MIME"text/markdown", metric::SemanticMetric) =
     print(io, "**", metric.label, ":** ", _semantic_metric_text(metric))
