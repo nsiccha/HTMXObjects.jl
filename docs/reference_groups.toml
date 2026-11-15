@@ -125,6 +125,7 @@ names = [
     "redirect_history_script",
     "redirect_to",
     "render_markdown",
+    "report_view",
     "semantic_card",
     "semantic_texts",
     "syntax_script",

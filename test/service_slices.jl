@@ -155,6 +155,9 @@ end
             string(export_audience(__req__)),
             HTTP.header(__req__, "X-HTMXO-Service-Token", "absent")), ":")
         @get context_view() = dispatch(:GET, "/context"; lang="de", audience=:private)
+        @fresh @get reported_context() = string(HTMXObjects.page_report())
+        @get reported_view() = dispatch(:GET, "/reported_context"; report=true)
+        @get unreported_view() = dispatch(:GET, "/reported_context")
         @post update(; value::Int) = begin
             counter[] += 1
             string(value)
@@ -162,9 +165,11 @@ end
         @post local_only() = "local"
     end
     plan = service_plan(SliceBoundaryFixture, [
-        ServiceSlice(:front; routes=[:view, :context_view, :update, :cookie],
-            forwards=[:identity => :owner, :context => :owner, :update => :owner, :cookie => :owner]),
-        ServiceSlice(:owner; routes=[], internal=[:identity, :context, :update, :local_only, :cookie]),
+        ServiceSlice(:front; routes=[:view, :context_view, :update, :cookie, :reported_view, :unreported_view],
+            forwards=[:identity => :owner, :context => :owner, :update => :owner, :cookie => :owner,
+                      :reported_context => :owner]),
+        ServiceSlice(:owner; routes=[], internal=[:identity, :context, :update, :local_only, :cookie,
+                                                 :reported_context]),
         ServiceSlice(:observer; routes=[]),
     ])
     checked = Ref(0)
@@ -193,6 +198,11 @@ end
         context = front(HTTP.Request("GET", "/context_view", ["X-Actor" => "reader"]))
         @test context.status == 200
         @test String(context.body) == "de:private:absent"
+        # A report's request stays one on the owner (`page_report`).
+        reported = front(HTTP.Request("GET", "/reported_view", ["X-Actor" => "reader"]))
+        @test reported.status == 200
+        @test String(reported.body) == "true"
+        @test String(front(HTTP.Request("GET", "/unreported_view", ["X-Actor" => "reader"])).body) == "false"
         body_headers = ["X-Actor" => "reader", "Content-Type" => "application/x-www-form-urlencoded"]
         written = front(HTTP.Request("POST", "/update", body_headers, "value=7"))
         @test written.status == 200
@@ -214,6 +224,10 @@ end
         @test owner(HTTP.Request("GET", "/identity", headers)).status == 409
         headers[3] = "X-HTMXO-Service-Contract" => "v1"
         @test owner(HTTP.Request("POST", "/local_only", headers)).status == 404
+        @test owner(HTTP.Request("GET", "/reported_context",
+            [headers; "X-HTMXO-Service-Report" => "yes"])).status == 400
+        @test String(owner(HTTP.Request("GET", "/reported_context",
+            [headers; "X-HTMXO-Service-Report" => "true"])).body) == "true"
 
         # Observation reads apply identity policy and deployment authentication,
         # but neither execute operations nor increase their counts.

@@ -41,7 +41,7 @@ export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
 export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
-export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
+export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot, report_view
 export CaptionTexts, caption_texts
 export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_options, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
@@ -3926,6 +3926,50 @@ other tasks.
 """
 page_progress_pause() = _page_meta().progress_pause
 
+# Whether the Markdown being written is a report's. A scope of its own rather
+# than a page meta field: a route's answer replaces the page meta with its own
+# mount chain's, while a report reaches every answer rendered inside it (a
+# `dispatch` that a component's Markdown makes, say). A request from outside
+# has none: `_register_handler` enters the request's own.
+const _REPORT = ScopedValues.ScopedValue{Bool}(false)
+
+"""
+    HTMXObjects.page_report() -> Bool
+
+Whether the Markdown being written is for a report, such as the PDF that
+[`pdf_report`](@ref) makes of a value. A component reads it to give a report a
+Markdown view of its own, for example a figure's picture where an ordinary
+`?plain` read gets a summary of the figure's data; [`report_view`](@ref) is the
+ready-made form of that.
+
+It is `true` while `pdf_report(value, …)` writes the value's Markdown, while a
+`dispatch(…; report=true)` answer is built and written, and inside
+`to_markdown_string(x; report=true)`. A `dispatch` or `to_markdown_string` made
+inside one of these keeps it unless it passes `report=false`, so it reaches
+nested renders: a component that shows its children, and a route a component
+fetches with `dispatch`. It is `false` everywhere else: in live requests, in
+`?plain` and `?markdown` reads, in static exports, and outside any request.
+
+Read it where the Markdown is written, in `show(io, MIME"text/markdown"(), x)`,
+not where a value is built: a built value can be cached and shown again to a
+reader who is not making a report.
+"""
+page_report() = _REPORT[]
+
+_with_report(f, ::Nothing) = f()
+_with_report(f, report::Bool) = ScopedValues.with(f, _REPORT => report)
+
+# `report=` of `dispatch` and `to_markdown_string`: `true`, `false`, or
+# `nothing` to keep the one of the answer it is called in.
+_check_report(::Nothing, who) = nothing
+_check_report(report::Bool, who) = report
+_check_report(report, who) = throw(ArgumentError(string(
+    who, ": report must be true, false, or nothing to keep the enclosing answer's; got ", repr(report))))
+
+# Whether a request's answer is written for a report: `dispatch(…; report)`
+# sets it, and so does a service slice that forwards such a request.
+_request_report(req::HTTP.Request) = get(req.context, :htmxo_report, false)::Bool
+
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
 function _page_meta_of(objects)
@@ -6075,7 +6119,7 @@ _finalized_response(r::HTTP.Response) = r
 _finalized_response(m::MIMEResponse) = to_response(m)
 
 """
-    to_markdown_string(val; audience=nothing, lang=nothing) -> String
+    to_markdown_string(val; audience=nothing, lang=nothing, report=nothing) -> String
 
 The Markdown of `val`, as a `?plain` or `Accept: text/markdown` answer holds it:
 `show(io, MIME"text/markdown"(), val)` once interactive chrome (forms, inputs,
@@ -6093,20 +6137,29 @@ HTMXObjects writes itself, such as the label of private content ("nicht
 (`HTMXObjects.page_lang`), and are English outside any route. The
 Markdown keeps the language it is rendered in.
 
-Library code that assembles a document from values it renders itself passes
-the document's audience and language, also when it runs inside a live request,
-which is `:private`:
+`report=true` writes the Markdown for a report: components that read
+`HTMXObjects.page_report()` give their report view, such as a figure's
+picture (see [`report_view`](@ref)). Without it, the Markdown is a report's
+when the answer it is rendered in is one, and an ordinary read's otherwise;
+`report=false` asks for an ordinary read inside a report.
+
+Library code that assembles a report from values it renders itself passes the
+report's audience and language, also when it runs inside a live request, which
+is `:private`, and `report=true`:
 
 ```julia
-chunks = [to_markdown_string(section; audience, lang="de-DE") for section in sections]
+chunks = [to_markdown_string(section; audience, lang="de-DE", report=true) for section in sections]
 pdf_report(join(chunks, "\\n\\n"), "konzept.pdf"; title="Konzept", lang="de-DE", audience)
 ```
 
-An `audience` other than `:public` and `:private`, and a `lang` that is not a
-language tag (`"German"`), are an `ArgumentError`.
+An `audience` other than `:public` and `:private`, a `lang` that is not a
+language tag (`"German"`), and a `report` other than `true`, `false` and
+`nothing` are an `ArgumentError`.
 """
-to_markdown_string(val; audience=nothing, lang=nothing) =
-    _with_page_lang(() -> _to_markdown_string(val, audience), _check_lang(lang, "to_markdown_string"))
+to_markdown_string(val; audience=nothing, lang=nothing, report=nothing) =
+    _with_report(_check_report(report, "to_markdown_string")) do
+        _with_page_lang(() -> _to_markdown_string(val, audience), _check_lang(lang, "to_markdown_string"))
+    end
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
 # Interactive chrome (form/input/textarea/button) is dropped first by
 # `_strip_md_chrome` so a `?plain`/`?markdown` read never serializes a form's
@@ -6170,6 +6223,68 @@ Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text
 # Plain text among semantic content is a text reader's too, so it reads the text
 # (a `SemanticProse`'s plain peer is its Markdown source as well).
 _semantic_show_leaf(io::IO, ::MIME"text/plain", val::MarkdownOnly) = print(io, val.text)
+
+"""
+    report_view(content, report)
+
+Content with a view of its own for reports: HTML and ordinary Markdown reads
+show `content`, and the Markdown of a report shows `report` in its place, or
+nothing when `report` is `nothing`.
+
+A report's Markdown is the one [`pdf_report`](@ref) writes of a value, a
+`dispatch(…; report=true)` answer, and `to_markdown_string(x; report=true)`:
+where `HTMXObjects.page_report()` is `true`. Every other Markdown read
+(`?plain`, `?markdown`, `to_markdown_string(x)`) reads `content`, and so does
+the browser.
+
+Interactive chrome is dropped from the view that is shown, as from any Markdown,
+so `report_view(controls, nothing)` keeps a figure's controls out of a report
+and leaves an ordinary read as it was. A figure that is an interactive plot in
+the browser and a summary of its data in `?plain` can be a picture on paper:
+
+```julia
+h.figure(report_view(plot, h.img(; src=svg_data_uri, alt="Weekly sales by region")),
+         h.figcaption("Weekly sales"))
+```
+
+`report` is shown when the Markdown is written, so a value whose Markdown is
+costly to make (a rendered image, say) costs nothing outside reports when it
+renders itself in its `show(io, MIME"text/markdown"(), x)`. The readers of the
+HTML (`?error`, static exports, the page's prestarted fragments) see `content`.
+"""
+struct ReportView
+    content::Any
+    report::Any
+end
+report_view(content, report) = ReportView(content, report)
+
+# The view that the Markdown being written shows.
+_report_shown(r::ReportView) = page_report() ? r.report : r.content
+
+# HTML, HXML and a whole HTML answer: `content`, as without the wrapper.
+Base.show(io::IO, m::MIME"text/html", r::ReportView) = _show_html_content(io, m, r.content)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", r::ReportView) =
+    _show_html_content(io, m, r.content)
+to_response(r::ReportView) = to_response(r.content)
+auto(r::ReportView; wrap) = auto(r.content; wrap)
+filter_errors(r::ReportView) = filter_errors(r.content)
+_filter_errors_child(r::ReportView) = _filter_errors_child(r.content)
+_semantic_layout_children(r::ReportView) = (r.content,)
+
+# Markdown and plain text: the view of the Markdown being written, which is
+# stripped of chrome like the rest of it.
+function Base.show(io::IO, m::MIME"text/markdown", r::ReportView)
+    shown = _report_shown(r)
+    isnothing(shown) || show(io, m, shown)
+    nothing
+end
+Base.show(io::IO, m::MIME"text/plain", r::ReportView) = _show_html_content(io, m, _report_shown(r))
+HTMX.markdown_block(r::ReportView) = HTMX.markdown_block(_report_shown(r))
+_strip_md_chrome(r::ReportView) = _strip_md_chrome(_report_shown(r))
+_strip_md_chrome_child(r::ReportView) = _strip_md_chrome(r)
+_rescue_semantic!(out, r::ReportView) = _rescue_semantic!(out, _report_shown(r))
+_shows_nothing(r::ReportView, audience) = _shows_nothing(_report_shown(r), audience)
+_private_block(r::ReportView) = _private_block(_report_shown(r))
 
 # --- Audience: content that public views leave out ---
 
@@ -7635,6 +7750,13 @@ function _static_walk(val::HtmlOnly, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : HtmlOnly(walked)
 end
 _static_walk_child(val::HtmlOnly, rules) = _static_walk(val, rules)
+# A report view is walked through its HTML content; its report view stays as
+# given, for a report made of the export.
+function _static_walk(r::ReportView, rules::_StaticRules)
+    walked = _static_walk(r.content, rules)
+    walked === _STATIC_REMOVED ? walked : ReportView(walked, r.report)
+end
+_static_walk_child(r::ReportView, rules) = _static_walk(r, rules)
 function _static_walk(c::_LabelledControl, rules::_StaticRules)
     walked = _static_walk(c.control, rules)
     walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
@@ -9107,6 +9229,8 @@ _prestart_walk(doc::HTMLDocument, walk, blocked) =
     _prestart_rewrap(_prestart_walk(doc.root, walk, blocked), HTMLDocument)
 _prestart_walk(val::HtmlOnly, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.content, walk, blocked), HtmlOnly)
+_prestart_walk(r::ReportView, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(r.content, walk, blocked), content -> ReportView(content, r.report))
 _prestart_walk(p::Private, walk, blocked) = _ambient_audience() === :public ?
     _prestart_rewrap(_prestart_walk(p.public, walk, blocked), x -> Private(p.content, x, p.mark)) :
     _prestart_walk_private(_built(p.content), p, walk, blocked)
@@ -11106,8 +11230,10 @@ function _register_handler(method, path, handler; resume_only::Bool=false,
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
-        # The whole answer renders for the request's audience (`private`).
-        _with_audience(() -> handler(req), export_audience(req))
+        # The whole answer renders for the request's audience (`private`), and
+        # for a report when the request is one's (`page_report`).
+        ScopedValues.with(() -> handler(req),
+            _AUDIENCE => export_audience(req), _REPORT => _request_report(req))
     end
     operation && (wrapped = _OperationRoute(wrapped))
     if http_method == "GET" && !resume_only
@@ -20203,7 +20329,7 @@ dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, no
 
 """
     dispatch(method, url; headers=[], body=UInt8[], parent=nothing, static=nothing,
-             operation_policy=nothing, audience=nothing, lang=nothing) -> HTTP.Response
+             operation_policy=nothing, audience=nothing, lang=nothing, report=nothing) -> HTTP.Response
 
 Run one request against the registered route tree in-process and return the
 handler's `HTTP.Response` — no listener, no socket, no serialization
@@ -20284,6 +20410,16 @@ for a loopback request.
   `dispatch` made inside another request. A follow-up poll is a request of its
   own: dispatch it with the same `lang`. A `lang` that is not a language tag
   (`"German"`) is an `ArgumentError`.
+- `report` — `true` writes the answer for a report: while the route runs and
+  its answer is written, `HTMXObjects.page_report()` is `true`, so a Markdown
+  answer holds the report view of each [`report_view`](@ref) and of the
+  components that read it, such as a figure's picture. Fetch a report's
+  Markdown with it before passing the string to [`pdf_report`](@ref). By
+  default it is the report flag of the request or report this `dispatch` is
+  made in, and `false` outside any; `report=false` asks for an ordinary
+  answer inside a report. A follow-up poll is a request of its own: dispatch
+  it with the same `report`. A `report` other than `true`, `false` and
+  `nothing` is an `ArgumentError`.
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
@@ -20302,11 +20438,13 @@ markdown = String(resp.body)
 ```
 """
 function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
-        parent=nothing, static=nothing, operation_policy=nothing, audience=nothing, lang=nothing)
+        parent=nothing, static=nothing, operation_policy=nothing, audience=nothing, lang=nothing,
+        report=nothing)
     spec = _dispatch_static(static)
     audience = _dispatch_audience(audience, spec)
     policy = _dispatch_operation_policy(operation_policy)
     lang = _check_lang(lang, "dispatch")
+    report = something(_check_report(report, "dispatch"), page_report())
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
@@ -20314,6 +20452,7 @@ function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
     policy !== nothing && (req.context[:htmxo_operation_policy] = policy)
     lang !== nothing && (req.context[:htmxo_lang] = lang)
     req.context[:htmxo_audience] = audience
+    report && (req.context[:htmxo_report] = true)
     resp = _with_dispatch_parent(() -> _service_dispatch(req), parent)
     audience === :public ? _check_public(resp, "the answer to $(req.method) $(req.target)") : resp
 end
@@ -20965,6 +21104,46 @@ const _PDF_REPORT_LANG = r"^[A-Za-z]{2,3}(-[A-Za-z]{4})?-([A-Za-z]{2}|[0-9]{3})$
 # The XMP entry Typst writes into a PDF/UA-1 file, and only into one.
 const _PDFUA1_MARKER = "<pdfuaid:part>1</pdfuaid:part>"
 
+# The PDF/A levels Typst 0.15.1 writes together with PDF/UA-1, the default
+# first; each passes veraPDF 1.30.3 on its PDF/A profile and on PDF/UA-1 (snag
+# pdf-report-pdfa-d81a2646, user design decision 0qdb7sa). PDF/A-1 forbids
+# transparency, which charts use, and PDF/A-4 shares no PDF version with
+# PDF/UA-1.
+const _PDF_REPORT_ARCHIVAL = ("a-2a", "a-3a", "a-2u", "a-3u", "a-2b", "a-3b")
+const _PDF_REPORT_ARCHIVAL_DEFAULT = "a-2a"
+
+_pdf_report_archival(::Nothing) = nothing
+function _pdf_report_archival(level::AbstractString)
+    level in _PDF_REPORT_ARCHIVAL || throw(ArgumentError(
+        "pdf_report: `archival` must be one of $(join(map(repr, _PDF_REPORT_ARCHIVAL), ", ")) or " *
+        "`nothing` (got $(repr(level))): the PDF/A levels Typst writes together with PDF/UA-1. " *
+        "PDF/A-1 forbids transparency, which charts use, and PDF/A-4 cannot be combined with PDF/UA-1"))
+    String(level)
+end
+_pdf_report_archival(level) = throw(ArgumentError(
+    "pdf_report: `archival` must be a PDF/A level such as \"a-2a\", or `nothing`; got $(repr(level))"))
+
+_pdf_report_standards(::Nothing) = "[ua-1]"
+_pdf_report_standards(level::AbstractString) = "[ua-1, $level]"
+
+# The XMP entries Typst writes into a PDF/A file of `level`: "a-2a" is part 2,
+# conformance A.
+_pdfa_markers(level) = ("<pdfaid:part>$(level[3])</pdfaid:part>",
+                        "<pdfaid:conformance>$(uppercase(level[4]))</pdfaid:conformance>")
+
+# Typst's message for a rule of PDF/A alone ("PDF/A-2a error: …"); one that
+# PDF/UA-1 shares reads "PDF/A-2a, PDF/UA-1 error: …".
+const _PDFA_ONLY_ERROR = r"PDF/A-\d[a-z]? error:"
+
+# What to do when Typst refused the report for a rule of PDF/A alone, measured
+# with Typst 0.15.1: a CMYK image fails every level, a private-use character
+# (an icon font's glyph) the `a` levels.
+_pdf_report_archival_hint(archival, log) =
+    isnothing(archival) || !occursin(_PDFA_ONLY_ERROR, log) ? "" :
+    ". It breaks a rule of PDF/A ($archival) that PDF/UA-1 alone does not have: a CMYK image needs " *
+    "converting to RGB for any PDF/A level, a character from Unicode's private use area (an icon font's " *
+    "glyph) passes with `archival=\"a-2u\"`, and `archival=nothing` writes PDF/UA-1 alone"
+
 # Quarto keeps a font cache in `<dir>/.quarto`, which `pdf_report` removes when
 # it created it; one render per process at a time keeps that safe.
 const _PDF_REPORT_LOCK = ReentrantLock()
@@ -20983,9 +21162,9 @@ _pdf_report_paper(lang) =
 const _PDF_REPORT_OWN_KEYS = Dict(
     "title" => "pass it as `title=`",
     "lang" => "pass it as `lang=`",
-    "format" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
+    "format" => "pdf_report renders Typst with `pdf-standard: [ua-1, a-2a]`; pass the PDF/A level as `archival=`",
     "from" => "pdf_report reads the Markdown with web and mail addresses linked, as PAC requires",
-    "pdf-standard" => "pdf_report renders Typst with `pdf-standard: [ua-1]`",
+    "pdf-standard" => "pdf_report writes PDF/UA-1 (`ua-1`) and the PDF/A level `archival=` names, PDF/A-2a by default",
     "filters" => "pdf_report runs the filter that gives equations alt text",
     "syntax-highlighting" => "pdf_report sets code with Typst, which tags a code block as one Code element; " *
         "Quarto's themes tag each token as its own, and PAC reports the empty and whitespace-only ones",
@@ -21125,7 +21304,8 @@ _pdf_report_url_map(urls) = isempty(urls) ? "$_PDF_REPORT_URL_MAP_KEY: {}\n" :
     "$_PDF_REPORT_URL_MAP_KEY:\n" *
     join("  $(_yaml_string(target)): $(_yaml_string(_markdown_literal(url)))\n" for (target, url) in urls)
 
-function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, urls=nothing)
+function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, urls=nothing,
+                         archival=_PDF_REPORT_ARCHIVAL_DEFAULT)
     line = _markdown_metadata_block(markdown)
     isnothing(line) || throw(ArgumentError(
         "pdf_report: the Markdown has a YAML metadata block (line $line). Quarto would let it override " *
@@ -21137,7 +21317,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
     $(_pdf_report_base_url(base_url))$(_pdf_report_url_map(urls))$(_pdf_report_front_matter(metadata, lang))format:
       typst:
         from: $(_PDF_REPORT_READER)
-        pdf-standard: [ua-1]
+        pdf-standard: $(_pdf_report_standards(_pdf_report_archival(archival)))
         syntax-highlighting: idiomatic
         include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST)), $(_yaml_string(_PDF_REPORT_CODE_TYPST))]
     filters:
@@ -21158,14 +21338,14 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
 end
 
 """
-    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto", audience=:public, glossary) -> pdf_path
+    pdf_report(markdown::AbstractString, pdf_path; title, lang, metadata=(;), base_url=nothing, url_map=nothing, resources=dirname(abspath(pdf_path)), quarto="quarto", audience=:public, glossary, archival="a-2a") -> pdf_path
     pdf_report(value, pdf_path; audience=:public, glossary, kwargs...) -> pdf_path
 
-Write a report as an accessible PDF (PDF/UA-1, ISO 14289-1) at `pdf_path`. The
-input is Markdown, typically a page's own projection: a `value` such as an
+Write a report as an accessible and archival PDF (PDF/UA-1, ISO 14289-1, and
+PDF/A-2a, ISO 19005-2) at `pdf_path`. The input is Markdown, typically a page's own projection: a `value` such as an
 `h.article(...)` is converted with `to_markdown_string`, and the body of
-`dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"])` is passed as
-it is. Tables, figures and captions keep their structure: header rows become
+`dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"], report=true)`
+is passed as it is. Tables, figures and captions keep their structure: header rows become
 table header cells, captions stay attached to their table or figure. A table
 longer than the rest of its page continues on the next, its header row
 repeated, and a caption above it moves along with its first rows. A code block
@@ -21201,8 +21381,22 @@ dates, vectors, and NamedTuples or dictionaries for nested options
 Letter for the regions Unicode CLDR lists for it (US, CA, MX and others in the
 Americas), A4 everywhere else; `papersize` overrides it. `title`, `lang`,
 `format`, `from`, `pdf-standard`, `filters`, `syntax-highlighting` and
-`highlight-style` belong to `pdf_report` and cannot be set through `metadata`. The Markdown itself must not carry a YAML metadata
+`highlight-style` belong to `pdf_report` and cannot be set through `metadata`
+(the PDF/A level is `archival=`). The Markdown itself must not carry a YAML metadata
 block: Quarto would let it override `title`, `lang` and the equation filter.
+
+`archival` is the PDF/A level the PDF meets besides PDF/UA-1. PDF/A is the
+archival standard: the file embeds its fonts, a colour profile and its
+metadata, so it looks the same decades from now. The default `"a-2a"` is the
+highest level that goes with PDF/UA-1: `a` also requires the tagged structure,
+`u` (`"a-2u"`) only text that reads as Unicode, `b` (`"a-2b"`) only the
+appearance. `"a-3a"`, `"a-3u"` and `"a-3b"` are the same levels of PDF/A-3,
+which also allows attached files. `nothing` writes PDF/UA-1 alone. PDF/A refuses
+two things PDF/UA-1 alone accepts: a CMYK image, at every level (convert it to
+RGB), and a character from Unicode's private use area, such as an icon font's
+glyph, at the `a` levels (`"a-2u"` accepts it). PDF/A-1, which forbids the
+transparency charts use, and PDF/A-4, which cannot be combined with PDF/UA-1,
+are not offered.
 
 `date` is printed in the title block. A `Date` or `DateTime`, an ISO date
 (`"2026-10-22"`, also with a time) or Quarto's `"today"`, `"now"` and
@@ -21214,8 +21408,8 @@ block: Quarto would let it override `title`, `lang` and the equation filter.
 Quarto alone would read such text as a date: `"22.10.2026"` as "Invalid Date",
 `"05.10.2026"` as 10 May.
 
-The PDF is rendered by Quarto's Typst engine with `pdf-standard: ua-1`, plus a
-filter that gives every equation its TeX source as alt text. Typographic quotes
+The PDF is rendered by Quarto's Typst engine with `pdf-standard: [ua-1, a-2a]`
+(the `archival` level), plus a filter that gives every equation its TeX source as alt text. Typographic quotes
 read as written (`„Titel“`, `‚Wort‘`, `“title”`); straight quotes (`"Titel"`)
 become the quotes of `lang`, so `„Titel“` in a `de-DE` report. Tables are set
 ragged-right, while the body text stays justified: a word in a table cell is
@@ -21246,6 +21440,13 @@ stays in the language it was rendered in. A public report refuses Markdown
 that holds private markup rendered for the live app, raw HTML carrying
 `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
 
+A value's Markdown is written for a report: while it is written,
+`HTMXObjects.page_report()` is `true`, so each [`report_view`](@ref) shows its
+report view, and so do the components that read it, such as a figure that
+gives a report its picture where an ordinary `?plain` read gets a summary of
+its data. A Markdown string is written already: fetch it with `dispatch(…;
+report=true)` or render it with `to_markdown_string(x; report=true)`.
+
 `glossary`, a [`Glossary`](@ref), is the app's glossary: by default the one a
 route's mount chain declares as `__glossary__` while `pdf_report` runs inside
 it, else none. A value's uses of its terms are linked as on a page
@@ -21257,11 +21458,13 @@ Markdown already holds an entry (a [`glossary_section`](@ref) of its own).
 Throws an `ArgumentError` for a blank `title`, a `lang` without region, a
 `metadata` key that `pdf_report` sets itself or a value it cannot write, a
 `date_format` next to a text `date`, a `base_url` that is not an absolute URL,
-a YAML metadata block in the Markdown, a missing `resources` directory or an
-`audience` other than `:public` and `:private`, all before running Quarto, a `url_map` answer that is neither an absolute URL nor
+a YAML metadata block in the Markdown, a missing `resources` directory, an
+`audience` other than `:public` and `:private` or an `archival` that is no level
+above, all before running Quarto, a `url_map` answer that is neither an absolute URL nor
 `nothing` before rendering, and an error carrying Quarto's output when
 Quarto is not found, fails (for example `PDF/UA-1 error: missing alt text` with
-the offending source line), or writes a PDF that does not declare PDF/UA-1. The
+the offending source line, or a rule of PDF/A alone with what to do about it), or
+writes a PDF that does not declare PDF/UA-1 and the `archival` level. The
 temporary `.qmd`, Quarto's intermediate files and its `.quarto` cache are removed
 from `resources`, also when the render fails.
 
@@ -21315,7 +21518,8 @@ Poppler; other readers can still repeat letters.
 Math is what [`render_markdown`](@ref) takes for math: `\$…\$`, `\\(…\\)`,
 `\$\$…\$\$`, `\\[…\\]` and a `math` fence. A TeX command outside them stays text.
 
-Check the result with veraPDF (`verapdf --flavour ua1 report.pdf`) or PAC. The
+Check the result with veraPDF on both standards (`verapdf --flavour ua1 report.pdf`
+and `verapdf --flavour 2a report.pdf`, the `archival` level without `a-`) or PAC. The
 alt texts and the reading order are still yours to check by hand.
 
 ```julia
@@ -21329,22 +21533,25 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     base_url::Union{Nothing,AbstractString}=nothing, url_map=nothing,
                     resources::AbstractString=dirname(abspath(pdf_path)),
                     quarto::AbstractString="quarto", audience=:public,
-                    glossary=_page_glossary())
+                    glossary=_page_glossary(), archival=_PDF_REPORT_ARCHIVAL_DEFAULT)
+    archival = _pdf_report_archival(archival)
     _check_audience(audience, "pdf_report") === :public && _check_public(markdown, "the report's Markdown")
-    markdown = _glossary_report(markdown, _check_glossary(glossary, "pdf_report"); audience, lang)
+    markdown = _with_report(true) do
+        _glossary_report(markdown, _check_glossary(glossary, "pdf_report"); audience, lang)
+    end
     isempty(strip(title)) &&
         throw(ArgumentError("pdf_report: `title` is blank; PDF/UA-1 requires a document title"))
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
         "pdf_report: `lang` must be a language tag with its region, such as \"de-DE\" or \"en-GB\" " *
         "(got $(repr(lang))); without one Quarto labels the document with the region US"))
-    document = _pdf_report_qmd(markdown; title, lang, metadata, base_url)
+    document = _pdf_report_qmd(markdown; title, lang, metadata, base_url, archival)
     isdir(resources) ||
         throw(ArgumentError("pdf_report: `resources` is not a directory: $(repr(resources))"))
     exe = Sys.which(quarto)
     isnothing(exe) && error("pdf_report: Quarto not found (`quarto=$(repr(quarto))`); " *
         "install a Quarto whose Typst supports PDF/UA-1 (verified: 1.10.18) or pass its path as `quarto=`")
     urls = _pdf_report_urls(url_map, exe, document)
-    isnothing(urls) || (document = _pdf_report_qmd(markdown; title, lang, metadata, base_url, urls))
+    isnothing(urls) || (document = _pdf_report_qmd(markdown; title, lang, metadata, base_url, urls, archival))
     lock(_PDF_REPORT_LOCK) do
         cache_dir = joinpath(resources, ".quarto")
         had_cache = ispath(cache_dir)
@@ -21357,10 +21564,16 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                                 stdout=output, stderr=output))
             log = replace(String(take!(output)), r"\e\[[0-9;]*m" => "")
             success(proc) && isfile(pdf) ||
-                error("pdf_report: Quarto could not render the report (exit code $(proc.exitcode)):\n$log")
-            occursin(_PDFUA1_MARKER, read(pdf, String)) || error(
+                error("pdf_report: Quarto could not render the report (exit code $(proc.exitcode))" *
+                      _pdf_report_archival_hint(archival, log) * ":\n$log")
+            bytes = read(pdf, String)
+            occursin(_PDFUA1_MARKER, bytes) || error(
                 "pdf_report: Quarto wrote a PDF that does not declare PDF/UA-1, so its Typst does not apply " *
                 "`pdf-standard: ua-1`; use a newer Quarto (verified: 1.10.18). Quarto's output:\n$log")
+            isnothing(archival) || all(marker -> occursin(marker, bytes), _pdfa_markers(archival)) || error(
+                "pdf_report: Quarto wrote a PDF that does not declare PDF/A ($archival), so its Typst does not " *
+                "apply `pdf-standard: $(_pdf_report_standards(archival))`; use a newer Quarto (verified: 1.10.18). " *
+                "Quarto's output:\n$log")
             _pdf_repair_text_layer!(pdf)
             mkpath(dirname(abspath(pdf_path)))
             mv(pdf, pdf_path; force=true)
@@ -21375,12 +21588,13 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     return pdf_path
 end
 # The value renders in the report's language, which the words HTMXObjects
-# writes itself follow (`page_lang`: the label of private content).
+# writes itself follow (`page_lang`: the label of private content), and for a
+# report (`page_report`: the report view of each `report_view`).
 pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString,
            glossary=_page_glossary(), kwargs...) =
     pdf_report(_with_page_lang(lang) do
                    to_markdown_string(_glossary_answer(value, _check_glossary(glossary, "pdf_report"));
-                                      audience=_check_audience(audience, "pdf_report"))
+                                      audience=_check_audience(audience, "pdf_report"), report=true)
                end, pdf_path; audience, lang, glossary, kwargs...)
 
 # --- Captions ---
@@ -39460,6 +39674,7 @@ _tabset_key(x::Node, h::UInt) =
     _tabset_key(HTMX.children(x), _tabset_key(HTMX.attrs(x), _tabset_key(HTMX.tag(x), h)))
 _tabset_key(x::_TabsetPart, h::UInt) = _tabset_key(x.node, h)
 _tabset_key(x::HtmlOnly, h::UInt) = _tabset_key(x.content, h)
+_tabset_key(x::ReportView, h::UInt) = _tabset_key(x.content, h)
 _tabset_key(x::Private, h::UInt) = _tabset_key(x.public, hash("private", h))
 function _tabset_key(x::SemanticNode, h::UInt)
     h = hash(string(nameof(typeof(x))), h)
@@ -40867,15 +41082,17 @@ function __init__()
     # A part a worker-bound body sends ahead comes back as a requester message.
     _has_requester_messages() &&
         DynamicObjects.on_requester_message!(_receive_sent_ahead!, :htmxo_sent_ahead)
-    # The answer's page language and audience reach a worker-bound body: the
-    # worker binds these two scopes to the requester's values around its
-    # computation (DynamicObjects 0.5.8, `carry_to_worker!`). Both processes
-    # register, since the worker loads this package too. The page meta travels
-    # as its plain fields; the glossary stays with the page shell here.
+    # The answer's page language, audience and report flag reach a
+    # worker-bound body: the worker binds these scopes to the requester's
+    # values around its computation (DynamicObjects 0.5.8, `carry_to_worker!`).
+    # Both processes register, since the worker loads this package too. The
+    # page meta travels as its plain fields; the glossary stays with the page
+    # shell here.
     if isdefined(DynamicObjects, :carry_to_worker!)
         DynamicObjects.carry_to_worker!(@__MODULE__, :_PAGE_META;
             wire=_wire_page_meta, unwire=_unwire_page_meta)
         DynamicObjects.carry_to_worker!(@__MODULE__, :_AUDIENCE)
+        DynamicObjects.carry_to_worker!(@__MODULE__, :_REPORT)
     end
 end
 

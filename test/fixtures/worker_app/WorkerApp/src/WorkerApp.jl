@@ -40,9 +40,11 @@ end
     end
 end
 
-# What a body sees of the answer it serves: the page's language and the
-# reader's audience, which a worker must bind as the requesting process has them.
-seen() = "lang=$(something(HTMXObjects.page_lang(), "none")) audience=$(HTMXObjects._AUDIENCE[])"
+# What a body sees of the answer it serves: the page's language, the reader's
+# audience and whether it is written for a report, which a worker must bind as
+# the requesting process has them.
+seen() = "lang=$(something(HTMXObjects.page_lang(), "none")) audience=$(HTMXObjects._AUDIENCE[]) " *
+    "report=$(HTMXObjects.page_report())"
 
 @htmx struct App
     __lang__ = "de"

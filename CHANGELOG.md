@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.120
+## 0.1.122
 
 - A `semantic_app(…; presentation=:tabs)` page can compute a result in the
   browser. `@browser(name) = browser_module(file, entry)` gives a property an
@@ -30,6 +30,40 @@
   an operation's dependencies with, a `presentation=:tabs` page treated every
   operation as reading every input: all inputs went to the sidebar and every
   result was asked again on any change. Its dependencies are read again.
+
+## 0.1.121
+
+- `HTMXObjects.page_report()` says whether the Markdown being written is for a
+  report. It is `true` while `pdf_report(value, …)` writes the value's
+  Markdown, and inside `dispatch(…; report=true)` and
+  `to_markdown_string(x; report=true)`, which take the new keyword. A
+  `dispatch` or `to_markdown_string` made inside a report keeps it unless it
+  passes `report=false`; live requests, `?plain` and `?markdown` reads, static
+  exports and code outside any request read `false`. The flag reaches
+  `@queued` bodies on a worker process and requests forwarded to another
+  service slice.
+- `report_view(content, report)` shows `content` in HTML and in ordinary
+  Markdown reads, and `report` in a report's Markdown (`nothing` shows
+  nothing there). Chrome is stripped from whichever view is shown. A figure
+  can be an interactive plot in the browser, a summary in `?plain` and a
+  picture in a PDF, and a control can stay out of a report without leaving
+  `?plain`.
+
+## 0.1.120
+
+- `pdf_report` writes PDF/A-2a, the archival standard, besides PDF/UA-1:
+  the file embeds its fonts, a colour profile and its metadata, and declares
+  both standards in its XMP metadata, which `pdf_report` checks after
+  rendering. `archival=` picks another PDF/A level Typst writes with PDF/UA-1
+  (`"a-3a"`, `"a-2u"`, `"a-3u"`, `"a-2b"`, `"a-3b"`), or `nothing` for
+  PDF/UA-1 alone; any other value is an `ArgumentError` before Quarto runs.
+  Before, every report was PDF/UA-1 only, and `metadata=` could not change
+  the standard. **Behaviour change:** PDF/A refuses two things PDF/UA-1 alone
+  accepts, so a report holding a CMYK image (any PDF/A level) or a character
+  from Unicode's private use area, such as an icon font's glyph (the `a`
+  levels), now fails with Typst's message and a hint: convert the image to
+  RGB, pass `archival="a-2u"` for the character, or `archival=nothing`.
+  veraPDF 1.30.3 passes the default on `--flavour ua1` and `--flavour 2a`.
 
 ## 0.1.119
 
