@@ -221,8 +221,10 @@ followed by the unit. A `log` domain spaces the slider evenly in ratio, for a
 positive quantity spanning orders of magnitude. A slider value lies on the
 `step` grid counted from the lower bound; without a step it keeps `digits`
 decimal places, or three significant digits. Typing in the field moves the
-slider. Results and the page address follow the field once the slider is
-released. Without JavaScript, the field alone still submits.
+slider. A result computed in the browser (`@browser`) follows the field while
+the slider moves, redrawn once an animation frame at most; a result asked of
+the server and the page address follow it once the slider is released.
+Without JavaScript, the field alone still submits.
 
 A number outside the interval answers 400 at its field, for `@param`s,
 operation arguments and JSON bodies alike, as a value outside a finite

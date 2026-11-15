@@ -335,6 +335,20 @@ end
             type('b', '2');
             // a*b = 6: `extra` no longer applies and reads its default, as on the server.
             await until(() => shown() === '5.0|8.0|3.0|0.5' && !region().querySelector('.htmxo-browser-fault'), 'recovered: ' + shown());
+            // A slider held down sends `input` events only, which its field
+            // relays: the result follows each, the address waits for the release.
+            const slider = document.querySelector('label[data-htmxo-number]:has(input[name="a"]) input[data-htmxo-number-slider]');
+            slider.value = '100';
+            slider.dispatchEvent(new Event('input', {bubbles: true}));
+            await until(() => shown() === '4.0|6.0|2.0|0.5', 'held slider: ' + shown());
+            if (control('a').value !== '2' || new URLSearchParams(location.search).get('a') !== '3')
+              throw new Error('held slider field or address: ' + control('a').value + ' ' + location.search);
+            // A number being typed: `input` events of the field alone.
+            control('a').value = '4';
+            control('a').dispatchEvent(new Event('input', {bubbles: true}));
+            await until(() => shown() === '6.0|10.0|4.0|0.5', 'typed: ' + shown());
+            slider.dispatchEvent(new Event('change', {bubbles: true}));
+            await until(() => new URLSearchParams(location.search).get('a') === '4', 'address on release: ' + location.search);
             await fetch('/mark?phase=end');
             if (new URLSearchParams(location.search).get('b') !== '2') throw new Error('address: ' + location.search);
             sessionStorage.setItem('htmxo-test-browser', '1');

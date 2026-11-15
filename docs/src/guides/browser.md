@@ -59,6 +59,10 @@ println(String(response.body))
 - **Finite inputs** (a `Bool`, an enum, `@options`) that a result reads are
   views of their own: the page carries the result rendered for each value (at
   most 64) and shows the one the inputs select.
+- **While an input moves** (a slider held down, a number being typed), the
+  result follows each of its `input` events, redrawn once an animation frame at
+  most. A result asked of the server and the page address wait for the release
+  (`change`).
 - **An error** the module throws is shown in the result under its name
   (`DomainError: …`), which keeps its last answer faded until the next one.
 - **The page address**: a page applies the inputs its address names to its

@@ -34186,9 +34186,11 @@ explainer pictures pick slider values). Typing a number in the field moves the
 slider. The slider's own `input` and `change` events stop at it, and the field
 sends them instead, so a form, an htmx trigger, a result that follows its
 inputs and the page address each see one change of the field: while dragging,
-`input` events; on release, one `change`. A page's own script that computes
-from the value listens on the field and reads the domain from the label's
-`data-htmxo-number` ([`number_record`](@ref)).
+`input` events; on release, one `change`. A result computed in the browser
+(`@browser`) follows the `input` events, so it moves with the slider; a result
+asked of the server and the page address follow the `change`. A page's own
+script that computes from the value listens on the field and reads the domain
+from the label's `data-htmxo-number` ([`number_record`](@ref)).
 
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
 once per page when building a `<head>` by hand. Without it the field still
@@ -35910,7 +35912,11 @@ it renders, and the script applies them to the controls when the page loads,
 which is what a static page (`export_site`) needs.
 
 A result that reads a `@browser` property is computed in the browser
-([`semantic_browser_script`](@ref)) instead of asked for, under the same rules.
+([`semantic_browser_script`](@ref)) instead of asked for, under the same rules,
+and it also follows an input while it moves: on each `input` event (a slider
+held down, a number being typed), at most once an animation frame and never
+while its previous computation still runs, with the newest values. The page
+address and a result asked of the server still wait for the `change`.
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
 once per page when building a `<head>` by hand.
 """
@@ -36011,8 +36017,7 @@ semantic_follow_script() = h.script(Raw(raw"""
     region.setAttribute('data-htmxo-shown', key);
     // A result computed in the browser (`@browser`) asks nothing of the server.
     if (region.hasAttribute('data-htmxo-browser') && window.__htmxoBrowserCompute) {
-      window.__htmxoBrowserCompute(region, pairs);
-      return;
+      return window.__htmxoBrowserCompute(region, pairs);
     }
     // A result asked for the first time shows that it is coming.
     if (!region.children.length) region.appendChild(document.createElement('progress'));
@@ -36025,6 +36030,22 @@ semantic_follow_script() = h.script(Raw(raw"""
   function later(region) {
     clearTimeout(timers.get(region));
     timers.set(region, setTimeout(function() { timers.delete(region); consider(region); }, DELAY));
+  }
+  // A result computed in the browser also follows an input while it moves (a
+  // slider held down, a number being typed): once a frame at most, and never
+  // while its previous computation is still running, with the newest values.
+  var frame = window.requestAnimationFrame || function(f) { return setTimeout(f, 16); };
+  var moving = new Map();
+  function soon(region) {
+    var pending = moving.get(region);
+    if (pending) { pending.again = true; return; }
+    pending = {again: false};
+    moving.set(region, pending);
+    function done() {
+      moving.delete(region);
+      if (pending.again) soon(region);
+    }
+    frame(function() { Promise.resolve(consider(region)).then(done, done); });
   }
   function readers(form) {
     return regions().filter(function(r) { return formsOf(r).indexOf(form) >= 0; });
@@ -36209,6 +36230,14 @@ semantic_follow_script() = h.script(Raw(raw"""
     // After the page's own listeners, which show and hide inputs that apply.
     // Applying the address on load writes nothing back.
     if (kept(form) && !applying) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
+  });
+  // A result asked of the server, and the address, wait for the `change`.
+  document.addEventListener('input', function(e) {
+    var form = e.target && e.target.form;
+    if (!form) return;
+    readers(form).forEach(function(r) {
+      if (r.hasAttribute('data-htmxo-browser') && visible(r)) soon(r);
+    });
   });
   document.addEventListener('htmx:load', function(e) { arm(e.target); });
   // A control re-rendered in place (a dependent domain, a `@relevant` input
