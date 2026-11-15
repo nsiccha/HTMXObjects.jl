@@ -39,7 +39,7 @@ export ErrorRecorder, record_error!
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, format_date, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot, report_view
 export CaptionTexts, caption_texts
@@ -13816,7 +13816,7 @@ function _locale_texts(::Type{T}, fname, locales, placeholders, locale::Symbol; 
             "; texts are ", join(names, ", "))))
     end
     table = getfield(locales, locale)
-    merged = merge(table, (; (k => _locale_text_value(table[k], v) for (k, v) in pairs(texts))...))
+    merged = merge(table, (; (k => _locale_text_value(table[k], v, fname, k) for (k, v) in pairs(texts))...))
     for name in names
         merged[name] isa AbstractString || continue
         allowed = get(placeholders, name, ())
@@ -13837,6 +13837,15 @@ _status_texts(table) = Tuple(sort!(collect(Pair{Int,String}, table); by=first))
 _locale_text_value(::AbstractString, v) = string(v)
 _locale_text_value(table::_StatusTexts, v) =
     _status_texts(merge!(Dict{Int,String}(table), Dict{Int,String}(Int(k) => string(x) for (k, x) in v)))
+_locale_text_value(stored, v, fname, name) = _locale_text_value(stored, v)
+# Twelve names given by keyword (`TableTexts.months`), in any collection,
+# replace the locale's twelve, January first.
+function _locale_text_value(::NTuple{12,String}, v, fname, name)
+    names = v isa AbstractString || !applicable(iterate, v) ? nothing : collect(v)
+    (isnothing(names) || length(names) != 12) && throw(ArgumentError(string(fname, ": ", name,
+        " takes twelve names, January first; got ", repr(v))))
+    NTuple{12,String}(string.(names))
+end
 
 # A text with its `{placeholders}` filled in from `values`.
 _fill_text(template::AbstractString; values...) =
@@ -24927,7 +24936,11 @@ the text of an estimate with its interval ([`format_interval`](@ref):
 `interval`, `22 (13–34)`, and `interval_signed` for a negative bound,
 `-5 (-8 to -2)`, German `−5 (−8 bis −2)`) and the range a group summary lies
 in when a leaf gives its value as bounds ([`ColumnSummary`](@ref): `range`,
-`9–100`, and `range_signed` for a negative end, `-8 to -2`). Build one with
+`9–100`, and `range_signed` for a negative end, `-8 to -2`), and the words of
+the dates [`format_date`](@ref) writes (`months` and `months_short`, twelve
+names each, January first, and the layouts `date_long`, `date_short` and
+`date_month`: `1 October 2015`, `1 Oct 2015`, `Oct 2015`, German
+`1. Oktober 2015`, `1. Okt. 2015`, `Okt. 2015`). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -24941,9 +24954,13 @@ texts take `{name}` (the grouping), `group_level` also `{level}`;
 `linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
 take `{name}` (the sort key); `interval` and `interval_signed` take
 `{estimate}`, `{lower}` and `{upper}`; `range` and `range_signed` take
-`{lower}` and `{upper}`. A number in a text is written with
+`{lower}` and `{upper}`; `date_long`, `date_short` and `date_month` take
+`{day}`, `{month}` (from `months`), `{month_short}` (from `months_short`) and
+`{year}`, so `table_texts(; date_long = "{month} {day}, {year}")` writes
+American English. A number in a text is written with
 `thousands`, like a group row's own count: `"1.672 von 1.672 Messstellen"`
 under `table_texts(:de)`, `"1,672 of 1,672 rows shown"` under `table_texts(:en)`.
+A date's day and year are digits alone: `2015`, never `2,015`.
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -24991,7 +25008,20 @@ struct TableTexts
     interval_signed::String     #   the same with a negative bound, where a dash would read as a minus
     range::String               # a group summary's range (`ColumnSummary` over a leaf's bounds)
     range_signed::String        #   the same with a negative end
+    months::NTuple{12,String}       # the month names `format_date` writes, January first
+    months_short::NTuple{12,String} #   and their abbreviations
+    date_long::String           # `format_date(d; style=:long)`: 1 October 2015
+    date_short::String          #   `style=:short`: 1 Oct 2015
+    date_month::String          #   `style=:month`: Oct 2015
 end
+
+# The texts only `format_date` reads. The browser runtime writes no date, so
+# they stay out of the texts a table carries (`_table_browser_texts`).
+const _TABLE_DATE_TEXTS = (:months, :months_short, :date_long, :date_short, :date_month)
+
+# What a date layout may name: the day of the month and the year (digits
+# alone, without a thousands mark), the month's name and its abbreviation.
+const _DATE_PLACEHOLDERS = (:day, :month, :month_short, :year)
 
 const _TABLE_TEXT_PLACEHOLDERS = (
     count = (:shown, :total),
@@ -25002,6 +25032,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     sort_ascending = (:name,), sort_descending = (:name,),
     interval = (:estimate, :lower, :upper), interval_signed = (:estimate, :lower, :upper),
     range = (:lower, :upper), range_signed = (:lower, :upper),
+    date_long = _DATE_PLACEHOLDERS, date_short = _DATE_PLACEHOLDERS, date_month = _DATE_PLACEHOLDERS,
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -25051,6 +25082,12 @@ const _TABLE_TEXT_LOCALES = (
         interval_signed = "{estimate} ({lower} to {upper})",
         range = "{lower}–{upper}",
         range_signed = "{lower} to {upper}",
+        months = ("January", "February", "March", "April", "May", "June", "July",
+                  "August", "September", "October", "November", "December"),
+        months_short = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        date_long = "{day} {month} {year}",
+        date_short = "{day} {month_short} {year}",
+        date_month = "{month_short} {year}",
     ),
     de = (
         search = "Suche",
@@ -25098,6 +25135,12 @@ const _TABLE_TEXT_LOCALES = (
         interval_signed = "{estimate} ({lower} bis {upper})",
         range = "{lower}–{upper}",
         range_signed = "{lower} bis {upper}",
+        months = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
+                  "August", "September", "Oktober", "November", "Dezember"),
+        months_short = ("Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez."),
+        date_long = "{day}. {month} {year}",
+        date_short = "{day}. {month_short} {year}",
+        date_month = "{month_short} {year}",
     ),
 )
 
@@ -25171,13 +25214,21 @@ _table_text(texts::TableTexts, name::Symbol; values...) =
 _table_text_value(v, texts) = v
 _table_text_value(n::Integer, texts) = format_number(n; texts)
 
+# The texts the browser runtime reads: all but the dates.
+const _TABLE_BROWSER_TEXTS = Tuple(n for n in fieldnames(TableTexts) if !(n in _TABLE_DATE_TEXTS))
+_table_browser_texts(texts::TableTexts) =
+    NamedTuple{_TABLE_BROWSER_TEXTS}(map(n -> getfield(texts, n), _TABLE_BROWSER_TEXTS))
+
+const _EN_TABLE_BROWSER_TEXTS = _table_browser_texts(_EN_TABLE_TEXTS)
+
 # The texts as the JSON object `htmxoText` reads.
-_table_texts_json(texts::TableTexts) = JSON.json(texts)
+_table_texts_json(texts::TableTexts) = JSON.json(_table_browser_texts(texts))
 
 # The outermost element of a table carries its texts for the browser runtime,
 # which writes the count, selection and lazy-detail lines; English is the
-# runtime's own default, so an English table stays byte-identical.
-_with_table_texts(node, texts::TableTexts) = texts == _EN_TABLE_TEXTS ? node :
+# runtime's own default, so an English table stays byte-identical, and so does
+# one whose texts differ from English only in the dates.
+_with_table_texts(node, texts::TableTexts) = _table_browser_texts(texts) == _EN_TABLE_BROWSER_TEXTS ? node :
     Node(HTMX.tag(node), merge(copy(HTMX.attrs(node)),
         Dict{Symbol,Any}(Symbol("data-htmxo-texts") => _table_texts_json(texts))), HTMX.children(node))
 
@@ -27811,6 +27862,56 @@ _number_value(x::Union{Integer,AbstractFloat}) = x
 _number_value(x::Real) = float(x)
 _number_value(x) = throw(ArgumentError(string(
     "format_number: expected a real number, missing or nothing; got ", repr(x))))
+
+"""
+    format_date(d; texts=table_texts(), style=:long) -> String
+
+Write a date in the language of a table's texts, with its month names.
+
+Write the day `d` (a `Dates.Date`) with the month names and date layouts of
+`texts` (a [`TableTexts`](@ref)), the date counterpart of
+[`format_number`](@ref). For 1 October 2015:
+
+| `style` | `table_texts()` | `table_texts(:de)` |
+|:--- |:--- |:--- |
+| `:long` (the default) | `1 October 2015` | `1. Oktober 2015` |
+| `:short` | `1 Oct 2015` | `1. Okt. 2015` |
+| `:month` | `Oct 2015` | `Okt. 2015` |
+
+The names are those browsers write (Unicode CLDR): German abbreviates
+`Jan.`, `Feb.`, `März`, `Apr.`, `Mai`, `Juni`, `Juli`, `Aug.`, `Sept.`,
+`Okt.`, `Nov.`, `Dez.`; English writes `Jan` to `Dec` with `Sep`. English puts
+the day first. Each style's layout is a text of `texts` with the placeholders
+`{day}`, `{month}`, `{month_short}` and `{year}`, and the names are its
+`months` and `months_short`, so an app changes them by keyword:
+
+```julia
+format_date(Date(2015, 10, 1); texts = table_texts(; date_long = "{month} {day}, {year}"))  # "October 1, 2015"
+format_date(Date(2015, 10, 1); texts = table_texts(:de; date_month = "{month} {year}"), style = :month)  # "Oktober 2015"
+```
+
+`missing` and `nothing` write `–`, as in [`format_number`](@ref). A
+`DateTime` is refused rather than written without its time of day: pass
+`Date(x)` to write its day.
+"""
+format_date(d; texts::TableTexts=_EN_TABLE_TEXTS, style::Symbol=:long) =
+    _format_date(d, texts, _date_layout(texts, style))
+
+_date_layout(texts::TableTexts, style::Symbol) =
+    style === :long ? texts.date_long : style === :short ? texts.date_short :
+    style === :month ? texts.date_month : throw(ArgumentError(string(
+        "format_date: unknown style ", repr(style), "; styles are :long, :short, :month")))
+
+_format_date(::Union{Nothing,Missing}, texts, layout) = "–"
+function _format_date(d::Dates.Date, texts, layout)
+    m = Dates.month(d)
+    _fill_text(layout; day=string(Dates.day(d)), month=texts.months[m],
+        month_short=texts.months_short[m], year=string(Dates.year(d)))
+end
+_format_date(d::Dates.DateTime, texts, layout) = throw(ArgumentError(string(
+    "format_date: ", d, " is a DateTime; it writes a day, so pass Date(x) (its time of day is not written)")))
+_format_date(d, texts, layout) = throw(ArgumentError(string(
+    "format_date: expected a Date, missing or nothing; got ", repr(d))))
 
 _format_number(::Nothing, texts, rounding) = "–"
 _format_number(x::Integer, texts, rounding) = _format_finite(x, texts, rounding)
