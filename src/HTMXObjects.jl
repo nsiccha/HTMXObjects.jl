@@ -29307,7 +29307,8 @@ end
     number_domain(lower .. upper; log=false, step=nothing, digits=nothing, unit=nothing)
     number_domain(lower, upper; kwargs...)
 
-Declare once which numbers an input takes and how a reader picks one:
+Declare once, in an input's `@options`, which numbers it takes and how a
+reader picks one.
 
 ```julia
 "Attenuation per mm of snow water"
@@ -29377,8 +29378,8 @@ _number_domain(_) = nothing
 """
     number_record(domain) -> NamedTuple or nothing
 
-A [`number_domain`](@ref), or a bare interval of numbers, as plain data, the
-same record a generated control carries as JSON in `data-htmxo-number`:
+A [`number_domain`](@ref), or a bare interval of numbers, as plain data: the
+same record a generated control carries as JSON in `data-htmxo-number`.
 
 ```julia
 number_record(number_domain(0.001 .. 0.015; log=true, digits=4))
