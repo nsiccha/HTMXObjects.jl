@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.125
+
+- A caption without a title shows its summary alone: `CaptionSpec(; title="",
+  short=text)` renders `text`, in HTML and Markdown, through `render_caption`,
+  `with_caption`, the tables' `caption=` and AoV's `with_plot_caption`. Before,
+  it rendered an empty `<strong></strong>` (`****` in Markdown) and a leading
+  ` — `. A blank tier (whitespace only) is left out with its ` — ` in general:
+  a blank summary leaves the title alone, and a long text with neither title
+  nor summary opens the Markdown caption without a dash. Captions with a
+  title are unchanged (snag `caption-empty-ti-4b05b833`).
+
 ## 0.1.124
 
 - `format_date(d; texts = table_texts(), style = :long)` writes a `Date` in
