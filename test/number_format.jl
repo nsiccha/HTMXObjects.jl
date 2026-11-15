@@ -116,6 +116,61 @@ end
     @test contains(repr("text/plain", st), "a\t1234.5\t3.81e-5\t2024")
 end
 
+@testitem "format_number and number_cell write a share as a percent" tags=[:unit] begin
+    using HTMXObjects
+    de = table_texts(:de)
+    p(x; kw...) = format_number(x; percent=true, kw...)
+    @test p(0.45) == "45%" && p(0.45; texts=de) == "45\u00a0%" && p(0.4517; digits=1) == "45.2%"
+    @test p(0.4517; texts=de, digits=1) == "45,2\u00a0%" && p(0.4517; sigdigits=2) == "45%"
+    # The decimal point moves by two places: 0.145 is 14.5, which rounds up,
+    # and 0.07 is 7, where `0.07 * 100` is 7.000000000000001.
+    @test p(0.145; digits=0) == "15%" && p(0.07) == "7%" && p(0.0012) == "0.12%" && p(1.5) == "150%"
+    @test p(-0.07; texts=de) == "−7\u00a0%" && p(1) == "100%" && p(0.0) == "0%" && p(0.45; digits=0) == "45%"
+    # No value, and a value that is not a finite number, take no sign.
+    @test p(nothing) == "–" && p(missing) == "–" && p(Inf) == "∞" && p(-Inf; texts=de) == "−∞" && p(NaN) == "NaN"
+    # A language's own percent text, overridable like any table text.
+    @test p(0.45; texts=table_texts(; percent="{number} pct")) == "45 pct"
+    @test_throws ArgumentError table_texts(; percent="{amount}%")
+    # The cell shows the percent and keeps the share for sorting and the CSV.
+    c = repr("text/html", number_cell(0.4517; percent=true, digits=1))
+    @test contains(c, ">45.2%</td>") && contains(c, "data-sort-value=\"0.4517\"") && contains(c, "data-htmxo-number=\"0.4517\"")
+end
+
+@testitem "a ColumnSpec says how render_table writes its column's numbers" tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    html(x) = repr("text/html", x)
+    rows = (water=[0.0, 20.0, 41.5], share=[1.0, 0.6712, 0.12], n=[3, 1234, 5], name=["a", "b", "c"])
+    t = html(render_table(rows; columns=[:water => ColumnSpec("Water (mm)"; digits=0),
+        :share => ColumnSpec("Share"; digits=3), :n => ColumnSpec("Count"; percent=true)]))
+    @test contains(t, ">42</td>") && contains(t, "data-htmxo-number=\"41.5\"")
+    @test contains(t, ">0.671</td>") && contains(t, ">0.120</td>") && contains(t, ">1.000</td>")
+    # An integer is a number cell in such a column, where it is otherwise text.
+    @test contains(t, ">123,400%</td>") && contains(t, "data-htmxo-number=\"1234\"")
+    @test contains(t, "<td>a</td>")
+    plain = html(render_table(rows))
+    @test contains(plain, "<td>1234</td>") && contains(plain, ">41.5</td>") && contains(plain, ">0.6712</td>")
+    # The German table's words reach the percent; a header keeps its label and help.
+    de = html(render_table((s=[0.45],); columns=[:s => ColumnSpec("Anteil"; help="Durchgang", percent=true)],
+                          texts=table_texts(:de)))
+    @test contains(de, ">45\u00a0%</td>") && contains(de, "Anteil") && contains(de, "Durchgang")
+    @test_throws ArgumentError ColumnSpec("x"; digits=1, sigdigits=2)
+    @test_throws ArgumentError ColumnSpec("x"; digits=11)
+    # The tables whose cells are built already refuse them rather than ignore them.
+    e = try; sortable_table([ColumnSpec("x"; digits=1)], [h.tr(h.td("1"))]); nothing; catch err; err; end
+    @test e isa ArgumentError && contains(e.msg, "number_cell(x; digits, sigdigits, percent)")
+    # A row's hover-link key may be a column, its number as the browser writes it,
+    # as AlgebraOfVega keys a plot's marks by the same column.
+    linked = html(render_table(rows; link="g", link_key=:water))
+    @test contains(linked, "data-htmxo-link-key=\"0\"") && contains(linked, "data-htmxo-link-key=\"20\"") &&
+          contains(linked, "data-htmxo-link-key=\"41.5\"")
+    @test contains(html(render_table(rows; link="g", link_key=:name)), "data-htmxo-link-key=\"b\"")
+    e2 = try; render_table(rows; link="g", link_key=:nope); nothing; catch err; err; end
+    @test e2 isa ArgumentError && contains(e2.msg, "names no column")
+    @test [HTMXObjects._js_number_text(x) for x in (20.0, -0.0, 0.1 + 0.2, 1e21, 1.5e-7, 1e-6, 123456789012345680000.0, Inf, NaN)] ==
+          ["20", "0", "0.30000000000000004", "1e+21", "1.5e-7", "0.000001", "123456789012345680000", "Infinity", "NaN"]
+end
+
 @testitem "render_table writes no value as an empty number cell" tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h, to_markdown_string
