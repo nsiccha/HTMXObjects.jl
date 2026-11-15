@@ -199,6 +199,7 @@ names = [
     "fmt_bytes",
     "fmt_number",
     "fmt_time",
+    "format_date",
     "format_interval",
     "format_number",
     "interval_cell",

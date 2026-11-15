@@ -4,10 +4,12 @@
     export marked, english_words, table_variants, without_texts_attr
 
     # Every text replaced by a marker that keeps its placeholders, so a
-    # rendered table shows which texts reached it ("⟨count 3 7⟩").
-    marked() = table_texts(:en; (n => string("⟨", n,
-        join((" {$p}" for p in get(HTMXObjects._TABLE_TEXT_PLACEHOLDERS, n, ())), ""), "⟩")
-        for n in fieldnames(TableTexts))...)
+    # rendered table shows which texts reached it ("⟨count 3 7⟩"); the twelve
+    # month names each get their own ("⟨months 10⟩").
+    marker(n) = fieldtype(TableTexts, n) <: AbstractString ? string("⟨", n,
+        join((" {$p}" for p in get(HTMXObjects._TABLE_TEXT_PLACEHOLDERS, n, ())), ""), "⟩") :
+        ntuple(i -> string("⟨", n, " ", i, "⟩"), 12)
+    marked() = table_texts(:en; (n => marker(n) for n in fieldnames(TableTexts))...)
 
     # Fragments of the English texts that no fixture's own content contains.
     english_words = ["Search", "rows shown", "No matching rows", "0 selected", "Select all shown",
