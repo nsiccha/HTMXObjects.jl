@@ -29,7 +29,8 @@ using TestItemRunner
         "Slope"
         @param a::Float64 = 2.0
         # A range (a slider with a number field): continuous, never a view per value.
-        @options(a) = number_domain(0.0, 10.0)
+        # Its `step` is the slider's grid; a typed number need only lie in the range.
+        @options(a) = number_domain(0.0, 10.0; step = 0.5)
         "Intercept"
         @param b::Float64 = 1.0
         "Show"
@@ -518,6 +519,12 @@ end
             await until(() => shown() === '6|10|4|0.50', 'typed: ' + shown());
             slider.dispatchEvent(new Event('change', {bubbles: true}));
             await until(() => new URLSearchParams(location.search).get('a') === '4', 'address on release: ' + location.search);
+            // A number between the slider's grid values (`step = 0.5`) is
+            // computed as typed (snag use-number-domai-f74b4f09: the grid as
+            // the field's own step made it invalid, and the result stayed).
+            type('a', '4.3');
+            await until(() => shown() === '6.3|10.6|4.3|0.50', 'between grid values: ' + shown());
+            await until(() => new URLSearchParams(location.search).get('a') === '4.3', 'address between grid values: ' + location.search);
             await fetch('/mark?phase=end');
             if (new URLSearchParams(location.search).get('b') !== '2') throw new Error('address: ' + location.search);
             sessionStorage.setItem('htmxo-test-browser', '1');

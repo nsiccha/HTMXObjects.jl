@@ -14024,7 +14024,9 @@ that a running request will replace (`loading`, `loading_named`; see
 list (`choice_search`, its placeholder, and `choice_no_match`, shown when no
 option matches; see [`choice_list`](@ref)), and the button of a
 `semantic_app(…; presentation=:tabs)` page that returns every input to its
-default (`reset_inputs`). Build one with
+default (`reset_inputs`), and the line of that page's Markdown that names the
+inputs a result is shown at (`shown_at`, "Shown at"; a checkbox's value in it
+is `shown_yes` or `shown_no`). Build one with
 [`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
@@ -14097,6 +14099,9 @@ struct ErrorTexts
     record_label::String               # ... the accessible name of its label field
     record_fields::String              # ... the accessible name of its fold control
     reset_inputs::String               # a semantic_app page's Reset: every input to its default
+    shown_at::String                   # ... its Markdown: the line naming the inputs a result shows
+    shown_yes::String                  # ... a checked box's value in that line
+    shown_no::String                   # ... an unchecked one's
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -14152,6 +14157,9 @@ const _ERROR_TEXT_LOCALES = (
         record_label = "Label",
         record_fields = "Fields",
         reset_inputs = "Reset",
+        shown_at = "Shown at",
+        shown_yes = "yes",
+        shown_no = "no",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -14195,6 +14203,9 @@ const _ERROR_TEXT_LOCALES = (
         record_label = "Bezeichnung",
         record_fields = "Felder",
         reset_inputs = "Zurücksetzen",
+        shown_at = "Dargestellt bei",
+        shown_yes = "ja",
+        shown_no = "nein",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -30120,8 +30131,9 @@ show so too.
 
 `domain` takes a [`number_domain`](@ref) or an interval (`0.001 .. 0.015`)
 and draws the control a generated form draws for a number input declared with
-one: the field takes its bounds and step from the domain, a slider beside it
-moves the value (evenly in ratio when the domain is `log`), and the unit
+one: the field takes its bounds from the domain and any number between them,
+a slider beside it moves the value (evenly in ratio when the domain is `log`)
+along the domain's step grid, as the field's arrow keys do, and the unit
 follows it. Give the bounds and step in the domain, not as `min`, `max` and
 `step` beside it.
 """
@@ -30208,11 +30220,13 @@ domain with no other settings. The label and help text stay where they are
 
 - `log=true` spaces the slider evenly in ratio, for a positive quantity
   spanning orders of magnitude; the interval must be positive and finite.
-- `step` is the spacing of the values the slider and the field offer, counted
-  from the lower bound (the field's `step`). The server checks only the
-  interval. Without it the field takes any number and a value picked on the
-  slider keeps three significant digits, as the explainer pictures pick
-  them. An integer input takes whole numbers either way.
+- `step` is the spacing of the values the slider offers and the field's
+  arrow keys step through, counted from the lower bound. It does not
+  restrict a typed number: the field, like the server, takes any number in
+  the interval, so 273 typed on a `50 .. 400` domain with `step=10` is used
+  as typed. Without a step a value picked on the slider keeps three
+  significant digits, as the explainer pictures pick them. An integer input
+  takes whole numbers either way.
 - `digits` is the number of decimal places (0 to 10) the field shows its
   value with while the reader is not editing it, as
   [`format_number`](@ref)`(x; digits)` writes it: with `digits=4` a default
@@ -30332,10 +30346,17 @@ function _number_control(name, label, domain::NumberDomain, value;
     lower, upper = IntervalSets.endpoints(domain.interval)
     step = domain.step !== nothing ? domain.step : integer ? 1 : nothing
     record = merge(number_record(domain), (; step))
+    # The field takes any number in the interval, as the server does: `step`
+    # is the grid the slider and the field's arrow keys move along
+    # (`number_control_script`), so a number typed between grid values is
+    # valid and is used as typed. As the field's own `step` it made such a
+    # number invalid (`stepMismatch`): native submission refused it and a
+    # result that follows its inputs kept the last valid values. A
+    # whole-number input keeps `step="1"`, which its type requires.
     field_attrs = (;
         (isfinite(lower) ? (; min=_number_control_value(lower)) : (;))...,
         (isfinite(upper) ? (; max=_number_control_value(upper)) : (;))...,
-        step=step === nothing ? "any" : _number_control_value(step),
+        step=integer ? 1 : "any",
         (required ? (; required="true") : (;))...)
     shown = value === nothing || value === _NO_DEFAULT ? "" :
         value isa Real ? _number_control_value(value) : string(value)
@@ -33466,7 +33487,8 @@ shows the values it names, and the script writes the inputs into it. With
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
-        reset::Bool=true, sections=InputSection[], place=nothing)
+        reset::Bool=true, sections=InputSection[], place=nothing,
+        report_states=_ReportState[])
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places. The fields of
@@ -33514,6 +33536,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         "semantic_app sections= names ", join(repr.(unknown), ", "),
         ", which no operation of the surface takes; its inputs are ",
         join(repr.(sort!(collect(inputs))), ", "))))
+    _check_report_states(report_states, inputs)
     own = [setdiff(read, sidebar) for read in reads]
     routes = [_semantic_tabs_route(spec.mounted, spec.runtime_route, sidebar, own[i])
               for (i, spec) in enumerate(specs)]
@@ -33599,16 +33622,20 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 (isnothing(key_reads) ? (;) :
                     (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
                 data_htmxo_live="", hx_sync="this:replace")
+            # The page's Markdown writes the result its address answers, at the
+            # inputs it reads (`_tab_result_markdown`).
+            markdown = _tab_result_markdown(spec.mounted, route, current, target, sent,
+                something(key_reads, sent), report_states, browser_page.static)
             browser = _browser_reads(spec.mounted, base.name)
             if !isempty(browser)
                 browser_regions[i] = true
                 form, _browser_region(browser_page, spec, route, current, target, sent,
-                                      region_attrs, browser)
+                                      region_attrs, browser; markdown)
             else
                 initial = names[i] == open ?
                     Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
                     Any[]
-                form, h.div(initial...; region_attrs...)
+                form, h.div(initial..., markdown; region_attrs...)
             end
         else
             form = base.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
@@ -33713,7 +33740,7 @@ end
                  results=:each, layout=_default_semantic_layout,
                  select=entry -> true, presentation=:stacked, radio_max=8,
                  shared=nothing, active=nothing, url_state=true, reset=true,
-                 sections=nothing, place=nothing)
+                 sections=nothing, place=nothing, report_states=nothing)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -33762,6 +33789,23 @@ groups its inputs under headings wherever they are placed, a list of
 draws a sidebar input's control in an operation's tab instead, still an
 input of the sidebar's form. The contract is the API reference's *An app
 page*.
+
+In the page's Markdown (`?plain`, `Accept: text/markdown`,
+[`to_markdown_string`](@ref), and a report: `dispatch(…; report=true)`,
+[`pdf_report`](@ref)) each tab is its label followed by its result, as the
+result's own address answers it as Markdown at the page's inputs: the report
+view in a report, and for a result computed in the browser what the server
+draws of it. A line before it names the inputs the result reads and their
+values as their controls show them, `Shown at: Slope (per day) 0.20;
+Intercept 80 units` (`__error_texts__`'s `shown_at`, and `shown_yes` or
+`shown_no` for a checkbox). A result takes no number in a [`numbered`](@ref)
+document, as it takes none on the page. The HTML page asks no result it does
+not show; a Markdown read asks each tab's result once.
+`report_states = ["Steep" => (a = 0.5,), (b = 20.0,)]` writes, in a report
+only, each tab again for each state that names an input it reads: with the
+state's values in place of the page's, its own line, and its caption first
+when it has one. A state names inputs of the page, or the call throws an
+`ArgumentError`; a value an input refuses makes the report throw.
 
 A single choice among at most `radio_max` options (default 8) is a row of
 pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
@@ -33887,7 +33931,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
-        reset=nothing, sections=nothing, place=nothing)
+        reset=nothing, sections=nothing, place=nothing, report_states=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -33911,7 +33955,10 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app sections= groups the inputs of presentation=:tabs"))
         isnothing(place) || throw(ArgumentError(
             "semantic_app place= puts inputs of presentation=:tabs into its tabs"))
+        isnothing(report_states) || throw(ArgumentError(
+            "semantic_app report_states= shows the results of presentation=:tabs at further states in a report"))
     end
+    states = _report_states(report_states)
     input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
         "semantic_app url_state must be true or false, got $(repr(url_state))"))
@@ -33964,7 +34011,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
-        reset=something(reset, true), sections=input_sections, place,
+        reset=something(reset, true), sections=input_sections, place, report_states=states,
         render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
@@ -34625,7 +34672,9 @@ is the named input the form submits, the unit, and an unnamed slider over
 positions 0…500. Moving the slider writes its value into the field, spaced
 evenly in ratio for a `log` domain, on the `step` grid from the lower bound,
 else to three significant digits (as the explainer pictures pick slider
-values). Typing a number in the field moves the slider. A domain with `digits`
+values). Typing a number in the field moves the slider; the field takes any
+number in the interval, between grid values too, and its arrow keys step
+along the `step` grid as the slider does. A domain with `digits`
 shows the field's value rounded to them while the reader is not editing it,
 written as [`format_number`](@ref) writes it, and the text follows every
 change the field announces (typing, the slider, Reset, the page address) and
@@ -34706,6 +34755,32 @@ number_control_script() = h.script(Raw(raw"""
   }
   document.addEventListener('input', follow);
   document.addEventListener('change', follow);
+  // The field takes any number in the interval (its `step` is `any`, or `1`
+  // for whole numbers); its arrow keys move along the domain's step grid, as
+  // the slider does: to the next grid value above or below the field's
+  // value, as the browser steps a field whose own step is the grid
+  // (`stepUp`/`stepDown` with the grid as its step for that one call), and
+  // announced as the browser announces its own stepping, `input` then
+  // `change`. A domain without a step keeps the browser's own stepping.
+  document.addEventListener('keydown', function(e) {
+    var t = e.target;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    if (!t || !t.matches || !t.matches('input[data-htmxo-number-field]') || t.readOnly || t.disabled) return;
+    var holder = t.closest('[data-htmxo-number]'), spec;
+    if (!holder) return;
+    try { spec = JSON.parse(holder.getAttribute('data-htmxo-number')); } catch (_) { return; }
+    var own = t.getAttribute('step');
+    if (!spec || typeof spec.step !== 'number' || !(spec.step > 0) || own === String(spec.step)) return;
+    e.preventDefault();
+    var before = t.value;
+    t.setAttribute('step', String(spec.step));
+    try { if (e.key === 'ArrowUp') t.stepUp(); else t.stepDown(); }
+    catch (_) {}
+    finally { if (own === null) t.removeAttribute('step'); else t.setAttribute('step', own); }
+    if (t.value === before) return;
+    t.dispatchEvent(new Event('input', {bubbles: true}));
+    t.dispatchEvent(new Event('change', {bubbles: true}));
+  });
   // A field with `digits` shows its value rounded to them while the reader is
   // not editing it: the text over it (`.htmxo-number-shown`) follows every
   // announced change of the field, written as `format_number(x; digits)`
@@ -40623,6 +40698,7 @@ include("numbering.jl")
 
 include("comparison.jl")
 include("semantic_browser.jl")
+include("semantic_report.jl")
 
 """
     tabset(tabs::Pair...; active=1, id=<from the labels, names and content>, preload=nothing,
