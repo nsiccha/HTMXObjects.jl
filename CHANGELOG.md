@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 0.1.122
+
+- A `semantic_app(…; presentation=:tabs)` page can compute a result in the
+  browser. `@browser(name) = browser_module(file, entry)` gives a property an
+  ES module that computes it from the inputs, in the contract
+  `ReactiveKernels.js_source` emits (positional arguments named by its
+  `INPUTS`, a named tuple returned as an object, errors named by their Julia
+  exception); `browser_module(; source, entry)` takes the module's text. In a
+  view, `bound(x)`, `bound(x.output)`, `bound(x.output[i])` and `bound(a)` (a
+  `@param`), with `digits=`, show such a value; `bound(x; columns)` is a table
+  for a plot, whose element takes `bound_columns_attrs(...)`. A result reading
+  such a property is computed and redrawn in the browser with no request: the
+  page carries its view for each value of the finite inputs it reads, the
+  property's module and the data the module takes. A module error is shown in
+  the result. So the page follows its inputs as a static export and offline.
+- `export_site` refuses a page with such a result where it would show
+  something stale, naming each part: a view showing an input outside `bound`,
+  a result that reads inputs and computes nothing in the browser, a control the
+  server draws again.
+- A `presentation=:tabs` page applies the inputs its address names to its
+  controls when it loads, so a static page's shared link reopens them; where
+  the server already did, nothing changes.
+- A `@relevant` condition comparing arithmetic of `@param`s (`a * b > 10`) is
+  evaluated in the browser instead of re-rendering the control from the server.
+- With DynamicObjects 0.5.21, which removed the private helper HTMXObjects read
+  an operation's dependencies with, a `presentation=:tabs` page treated every
+  operation as reading every input: all inputs went to the sidebar and every
+  result was asked again on any change. Its dependencies are read again.
+
 ## 0.1.121
 
 - `HTMXObjects.page_report()` says whether the Markdown being written is for a

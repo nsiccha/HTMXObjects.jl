@@ -76,6 +76,7 @@ export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
 export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs, Records, record_view, all_records
 export NumberDomain, number_domain, number_record, number_control_script
+export browser_module, BrowserModule, bound_columns_attrs, semantic_browser_script
 
 using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
@@ -2180,7 +2181,7 @@ end
 _param_names(::Type) = ()
 
 """
-    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets)
+    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets, browser)
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
 to plain derived-property assignments that call
@@ -2211,8 +2212,12 @@ extracts its submitted value only while that property is `true`: otherwise it
 is its default, whatever was submitted. A `@relevant` parameter therefore needs
 a default.
 
+A `@browser(name) = browser_module(file, entry)` line becomes the property
+`__browser_<name>__`: the module a static page computes `name` with.
+
 Returns the ordered list of declared param names for later `_param_names`
-emission, the `@relevant` conditions, and each `@resets` target's source names.
+emission, the `@relevant` conditions, each `@resets` target's source names, and
+the `@browser` property names.
 """
 function _convert_params!(struct_expr; parent_params=())
     body = struct_expr.args[3]
@@ -2239,6 +2244,11 @@ function _convert_params!(struct_expr; parent_params=())
     reset_names = Set(first.(resets))
     length(reset_names) == length(resets) || throw(ArgumentError(
         "@htmx: an input has two `@resets` declarations; name its sources in one tuple"))
+    browser = Symbol[first(declared) for declared in
+                     (_browser_declaration(arg) for arg in body.args) if declared !== nothing]
+    allunique(browser) || throw(ArgumentError(string(
+        "@htmx: a property has two `@browser` declarations: ",
+        join(unique(n for n in browser if count(==(n), browser) > 1), ", "))))
     names = Symbol[]
     new_args = Any[]
     process_line! = inner -> begin
@@ -2276,6 +2286,13 @@ function _convert_params!(struct_expr; parent_params=())
             # The help text, likewise a property: a generated form draws it
             # under the control and draws it again when what it reads changes.
             push!(new_args, Expr(:(=), _help_property(first(declared)), last(declared)))
+            continue
+        end
+        declared = _browser_declaration(arg)
+        if declared !== nothing
+            # The browser module computing the property: a property of its own,
+            # evaluated where a page renders the results that read it.
+            push!(new_args, Expr(:(=), _browser_property(first(declared)), last(declared)))
             continue
         end
         if !(arg isa Expr)
@@ -2336,6 +2353,11 @@ function _convert_params!(struct_expr; parent_params=())
             "@htmx: `@help($name)` names no `@param` of this struct; ",
             "declare `@param $name = <default>` next to it")))
     end
+    for name in browser
+        name in names && throw(ArgumentError(string(
+            "@htmx: `@browser($name)` names a `@param`, which the page's control ",
+            "supplies; declare it on a property computed from the inputs")))
+    end
     available = union(Set(names), Set(parent_params))
     for (name, sources) in resets
         name in names || throw(ArgumentError("@htmx: `@resets($name)` names no `@param` of this struct"))
@@ -2344,13 +2366,13 @@ function _convert_params!(struct_expr; parent_params=())
                 "@htmx: `@resets($name)` source `$source` names no `@param` of this struct or its parent"))
         end
     end
-    names, relevance, resets
+    names, relevance, resets, browser
 end
 
 # Companion declarations share the two Julia parser shapes, including
 # `@marker(name) = value` and `@marker name = value`.
-function _param_declaration(arg, marker, value)
-    message = "@htmx: write `$marker(name) = $value` with the name of one `@param`"
+function _param_declaration(arg, marker, value; what="one `@param`")
+    message = "@htmx: write `$marker(name) = $value` with the name of $what"
     if Meta.isexpr(arg, :(=), 2) && Meta.isexpr(arg.args[1], :macrocall)
         lhs = arg.args[1]
         mname = lhs.args[1]
@@ -2378,6 +2400,69 @@ _relevance_property(name::Symbol) = Symbol("__relevant_", name, "__")
 _help_declaration(arg) = _param_declaration(arg, Symbol("@help"), "text")
 
 _help_property(name::Symbol) = Symbol("__help_", name, "__")
+
+# `@browser(name) = browser_module(file, entry)` (and `@browser name = …`), as
+# `name => module`; `nothing` for any other line. `name` is a property the
+# browser computes with that module on a static page (`semantic_browser.jl`).
+_browser_declaration(arg) = _param_declaration(arg, Symbol("@browser"),
+    "browser_module(file, entry)"; what="one property")
+_browser_property(name::Symbol) = Symbol("__browser_", name, "__")
+
+# Default: no `@browser` declarations.
+_browser_properties(::Type) = ()
+
+# `bound(x)`, `bound(x.field)`, `bound(x.field[2])` and `bound(x; columns=…)` in
+# an `@htmx` struct become `_bound(path, x…)`: the path names, for the browser,
+# where the value comes from (a `@browser` property or a `@param`), which a
+# value alone cannot tell. Quoted code is left alone.
+function _rewrite_bound!(struct_expr)
+    body = struct_expr.args[3]
+    body.args = Any[_rewrite_bound(arg) for arg in body.args]
+    struct_expr
+end
+_rewrite_bound(x) = x
+function _rewrite_bound(ex::Expr)
+    ex.head in (:quote, :inert) && return ex
+    Meta.isexpr(ex, :call) && ex.args[1] === :bound && return _lower_bound(ex)
+    Expr(ex.head, Any[_rewrite_bound(a) for a in ex.args]...)
+end
+function _lower_bound(ex::Expr)
+    positional = Any[]
+    keywords = Any[]
+    for arg in ex.args[2:end]
+        if Meta.isexpr(arg, :parameters)
+            append!(keywords, arg.args)
+        elseif Meta.isexpr(arg, :kw)
+            push!(keywords, arg)
+        else
+            push!(positional, arg)
+        end
+    end
+    length(positional) == 1 || throw(ArgumentError(string(
+        "@htmx: `bound` takes one value, a property or `@param` name with optional ",
+        "`.field` and `[i]` parts: got `", ex, "`")))
+    value = only(positional)
+    path = _bound_path(value)
+    path === nothing && throw(ArgumentError(string(
+        "@htmx: `bound` takes a property or `@param` name with optional `.field` and ",
+        "`[i]` parts (`i` an integer literal), such as `bound(prediction.half)` or ",
+        "`bound(prediction.at[1])`: got `bound(", value, ")`")))
+    Expr(:call, GlobalRef(@__MODULE__, :_bound),
+         Expr(:parameters, Any[_rewrite_bound(k) for k in keywords]...),
+         Expr(:tuple, path...), value)
+end
+_bound_path(x::Symbol) = Any[QuoteNode(x)]
+_bound_path(_) = nothing
+function _bound_path(ex::Expr)
+    if Meta.isexpr(ex, :., 2) && ex.args[2] isa QuoteNode && ex.args[2].value isa Symbol
+        head = _bound_path(ex.args[1])
+        return head === nothing ? nothing : push!(head, ex.args[2])
+    elseif Meta.isexpr(ex, :ref, 2) && ex.args[2] isa Integer
+        head = _bound_path(ex.args[1])
+        return head === nothing ? nothing : push!(head, Int(ex.args[2]))
+    end
+    nothing
+end
 
 # Default: no `@relevant` declarations.
 _param_relevance(::Type) = (;)
@@ -2602,7 +2687,8 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     reroute && _warn_redundant_req_decl!(struct_expr)
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
-    own_params, own_relevance, own_resets = _convert_params!(struct_expr; parent_params)
+    _rewrite_bound!(struct_expr)
+    own_params, own_relevance, own_resets, own_browser = _convert_params!(struct_expr; parent_params)
     own_headers = _convert_headers!(struct_expr)
     # Merge: parent params/headers first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -2675,6 +2761,12 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
             Expr(:call, _reset_fname, :(::Type{$type_name})),
             Expr(:tuple, Expr(:parameters,
                 (Expr(:kw, name, QuoteNode(sources)) for (name, sources) in own_resets)...))))
+    end
+    # Emit `_browser_properties`: the properties a page computes in the browser.
+    if !isempty(own_browser)
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, GlobalRef(@__MODULE__, :_browser_properties), :(::Type{$type_name})),
+            Tuple(own_browser)))
     end
     # Emit _inline_struct_props for backward compat
     all_nested = Symbol[p for (p, _) in inline_props]
@@ -7991,10 +8083,11 @@ struct _SiteLog
     targets::Vector{Tuple{String,String,Bool}}  # key, address, fragment
     provisional::Dict{String,Int}
     checks::Vector{Tuple{String,String,Symbol}}  # base, url, kind
+    problems::Vector{String}  # what the page reports a static site cannot serve
     lock::ReentrantLock  # a route may name addresses from several tasks
 end
 _SiteLog() = _SiteLog(Tuple{String,String,Bool}[], Dict{String,Int}(), Tuple{String,String,Symbol}[],
-                      ReentrantLock())
+                      String[], ReentrantLock())
 
 # The `url_map` of one dispatch in the crawl: `base` is the address being
 # rendered, against which a relative address resolves.
@@ -8779,6 +8872,10 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, run::_Si
     resp = rendered.answer
     resp isa PrivateContentEscaped &&
         return lock(() -> push!(crawl.failed, e.address => sprint(showerror, resp)), crawl.lock)
+    # A page that knows it would be stale as a static file says why
+    # (`_browser_report!`): a semantic page computing results in the browser.
+    isempty(rendered.log.problems) || return lock(() -> push!(crawl.failed,
+        e.address => join(unique(rendered.log.problems), "; ")), crawl.lock)
     if _private_page_response(resp)
         return lock(() -> (crawl.private[i] = length(crawl.private) + 1), crawl.lock)
     end
@@ -30924,8 +31021,9 @@ the predicate `show_when_script` reads (`data-show-when`); `nothing` for any
 other condition, which the page evaluates on the server instead. The browser
 evaluates comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `∉`) of one of
 `names` (the struct's `@param`s) with literals (strings, numbers, booleans,
-symbols, or a tuple or vector of them), a bare `Bool` parameter, and `!`, `&&`
-and `||` of those.
+symbols, or a tuple or vector of them), numeric comparisons in which either
+side is arithmetic (`+`, `-`, `*`, `/`) of `names` and number literals
+(`a * b > 10`), a bare `Bool` parameter, and `!`, `&&` and `||` of those.
 """
 _client_relevance(_, _names) = nothing
 _client_relevance(ex::Symbol, names) = ex in names ?
@@ -30954,6 +31052,13 @@ function _client_relevance(ex::Expr, names)
     end
     op = get(_CLIENT_COMPARISONS, f, nothing)
     isnothing(op) && return nothing
+    # Arithmetic of numeric inputs on either side (`a * b > 10`): compared as
+    # numbers, so a comparison of two plain inputs stays on the server.
+    if Meta.isexpr(a, :call) || Meta.isexpr(b, :call)
+        left, right = _client_arith(a, names), _client_arith(b, names)
+        (isnothing(left) || isnothing(right)) && return nothing
+        return Dict{String,Any}("cmp" => op, "left" => left, "right" => right)
+    end
     if !(a isa Symbol && a in names)
         b isa Symbol && b in names || return nothing
         a, b, op = b, a, _FLIPPED_COMPARISONS[op]
@@ -30962,6 +31067,23 @@ function _client_relevance(ex::Expr, names)
     isnothing(literal) && return nothing
     Dict{String,Any}("field" => string(a), "op" => op, "value" => first(literal),
                      "numeric" => last(literal))
+end
+
+# An arithmetic expression `show_when_script` evaluates: `+`, `-`, `*` and `/`
+# of `names` (numeric inputs) and number literals; `nothing` for anything else.
+_client_arith(x::Bool, _names) = nothing
+_client_arith(x::Real, _names) = isfinite(x) ? Dict{String,Any}("num" => x) : nothing
+_client_arith(x::Symbol, names) = x in names ? Dict{String,Any}("field" => string(x)) : nothing
+_client_arith(_, _names) = nothing
+function _client_arith(ex::Expr, names)
+    Meta.isexpr(ex, :call) || return nothing
+    f = ex.args[1]
+    f in (:+, :-, :*, :/) || return nothing
+    args = Any[_client_arith(arg, names) for arg in ex.args[2:end]]
+    (isempty(args) || any(isnothing, args)) && return nothing
+    length(args) == 1 && return f === :- ? Dict{String,Any}("neg" => only(args)) :
+                                f === :+ ? only(args) : nothing
+    Dict{String,Any}("arith" => string(f), "args" => args)
 end
 
 # The `@param`s a `@relevant` condition reads, which re-render its control
@@ -30989,11 +31111,34 @@ end
 # --- What an operation reads ---
 
 # DynamicObjects' dependency closure of `name` on `T` (the property and every
-# property it reads, transitively); `nothing` on a DynamicObjects without it.
-_dependency_closure(T::Type, name::Symbol) =
-    isdefined(DynamicObjects, :_semantic_dependency_closure) ?
-        Base.invokelatest(getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,)) :
-        nothing
+# property it reads, transitively), in declaration order; `nothing` on a
+# DynamicObjects without the per-property `dependson` metadata. DynamicObjects
+# 0.5.21 (`878dd48`) removed its private `_semantic_dependency_closure`, which
+# this used to call, so the closure is walked here from that metadata, as it was
+# there; an older DynamicObjects keeps answering through its own helper.
+function _dependency_closure(T::Type, name::Symbol)
+    isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
+        getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,))
+    isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
+    metafirst = getproperty(DynamicObjects, :metafirst)
+    meta = getproperty(DynamicObjects, :meta)
+    Base.invokelatest(applicable, meta, T) || return nothing
+    closure = Set{Symbol}()
+    pending = Symbol[name]
+    while !isempty(pending)
+        current = pop!(pending)
+        current in closure && continue
+        info = Base.invokelatest(metafirst, T, current)
+        info === nothing && continue
+        push!(closure, current)
+        dependencies = get(info, :dependson, nothing)
+        dependencies === nothing && continue
+        for dependency in dependencies
+            dependency isa Symbol && push!(pending, dependency)
+        end
+    end
+    unique!(Symbol[n for (n, _) in Base.invokelatest(meta, T) if n in closure])
+end
 
 # The properties of `T` that hand `__self__` to other code, whose reads no
 # static scan follows.
@@ -32790,6 +32935,9 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                     context_entries)
 
     open = _semantic_open_tab(obj, names, active)
+    # Results that read `@browser` properties are computed in the browser.
+    browser_page = _BrowserPage(context_id, _browser_static(obj))
+    browser_regions = falses(length(specs))
     operations = map(enumerate(specs)) do (i, spec)
         base = spec.base_entry
         route = routes[i]
@@ -32811,15 +32959,23 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
             # Its own arguments are inputs of its tab, and it reads them all.
             sent = union(shared_names, Set{Symbol}(param.name for param in own_params))
             key_reads = complete[i] ? union(reads[i], setdiff(sent, shared_names)) : nothing
-            initial = names[i] == open ?
-                Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
-                Any[]
-            form, h.div(initial...; id=base.target_id,
+            region_attrs = (; id=base.target_id,
                 class="htmxo-semantic-operation-result", aria_live="polite",
                 data_htmxo_follow=string(target), data_htmxo_inputs=join(selectors, ' '),
                 (isnothing(key_reads) ? (;) :
                     (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
                 data_htmxo_live="", hx_sync="this:replace")
+            browser = _browser_reads(spec.mounted, base.name)
+            if !isempty(browser)
+                browser_regions[i] = true
+                form, _browser_region(browser_page, spec, route, current, target, sent,
+                                      region_attrs, browser)
+            else
+                initial = names[i] == open ?
+                    Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
+                    Any[]
+                form, h.div(initial...; region_attrs...)
+            end
         else
             form = base.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
                 spec.mounted, spec.local_route;
@@ -32836,6 +32992,12 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         end
         merge(base, (; form, result, tab=names[i], follows=follows[i],
                       placed=get(placed_controls, names[i], Any[])))
+    end
+    # A static export of a page that computes in the browser: whatever else on
+    # it still needs the server is reported, not shipped stale.
+    if browser_page.static !== nothing && any(browser_regions)
+        _browser_server_parts!(browser_page, specs, routes, follows, browser_regions, reads, complete)
+        _browser_report!(browser_page)
     end
 
     _activate_semantic_root_provider!(obj)
@@ -33309,6 +33471,21 @@ show_when_script() = h.script(Raw(raw"""
   // A JSON condition: true or false, or null when a field it reads is on no
   // form of the page.
   function number(v) { return v === '' ? NaN : Number(v); }
+  // An arithmetic expression of numeric fields: null when a field is on no form.
+  function calc(e, el) {
+    if (e.num !== undefined) return e.num;
+    if (e.field !== undefined) {
+      var values = fieldValues(scopeOf(el), e.field);
+      if (!values && scopeOf(el) !== document.body) values = fieldValues(document.body, e.field);
+      return values ? number(values[0]) : null;
+    }
+    if (e.neg) { var v = calc(e.neg, el); return v === null ? null : -v; }
+    var args = e.args.map(function(x) { return calc(x, el); });
+    if (args.some(function(x) { return x === null; })) return null;
+    return args.reduce(function(x, y) {
+      return e.arith === '+' ? x + y : e.arith === '-' ? x - y : e.arith === '*' ? x * y : x / y;
+    });
+  }
   function holds(p, el) {
     var parts, i, r;
     if (p.all || p.any) {
@@ -33321,6 +33498,12 @@ show_when_script() = h.script(Raw(raw"""
       return !!p.all;
     }
     if (p.not) { r = holds(p.not, el); return r === null ? null : !r; }
+    if (p.cmp) {
+      var a = calc(p.left, el), b = calc(p.right, el);
+      if (a === null || b === null) return null;
+      return p.cmp === 'eq' ? a === b : p.cmp === 'neq' ? a !== b : p.cmp === 'lt' ? a < b :
+             p.cmp === 'le' ? a <= b : p.cmp === 'gt' ? a > b : a >= b;
+    }
     var values = fieldValues(scopeOf(el), p.field);
     if (!values && scopeOf(el) !== document.body) values = fieldValues(document.body, p.field);
     if (!values) return null;
@@ -35497,7 +35680,12 @@ that is written into the address (`history.replaceState`, no new history
 entry); one back at it, an empty one, one that does not apply (its
 control is hidden) and one that shows its computed default are left out. Other parameters, such as the tab's `?tab=`,
 stay. The page shows the values its address names, so a reload or a shared
-link reopens the same inputs and results.
+link reopens the same inputs and results: the server applies them to a page
+it renders, and the script applies them to the controls when the page loads,
+which is what a static page (`export_site`) needs.
+
+A result that reads a `@browser` property is computed in the browser
+([`semantic_browser_script`](@ref)) instead of asked for, under the same rules.
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
 once per page when building a `<head>` by hand.
 """
@@ -35596,6 +35784,11 @@ semantic_follow_script() = h.script(Raw(raw"""
     var key = keyOf(region, pairs);
     if (region.getAttribute('data-htmxo-shown') === key) return;
     region.setAttribute('data-htmxo-shown', key);
+    // A result computed in the browser (`@browser`) asks nothing of the server.
+    if (region.hasAttribute('data-htmxo-browser') && window.__htmxoBrowserCompute) {
+      window.__htmxoBrowserCompute(region, pairs);
+      return;
+    }
     // A result asked for the first time shows that it is coming.
     if (!region.children.length) region.appendChild(document.createElement('progress'));
     var url = region.getAttribute('data-htmxo-follow');
@@ -35739,12 +35932,58 @@ semantic_follow_script() = h.script(Raw(raw"""
     try { sessionStorage.setItem('htmx-current-path-for-history', url.pathname + url.search); } catch (_) {}
   }
   function kept(form) { return form && form.hasAttribute && form.hasAttribute('data-htmxo-address'); }
+  // The page shows the values its address names. The server applies them to
+  // a page it renders; a static page (`export_site`) applies them here, when
+  // it loads. Where the server did, the controls already show them and this
+  // changes nothing.
+  var applying = false;
+  function setControls(form, name, wanted, changed) {
+    Array.prototype.forEach.call(form.elements, function(c) {
+      if (c.name !== name || PRESSED.test(c.type)) return;
+      var toggle = c.type === 'radio' || c.type === 'checkbox';
+      var before = toggle ? c.checked : c.value;
+      if (c.type === 'radio') c.checked = wanted.indexOf(c.value) >= 0;
+      else if (c.type === 'checkbox')
+        c.checked = c.value === 'true' && !c.closest('[data-htmxo-multiple]') ?
+          wanted[0] === 'true' : wanted.indexOf(c.value) >= 0;
+      else if (c.type === 'select-multiple')
+        Array.prototype.forEach.call(c.options, function(o) { o.selected = wanted.indexOf(o.value) >= 0; });
+      else c.value = wanted[0];
+      if ((toggle ? c.checked : c.value) !== before) changed.push(c);
+    });
+  }
+  function applyAddress() {
+    var params = new URLSearchParams(location.search), changed = [];
+    document.querySelectorAll('form[data-htmxo-address]').forEach(function(form) {
+      var defaults;
+      try { defaults = JSON.parse(form.getAttribute('data-htmxo-address')); } catch (_) { return; }
+      Object.keys(defaults).forEach(function(name) {
+        if ((defaults[name] && defaults[name].records) || !params.has(name)) return;
+        var wanted = params.getAll(name);
+        if (same(valuesOf(form, name) || [], wanted, numeric(form, name))) return;
+        setControls(form, name, wanted, changed);
+      });
+    });
+    if (!changed.length) return;
+    // Every result that reads these forms is asked again, also one armed only
+    // after this (its shown key could not match).
+    changed.forEach(function(c) {
+      if (c.form) readers(c.form).forEach(function(r) { r.setAttribute('data-htmxo-shown', '*'); });
+    });
+    applying = true;
+    try {
+      changed.forEach(function(c) { c.dispatchEvent(new Event('change', {bubbles: true})); });
+    } finally { applying = false; }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', applyAddress);
+  else applyAddress();
   document.addEventListener('change', function(e) {
     var form = e.target && e.target.form;
     if (!form) return;
     readers(form).forEach(function(r) { if (visible(r)) later(r); });
     // After the page's own listeners, which show and hide inputs that apply.
-    if (kept(form)) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
+    // Applying the address on load writes nothing back.
+    if (kept(form) && !applying) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
   });
   document.addEventListener('htmx:load', function(e) { arm(e.target); });
   // A control re-rendered in place (a dependent domain, a `@relevant` input
@@ -39464,6 +39703,7 @@ include("glossary.jl")
 include("content_units.jl")
 
 include("comparison.jl")
+include("semantic_browser.jl")
 
 """
     tabset(tabs::Pair...; active=1, id=<from the labels, names and content>, preload=nothing,
