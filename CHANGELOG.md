@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.1.121
+
+- `HTMXObjects.page_report()` says whether the Markdown being written is for a
+  report. It is `true` while `pdf_report(value, …)` writes the value's
+  Markdown, and inside `dispatch(…; report=true)` and
+  `to_markdown_string(x; report=true)`, which take the new keyword. A
+  `dispatch` or `to_markdown_string` made inside a report keeps it unless it
+  passes `report=false`; live requests, `?plain` and `?markdown` reads, static
+  exports and code outside any request read `false`. The flag reaches
+  `@queued` bodies on a worker process and requests forwarded to another
+  service slice.
+- `report_view(content, report)` shows `content` in HTML and in ordinary
+  Markdown reads, and `report` in a report's Markdown (`nothing` shows
+  nothing there). Chrome is stripped from whichever view is shown. A figure
+  can be an interactive plot in the browser, a summary in `?plain` and a
+  picture in a PDF, and a control can stay out of a report without leaving
+  `?plain`.
+
 ## 0.1.120
 
 - `pdf_report` writes PDF/A-2a, the archival standard, besides PDF/UA-1:

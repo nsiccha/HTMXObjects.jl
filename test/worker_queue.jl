@@ -208,7 +208,11 @@ end
             @test contains(done, "n=1 lang=de audience=private")
             public = body_text(hx_get("/heavy?n=2"))
             public = running(public) ? settle_slowly(poll_url(public)) : public
-            @test contains(public, "heavy pid=$(status.pid) n=2 lang=de audience=public")
+            @test contains(public, "heavy pid=$(status.pid) n=2 lang=de audience=public report=false")
+            # A report's request is one in the worker too (`page_report`).
+            report = body_text(dispatch(:GET, "/heavy?n=3"; headers=["HX-Request" => "true"], report=true))
+            report = running(report) ? settle_slowly(poll_url(report)) : report
+            @test contains(report, "heavy pid=$(status.pid) n=3 lang=de audience=public report=true")
             # A part the worker sends ahead reaches the running poller's answer
             # before the route finishes, and the finished answer replaces it.
             gate = tempname()

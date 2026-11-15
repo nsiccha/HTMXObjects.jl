@@ -570,6 +570,7 @@ function _service_forward(service, peer, req; request_timeout=service.request_ti
         "X-HTMXO-Service-Audience" => string(export_audience(req))])
     lang = get(req.context, :htmxo_lang, nothing)
     lang === nothing || push!(headers, "X-HTMXO-Service-Lang" => lang)
+    _request_report(req) && push!(headers, "X-HTMXO-Service-Report" => "true")
     timeout = pkgversion(HTTP) >= v"2" ? (; request_timeout) :
               (; readtimeout=ceil(Int, request_timeout))
     try
@@ -635,6 +636,9 @@ function _service_authenticate!(service, req; observations=false)
     req.context[:htmxo_audience] = Symbol(audience)
     lang = HTTP.header(req, "X-HTMXO-Service-Lang", "")
     isempty(lang) || (req.context[:htmxo_lang] = _check_lang(lang, "service request"))
+    report = HTTP.header(req, "X-HTMXO-Service-Report", "")
+    report in ("", "true") || return HTTP.Response(400)
+    report == "true" && (req.context[:htmxo_report] = true)
     for name in [first(h) for h in req.headers if _service_header(first(h))]
         HTTP.removeheader(req, String(name))
     end
