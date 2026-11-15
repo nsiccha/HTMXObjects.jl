@@ -24,6 +24,8 @@ using TestItemRunner
     @htmx struct Lines
         "Slope"
         @param a::Float64 = 2.0
+        # A range (a slider with a number field): continuous, never a view per value.
+        @options(a) = number_domain(0.0, 10.0)
         "Intercept"
         @param b::Float64 = 1.0
         "Show"
@@ -163,6 +165,7 @@ end
     # The view at the current values, and one template per value of the finite input.
     @test count("<div class=\"htmxo-browser-view\"", html) == 1
     @test count("<template data-htmxo-variant=", html) == 2
+    @test occursin("data-htmxo-number=", html)  # `a`'s range control
     @test bound_texts(html)[1:4] == ["3.0", "5.0", "2.0", "0.5"]
     # The binding: the module's arguments in its order, data embedded once.
     binding = JSON.parse(match(r"<script type=\"application/json\" id=\"[^\"]*\" data-htmxo-browser-binding=\"\">([^<]*)</script>", html).captures[1])
