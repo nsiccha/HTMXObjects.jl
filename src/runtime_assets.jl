@@ -38,6 +38,7 @@ _runtime_blocks() = (
     semantic_follow = (:js, semantic_follow_script),
     show_when = (:js, show_when_script),
     choice_list = (:js, choice_list_script),
+    number_control = (:js, number_control_script),
     url_params = (:js, url_params_script),
     url_anchor = (:js, url_anchor_script),
     instance_scope = (:js, instance_scope_script),

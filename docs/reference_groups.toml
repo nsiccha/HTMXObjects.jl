@@ -142,6 +142,7 @@ names = [
 names = [
     "@query_url",
     "Long",
+    "NumberDomain",
     "ainput",
     "choice_list",
     "choice_list_script",
@@ -156,6 +157,9 @@ names = [
     "linput",
     "loading_indicator_script",
     "ninput",
+    "number_control_script",
+    "number_domain",
+    "number_record",
     "option_wire_value",
     "post_form",
     "preload_runtime_js",

@@ -75,6 +75,7 @@ export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
 export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs, Records, record_view, all_records
+export NumberDomain, number_domain, number_record, number_control_script
 
 using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
@@ -3698,6 +3699,9 @@ function htmx(args...;
         # A `choice_list` (a generated choice among many options) opens,
         # searches and chooses; inert on pages without one.
         :choice_list,
+        # A number input with a range keeps its slider and its field on
+        # one value; inert on pages without one.
+        :number_control,
         # `url_params` elements follow the page address and write
         # their values into it; inert on pages without one.
         :url_params,
@@ -10635,15 +10639,30 @@ end
 # actual machine object from the bound, lazily evaluated `__options__` property
 # before the ordinary parser sees it. This is essential for node-valued domains
 # whose abstract/concrete element type deliberately has no `parse` method.
-function _declared_param_options(options, name)
-    declared = Base.invokelatest(options, Val(Symbol(name)))
+_declared_param_domain(options, name) = Base.invokelatest(options, Val(Symbol(name)))
+function _declared_param_records(declared)
     isdefined(DynamicObjects, :option_records) || return nothing
     Base.invokelatest(getproperty(DynamicObjects, :option_records), declared)
 end
+_declared_param_options(options, name) =
+    _declared_param_records(_declared_param_domain(options, name))
+
+# A declared domain that is no list of options but a range of numbers (an
+# interval, a `number_domain`) still decides which submitted values are
+# allowed: every one must lie in it.
+function _check_number_domain(declared, value, name)
+    number = _number_domain(declared)
+    number === nothing && return value
+    for x in (value isa AbstractVector ? value : (value,))
+        x === nothing || x in number || throw(InvalidDomainValue(Symbol(name), x, number))
+    end
+    value
+end
 
 function _convert_option_param(options, val::Union{AbstractString,AbstractVector}, name, T)
-    records = _declared_param_options(options, name)
-    records === nothing && return _convert_submitted(val, T, name)
+    declared = _declared_param_domain(options, name)
+    records = _declared_param_records(declared)
+    records === nothing && return _check_number_domain(declared, _convert_submitted(val, T, name), name)
     allowed = Any[option.value for option in records
                   if !get(option, :disabled, false)]
     by_wire = Dict{String,Any}()
@@ -10691,7 +10710,8 @@ function _lookup_option_param(options, src::_JSONParams, fallback, name, T)
     haskey(src, String(name)) ||
         return fallback === nothing ? _NO_DEFAULT : _lookup_option_param(options, fallback, nothing, name, T)
     val = src[String(name)]
-    records = _declared_param_options(options, name)
+    declared = _declared_param_domain(options, name)
+    records = _declared_param_records(declared)
     # Option wire strings may represent application objects without a parser.
     if records !== nothing && val isa AbstractString
         return _convert_option_param(options, val, name, T)
@@ -10701,6 +10721,8 @@ function _lookup_option_param(options, src::_JSONParams, fallback, name, T)
         allowed = Any[option.value for option in records if !get(option, :disabled, false)]
         any(candidate -> isequal(candidate, converted), allowed) ||
             throw(InvalidDomainValue(Symbol(name), converted, allowed))
+    else
+        _check_number_domain(declared, converted, name)
     end
     converted
 end
@@ -13872,8 +13894,9 @@ _caller_fault_message(e::MissingRequiredParam, texts::ErrorTexts) =
 function _caller_fault_message(e::InvalidDomainValue, texts::ErrorTexts)
     message = _fill_text(texts.invalid_value; name=e.name, value=repr(e.value))
     isempty(e.allowed) ? message :
-        string(message, "; ", _fill_text(texts.allowed_values; allowed=join(repr.(e.allowed), ", ")))
+        string(message, "; ", _fill_text(texts.allowed_values; allowed=_allowed_text(e.allowed, e.name)))
 end
+_allowed_text(allowed, _name) = join(repr.(allowed), ", ")
 function _caller_fault_message(e::InvalidParamValue, texts::ErrorTexts)
     message = string(_fill_text(texts.invalid_value; name=e.name, value=repr(e.value)),
         "; ", _fill_text(texts.expected_type; type=e.type))
@@ -14940,10 +14963,21 @@ function _declared_input_domain(obj, input, domain, values)
     normalized = isdefined(DynamicObjects, :option_records) ?
         Base.invokelatest(getproperty(DynamicObjects, :option_records), declared) :
         declared
-    normalized === nothing && return nothing
+    # Not a list: a range of numbers (`number_domain`, an interval) is its
+    # own domain kind, `:interval`; any other domain stays unrestricted.
+    normalized === nothing && return _interval_input_domain(declared, domain)
     Base.invokelatest(getproperty(DynamicObjects, :static_domain), normalized;
         multiple=get(domain, :multiple, false),
         allow_custom=get(domain, :allow_custom, false))
+end
+
+# A declared range of numbers as a resolved domain: no options to list, the
+# `NumberDomain` that decides membership and draws the control.
+function _interval_input_domain(declared, domain)
+    number = _number_domain(declared)
+    number === nothing && return nothing
+    (; kind=:interval, options=NamedTuple[], multiple=get(domain, :multiple, false),
+       allow_custom=false, number)
 end
 
 function _resolved_input_domain(obj, T, input, values)
@@ -14963,6 +14997,13 @@ function _validate_input_domain!(obj, T, input, value, values)
     get(domain, :allow_custom, false) && return
     value === nothing && !get(input, :required, true) && return
 
+    if get(domain, :kind, nothing) === :interval
+        for submitted in _submitted_domain_values(value, get(domain, :multiple, false))
+            submitted in domain.number ||
+                throw(InvalidDomainValue(input.name, submitted, domain.number))
+        end
+        return
+    end
     options = get(domain, :options, NamedTuple[])
     allowed = [option.value for option in options if !get(option, :disabled, false)]
     for submitted in _submitted_domain_values(value, get(domain, :multiple, false))
@@ -29189,7 +29230,7 @@ rinput(nv; label=Long(nv), value=_avalue(nv, 50), min=0, max=100, step=1, show_w
 end
 
 """
-    ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...)
+    ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, domain=nothing, kwargs...)
 
 A labeled number `<input type="number">`. Only `min`, `max`, `step` that are
 not `nothing` are included as attributes. Extra `kwargs` go on the `<input>`.
@@ -29200,8 +29241,23 @@ exponent: `10000`, `-50`, `0.5`, `1000000`, `1.5e-5`, not `string`'s
 `10000.0` or `1.0e6`. The fields [`semantic_app`](@ref) generates for float
 inputs are `ninput`s, so their defaults and the values a page's address names
 show so too.
+
+`domain` takes a [`number_domain`](@ref) or an interval (`0.001 .. 0.015`)
+and draws the control a generated form draws for a number input declared with
+one: the field takes its bounds and step from the domain, a slider beside it
+moves the value (evenly in ratio when the domain is `log`), and the unit
+follows it. Give the bounds and step in the domain, not as `min`, `max` and
+`step` beside it.
 """
-ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, kwargs...) = begin
+ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=nothing, show_when=nothing, domain=nothing, kwargs...) = begin
+    if domain !== nothing
+        number = _number_domain(domain)
+        number === nothing && throw(ArgumentError(string(
+            "ninput: domain= takes a number_domain or an interval of numbers (lo .. hi); got ", repr(domain))))
+        (min === nothing && max === nothing && step === nothing) || throw(ArgumentError(
+            "ninput: the domain gives the bounds and step; set them in number_domain(…) instead of min, max or step beside domain="))
+        return _number_control(_aname(nv), label, number, value; show_when, kwargs...)
+    end
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
     num_attrs = filter(((_, v),) -> !isnothing(v), pairs((; min, max, step)))
     h.label(
@@ -29209,6 +29265,209 @@ ninput(nv; label=Long(nv), value=_avalue(nv, 0), min=nothing, max=nothing, step=
         ainput(nv; type="number", value=_number_control_value(value), num_attrs..., kwargs...);
         show_attrs...
     )
+end
+
+# --- Numbers from a range: `number_domain`, its record and its control ---
+
+"""
+    NumberDomain
+
+The numbers an input takes, with how a reader picks one: an interval of
+numbers, whether the reader moves through it evenly in ratio (`log`), the
+`step` between values, the decimal places a value picked on the slider keeps
+(`digits`) and the `unit`. Construct it with [`number_domain`](@ref).
+
+It is a domain, as DynamicObjects reads one: `in` tells whether a number lies
+in its interval, so `@options(name) = number_domain(…)` declares it and every
+consumer that checks membership needs nothing else. It is not a collection, so
+it is never listed as choices. [`number_record`](@ref) gives it as plain data.
+"""
+struct NumberDomain{I<:IntervalSets.AbstractInterval}
+    interval::I
+    log::Bool
+    step::Union{Nothing,Real}
+    digits::Union{Nothing,Int}
+    unit::Union{Nothing,String}
+end
+
+Base.in(x, domain::NumberDomain) = x isa Real && !isnan(x) && x in domain.interval
+Base.isempty(domain::NumberDomain) = isempty(domain.interval)
+function Base.show(io::IO, domain::NumberDomain)
+    print(io, "number_domain(", repr(domain.interval))
+    settings = String[]
+    domain.log && push!(settings, "log=true")
+    domain.step === nothing || push!(settings, "step=$(repr(domain.step))")
+    domain.digits === nothing || push!(settings, "digits=$(domain.digits)")
+    domain.unit === nothing || push!(settings, "unit=$(repr(domain.unit))")
+    isempty(settings) || print(io, "; ", join(settings, ", "))
+    print(io, ")")
+end
+
+"""
+    number_domain(lower .. upper; log=false, step=nothing, digits=nothing, unit=nothing)
+    number_domain(lower, upper; kwargs...)
+
+Declare once which numbers an input takes and how a reader picks one:
+
+```julia
+"Attenuation per mm of snow water"
+@param attenuation::Float64 = 0.004
+@options(attenuation) = number_domain(0.001 .. 0.015; log=true, digits=4)
+
+"Snow density"
+@param density::Float64 = 300.0
+@options(density) = number_domain(50 .. 600; step=10, unit="kg/m³")
+```
+
+The interval is any IntervalSets interval of real numbers (`a .. b`, or one
+with an open end such as `Interval{:open,:closed}(0, 1)`); `lower, upper` is the
+closed interval.
+[`semantic_app`](@ref) and [`operation_form`](@ref) then draw the input as a
+slider with a number field beside it, followed by the unit. A submitted number
+outside the interval is refused with a 400 at that field, as a value outside a
+finite `@options` list is. A bare interval, `@options(x) = 0 .. 1`, is the same
+domain with no other settings. The label and help text stay where they are
+(the `@param` docstring, `@help`).
+
+- `log=true` spaces the slider evenly in ratio, for a positive quantity
+  spanning orders of magnitude; the interval must be positive and finite.
+- `step` is the spacing of the values the slider and the field offer, counted
+  from the lower bound (the field's `step`). The server checks only the
+  interval. Without it the field takes any number and a value picked on the
+  slider keeps `digits` decimal places, or three significant digits. An
+  integer input takes whole numbers either way.
+- `digits` is the number of decimal places a value picked on the slider keeps.
+- `unit` is written after the field.
+
+An interval with an infinite end has no slider: its field takes the finite
+bound. [`number_record`](@ref) gives the domain as plain data, and every
+generated control carries that record as JSON in `data-htmxo-number`, so a
+page's own script (a model computed in the browser, a static export) reads the
+bounds, scale, step, decimal places and unit from the page.
+"""
+function number_domain(interval::IntervalSets.AbstractInterval; log::Bool=false,
+        step=nothing, digits=nothing, unit=nothing)
+    lower, upper = IntervalSets.endpoints(interval)
+    lower isa Real && upper isa Real || throw(ArgumentError(string(
+        "number_domain: ", repr(interval), " is not an interval of real numbers")))
+    !isnan(lower) && !isnan(upper) && !isempty(interval) || throw(ArgumentError(string(
+        "number_domain: ", repr(interval), " holds no number")))
+    log && !(lower > 0 && isfinite(upper)) && throw(ArgumentError(string(
+        "number_domain(…; log=true) is for a positive quantity with finite bounds; got ", repr(interval))))
+    step === nothing || (step isa Real && isfinite(step) && step > 0) || throw(ArgumentError(string(
+        "number_domain: step must be a positive number; got ", repr(step))))
+    digits === nothing || (digits isa Integer && digits >= 0) || throw(ArgumentError(string(
+        "number_domain: digits must be a whole number of decimal places, 0 or more; got ", repr(digits))))
+    unit === nothing || unit isa AbstractString || throw(ArgumentError(string(
+        "number_domain: unit must be text; got ", repr(unit))))
+    NumberDomain(interval, log, step, digits === nothing ? nothing : Int(digits),
+                 unit === nothing ? nothing : String(unit))
+end
+number_domain(lower::Real, upper::Real; kwargs...) =
+    number_domain(IntervalSets.ClosedInterval(promote(lower, upper)...); kwargs...)
+
+# A declared domain as a `NumberDomain`, or `nothing` for any other domain:
+# a bare interval of numbers is one with no settings.
+_number_domain(domain::NumberDomain) = domain
+_number_domain(interval::IntervalSets.AbstractInterval) =
+    all(x -> x isa Real, IntervalSets.endpoints(interval)) ?
+        NumberDomain(interval, false, nothing, nothing, nothing) : nothing
+_number_domain(_) = nothing
+
+"""
+    number_record(domain) -> NamedTuple or nothing
+
+A [`number_domain`](@ref), or a bare interval of numbers, as plain data, the
+same record a generated control carries as JSON in `data-htmxo-number`:
+
+```julia
+number_record(number_domain(0.001 .. 0.015; log=true, digits=4))
+# (lower = 0.001, upper = 0.015, closed = (true, true), log = true,
+#  step = nothing, digits = 4, unit = nothing)
+```
+
+`lower` and `upper` are the interval's ends, `nothing` where it is unbounded;
+`closed` says whether each end belongs to it. `nothing` for any other domain
+(a list of choices, a type), as `option_records` gives `nothing` for a domain
+that is not a list. Read a live object's domain with
+`number_record(property_options(object, :name))`.
+"""
+function number_record(domain)
+    number = _number_domain(domain)
+    number === nothing && return nothing
+    lower, upper = IntervalSets.endpoints(number.interval)
+    (; lower=_number_bound(lower), upper=_number_bound(upper),
+       closed=(IntervalSets.isleftclosed(number.interval), IntervalSets.isrightclosed(number.interval)),
+       log=number.log, step=number.step, digits=number.digits, unit=number.unit)
+end
+_number_bound(x) = isfinite(x) ? x : nothing
+
+# The domain as a reader reads it in a refusal: `0.001 ≤ attenuation ≤ 0.015`,
+# `0 < share ≤ 1`, `count ≥ 0` (`InvalidDomainValue`'s allowed values).
+_allowed_text(allowed::NumberDomain, name) = _number_range_text(allowed, name)
+function _number_range_text(domain::NumberDomain, name)
+    lower, upper = IntervalSets.endpoints(domain.interval)
+    left = IntervalSets.isleftclosed(domain.interval) ? " ≤ " : " < "
+    right = IntervalSets.isrightclosed(domain.interval) ? " ≤ " : " < "
+    shown(x) = string(_number_control_value(x))
+    isfinite(lower) && isfinite(upper) && return string(shown(lower), left, name, right, shown(upper))
+    isfinite(lower) && return string(name, left == " ≤ " ? " ≥ " : " > ", shown(lower))
+    isfinite(upper) && return string(name, right, shown(upper))
+    "any number"
+end
+
+# The slider runs over positions 0…500, as the explainer pictures' does; a
+# `log` domain spaces them evenly in ratio. An open end keeps the slider one
+# position inside it.
+const _NUMBER_SLIDER_STEPS = 500
+function _number_has_slider(domain::NumberDomain)
+    lower, upper = IntervalSets.endpoints(domain.interval)
+    isfinite(lower) && isfinite(upper) && lower < upper
+end
+_number_slider_ends(domain::NumberDomain) =
+    (IntervalSets.isleftclosed(domain.interval) ? 0 : 1,
+     IntervalSets.isrightclosed(domain.interval) ? _NUMBER_SLIDER_STEPS : _NUMBER_SLIDER_STEPS - 1)
+function _number_slider_position(domain::NumberDomain, value)
+    first_position, last_position = _number_slider_ends(domain)
+    value isa Real && isfinite(value) || return first_position
+    lower, upper = float.(IntervalSets.endpoints(domain.interval))
+    share = domain.log ? log(value / lower) / log(upper / lower) : (value - lower) / (upper - lower)
+    isfinite(share) || return first_position
+    clamp(round(Int, clamp(share, 0, 1) * _NUMBER_SLIDER_STEPS), first_position, last_position)
+end
+
+# The control of a number input with a `NumberDomain`: a `<label>` holding the
+# number field (named, so it is what the form submits and validates), the
+# unit, and an unnamed slider the page's `number_control_script` keeps on the
+# field's value. The label carries `number_record` as `data-htmxo-number`.
+function _number_control(name, label, domain::NumberDomain, value;
+        integer::Bool=false, required::Bool=false, show_when=nothing, kwargs...)
+    lower, upper = IntervalSets.endpoints(domain.interval)
+    step = domain.step !== nothing ? domain.step : integer ? 1 : nothing
+    record = merge(number_record(domain), (; step))
+    field_attrs = (;
+        (isfinite(lower) ? (; min=_number_control_value(lower)) : (;))...,
+        (isfinite(upper) ? (; max=_number_control_value(upper)) : (;))...,
+        step=step === nothing ? "any" : _number_control_value(step),
+        (required ? (; required="true") : (;))...)
+    shown = value === nothing || value === _NO_DEFAULT ? "" :
+        value isa Real ? _number_control_value(value) : string(value)
+    field = h.input(; type="number", name=string(name), value=shown, field_attrs...,
+                    data_htmxo_number_field="", kwargs...)
+    unit = domain.unit === nothing ? () : (h.span(domain.unit; class="htmxo-number-unit"),)
+    slider = if _number_has_slider(domain)
+        first_position, last_position = _number_slider_ends(domain)
+        position = _number_slider_position(domain, value isa AbstractString ?
+            tryparse(Float64, value) : value)
+        name_attrs = label isa AbstractString ? (; aria_label=label) : (;)
+        (h.input(; type="range", min=first_position, max=last_position, step=1,
+                 value=position, data_htmxo_number_slider="", name_attrs...),)
+    else
+        ()
+    end
+    show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
+    h.label(label, h.span(field, unit..., slider...; class="htmxo-number");
+            data_htmxo_number=JSON.json(record), show_attrs...)
 end
 
 """
@@ -29613,6 +29872,9 @@ end
 function _semantic_choice_value(domain, value, param)
     value === _NO_DEFAULT && return value
     value isa Expr && return _NO_DEFAULT
+    # A range of numbers: a number in it stays chosen; any other value (out of
+    # range, unreadable, blank) recovers the default, as an unavailable option does.
+    get(domain, :kind, nothing) === :interval && return _semantic_number_value(domain.number, value, param)
     wire = _option_wire_string(value)
     for option in get(domain, :options, NamedTuple[])
         get(option, :disabled, false) && continue
@@ -29631,6 +29893,18 @@ function _semantic_choice_value(domain, value, param)
         end
     end
     _NO_DEFAULT
+end
+
+function _semantic_number_value(number::NumberDomain, value, param)
+    if value isa AbstractString
+        value = try
+            _convert_param(value, param.type)
+        catch err
+            err isa Union{ArgumentError,MethodError} || rethrow()
+            return _NO_DEFAULT
+        end
+    end
+    value in number ? value : _NO_DEFAULT
 end
 
 # Resolve once before controls, hidden inputs and initial result URLs consume
@@ -30262,10 +30536,14 @@ function _help_nodes(help::AbstractString)
         for (i, part) in enumerate(parts) if !(isodd(i) && isempty(part))]
 end
 
-# A form field among a label's children names its help text.
+# A form field among a label's children names its help text, also inside a
+# `<span>` laying out several (a number field with its slider).
 _described_field(child, id) = child
 function _described_field(child::Node, id)
-    Symbol(lowercase(string(HTMX.tag(child)))) in (:input, :textarea, :select) || return child
+    tag = Symbol(lowercase(string(HTMX.tag(child))))
+    tag === :span && return Node(HTMX.tag(child), copy(HTMX.attrs(child)),
+        Any[_described_field(c, id) for c in HTMX.children(child)])
+    tag in (:input, :textarea, :select) || return child
     attrs = copy(HTMX.attrs(child))
     attrs[Symbol("aria-describedby")] = id
     Node(HTMX.tag(child), attrs, copy(HTMX.children(child)))
@@ -30282,7 +30560,12 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
     domain = haskey(domains, param.name) ? domains[param.name] :
         _resolved_input_domain(control_obj, ControlT, input, values)
 
-    if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
+    # A range of numbers: a slider with a number field (a vector of numbers
+    # keeps its typed control; each element is still checked against it).
+    if domain !== nothing && get(domain, :kind, nothing) === :interval
+        get(domain, :multiple, false) || return _number_control(param.name, label, domain.number, value;
+            integer=param.type isa Type && param.type <: Integer, required=param.required)
+    elseif domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
         options = get(domain, :options, NamedTuple[])
         if get(domain, :allow_custom, false)
             enabled = [option.value => option.label for option in options
@@ -30319,6 +30602,9 @@ function _semantic_short_field(obj, owner, param, values;
     control_obj, ControlT = _semantic_control_owner(obj, owner, param)
     input = (name=param.name, domain=get(param, :domain, nothing))
     domain = _resolved_input_domain(control_obj, ControlT, input, values)
+    # A slider needs the width of a row; a field with one bound does not.
+    domain !== nothing && get(domain, :kind, nothing) === :interval &&
+        return !get(domain, :multiple, false) && !_number_has_slider(domain.number)
     if domain !== nothing && get(domain, :kind, :unrestricted) !== :unrestricted
         presentation === :cards && return false
         _has_option_columns(domain) && return false
@@ -33261,6 +33547,96 @@ choice_list_script() = h.script(Raw(raw"""
     e.preventDefault();
     chooseRow(t);
   });
+})();
+"""))
+
+"""
+    number_control_script()
+
+Keep the slider of a number input with a range ([`number_domain`](@ref), or
+`ninput(…; domain)`) and its number field on one value.
+
+The control is a `<label data-htmxo-number>` holding the number field, which
+is the named input the form submits, the unit, and an unnamed slider over
+positions 0…500. Moving the slider writes its value into the field, spaced
+evenly in ratio for a `log` domain, on the `step` grid from the lower bound,
+else to `digits` decimal places, else to three significant digits (as the
+explainer pictures pick slider values). Typing a number in the field moves the
+slider. The slider's own `input` and `change` events stop at it, and the field
+sends them instead, so a form, an htmx trigger, a result that follows its
+inputs and the page address each see one change of the field: while dragging,
+`input` events; on release, one `change`. A page's own script that computes
+from the value listens on the field and reads the domain from the label's
+`data-htmxo-number` ([`number_record`](@ref)).
+
+Automatic — no consumer wiring. The `htmx()` shell installs it; include it
+once per page when building a `<head>` by hand. Without it the field still
+works alone.
+"""
+number_control_script() = h.script(Raw(raw"""
+(function() {
+  if (window.__htmxoNumberControl) return;
+  window.__htmxoNumberControl = true;
+  var STEPS = 500, relaying = false;
+  function partsOf(el) {
+    var box = el.closest && el.closest('[data-htmxo-number]');
+    if (!box) return null;
+    var spec;
+    try { spec = JSON.parse(box.getAttribute('data-htmxo-number')); } catch (_) { return null; }
+    if (spec.lower === null || spec.upper === null) return null;
+    return {spec: spec, field: box.querySelector('input[data-htmxo-number-field]'),
+            slider: box.querySelector('input[data-htmxo-number-slider]')};
+  }
+  function inside(d, v) {
+    return isFinite(v) && (d.closed[0] ? v >= d.lower : v > d.lower) &&
+      (d.closed[1] ? v <= d.upper : v < d.upper);
+  }
+  // The number at a slider position: evenly in ratio for a log domain; on the
+  // step grid, else to its decimal places, else to three significant digits.
+  function fromSlider(d, position) {
+    var share = position / STEPS;
+    var raw = d.log ? d.lower * Math.pow(d.upper / d.lower, share) : d.lower + (d.upper - d.lower) * share;
+    var v;
+    if (d.step) {
+      var k = Math.round((raw - d.lower) / d.step);
+      v = Number((d.lower + k * d.step).toPrecision(12));
+      if (!inside(d, v)) v = Number((d.lower + (v > raw ? k - 1 : k + 1) * d.step).toPrecision(12));
+    } else if (d.digits !== null && d.digits !== undefined) {
+      v = Number(raw.toFixed(d.digits));
+    } else {
+      v = Number(raw.toPrecision(3));
+    }
+    return inside(d, v) ? v : raw;
+  }
+  function toSlider(d, value) {
+    var share = d.log ? Math.log(value / d.lower) / Math.log(d.upper / d.lower) : (value - d.lower) / (d.upper - d.lower);
+    var first = d.closed[0] ? 0 : 1, last = d.closed[1] ? STEPS : STEPS - 1;
+    return Math.min(last, Math.max(first, Math.round(Math.min(1, Math.max(0, share)) * STEPS)));
+  }
+  // The slider is not a field of the form: its events stop here, and the
+  // number field it writes sends them in its place.
+  function relay(e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('input[data-htmxo-number-slider]')) return;
+    e.stopPropagation();
+    var p = partsOf(t);
+    if (!p || !p.field) return;
+    if (e.type === 'input') p.field.value = String(fromSlider(p.spec, Number(t.value)));
+    relaying = true;
+    try { p.field.dispatchEvent(new Event(e.type, {bubbles: true})); } finally { relaying = false; }
+  }
+  document.addEventListener('input', relay, true);
+  document.addEventListener('change', relay, true);
+  // A number typed (or set by a script that announces it) moves the slider.
+  function follow(e) {
+    var t = e.target;
+    if (relaying || !t || !t.matches || !t.matches('input[data-htmxo-number-field]')) return;
+    var p = partsOf(t), x = Number(t.value);
+    if (!p || !p.slider || t.value === '' || !isFinite(x)) return;
+    p.slider.value = String(toSlider(p.spec, x));
+  }
+  document.addEventListener('input', follow);
+  document.addEventListener('change', follow);
 })();
 """))
 
@@ -36970,6 +37346,16 @@ table[data-htmxo-columns="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { d
 table[data-htmxo-columns="held"] { table-layout: fixed; }
 table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; }
 tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
+
+/* A number input with a range (`number_domain`): the slider, then the number
+   field and its unit, on one row under the label, spaced as a field is. The
+   field comes first in the document, so the label names it and Tab reaches
+   it first. UNLAYERED: Pico styles `input` unlayered. */
+.htmxo-number { display: flex; align-items: center; gap: .5rem; margin: calc(var(--pico-spacing, 1rem) * .25) 0 var(--pico-spacing, 1rem); }
+.htmxo-number > input { margin: 0; }
+.htmxo-number > input[type="range"] { order: 0; flex: 1 1 6rem; width: auto; min-width: 5rem; }
+.htmxo-number > input[type="number"] { order: 1; flex: 0 0 7rem; width: 7rem; }
+.htmxo-number > .htmxo-number-unit { order: 2; white-space: nowrap; }
 """))
 
 # --- Request feedback ---
