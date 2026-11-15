@@ -111,8 +111,10 @@ end
     ordinary = to_markdown_string(page)
     @test ordinary == to_markdown_string(unwrapped(live))
     @test contains(ordinary, "live view") && !contains(ordinary, "paper view") && !contains(ordinary, "Pick")
+    # A report writes the article without HTMX's `---` seam, so the paper view
+    # is compared as a report writes it alone.
     reported = to_markdown_string(page; report=true)
-    @test reported == to_markdown_string(unwrapped(paper))
+    @test reported == to_markdown_string(unwrapped(paper); report=true)
     @test contains(reported, "paper view") && !contains(reported, "live view") && !contains(reported, "Zoom")
 
     # `nothing` leaves a view out of reports only.
@@ -147,6 +149,52 @@ end
                               StaticExport())
     @test !contains(repr(MIME"text/html"(), walked), "hx-get")
     @test contains(to_markdown_string(walked; report=true), "paper")
+end
+
+@testitem "a report's Markdown writes a plain section or article without HTMX's --- seam" setup=[ReportProbes] tags=[:unit] begin
+    # HTMX.jl writes a `---` line before a plain `<section>`/`<article>` for a
+    # Markdown reader. Pandoc reads it as a horizontal rule, so a report's PDF
+    # drew a line the page does not have (snag `contents-with-no-6e01ea0e`,
+    # user design `1o8j77d`). Ordinary reads keep it; an `h.hr()` keeps its rule.
+    seam(md) = "---" in split(md, '\n')
+    plain = h.div(h.section(h.h2("Purpose"), h.p("A package.")), h.article(h.h2("Use"), h.p("x")))
+    as_divs = h.div(h.div(h.h2("Purpose"), h.p("A package.")), h.div(h.h2("Use"), h.p("x")))
+    @test seam(to_markdown_string(plain))
+    @test seam(to_markdown_string(plain; report=false))
+    @test !seam(to_markdown_string(plain; report=true))
+    @test to_markdown_string(plain; report=true) == to_markdown_string(as_divs; report=true)
+
+    # The reported document: a numbered one whose sections are plain, so its
+    # contents list is empty and writes nothing.
+    doc = numbered(contents(), h.div(h.section(h.h2("Purpose"), h.p("A package."))))
+    @test seam(to_markdown_string(doc; lang="en-GB"))
+    @test !seam(to_markdown_string(doc; lang="en-GB", report=true))
+
+    # A linked section keeps its id on its heading, and an intended rule stays.
+    linked = to_markdown_string(h.div(h.p(h.a("go"; href="#t")), h.section(id="t")(h.h2("Eins"), h.p("Text"))); report=true)
+    @test occursin("## Eins {#t}", linked) && !seam(linked)
+    @test seam(to_markdown_string(h.div(h.p("a"), h.hr(), h.p("b")); report=true))
+
+    # A Markdown render made inside a report keeps it, unless it asks for an
+    # ordinary read, which writes the seam again.
+    struct RendersSection
+        report::Union{Nothing,Bool}
+    end
+    Base.show(io::IO, ::MIME"text/markdown", x::RendersSection) =
+        print(io, to_markdown_string(h.section(h.p("x")); report=x.report))
+    @test !seam(to_markdown_string(RendersSection(nothing); report=true))
+    @test seam(to_markdown_string(RendersSection(false); report=true))
+
+    # A route's answer for a report, as `dispatch(…; report=true)` writes it.
+    @htmx struct ReportSeamApp
+        @direct @get report_seam_page() = h.div(h.section(h.h2("Purpose"), h.p("A package.")))
+    end
+    route!(ReportSeamApp())
+    md = ["Accept" => "text/markdown"]
+    body(r) = String(HTMXObjects._message_body_bytes(r))
+    @test seam(body(dispatch(:GET, "/report_seam_page"; headers=md)))
+    @test !seam(body(dispatch(:GET, "/report_seam_page"; headers=md, report=true)))
+    @test HTMXObjects.HTMX.markdown_seams()
 end
 
 @testitem "pdf_report writes a value's Markdown for a report" setup=[ReportProbes] tags=[:unit] begin

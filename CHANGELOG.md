@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.133
+
+- Requires HTMX.jl 1.3 (`[compat] HTMX = "1.3"`). A report's Markdown
+  (`pdf_report(value, …)`, `to_markdown_string(x; report=true)`,
+  `dispatch(…; report=true)`) writes a plain `h.section` or `h.article`
+  without the `---` line HTMX.jl puts before it for a Markdown reader, through
+  HTMX.jl's `HTMX.with_markdown_seams`. Pandoc read that line as a horizontal
+  rule, so the PDF drew a centred line before every such element where the
+  page has none: under the title of `pdf_report(h.article(h.h1(…), …))`, and
+  before each section of a report built from plain sections. A linked
+  section's id stays on its heading (`## Eins {#t}`), an `h.hr()` keeps its
+  rule, and ordinary Markdown (`?plain`, `Accept: text/markdown`, and
+  `report=false` inside a report) keeps the `---`.
+
 ## 0.1.132
 
 - **Breaking:** `bound(x)` writes a number as `format_number` writes it,
