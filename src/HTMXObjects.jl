@@ -39,7 +39,7 @@ export ErrorRecorder, record_error!
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, format_date, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot, report_view
 export CaptionTexts, caption_texts
@@ -5781,6 +5781,7 @@ end
 _semantic_table_cell(value) =
     replace(replace(strip(string(value)), r"\s*\n\s*" => "<br>"), "|" => "\\|")
 _semantic_table_cell(value::AbstractFloat) = format_number(value)
+_semantic_table_cell(::Union{Nothing,Missing}) = format_number(nothing)
 
 function Base.show(io::IO, mime::MIME"text/markdown", table::SemanticTable)
     cells = _semantic_table_columns(table.source)
@@ -5873,7 +5874,8 @@ Base.show(io::IO, ::MIME"text/plain", artifact::SemanticArtifact) = print(
     isnothing(artifact.target) ? "" : " ($(artifact.target))")
 
 # The tab-separated peer keeps exact values, as the ⬇ CSV does: a column of
-# `IntervalEstimate`s is three columns, the estimate and its two bounds.
+# `IntervalEstimate`s is three columns, the estimate and its two bounds, and
+# no value (`missing`, `nothing`) is an empty field.
 function Base.show(io::IO, mime::MIME"text/plain", table::SemanticTable)
     cells = _semantic_table_columns(table.source)
     isnothing(cells) && return _semantic_show_leaf(io, mime, table.source)
@@ -5883,11 +5885,13 @@ function Base.show(io::IO, mime::MIME"text/plain", table::SemanticTable)
     print(io, join((w ? join((n, "$n / $(texts.sort_lower)", "$n / $(texts.sort_upper)"), '\t') : string(n)
                     for (n, w) in zip(names, wide)), '\t'), '\n')
     for row in eachindex(first(columns))
-        print(io, join((w ? _semantic_interval_fields(column[row]) : string(column[row])
+        print(io, join((w ? _semantic_interval_fields(column[row]) : _semantic_plain_field(column[row])
                         for (column, w) in zip(columns, wide)), '\t'), '\n')
     end
 end
-_semantic_interval_fields(x) = string(x, "\t\t")
+_semantic_plain_field(x) = string(x)
+_semantic_plain_field(::Union{Nothing,Missing}) = ""
+_semantic_interval_fields(x) = string(_semantic_plain_field(x), "\t\t")
 
 function Base.show(io::IO, mime::MIME"text/plain", section::SemanticSection)
     print(io, section.title)
@@ -13816,7 +13820,7 @@ function _locale_texts(::Type{T}, fname, locales, placeholders, locale::Symbol; 
             "; texts are ", join(names, ", "))))
     end
     table = getfield(locales, locale)
-    merged = merge(table, (; (k => _locale_text_value(table[k], v) for (k, v) in pairs(texts))...))
+    merged = merge(table, (; (k => _locale_text_value(table[k], v, fname, k) for (k, v) in pairs(texts))...))
     for name in names
         merged[name] isa AbstractString || continue
         allowed = get(placeholders, name, ())
@@ -13837,6 +13841,15 @@ _status_texts(table) = Tuple(sort!(collect(Pair{Int,String}, table); by=first))
 _locale_text_value(::AbstractString, v) = string(v)
 _locale_text_value(table::_StatusTexts, v) =
     _status_texts(merge!(Dict{Int,String}(table), Dict{Int,String}(Int(k) => string(x) for (k, x) in v)))
+_locale_text_value(stored, v, fname, name) = _locale_text_value(stored, v)
+# Twelve names given by keyword (`TableTexts.months`), in any collection,
+# replace the locale's twelve, January first.
+function _locale_text_value(::NTuple{12,String}, v, fname, name)
+    names = v isa AbstractString || !applicable(iterate, v) ? nothing : collect(v)
+    (isnothing(names) || length(names) != 12) && throw(ArgumentError(string(fname, ": ", name,
+        " takes twelve names, January first; got ", repr(v))))
+    NTuple{12,String}(string.(names))
+end
 
 # A text with its `{placeholders}` filled in from `values`.
 _fill_text(template::AbstractString; values...) =
@@ -24927,7 +24940,11 @@ the text of an estimate with its interval ([`format_interval`](@ref):
 `interval`, `22 (13–34)`, and `interval_signed` for a negative bound,
 `-5 (-8 to -2)`, German `−5 (−8 bis −2)`) and the range a group summary lies
 in when a leaf gives its value as bounds ([`ColumnSummary`](@ref): `range`,
-`9–100`, and `range_signed` for a negative end, `-8 to -2`). Build one with
+`9–100`, and `range_signed` for a negative end, `-8 to -2`), and the words of
+the dates [`format_date`](@ref) writes (`months` and `months_short`, twelve
+names each, January first, and the layouts `date_long`, `date_short` and
+`date_month`: `1 October 2015`, `1 Oct 2015`, `Oct 2015`, German
+`1. Oktober 2015`, `1. Okt. 2015`, `Okt. 2015`). Build one with
 [`table_texts`](@ref) and pass it as `texts=` to [`sortable_table`](@ref),
 [`render_table`](@ref), [`master_detail_table`](@ref) or
 [`master_detail_pair`](@ref).
@@ -24941,9 +24958,13 @@ texts take `{name}` (the grouping), `group_level` also `{level}`;
 `linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
 take `{name}` (the sort key); `interval` and `interval_signed` take
 `{estimate}`, `{lower}` and `{upper}`; `range` and `range_signed` take
-`{lower}` and `{upper}`. A number in a text is written with
+`{lower}` and `{upper}`; `date_long`, `date_short` and `date_month` take
+`{day}`, `{month}` (from `months`), `{month_short}` (from `months_short`) and
+`{year}`, so `table_texts(; date_long = "{month} {day}, {year}")` writes
+American English. A number in a text is written with
 `thousands`, like a group row's own count: `"1.672 von 1.672 Messstellen"`
 under `table_texts(:de)`, `"1,672 of 1,672 rows shown"` under `table_texts(:en)`.
+A date's day and year are digits alone: `2015`, never `2,015`.
 """
 struct TableTexts
     search::String              # search field label and accessible name
@@ -24991,7 +25012,20 @@ struct TableTexts
     interval_signed::String     #   the same with a negative bound, where a dash would read as a minus
     range::String               # a group summary's range (`ColumnSummary` over a leaf's bounds)
     range_signed::String        #   the same with a negative end
+    months::NTuple{12,String}       # the month names `format_date` writes, January first
+    months_short::NTuple{12,String} #   and their abbreviations
+    date_long::String           # `format_date(d; style=:long)`: 1 October 2015
+    date_short::String          #   `style=:short`: 1 Oct 2015
+    date_month::String          #   `style=:month`: Oct 2015
 end
+
+# The texts only `format_date` reads. The browser runtime writes no date, so
+# they stay out of the texts a table carries (`_table_browser_texts`).
+const _TABLE_DATE_TEXTS = (:months, :months_short, :date_long, :date_short, :date_month)
+
+# What a date layout may name: the day of the month and the year (digits
+# alone, without a thousands mark), the month's name and its abbreviation.
+const _DATE_PLACEHOLDERS = (:day, :month, :month_short, :year)
 
 const _TABLE_TEXT_PLACEHOLDERS = (
     count = (:shown, :total),
@@ -25002,6 +25036,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     sort_ascending = (:name,), sort_descending = (:name,),
     interval = (:estimate, :lower, :upper), interval_signed = (:estimate, :lower, :upper),
     range = (:lower, :upper), range_signed = (:lower, :upper),
+    date_long = _DATE_PLACEHOLDERS, date_short = _DATE_PLACEHOLDERS, date_month = _DATE_PLACEHOLDERS,
 )
 
 const _TABLE_TEXT_LOCALES = (
@@ -25051,6 +25086,12 @@ const _TABLE_TEXT_LOCALES = (
         interval_signed = "{estimate} ({lower} to {upper})",
         range = "{lower}–{upper}",
         range_signed = "{lower} to {upper}",
+        months = ("January", "February", "March", "April", "May", "June", "July",
+                  "August", "September", "October", "November", "December"),
+        months_short = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        date_long = "{day} {month} {year}",
+        date_short = "{day} {month_short} {year}",
+        date_month = "{month_short} {year}",
     ),
     de = (
         search = "Suche",
@@ -25098,6 +25139,12 @@ const _TABLE_TEXT_LOCALES = (
         interval_signed = "{estimate} ({lower} bis {upper})",
         range = "{lower}–{upper}",
         range_signed = "{lower} bis {upper}",
+        months = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
+                  "August", "September", "Oktober", "November", "Dezember"),
+        months_short = ("Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez."),
+        date_long = "{day}. {month} {year}",
+        date_short = "{day}. {month_short} {year}",
+        date_month = "{month_short} {year}",
     ),
 )
 
@@ -25171,13 +25218,21 @@ _table_text(texts::TableTexts, name::Symbol; values...) =
 _table_text_value(v, texts) = v
 _table_text_value(n::Integer, texts) = format_number(n; texts)
 
+# The texts the browser runtime reads: all but the dates.
+const _TABLE_BROWSER_TEXTS = Tuple(n for n in fieldnames(TableTexts) if !(n in _TABLE_DATE_TEXTS))
+_table_browser_texts(texts::TableTexts) =
+    NamedTuple{_TABLE_BROWSER_TEXTS}(map(n -> getfield(texts, n), _TABLE_BROWSER_TEXTS))
+
+const _EN_TABLE_BROWSER_TEXTS = _table_browser_texts(_EN_TABLE_TEXTS)
+
 # The texts as the JSON object `htmxoText` reads.
-_table_texts_json(texts::TableTexts) = JSON.json(texts)
+_table_texts_json(texts::TableTexts) = JSON.json(_table_browser_texts(texts))
 
 # The outermost element of a table carries its texts for the browser runtime,
 # which writes the count, selection and lazy-detail lines; English is the
-# runtime's own default, so an English table stays byte-identical.
-_with_table_texts(node, texts::TableTexts) = texts == _EN_TABLE_TEXTS ? node :
+# runtime's own default, so an English table stays byte-identical, and so does
+# one whose texts differ from English only in the dates.
+_with_table_texts(node, texts::TableTexts) = _table_browser_texts(texts) == _EN_TABLE_BROWSER_TEXTS ? node :
     Node(HTMX.tag(node), merge(copy(HTMX.attrs(node)),
         Dict{Symbol,Any}(Symbol("data-htmxo-texts") => _table_texts_json(texts))), HTMX.children(node))
 
@@ -25216,6 +25271,10 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   `3.81e-5` shows `3,81·10⁻⁵`, and the cell sorts and exports to CSV by its
   exact value. Any other value shows as `string(value)`, integers included,
   since an integer column is as often a year, an id or a postcode as a count.
+  No value, `missing` or `nothing`, shows `–` with no sort value and an
+  empty CSV field (an empty `number_cell`), in any column: at the right in
+  a column of numbers, and where the text sits in a column of text or
+  integers. A custom `cell` gets `missing` and `nothing` as they are.
 - `class`: table CSS class (default `"striped"`)
 - `searchable`: client-side search over the rows (default `false`); see
   [`sortable_table`](@ref)
@@ -25242,12 +25301,16 @@ page = htmx(h.main(render_table(df; download=true, caption=cap)); pico_version="
 function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, columns=nothing, kwargs...)
     isnothing(link) == isnothing(link_key) || throw(ArgumentError(
         "render_table: `link` names the group and `link_key(row)` keys each row; give both or neither"))
-    cols = Tables.columnnames(Tables.columns(table))
+    tcols = Tables.columns(table)
+    cols = Tables.columnnames(tcols)
     texts = get(kwargs, :texts, _EN_TABLE_TEXTS)
     headers = _render_table_headers(columns, cols)
+    # Where each column's empty cells (`missing`, `nothing`) sit.
+    empty_aligns = Any[isnothing(cell) ? _render_empty_align(Tables.getcolumn(tcols, c), headers[j]) : nothing
+                       for (j, c) in enumerate(cols)]
 
     body_rows = [
-        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts), row)
+        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts, empty_aligns[j]), row)
               for (j, c) in enumerate(cols)]...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
              (isnothing(link_key) ? (;) : (; data_htmxo_link_key=string(link_key(row))))...)
@@ -25288,11 +25351,26 @@ function _render_sort_values(hdr::ColumnSpec, td, row)
         HTMX.children(td))
 end
 
-# A `render_table` cell: a float is a number cell in the table's language,
-# any other value its `string`; a custom `cell` renders the content.
-_render_table_cell(::Nothing, value::AbstractFloat, c, ri, texts) = number_cell(value; texts)
-_render_table_cell(::Nothing, value, c, ri, texts) = h.td(string(value))
-_render_table_cell(cell, value, c, ri, texts) = h.td(cell(value, c, ri))
+# A `render_table` cell: a float is a number cell in the table's language, no
+# value (`missing`, `nothing`) an empty number cell (`–`, no sort value, an
+# empty ⬇ CSV field) placed as `empty_align` says, any other value its
+# `string`; a custom `cell` renders the content, no value included.
+_render_table_cell(::Nothing, value::AbstractFloat, c, ri, texts, empty_align) = number_cell(value; texts)
+_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, ::Nothing) = number_cell(nothing; texts)
+_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, empty_align::String) =
+    number_cell(nothing; texts, data_htmxo_align=empty_align)
+_render_table_cell(::Nothing, value, c, ri, texts, empty_align) = h.td(string(value))
+_render_table_cell(cell, value, c, ri, texts, empty_align) = h.td(cell(value, c, ri))
+
+# Where a column's empty cells sit: at the right, as a number cell does
+# (`nothing`: no alignment of their own), in a column of numbers (floats,
+# `IntervalEstimate`s) or of no values at all; in a column that shows text
+# (strings, integers, any other value), where that text sits: its
+# `ColumnSpec(align)`, else the left.
+_render_empty_align(values, hdr) =
+    any(_render_shows_text, values) ? String(something(_header_align(hdr), :left)) : nothing
+_render_shows_text(_) = true
+_render_shows_text(::Union{Nothing,Missing,AbstractFloat}) = false
 
 # --- The row order `default_sort` writes ---
 # `sortable_table` writes its rows in the order a click on the `default_sort`
@@ -26510,7 +26588,9 @@ end
 # layout splatting `parts.action_attrs` onto the row. The helper keeps those
 # attributes on the row it builds. Its copy of the cells is its own, so
 # relabelling the first cell leaves the caller's row untouched. A bare float
-# among the cells becomes a number cell in the table's language.
+# among the cells becomes a number cell in the table's language, and a bare
+# `missing` an empty one. A bare `nothing` is no cell: HTMX drops a `nothing`
+# child, so a `<tr>` holding one never shows it to us either.
 _md_master_row(row::Node, texts::TableTexts) = HTMX.tag(row) === :tr ?
     (_md_master_cells(HTMX.children(row), texts), HTMX.attrs(row)) :
     throw(ArgumentError(string("master/detail: the master cells must be the row's ",
@@ -26518,6 +26598,7 @@ _md_master_row(row::Node, texts::TableTexts) = HTMX.tag(row) === :tr ?
 _md_master_row(cells, texts::TableTexts) = (_md_master_cells(cells, texts), ())
 _md_master_cells(cells, texts) = Any[_md_master_cell(c, texts) for c in cells]
 _md_master_cell(x::AbstractFloat, texts) = number_cell(x; texts)
+_md_master_cell(::Missing, texts) = number_cell(missing; texts)
 _md_master_cell(x, texts) = x
 
 # Whether a first cell's content holds a control of its own. A native button
@@ -26805,7 +26886,9 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   allows it). HTMXObjects ≥ 0.1.35.
 - `master(item)`: function returning the master row's `<td>` cells
   (vector or tuple of nodes), or one `<tr>` holding them. A bare float among
-  them becomes a [`number_cell`](@ref) in the table's language (`texts`). A row's attributes
+  them becomes a [`number_cell`](@ref) in the table's language (`texts`), and
+  a bare `missing` an empty one (`–`). A bare `nothing` is no cell at all, as
+  HTMX drops a `nothing` child: write a missing number as `missing`. A row's attributes
   stay on the master row the helper builds, so attributes computed together
   with the cells need no second callback: a [`semantic_app`](@ref) layout can
   return `h.tr(cells...; parts.action_attrs...)`, with the shared result host
@@ -27791,7 +27874,8 @@ A table cell, `<td>`, that shows `format_number(x; texts, digits, sigdigits)`
 `missing` and `nothing` show `–`, with no sort value and an empty CSV field.
 `attrs` are further attributes of the `<td>`. [`render_table`](@ref) and the
 master cells of [`master_detail_table`](@ref) make a float this cell by
-themselves; pass the table's `texts` to cells you build for
+themselves, and `missing` (in `render_table` also `nothing`) the empty one;
+pass the table's `texts` to cells you build for
 [`sortable_table`](@ref).
 """
 number_cell(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Integer}=nothing,
@@ -27811,6 +27895,56 @@ _number_value(x::Union{Integer,AbstractFloat}) = x
 _number_value(x::Real) = float(x)
 _number_value(x) = throw(ArgumentError(string(
     "format_number: expected a real number, missing or nothing; got ", repr(x))))
+
+"""
+    format_date(d; texts=table_texts(), style=:long) -> String
+
+Write a date in the language of a table's texts, with its month names.
+
+Write the day `d` (a `Dates.Date`) with the month names and date layouts of
+`texts` (a [`TableTexts`](@ref)), the date counterpart of
+[`format_number`](@ref). For 1 October 2015:
+
+| `style` | `table_texts()` | `table_texts(:de)` |
+|:--- |:--- |:--- |
+| `:long` (the default) | `1 October 2015` | `1. Oktober 2015` |
+| `:short` | `1 Oct 2015` | `1. Okt. 2015` |
+| `:month` | `Oct 2015` | `Okt. 2015` |
+
+The names are those browsers write (Unicode CLDR): German abbreviates
+`Jan.`, `Feb.`, `März`, `Apr.`, `Mai`, `Juni`, `Juli`, `Aug.`, `Sept.`,
+`Okt.`, `Nov.`, `Dez.`; English writes `Jan` to `Dec` with `Sep`. English puts
+the day first. Each style's layout is a text of `texts` with the placeholders
+`{day}`, `{month}`, `{month_short}` and `{year}`, and the names are its
+`months` and `months_short`, so an app changes them by keyword:
+
+```julia
+format_date(Date(2015, 10, 1); texts = table_texts(; date_long = "{month} {day}, {year}"))  # "October 1, 2015"
+format_date(Date(2015, 10, 1); texts = table_texts(:de; date_month = "{month} {year}"), style = :month)  # "Oktober 2015"
+```
+
+`missing` and `nothing` write `–`, as in [`format_number`](@ref). A
+`DateTime` is refused rather than written without its time of day: pass
+`Date(x)` to write its day.
+"""
+format_date(d; texts::TableTexts=_EN_TABLE_TEXTS, style::Symbol=:long) =
+    _format_date(d, texts, _date_layout(texts, style))
+
+_date_layout(texts::TableTexts, style::Symbol) =
+    style === :long ? texts.date_long : style === :short ? texts.date_short :
+    style === :month ? texts.date_month : throw(ArgumentError(string(
+        "format_date: unknown style ", repr(style), "; styles are :long, :short, :month")))
+
+_format_date(::Union{Nothing,Missing}, texts, layout) = "–"
+function _format_date(d::Dates.Date, texts, layout)
+    m = Dates.month(d)
+    _fill_text(layout; day=string(Dates.day(d)), month=texts.months[m],
+        month_short=texts.months_short[m], year=string(Dates.year(d)))
+end
+_format_date(d::Dates.DateTime, texts, layout) = throw(ArgumentError(string(
+    "format_date: ", d, " is a DateTime; it writes a day, so pass Date(x) (its time of day is not written)")))
+_format_date(d, texts, layout) = throw(ArgumentError(string(
+    "format_date: expected a Date, missing or nothing; got ", repr(d))))
 
 _format_number(::Nothing, texts, rounding) = "–"
 _format_number(x::Integer, texts, rounding) = _format_finite(x, texts, rounding)
@@ -28186,7 +28320,8 @@ _interval_csv_json(values...) = JSON.json(map(v -> isnothing(v) ? "" : _number_k
 # An `IntervalEstimate` is its cell wherever a table makes a float a
 # `number_cell`: a `render_table` column, a bare `master` cell, and the text
 # in a `SemanticTable`'s Markdown.
-_render_table_cell(::Nothing, value::IntervalEstimate, c, ri, texts) = interval_cell(value; texts)
+_render_table_cell(::Nothing, value::IntervalEstimate, c, ri, texts, empty_align) = interval_cell(value; texts)
+_render_shows_text(::IntervalEstimate) = false
 _md_master_cell(x::IntervalEstimate, texts) = interval_cell(x; texts)
 _semantic_table_cell(x::IntervalEstimate) = format_interval(x)
 _semantic_interval_fields(x::IntervalEstimate) =

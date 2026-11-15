@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## 0.1.124
+
+- `format_date(d; texts = table_texts(), style = :long)` writes a `Date` in
+  the language of a table's texts, the date counterpart of `format_number`:
+  `:long` writes `1 October 2015` / `1. Oktober 2015`, `:short` writes
+  `1 Oct 2015` / `1. Okt. 2015` and `:month` writes `Oct 2015` / `Okt. 2015`.
+  `missing` and `nothing` write `–`; a `DateTime` is refused (pass `Date(x)`).
+- `TableTexts` carries the words: `months` and `months_short` (twelve names
+  each, January first, the CLDR names browsers write) and the layouts
+  `date_long`, `date_short` and `date_month`, which take `{day}`, `{month}`,
+  `{month_short}` and `{year}`. `table_texts(; date_long = "{month} {day},
+  {year}")` writes American English. A table's HTML is unchanged: the date
+  texts are not among the texts a table sends the browser.
+
+## 0.1.123
+
+- `render_table` writes no value, `missing` or `nothing`, as `–` with no sort
+  value and an empty ⬇ CSV field (an empty `number_cell`), in every column.
+  Before, it wrote the words `missing` and `nothing`, which also sorted as
+  text among the numbers. In a column of numbers or `IntervalEstimate`s the
+  dash sits at the right with them, and an interval column keeps its five
+  sort keys, its empty rows last in both directions; in a column of text or
+  integers the dash sits where the text does, at the left or the column's
+  `ColumnSpec(align)`. A custom `cell` still gets `missing` and `nothing` as
+  they are. `master_detail_table` and `master_detail_pair` make a bare
+  `missing` among the master cells the same empty number cell (it was loose
+  text outside any cell); a bare `nothing` stays no cell, as HTMX drops a
+  `nothing` child. A `SemanticTable`'s Markdown shows the dash too, and its
+  tab-separated text writes an empty field (three in an interval column).
+
 ## 0.1.122
 
 - A `semantic_app(…; presentation=:tabs)` page can compute a result in the
