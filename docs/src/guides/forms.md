@@ -218,9 +218,10 @@ println(number_record(number_domain(0.001, 0.015; log=true, digits=4)))
 
 The generated form draws each as a slider with a number field beside it,
 followed by the unit. A `log` domain spaces the slider evenly in ratio, for a
-positive quantity spanning orders of magnitude. A slider value lies on the
-`step` grid counted from the lower bound; without a step it keeps three
-significant digits. Typing in the field moves the slider.
+positive quantity spanning orders of magnitude. A slider value, like the
+field's arrow keys, lies on the `step` grid counted from the lower bound;
+without a step it keeps three significant digits. A typed number need only
+lie in the interval, and moves the slider.
 
 `digits` sets how many decimals the field shows while not being edited, as
 `format_number(x; digits)` writes them: a fitted 0.003035586062774531 shows as

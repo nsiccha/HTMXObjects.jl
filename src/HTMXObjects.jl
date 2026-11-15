@@ -30131,8 +30131,9 @@ show so too.
 
 `domain` takes a [`number_domain`](@ref) or an interval (`0.001 .. 0.015`)
 and draws the control a generated form draws for a number input declared with
-one: the field takes its bounds and step from the domain, a slider beside it
-moves the value (evenly in ratio when the domain is `log`), and the unit
+one: the field takes its bounds from the domain and any number between them,
+a slider beside it moves the value (evenly in ratio when the domain is `log`)
+along the domain's step grid, as the field's arrow keys do, and the unit
 follows it. Give the bounds and step in the domain, not as `min`, `max` and
 `step` beside it.
 """
@@ -30219,11 +30220,13 @@ domain with no other settings. The label and help text stay where they are
 
 - `log=true` spaces the slider evenly in ratio, for a positive quantity
   spanning orders of magnitude; the interval must be positive and finite.
-- `step` is the spacing of the values the slider and the field offer, counted
-  from the lower bound (the field's `step`). The server checks only the
-  interval. Without it the field takes any number and a value picked on the
-  slider keeps three significant digits, as the explainer pictures pick
-  them. An integer input takes whole numbers either way.
+- `step` is the spacing of the values the slider offers and the field's
+  arrow keys step through, counted from the lower bound. It does not
+  restrict a typed number: the field, like the server, takes any number in
+  the interval, so 273 typed on a `50 .. 400` domain with `step=10` is used
+  as typed. Without a step a value picked on the slider keeps three
+  significant digits, as the explainer pictures pick them. An integer input
+  takes whole numbers either way.
 - `digits` is the number of decimal places (0 to 10) the field shows its
   value with while the reader is not editing it, as
   [`format_number`](@ref)`(x; digits)` writes it: with `digits=4` a default
@@ -30343,10 +30346,17 @@ function _number_control(name, label, domain::NumberDomain, value;
     lower, upper = IntervalSets.endpoints(domain.interval)
     step = domain.step !== nothing ? domain.step : integer ? 1 : nothing
     record = merge(number_record(domain), (; step))
+    # The field takes any number in the interval, as the server does: `step`
+    # is the grid the slider and the field's arrow keys move along
+    # (`number_control_script`), so a number typed between grid values is
+    # valid and is used as typed. As the field's own `step` it made such a
+    # number invalid (`stepMismatch`): native submission refused it and a
+    # result that follows its inputs kept the last valid values. A
+    # whole-number input keeps `step="1"`, which its type requires.
     field_attrs = (;
         (isfinite(lower) ? (; min=_number_control_value(lower)) : (;))...,
         (isfinite(upper) ? (; max=_number_control_value(upper)) : (;))...,
-        step=step === nothing ? "any" : _number_control_value(step),
+        step=integer ? 1 : "any",
         (required ? (; required="true") : (;))...)
     shown = value === nothing || value === _NO_DEFAULT ? "" :
         value isa Real ? _number_control_value(value) : string(value)
@@ -34662,7 +34672,9 @@ is the named input the form submits, the unit, and an unnamed slider over
 positions 0…500. Moving the slider writes its value into the field, spaced
 evenly in ratio for a `log` domain, on the `step` grid from the lower bound,
 else to three significant digits (as the explainer pictures pick slider
-values). Typing a number in the field moves the slider. A domain with `digits`
+values). Typing a number in the field moves the slider; the field takes any
+number in the interval, between grid values too, and its arrow keys step
+along the `step` grid as the slider does. A domain with `digits`
 shows the field's value rounded to them while the reader is not editing it,
 written as [`format_number`](@ref) writes it, and the text follows every
 change the field announces (typing, the slider, Reset, the page address) and
@@ -34743,6 +34755,32 @@ number_control_script() = h.script(Raw(raw"""
   }
   document.addEventListener('input', follow);
   document.addEventListener('change', follow);
+  // The field takes any number in the interval (its `step` is `any`, or `1`
+  // for whole numbers); its arrow keys move along the domain's step grid, as
+  // the slider does: to the next grid value above or below the field's
+  // value, as the browser steps a field whose own step is the grid
+  // (`stepUp`/`stepDown` with the grid as its step for that one call), and
+  // announced as the browser announces its own stepping, `input` then
+  // `change`. A domain without a step keeps the browser's own stepping.
+  document.addEventListener('keydown', function(e) {
+    var t = e.target;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    if (!t || !t.matches || !t.matches('input[data-htmxo-number-field]') || t.readOnly || t.disabled) return;
+    var holder = t.closest('[data-htmxo-number]'), spec;
+    if (!holder) return;
+    try { spec = JSON.parse(holder.getAttribute('data-htmxo-number')); } catch (_) { return; }
+    var own = t.getAttribute('step');
+    if (!spec || typeof spec.step !== 'number' || !(spec.step > 0) || own === String(spec.step)) return;
+    e.preventDefault();
+    var before = t.value;
+    t.setAttribute('step', String(spec.step));
+    try { if (e.key === 'ArrowUp') t.stepUp(); else t.stepDown(); }
+    catch (_) {}
+    finally { if (own === null) t.removeAttribute('step'); else t.setAttribute('step', own); }
+    if (t.value === before) return;
+    t.dispatchEvent(new Event('input', {bubbles: true}));
+    t.dispatchEvent(new Event('change', {bubbles: true}));
+  });
   // A field with `digits` shows its value rounded to them while the reader is
   // not editing it: the text over it (`.htmxo-number-shown`) follows every
   // announced change of the field, written as `format_number(x; digits)`

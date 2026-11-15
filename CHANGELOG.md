@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.137
+
+- A number field drawn from a `number_domain` with a `step` takes any number
+  in the interval, as the server does: the step is the grid of the slider and
+  of the field's arrow keys, no longer the field's own `step` attribute.
+  Before, a number typed between grid values (273 on `50 .. 400` with
+  `step=10`, 12.34 on `5 .. 20` with `step=0.5`) was invalid in the browser
+  (`stepMismatch`), so native submission refused it and a result that
+  follows its inputs, `@browser` ones included, silently kept the last
+  valid values. The field's `step` is now `any`, or `1` for a whole-number
+  input; `number_control_script` keeps the arrow keys on the grid (273 steps
+  up to 280 and down to 270) and announces each step as `input` then
+  `change`, as the browser does. The slider, `number_record` and
+  `data-htmxo-number` are unchanged (snag `use-number-domai-f74b4f09`).
+
 ## 0.1.136
 
 - A `semantic_app(…; presentation=:tabs)` page's Markdown (`?plain`,
