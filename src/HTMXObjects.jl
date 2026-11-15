@@ -14024,7 +14024,9 @@ that a running request will replace (`loading`, `loading_named`; see
 list (`choice_search`, its placeholder, and `choice_no_match`, shown when no
 option matches; see [`choice_list`](@ref)), and the button of a
 `semantic_app(…; presentation=:tabs)` page that returns every input to its
-default (`reset_inputs`). Build one with
+default (`reset_inputs`), and the line of that page's Markdown that names the
+inputs a result is shown at (`shown_at`, "Shown at"; a checkbox's value in it
+is `shown_yes` or `shown_no`). Build one with
 [`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
@@ -14097,6 +14099,9 @@ struct ErrorTexts
     record_label::String               # ... the accessible name of its label field
     record_fields::String              # ... the accessible name of its fold control
     reset_inputs::String               # a semantic_app page's Reset: every input to its default
+    shown_at::String                   # ... its Markdown: the line naming the inputs a result shows
+    shown_yes::String                  # ... a checked box's value in that line
+    shown_no::String                   # ... an unchecked one's
     reasons::_StatusTexts              # reason phrase per HTTP status
 end
 
@@ -14152,6 +14157,9 @@ const _ERROR_TEXT_LOCALES = (
         record_label = "Label",
         record_fields = "Fields",
         reset_inputs = "Reset",
+        shown_at = "Shown at",
+        shown_yes = "yes",
+        shown_no = "no",
         reasons = _status_texts(_REASON_PHRASES),
     ),
     de = (
@@ -14195,6 +14203,9 @@ const _ERROR_TEXT_LOCALES = (
         record_label = "Bezeichnung",
         record_fields = "Felder",
         reset_inputs = "Zurücksetzen",
+        shown_at = "Dargestellt bei",
+        shown_yes = "ja",
+        shown_no = "nein",
         reasons = _status_texts(Dict(
             400 => "Ungültige Anfrage", 401 => "Nicht autorisiert", 402 => "Zahlung erforderlich",
             403 => "Verboten", 404 => "Nicht gefunden", 405 => "Methode nicht erlaubt",
@@ -33466,7 +33477,8 @@ shows the values it names, and the script writes the inputs into it. With
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
-        reset::Bool=true, sections=InputSection[], place=nothing)
+        reset::Bool=true, sections=InputSection[], place=nothing,
+        report_states=_ReportState[])
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places. The fields of
@@ -33514,6 +33526,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         "semantic_app sections= names ", join(repr.(unknown), ", "),
         ", which no operation of the surface takes; its inputs are ",
         join(repr.(sort!(collect(inputs))), ", "))))
+    _check_report_states(report_states, inputs)
     own = [setdiff(read, sidebar) for read in reads]
     routes = [_semantic_tabs_route(spec.mounted, spec.runtime_route, sidebar, own[i])
               for (i, spec) in enumerate(specs)]
@@ -33599,16 +33612,20 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 (isnothing(key_reads) ? (;) :
                     (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
                 data_htmxo_live="", hx_sync="this:replace")
+            # The page's Markdown writes the result its address answers, at the
+            # inputs it reads (`_tab_result_markdown`).
+            markdown = _tab_result_markdown(spec.mounted, route, current, target, sent,
+                something(key_reads, sent), report_states, browser_page.static)
             browser = _browser_reads(spec.mounted, base.name)
             if !isempty(browser)
                 browser_regions[i] = true
                 form, _browser_region(browser_page, spec, route, current, target, sent,
-                                      region_attrs, browser)
+                                      region_attrs, browser; markdown)
             else
                 initial = names[i] == open ?
                     Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
                     Any[]
-                form, h.div(initial...; region_attrs...)
+                form, h.div(initial..., markdown; region_attrs...)
             end
         else
             form = base.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
@@ -33713,7 +33730,7 @@ end
                  results=:each, layout=_default_semantic_layout,
                  select=entry -> true, presentation=:stacked, radio_max=8,
                  shared=nothing, active=nothing, url_state=true, reset=true,
-                 sections=nothing, place=nothing)
+                 sections=nothing, place=nothing, report_states=nothing)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -33762,6 +33779,23 @@ groups its inputs under headings wherever they are placed, a list of
 draws a sidebar input's control in an operation's tab instead, still an
 input of the sidebar's form. The contract is the API reference's *An app
 page*.
+
+In the page's Markdown (`?plain`, `Accept: text/markdown`,
+[`to_markdown_string`](@ref), and a report: `dispatch(…; report=true)`,
+[`pdf_report`](@ref)) each tab is its label followed by its result, as the
+result's own address answers it as Markdown at the page's inputs: the report
+view in a report, and for a result computed in the browser what the server
+draws of it. A line before it names the inputs the result reads and their
+values as their controls show them, `Shown at: Slope (per day) 0.20;
+Intercept 80 units` (`__error_texts__`'s `shown_at`, and `shown_yes` or
+`shown_no` for a checkbox). A result takes no number in a [`numbered`](@ref)
+document, as it takes none on the page. The HTML page asks no result it does
+not show; a Markdown read asks each tab's result once.
+`report_states = ["Steep" => (a = 0.5,), (b = 20.0,)]` writes, in a report
+only, each tab again for each state that names an input it reads: with the
+state's values in place of the page's, its own line, and its caption first
+when it has one. A state names inputs of the page, or the call throws an
+`ArgumentError`; a value an input refuses makes the report throw.
 
 A single choice among at most `radio_max` options (default 8) is a row of
 pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
@@ -33887,7 +33921,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
-        reset=nothing, sections=nothing, place=nothing)
+        reset=nothing, sections=nothing, place=nothing, report_states=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -33911,7 +33945,10 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app sections= groups the inputs of presentation=:tabs"))
         isnothing(place) || throw(ArgumentError(
             "semantic_app place= puts inputs of presentation=:tabs into its tabs"))
+        isnothing(report_states) || throw(ArgumentError(
+            "semantic_app report_states= shows the results of presentation=:tabs at further states in a report"))
     end
+    states = _report_states(report_states)
     input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
         "semantic_app url_state must be true or false, got $(repr(url_state))"))
@@ -33964,7 +34001,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
-        reset=something(reset, true), sections=input_sections, place,
+        reset=something(reset, true), sections=input_sections, place, report_states=states,
         render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
@@ -40623,6 +40660,7 @@ include("numbering.jl")
 
 include("comparison.jl")
 include("semantic_browser.jl")
+include("semantic_report.jl")
 
 """
     tabset(tabs::Pair...; active=1, id=<from the labels, names and content>, preload=nothing,

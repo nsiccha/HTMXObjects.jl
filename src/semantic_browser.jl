@@ -403,7 +403,8 @@ it is sent, the bindings of those properties to their modules (once per page),
 the modules and the runtime (once per page). Under a static export it also
 records in `page.problems` what of the view would still need the server.
 """
-function _browser_region(page::_BrowserPage, spec, route, current, target, sent, attrs, browser)
+function _browser_region(page::_BrowserPage, spec, route, current, target, sent, attrs, browser;
+                         markdown=nothing)
     obj = spec.mounted
     T = typeof(obj)
     operation = spec.base_entry.name
@@ -439,8 +440,11 @@ function _browser_region(page::_BrowserPage, spec, route, current, target, sent,
     shown = something(findfirst(last, views), 1)
     page.static === nothing ||
         _browser_check!(page, obj, route, current, target, sent, operation, names)
-    nodes = Any[h.div(Raw(views[shown][2]); class="htmxo-browser-view",
+    # The page's Markdown holds the result's own Markdown (`markdown`), never
+    # the view's HTML, which a Markdown reader or a PDF cannot carry.
+    nodes = Any[h.div(html_only(Raw(views[shown][2])); class="htmxo-browser-view",
                       data_htmxo_variant=views[shown][1])]
+    isnothing(markdown) || push!(nodes, markdown)
     # Each view's markup as rendered, the shown one's too: the browser shows
     # a view again from its template, never from what the page made of it.
     if length(views) > 1
