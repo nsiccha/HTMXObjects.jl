@@ -43,6 +43,7 @@ export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_er
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot, report_view
 export CaptionTexts, caption_texts
+export numbered, contents, ref, numbering_texts, NumberingTexts
 export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_options, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
 export live_thread, live_thread_page, live_thread_tail, live_thread_unchanged, live_thread_refresh, live_thread_assets, live_thread_styles, live_thread_script, live_thread_texts, LiveThreadTexts
@@ -5582,9 +5583,12 @@ _semantic_heading_sigil(level) = "#"^min(level, 6)
 _semantic_html_node(card::SemanticCard) = h.article(
     h.header(h.strong(card.title)), card.children...;
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
-_semantic_html_node(section::SemanticSection, level=_semantic_opening_level(section)) = h.section(
-    h(_semantic_heading_tag(level), section.title), section.children...;
-    class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
+# In a `numbered` document the title starts with the section's `number`, and a
+# section without an anchor has the id its number gives it.
+_semantic_html_node(section::SemanticSection, level=_semantic_opening_level(section),
+                    number=nothing, anchor=section.anchor) = h.section(
+    h(_semantic_heading_tag(level), _section_number_nodes(number)..., section.title), section.children...;
+    class="htmxo-semantic-section", _semantic_anchor_attrs(anchor)...)
 _semantic_html_node(group::SemanticGroup) = h.div(
     group.children...; class="htmxo-semantic-group")
 # A disclosure with nothing to open for its reader has no peer at all, rather
@@ -5601,9 +5605,10 @@ _semantic_html_node(disclosure::SemanticDisclosure) =
 # other containers this owes no framework CSS: stacked blocks need no layout.
 function _semantic_html_node(alt::SemanticAlternatives)
     audience = _ambient_audience()
+    # The later views are HTML's alone (Markdown writes the first view only).
     h.div(
         first(alt.views),
-        (h.details(h.summary(String(first(v))), last(v);
+        (h.details(h.summary(String(first(v))), html_only(last(v));
             class="htmxo-semantic-alternative")
          for v in alt.views[2:end] if !_shows_nothing(last(v), audience))...;
         class="htmxo-semantic-alternatives")
@@ -5628,10 +5633,13 @@ _semantic_hxml_node(card::SemanticCard) = h.article(
     class="htmxo-semantic-card-body", _semantic_anchor_attrs(card.anchor)...)
 # Children are classified here, before serializing, so a nested section must
 # already see the level below this one.
-_semantic_hxml_node(section::SemanticSection, level=_semantic_opening_level(section)) = h.section(
-    h(_semantic_heading_tag(level), section.title),
-    _semantic_heading(_ -> map(_semantic_hxml_child, section.children), level)...;
-    class="htmxo-semantic-section", _semantic_anchor_attrs(section.anchor)...)
+_semantic_hxml_node(section::SemanticSection, level=_semantic_opening_level(section)) =
+    _numbered_section(section, level) do number, anchor
+        h.section(
+            h(_semantic_heading_tag(level), _section_number_nodes(number)..., section.title),
+            _semantic_heading(_ -> map(_semantic_hxml_child, section.children), level)...;
+            class="htmxo-semantic-section", _semantic_anchor_attrs(anchor)...)
+    end
 _semantic_hxml_node(group::SemanticGroup) = h.div(
     map(_semantic_hxml_child, group.children)...; class="htmxo-semantic-group")
 _semantic_hxml_node(disclosure::SemanticDisclosure) =
@@ -5659,14 +5667,19 @@ end
 _show_semantic_peer(io::IO, mime::MIME, ::Nothing) = nothing
 _show_semantic_peer(io::IO, mime::MIME, peer) = show(io, mime, peer)
 # A section's peer is built at the level it opens here and shown with its
-# children one level below: they render inside its `show`, not before it.
-for (mime, peer) in ((MIME"text/html", :_semantic_html_node),
-                     (MIME"application/vnd.hyperview+xml", :_semantic_hxml_node))
-    @eval Base.show(io::IO, mime::$mime, section::SemanticSection) =
-        _semantic_heading(_semantic_opening_level(section)) do level
-            show(io, mime, $peer(section, level))
+# children one level below: they render inside its `show`, not before it. In a
+# `numbered` document it takes its number first, and its children render as
+# the sections inside it.
+Base.show(io::IO, mime::MIME"text/html", section::SemanticSection) =
+    _semantic_heading(_semantic_opening_level(section)) do level
+        _numbered_section(section, level) do number, anchor
+            show(io, mime, _semantic_html_node(section, level, number, anchor))
         end
-end
+    end
+Base.show(io::IO, mime::MIME"application/vnd.hyperview+xml", section::SemanticSection) =
+    _semantic_heading(_semantic_opening_level(section)) do level
+        show(io, mime, _semantic_hxml_node(section, level))
+    end
 
 _semantic_show_leaf(io::IO, mime::MIME, value) =
     showable(mime, value) ? show(io, mime, value) : print(io, value)
@@ -5797,10 +5810,12 @@ end
 
 Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_opening_level(section)) do level
-        print(io, _semantic_heading_sigil(level), " ", _markdown_plain_text(section.title),
-            _markdown_heading_anchor(section.anchor))
-        _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
-        _semantic_show_children(io, mime, section.children, "\n\n")
+        _numbered_section(section, level) do number, anchor
+            print(io, _semantic_heading_sigil(level), " ", _section_number_text(number),
+                _markdown_plain_text(section.title), _markdown_heading_anchor(anchor))
+            _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
+            _semantic_show_children(io, mime, section.children, "\n\n")
+        end
     end
 
 Base.show(io::IO, mime::MIME"text/markdown", group::SemanticGroup) =
@@ -5893,11 +5908,12 @@ _semantic_plain_field(x) = string(x)
 _semantic_plain_field(::Union{Nothing,Missing}) = ""
 _semantic_interval_fields(x) = string(_semantic_plain_field(x), "\t\t")
 
-function Base.show(io::IO, mime::MIME"text/plain", section::SemanticSection)
-    print(io, section.title)
-    _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
-    _semantic_show_children(io, mime, section.children, "\n\n")
-end
+Base.show(io::IO, mime::MIME"text/plain", section::SemanticSection) =
+    _numbered_section(section, _semantic_opening_level(section)) do number, _
+        print(io, _section_number_text(number), section.title)
+        _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
+        _semantic_show_children(io, mime, section.children, "\n\n")
+    end
 
 Base.show(io::IO, mime::MIME"text/plain", group::SemanticGroup) =
     _semantic_show_children(io, mime, group.children, "\n\n")
@@ -6218,7 +6234,11 @@ auto(val::Union{Number,Symbol,Bool,Char}; wrap) = auto(string(val); wrap)
 auto(val::NamedTuple; wrap) = auto(collect(values(val)); wrap)
 
 # HTML rendering via show dispatch — HtmlOnly renders content, MarkdownOnly is invisible
-Base.show(io::IO, m::MIME"text/html", val::HtmlOnly) = show(io, m, val.content)
+# What only HTML shows takes no number in a `numbered` document, so the page
+# and its Markdown number the same elements. The content renders as an
+# element's child does, so plain text is escaped text (`show` has no HTML
+# method for a `String`).
+Base.show(io::IO, m::MIME"text/html", val::HtmlOnly) = _unnumbered(() -> _show_html_content(io, m, val.content))
 Base.show(io::IO, ::MIME"text/html", ::MarkdownOnly) = nothing
 
 # Markdown rendering via show dispatch — HtmlOnly skipped, MarkdownOnly prints text
@@ -7750,7 +7770,7 @@ _static_walk_child(s::HTMLSnapshot, rules) = _static_walk(s, rules)
 # re-wrapped to keep its empty Markdown projection. A removed control takes
 # the wrapper with it.
 function _static_walk(val::HtmlOnly, rules::_StaticRules)
-    walked = _static_walk(val.content, rules)
+    walked = _unnumbered(() -> _static_walk(val.content, rules))
     walked === _STATIC_REMOVED ? walked : HtmlOnly(walked)
 end
 _static_walk_child(val::HtmlOnly, rules) = _static_walk(val, rules)
@@ -7795,7 +7815,9 @@ end
 # walk runs one heading level below it, as its `show` does.
 _static_walk(section::SemanticSection, rules::_StaticRules) =
     _semantic_heading(_semantic_opening_level(section)) do level
-        _static_walk(_semantic_html_node(section, level), rules)
+        _numbered_section(section, level) do number, anchor
+            _static_walk(_semantic_html_node(section, level, number, anchor), rules)
+        end
     end
 # A plot owns no markup: its layer renders itself, and an address inside its
 # spec goes through `static_url`.
@@ -21066,6 +21088,12 @@ const _PDF_REPORT_TABLES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto",
 # keep Skylighting's colours and leave a blank line out of the tags.
 const _PDF_REPORT_CODE_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-code.typ")
 
+# A `numbered` document's captions carry their numbers as text, so Typst must
+# number no figure or table itself.
+const _PDF_REPORT_NUMBERED_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-numbered.typ")
+# A `numbered` document's `contents()` becomes Typst's outline, with page numbers.
+const _PDF_REPORT_CONTENTS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-contents.lua")
+
 # Typst reads the date Pandoc writes as markup, so `22. Oktober 2026` became a
 # numbered list; this filter writes the date as text, the date text of
 # `_PDF_REPORT_DATE_TEXT_KEY` when there is one.
@@ -21251,6 +21279,21 @@ function _pdf_report_front_matter(metadata, lang)
     join(("$key: $(_yaml_value(value))\n" for (key, value) in entries))
 end
 
+# A `numbered` document numbers its own sections, figures and tables and places
+# its own contents list; Quarto's would number everything a second time
+# ("2.1 2.1 Priors", "Figure 1: Figure 1: …") or list the contents twice.
+function _pdf_report_numbering_metadata(metadata, numbered, has_contents)
+    (numbered || has_contents) || return
+    for (key, value) in _metadata_pairs(metadata)
+        numbered && key == "number-sections" && value !== false && throw(ArgumentError(
+            "pdf_report: the report is a `numbered` document, which numbers its sections itself; " *
+            "`number_sections` would number them a second time"))
+        has_contents && key == "toc" && value !== false && throw(ArgumentError(
+            "pdf_report: the report places its contents list with `contents()`; " *
+            "`toc` would add a second one"))
+    end
+end
+
 # The line of a YAML metadata block in `markdown`, or `nothing`: Pandoc reads a
 # `---` line that starts the document or follows a blank line, is followed by a
 # `key:` line and is closed by `---` or `...` as one, and Quarto lets it
@@ -21328,6 +21371,11 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
     isnothing(line) || throw(ArgumentError(
         "pdf_report: the Markdown has a YAML metadata block (line $line). Quarto would let it override " *
         "`title`, `lang` and the equation alt-text filter; pass its options as `metadata=` instead"))
+    numbered = _markdown_numbered(markdown)
+    has_contents = _markdown_contents(markdown)
+    _pdf_report_numbering_metadata(metadata, numbered, has_contents)
+    headers = [_PDF_REPORT_TABLES_TYPST, _PDF_REPORT_CODE_TYPST]
+    numbered && push!(headers, _PDF_REPORT_NUMBERED_TYPST)
     """
     ---
     title: $(_yaml_string(title))
@@ -21337,7 +21385,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
         from: $(_PDF_REPORT_READER)
         pdf-standard: $(_pdf_report_standards(_pdf_report_archival(archival)))
         syntax-highlighting: idiomatic
-        include-in-header: [$(_yaml_string(_PDF_REPORT_TABLES_TYPST)), $(_yaml_string(_PDF_REPORT_CODE_TYPST))]
+        include-in-header: [$(join(map(_yaml_string, headers), ", "))]
     filters:
       - path: $(_yaml_string(_PDF_REPORT_QUOTES_FILTER))
         at: post-render
@@ -21350,7 +21398,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
       - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
       - $(_yaml_string(_PDF_REPORT_LINKS_FILTER))
       - $(_yaml_string(_PDF_REPORT_BREAKS_FILTER))
-    ---
+    $(has_contents ? "  - " * _yaml_string(_PDF_REPORT_CONTENTS_FILTER) * "\n" : "")---
 
     """ * markdown
 end
@@ -21766,7 +21814,7 @@ _wrap_long(s::AbstractString) = h.div(s)
 _wrap_long(s) = s
 
 """
-    render_caption(spec; actions=(), texts=caption_texts())
+    render_caption(spec; actions=(), texts=caption_texts(), kind=:figure, id=nothing)
 
 Return a `<figcaption>` node for `spec`, a [`CaptionSpec`](@ref) or a plain
 string for a caption with only that title. `actions` is an iterable of nodes
@@ -21777,16 +21825,28 @@ one row below the title in a narrow column (see [`caption_style`](@ref)).
 `texts` (a [`CaptionTexts`](@ref)) holds the caption's own words, such as the
 toggle that opens `long`; pass `caption_texts(:de)` on a German page.
 
+In a [`numbered`](@ref) document the title starts with the caption's number,
+"Figure 3:" for `kind=:figure` and "Table 1:" for `kind=:table`; `kind=nothing`
+gives it none. `id` is the id of the figure the caption labels, which
+[`ref`](@ref) cites. Outside a numbered document both change nothing.
+
 Use `with_caption(spec, content; actions)` to wrap content in a `<figure>` —
 this function returns just the `<figcaption>` so it can be embedded in a
 custom layout if needed.
 """
-function render_caption(spec::CaptionSpec; actions=(), texts::CaptionTexts=_EN_CAPTION_TEXTS)
+function render_caption(spec::CaptionSpec; actions=(), texts::CaptionTexts=_EN_CAPTION_TEXTS,
+                        kind::Union{Nothing,Symbol}=:figure, id=nothing)
     # A blank title or short is left out, with its " — ": a caption of `short`
-    # alone shows just that text, never an empty bold and a leading dash.
+    # alone shows just that text, never an empty bold and a leading dash. In a
+    # `numbered` document the caption's number starts the bold title, or stands
+    # in bold by itself before `short` when there is no title; outside one the
+    # number slot writes nothing, so these captions render as without it.
     has_title, has_short = !_caption_blank(spec.title), !_caption_blank(spec.short)
-    header_kids = Any[h.span(has_title ? h.strong(spec.title) : "",
-        has_title && has_short ? " — " : "", has_short ? spec.short : "")]
+    number = isnothing(kind) ? nothing :
+        _CaptionNumber(_caption_kind(kind), isnothing(id) ? "" : string(id), !has_title)
+    lead = has_title ? Any[h.strong((isnothing(number) ? () : (number,))..., spec.title)] :
+        isnothing(number) ? Any[""] : Any[number, ""]
+    header_kids = Any[h.span(lead..., has_title && has_short ? " — " : "", has_short ? spec.short : "")]
     if !isempty(actions)
         push!(header_kids, h.span(; class="caption-actions")(actions...))
     end
@@ -21812,7 +21872,7 @@ _as_children(content::Tuple) = content
 _as_children(content::AbstractVector) = content
 
 """
-    with_caption(spec, content; actions=(), id=nothing, texts=caption_texts())
+    with_caption(spec, content; actions=(), id=nothing, texts=caption_texts(), kind=:figure)
 
 Wrap `content` (a single node or iterable of nodes) in a `<figure>` with the
 caption rendered above it. `spec` is a [`CaptionSpec`](@ref), or a plain string
@@ -21820,10 +21880,14 @@ for a caption with only that title. Pass `actions` (e.g. download buttons) to po
 the right side of the caption header (below the title in a narrow column), `id` to give the `<figure>` an id, and
 `texts` (a [`CaptionTexts`](@ref)) for the caption's own words, as in
 [`render_caption`](@ref).
+
+In a [`numbered`](@ref) document the caption starts with its number, "Figure
+3:" (`kind=:table`: "Table 1:"; `kind=nothing`: none), and `ref(id)` cites it.
 """
-function with_caption(spec::Union{CaptionSpec,AbstractString}, content; actions=(), id=nothing, texts::CaptionTexts=_EN_CAPTION_TEXTS)
+function with_caption(spec::Union{CaptionSpec,AbstractString}, content; actions=(), id=nothing,
+                      texts::CaptionTexts=_EN_CAPTION_TEXTS, kind::Union{Nothing,Symbol}=:figure)
     fig_attrs = isnothing(id) ? (; class="captioned") : (; class="captioned", id)
-    h.figure(; fig_attrs...)(render_caption(spec; actions, texts), _as_children(content)...)
+    h.figure(; fig_attrs...)(render_caption(spec; actions, texts, kind, id), _as_children(content)...)
 end
 
 # --- Table rendering ---
@@ -26031,7 +26095,7 @@ function sortable_table(headers, rows;
     framed = if !isnothing(caption)
         actions = download ? (download_btn,) : ()
         fig_id = isnothing(id) ? nothing : "tbl-$id"
-        with_caption(caption, table_wrap; actions, id=fig_id, texts=caption_texts(; more=texts.more))
+        with_caption(caption, table_wrap; actions, id=fig_id, texts=caption_texts(; more=texts.more), kind=:table)
     elseif download
         h.figure(; class="captioned")(
             h.figcaption(; class="caption")(
@@ -37262,6 +37326,11 @@ It draws `pico_page`'s frame: the skip link (`.htmxo-skip-link`) is
 out of sight until the keyboard reaches it, and the header's link to the page
 being read (`aria-current="page"`) is bold.
 
+A [`numbered`](@ref) document's [`contents`](@ref) list is a bordered box: each
+line the section's number in a column of its own and its title as a link,
+deeper levels indented, no list markers, although Pico lays out every `nav` as
+a horizontal menu.
+
 Class prefixes:
 - `u-`            general utilities (display, layout, typography, spacing)
 - `u-text-*`      semantic text colors mapped to `--htmxo-*` tokens
@@ -38191,6 +38260,22 @@ tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain:
 .htmxo-number > input[type="range"] { order: 0; flex: 1 1 6rem; width: auto; min-width: 5rem; }
 .htmxo-number > input[type="number"] { order: 1; flex: 0 0 7rem; width: 7rem; }
 .htmxo-number > .htmxo-number-unit { order: 2; white-space: nowrap; }
+
+/* A numbered document's contents list (`contents`): a bordered box, each line
+   a section number in a column of its own and the title linking to the
+   section, deeper levels indented under their section's title, no list
+   markers. UNLAYERED: Pico lays out every `nav`, `nav ol` and `nav li` as a
+   horizontal menu, unlayered. */
+nav.htmxo-contents { display: block; margin: 0 0 var(--pico-spacing, 1rem); padding: .75rem 1rem; border: var(--pico-border-width, 1px) solid var(--pico-muted-border-color, #d0d7de); border-radius: var(--pico-border-radius, .25rem); }
+nav.htmxo-contents > .htmxo-contents-title { margin: 0 0 .5rem; font-weight: 600; }
+nav.htmxo-contents ol { display: block; margin: 0; padding: 0; list-style: none; }
+nav.htmxo-contents ol ol { padding-inline-start: 2.75em; }
+nav.htmxo-contents li { display: block; margin: 0; padding: 0; list-style: none; }
+nav.htmxo-contents li > a { display: flex; gap: .5em; margin: 0; padding: .2rem 0; border-radius: 0; text-decoration: none; }
+nav.htmxo-contents li > a:hover > span:last-child { text-decoration: underline; }
+nav.htmxo-contents .htmxo-section-number { flex: 0 0 2.25em; font-variant-numeric: tabular-nums; }
+nav.htmxo-contents ol ol .htmxo-section-number { flex-basis: 2.75em; }
+nav.htmxo-contents ol ol ol .htmxo-section-number { flex-basis: 3.5em; }
 """))
 
 # --- Request feedback ---
@@ -40052,7 +40137,11 @@ _tabset_key(x::Union{Tuple,NamedTuple,AbstractVector,AbstractDict}, h::UInt) =
     foldl((k, value) -> _tabset_key(value, k), x; init=hash(length(x), h))
 _tabset_key(x::Pair, h::UInt) = _tabset_key(x.second, _tabset_key(x.first, h))
 _tabset_key(x::Node, h::UInt) =
-    _tabset_key(HTMX.children(x), _tabset_key(HTMX.attrs(x), _tabset_key(HTMX.tag(x), h)))
+    _tabset_key(_tabset_key_children(HTMX.children(x)), _tabset_key(HTMX.attrs(x), _tabset_key(HTMX.tag(x), h)))
+# A caption's number (`render_caption`'s slot for `numbered`) is not part of
+# what a panel says, so a caption keeps the id its tabset had before numbers.
+_tabset_key_children(children) =
+    any(c -> c isa _CaptionNumber, children) ? filter(c -> !(c isa _CaptionNumber), children) : children
 _tabset_key(x::_TabsetPart, h::UInt) = _tabset_key(x.node, h)
 _tabset_key(x::HtmlOnly, h::UInt) = _tabset_key(x.content, h)
 _tabset_key(x::ReportView, h::UInt) = _tabset_key(x.content, h)
@@ -40082,6 +40171,7 @@ end
 # After the value types its walk sees through (`_TabsetPart` above).
 include("glossary.jl")
 include("content_units.jl")
+include("numbering.jl")
 
 include("comparison.jl")
 include("semantic_browser.jl")

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.129
+## 0.1.130
 
 - `bound(x; columns=…)` of single-value outputs (a number, a `Bool`, text) is
   a table of one row: `bound(prediction; columns=(:half,))` with
@@ -15,6 +15,30 @@
   mix single values and vectors: the error names both kinds and the table the
   single values can have. An output that is neither (a matrix) is refused
   naming its type.
+
+## 0.1.129
+
+- `numbered(content...)` numbers the sections, captioned figures and captioned
+  tables inside it, with the same numbers in the HTML page, its Markdown and a
+  `pdf_report` made from it: a `SemanticSection`'s title starts with `1`, `2.1`,
+  …, a caption from `with_caption` or AlgebraOfVega's `with_plot_caption` with
+  "Figure 3:", and a captioned table's with "Table 1:" (a caption without a
+  title shows its number in bold by itself). `contents()` inside it
+  shows its numbered sections as a box of links on the page and becomes Typst's
+  contents list, with page numbers, in the PDF; `ref(id)` cites a numbered
+  element as a link reading "Figure 3" or "Section 2.1". The words follow the
+  page's language, or `texts=numbering_texts(:de)`. Pages that do not use
+  `numbered` render as before.
+- `render_caption` and `with_caption` take `kind=:figure` / `:table` (or
+  `nothing` for no number) and `render_caption` an `id`, the figure `ref` cites.
+- `pdf_report` switches Typst's own figure and table numbers off for a numbered
+  document, so nothing is numbered twice, and refuses `number_sections=true`
+  for it and `toc=true` beside a `contents()`.
+- A `SemanticAlternatives` view after the first is wrapped in `html_only` in its
+  HTML, which it already was in effect: Markdown writes the first view alone.
+- `html_only(content)` renders its content in HTML as an element's child does:
+  plain text, a vector or `nothing` inside it no longer throws a `MethodError`,
+  and text is escaped. Content that rendered before renders the same bytes.
 
 ## 0.1.128
 
