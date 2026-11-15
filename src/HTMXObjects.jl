@@ -21899,10 +21899,10 @@ function _sort_dir_token(dir)
 end
 
 """
-    ColumnSpec(label; help=nothing, sort_keys=(), align=nothing)
+    ColumnSpec(label; help=nothing, sort_keys=(), align=nothing, digits=nothing, sigdigits=nothing, percent=false)
 
 A table column header that carries an explanation, several sort orders, an
-alignment, or any of them. Use it among the `headers` of [`sortable_table`](@ref) (and so of
+alignment, how its numbers are written, or any of them. Use it among the `headers` of [`sortable_table`](@ref) (and so of
 [`master_detail_table`](@ref)), or as a column of [`render_table`](@ref)
 (`columns=`), wherever a `String` header would go: the column stays auto-wired
 exactly like a `String` — the sort button with keyboard sorting,
@@ -21977,6 +21977,25 @@ spanning columns is left as it is. Without `align`, a column of number cells
 ([`number_cell`](@ref), floats, [`IntervalEstimate`](@ref), group sums) is
 right-aligned, header included; `align = :left` keeps such a column at the
 left. Markdown, CSV and search are unchanged.
+
+# How its numbers are written: `digits`, `sigdigits`, `percent`
+
+[`render_table`](@ref) writes the numbers of a column with these keywords as
+[`format_number`](@ref) takes them, each a [`number_cell`](@ref) that sorts
+and goes to the ⬇ CSV by its unrounded value: `digits=3` writes `0.120`,
+`sigdigits=2` writes `0.16` for 0.15623, and `percent=true` writes the share
+0.45 as `45%` (`45 %` with `texts = table_texts(:de)`), with `digits` or
+`sigdigits` applied to the percent. Integers are number cells too in such a
+column, where otherwise they show as their `string`.
+
+```julia
+render_table(rows; columns = ["share" => ColumnSpec("Share passing"; digits = 3),
+                              "water" => ColumnSpec("Snow water (mm)"; digits = 0)])
+```
+
+The tables whose cells you build ([`sortable_table`](@ref),
+[`master_detail_table`](@ref)) refuse these keywords: write those cells with
+`number_cell(x; digits, sigdigits, percent)`.
 """
 struct ColumnSpec
     label::String
@@ -21987,11 +22006,33 @@ struct ColumnSpec
     # `:left`, `:center` or `:right`; `nothing` leaves the column to the
     # table (number columns right, others as the page styles them).
     align::Union{Nothing,Symbol}
+    # How `render_table` writes the column's numbers (`format_number`'s
+    # keywords); all unset, a float keeps every digit and an integer is text.
+    digits::Union{Nothing,Int}
+    sigdigits::Union{Nothing,Int}
+    percent::Bool
 end
 ColumnSpec(label, help, sort_keys) = ColumnSpec(label, help, sort_keys, nothing)
-ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=(), align=nothing) =
+ColumnSpec(label, help, sort_keys, align) = ColumnSpec(label, help, sort_keys, align, nothing, nothing, false)
+function ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=(), align=nothing,
+                    digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing, percent::Bool=false)
+    _number_rounding(digits, sigdigits, string("ColumnSpec(", repr(label), ")"))
     ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
-        _column_sort_keys(label, sort_keys), _column_align(label, align))
+        _column_sort_keys(label, sort_keys), _column_align(label, align),
+        isnothing(digits) ? nothing : Int(digits), isnothing(sigdigits) ? nothing : Int(sigdigits), percent)
+end
+
+# How `render_table` writes a column's numbers: the `format_number` keywords
+# its `ColumnSpec` gives, or `nothing` when it gives none.
+_column_number_format(col::ColumnSpec) = isnothing(col.digits) && isnothing(col.sigdigits) && !col.percent ? nothing :
+    (; digits=col.digits, sigdigits=col.sigdigits, percent=col.percent)
+_column_number_format(_) = nothing
+# The header without what `render_table` reads to write the cells (computed
+# sort keys keep their names, the cells carry the values), as `sortable_table`
+# takes it.
+_cells_written(col::ColumnSpec) = ColumnSpec(col.label, col.help,
+    Pair{String,Any}[first(k) => nothing for k in col.sort_keys], col.align)
+_cells_written(hdr) = hdr
 
 const _COLUMN_ALIGNS = (:left, :center, :right)
 _column_align(label, ::Nothing) = nothing
@@ -24151,36 +24192,6 @@ function htmxoSummaryFill(cell, target, x, s, table) {
     target.textContent = text(x);
     cell.dataset.htmxoNumber = key(x);
 }
-// `_format_fixed`; `minus` is the sign (a machine-read key keeps `-`).
-function htmxoFixed(x, digits, decimal, thousands, minus = '-') {
-    const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
-    const s = BigInt(scaled).toString().padStart(digits + 1, '0');
-    const out = (x < 0 && scaled !== 0 ? minus : '') + htmxoGrouped(s.slice(0, s.length - digits), thousands);
-    return digits > 0 ? out + decimal + s.slice(s.length - digits) : out;
-}
-// `_round_sig`: x to k significant digits, halves away from zero, as
-// [negative, digits, point] for ±0.digits × 10^point, by the same steps.
-function htmxoSigDigits(x, k) {
-    const a = Math.abs(x), pow10 = n => Number('1e' + n);
-    if (!isFinite(a)) throw new RangeError('cannot round ' + x + ' to significant digits: it is not a finite number');
-    if (a === 0) return [false, '', 0];
-    let e = Math.floor(Math.log10(a));
-    while (a < pow10(e)) e--;
-    while (a >= pow10(e + 1)) e++;
-    const d = k - 1 - e;
-    const s = String(Math.round(d > 300 ? a * 1e300 * pow10(d - 300) : d >= 0 ? a * pow10(d) : a / pow10(-d)));
-    return [x < 0, s.replace(/0+$/, ''), s.length + e + 1 - k];
-}
-// `_format_digits`: ±0.ds × 10^point, as a power of ten (`sci`) or positionally.
-function htmxoDigitsText(negative, ds, point, decimal, thousands, sci, minus = '-') {
-    if (!ds) return '0';
-    const sup = n => (n < 0 ? '⁻' : '') + String(Math.abs(n)).replace(/[0-9]/g, c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]);
-    const out = negative ? minus : '';
-    if (sci) return out + ds[0] + (ds.length > 1 ? decimal + ds.slice(1) : '') + '·10' + sup(point - 1);
-    if (point <= 0) return out + '0' + decimal + '0'.repeat(-point) + ds;
-    if (point >= ds.length) return out + htmxoGrouped(ds + '0'.repeat(point - ds.length), thousands);
-    return out + htmxoGrouped(ds.slice(0, point), thousands) + decimal + ds.slice(point);
-}
 // `_md_summary_cell`: a summary `s` as the table writes it, or as the ⬇ CSV
 // does (`csv`: no power of ten, and `-` whatever `minus` is).
 function htmxoSummaryText(x, s, decimal, thousands, csv, minus = '-') {
@@ -25089,6 +25100,7 @@ struct TableTexts
     interval_signed::String     #   the same with a negative bound, where a dash would read as a minus
     range::String               # a group summary's range (`ColumnSummary` over a leaf's bounds)
     range_signed::String        #   the same with a negative end
+    percent::String             # a share written as a percent (`format_number(x; percent=true)`)
     months::NTuple{12,String}       # the month names `format_date` writes, January first
     months_short::NTuple{12,String} #   and their abbreviations
     date_long::String           # `format_date(d; style=:long)`: 1 October 2015
@@ -25113,6 +25125,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     sort_ascending = (:name,), sort_descending = (:name,),
     interval = (:estimate, :lower, :upper), interval_signed = (:estimate, :lower, :upper),
     range = (:lower, :upper), range_signed = (:lower, :upper),
+    percent = (:number,),
     date_long = _DATE_PLACEHOLDERS, date_short = _DATE_PLACEHOLDERS, date_month = _DATE_PLACEHOLDERS,
 )
 
@@ -25163,6 +25176,7 @@ const _TABLE_TEXT_LOCALES = (
         interval_signed = "{estimate} ({lower} to {upper})",
         range = "{lower}–{upper}",
         range_signed = "{lower} to {upper}",
+        percent = "{number}%",
         months = ("January", "February", "March", "April", "May", "June", "July",
                   "August", "September", "October", "November", "December"),
         months_short = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
@@ -25216,6 +25230,8 @@ const _TABLE_TEXT_LOCALES = (
         interval_signed = "{estimate} ({lower} bis {upper})",
         range = "{lower}–{upper}",
         range_signed = "{lower} bis {upper}",
+        # German writes a space before the sign (DIN 5008), one that never breaks the line.
+        percent = "{number}\u00a0%",
         months = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
                   "August", "September", "Oktober", "November", "Dezember"),
         months_short = ("Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez."),
@@ -25341,13 +25357,17 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   an explanation or several sort orders computed from each Tables.jl row:
   `columns = ["mean" => ColumnSpec("Employees"; help = "…",
   sort_keys = interval_sort_keys(r -> r.mean, r -> r.q025, r -> r.q975))]`
-  (see [`ColumnSpec`](@ref)). A name that is not a column throws.
+  (see [`ColumnSpec`](@ref)). A name that is not a column throws. A
+  `ColumnSpec` also says how the column's numbers are written:
+  `"share" => ColumnSpec("Share"; digits = 3)` writes `0.120`, `percent = true`
+  writes `45%` (see *How its numbers are written* in [`ColumnSpec`](@ref)).
 - `cell(value, column_name, row_index)`: custom renderer of a cell's content.
   By default a float is a [`number_cell`](@ref) in the table's language
   (`texts`): `0.15623` shows `0,15623` with `texts=table_texts(:de)`,
   `3.81e-5` shows `3,81·10⁻⁵`, and the cell sorts and exports to CSV by its
   exact value. Any other value shows as `string(value)`, integers included,
-  since an integer column is as often a year, an id or a postcode as a count.
+  since an integer column is as often a year, an id or a postcode as a count,
+  unless the column's `ColumnSpec` says how its numbers are written.
   No value, `missing` or `nothing`, shows `–` with no sort value and an
   empty CSV field (an empty `number_cell`), in any column: at the right in
   a column of numbers, and where the text sits in a column of text or
@@ -25360,13 +25380,37 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
 - `link`, `link_key(row)`: hover-link the rows with the other tables and plots
   of the link group `link`, each row keyed by `link_key` of its Tables.jl row
   (e.g. `link="probes", link_key=r -> r.kenn`); see *Hover linking* in
-  [`sortable_table`](@ref)
+  [`sortable_table`](@ref). `link_key` may instead name a column
+  (`link_key = :kenn`): each row is keyed by its value there, a number as the
+  browser's `String(x)` writes it (`20` for 20.0), as AlgebraOfVega keys a
+  plot's marks by the same column (`config(link = (; group, key = :kenn))`).
 - `texts`: the words of the built-in controls, a [`TableTexts`](@ref) from
   [`table_texts`](@ref) (default English); see [`sortable_table`](@ref)
 - `sticky`: keep the table's control line and column headers in view while
   its rows scroll (default `true`); see *Controls and headers stay in view* in
   [`sortable_table`](@ref)
 - Extra kwargs are forwarded to `h.table()`
+
+# A table the browser computes
+
+Inside an `@htmx` struct, `render_table(bound(p; columns = (:water, :share)))`
+shows the outputs of a property `p` declared `@browser` (see `bound`). The
+server writes its first rows as for any table. On a `semantic_app` page that
+computes `p` in the browser, the page writes the rows again from each new value,
+offline and in a static `export_site` page too: every cell as the server would
+write it (the column's `ColumnSpec` rounding, a sort value and ⬇ CSV value
+that are the unrounded number), the sort the reader chose, the search, the
+row count and the hover-link keys (`link_key = :water`) follow, and the number
+of rows may change. The browser runs no Julia, so such a table refuses `cell`,
+`search_text`, `selectable`, a function `link_key` and sort keys computed by
+functions.
+
+```julia
+@get shielding() = render_table(bound(prediction; columns = (:water, :share));
+    columns = [:water => ColumnSpec("Snow water (mm)"; digits = 0),
+               :share => ColumnSpec("Share passing"; digits = 3)],
+    link = "shielding", link_key = :water)
+```
 
 # Example
 ```julia
@@ -25382,21 +25426,55 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     cols = Tables.columnnames(tcols)
     texts = get(kwargs, :texts, _EN_TABLE_TEXTS)
     headers = _render_table_headers(columns, cols)
+    formats = Any[_column_number_format(hdr) for hdr in headers]
     # Where each column's empty cells (`missing`, `nothing`) sit.
-    empty_aligns = Any[isnothing(cell) ? _render_empty_align(Tables.getcolumn(tcols, c), headers[j]) : nothing
+    empty_aligns = Any[isnothing(cell) ? _render_empty_align(Tables.getcolumn(tcols, c), headers[j], formats[j]) : nothing
                        for (j, c) in enumerate(cols)]
+    row_key = _render_link_key(link_key, cols)
+    # A table of browser outputs (`bound(x; columns)`): the page writes its
+    # rows again after each computation, from this description of them.
+    bound = _bound_table_attrs(table, cols, headers, formats, empty_aligns; cell, search_text, link_key, kwargs)
 
     body_rows = [
-        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts, empty_aligns[j]), row)
+        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts, empty_aligns[j], formats[j]), row)
               for (j, c) in enumerate(cols)]...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
-             (isnothing(link_key) ? (;) : (; data_htmxo_link_key=string(link_key(row))))...)
+             (isnothing(row_key) ? (;) : (; data_htmxo_link_key=string(row_key(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
     ]
 
-    sortable_table(map(_sort_key_names_only, headers), body_rows;
-        id, sortable, download, download_filename, caption, class, link, kwargs...)
+    sortable_table(map(_cells_written, headers), body_rows;
+        id, sortable, download, download_filename, caption, class, link, bound..., kwargs...)
 end
+
+# What keys a row for hover linking: a function of the row, or the name of a
+# column, whose value keys it as the browser writes it (`_link_key_text`).
+_render_link_key(::Nothing, cols) = nothing
+function _render_link_key(name::Symbol, cols)
+    name in cols || throw(ArgumentError(string("render_table: `link_key = ", repr(name),
+        "` names no column of the table; its columns are ", join(repr.(cols), ", "))))
+    row -> _link_key_text(Tables.getcolumn(row, name))
+end
+_render_link_key(f, cols) = f
+# A value as a hover-link key: as the browser's `String(x)` writes it, which
+# is how AlgebraOfVega keys the marks of a plot by the same column
+# (`_linkKeyText`): `20` for 20.0, `1e-7`, `Infinity`.
+_link_key_text(x) = string(x)
+_link_key_text(x::AbstractFloat) = _js_number_text(Float64(x))
+function _js_number_text(x::Float64)
+    isnan(x) && return "NaN"
+    isinf(x) && return x > 0 ? "Infinity" : "-Infinity"
+    negative, ds, point = _shortest_digits(x)
+    isempty(ds) && return "0"
+    # ECMAScript's Number::toString: positional while -6 < point <= 21
+    # (from 1e-7 up to 1e21), else one digit before the point and `e±n`.
+    -6 < point <= 21 && return _format_digits(negative, ds, point, ".", "", false)
+    e = point - 1
+    string(negative ? "-" : "", ds[1], length(ds) > 1 ? string(".", ds[2:end]) : "", "e", e < 0 ? "-" : "+", abs(e))
+end
+
+# A table that is not one of browser outputs carries no description of its rows.
+_bound_table_attrs(table, cols, headers, formats, empty_aligns; kw...) = (;)
 
 # Each column's header: its name, or what `columns` gives for it (a label or
 # a `ColumnSpec`).
@@ -25428,24 +25506,32 @@ function _render_sort_values(hdr::ColumnSpec, td, row)
         HTMX.children(td))
 end
 
-# A `render_table` cell: a float is a number cell in the table's language, no
-# value (`missing`, `nothing`) an empty number cell (`–`, no sort value, an
-# empty ⬇ CSV field) placed as `empty_align` says, any other value its
-# `string`; a custom `cell` renders the content, no value included.
-_render_table_cell(::Nothing, value::AbstractFloat, c, ri, texts, empty_align) = number_cell(value; texts)
-_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, ::Nothing) = number_cell(nothing; texts)
-_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, empty_align::String) =
+# A `render_table` cell: a float is a number cell in the table's language, and
+# so is any number in a column whose `ColumnSpec` says how its numbers are
+# written (`format`); no value (`missing`, `nothing`) an empty number cell
+# (`–`, no sort value, an empty ⬇ CSV field) placed as `empty_align` says, any
+# other value its `string`; a custom `cell` renders the content, no value
+# included. The browser runtime's `boundCell` writes the same cells.
+_render_table_cell(::Nothing, value::Real, c, ri, texts, empty_align, format) = _render_number_cell(value, texts, format)
+_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, ::Nothing, format) = number_cell(nothing; texts)
+_render_table_cell(::Nothing, ::Union{Nothing,Missing}, c, ri, texts, empty_align::String, format) =
     number_cell(nothing; texts, data_htmxo_align=empty_align)
-_render_table_cell(::Nothing, value, c, ri, texts, empty_align) = h.td(string(value))
-_render_table_cell(cell, value, c, ri, texts, empty_align) = h.td(cell(value, c, ri))
+_render_table_cell(::Nothing, value, c, ri, texts, empty_align, format) = h.td(string(value))
+_render_table_cell(cell, value, c, ri, texts, empty_align, format) = h.td(cell(value, c, ri))
+_render_number_cell(value::Bool, texts, format) = h.td(string(value))
+_render_number_cell(value::Real, texts, format) = value isa AbstractFloat || !isnothing(format) ?
+    number_cell(value; texts, something(format, (;))...) : h.td(string(value))
 
 # Where a column's empty cells sit: at the right, as a number cell does
 # (`nothing`: no alignment of their own), in a column of numbers (floats,
 # `IntervalEstimate`s) or of no values at all; in a column that shows text
 # (strings, integers, any other value), where that text sits: its
-# `ColumnSpec(align)`, else the left.
-_render_empty_align(values, hdr) =
-    any(_render_shows_text, values) ? String(something(_header_align(hdr), :left)) : nothing
+# `ColumnSpec(align)`, else the left. In a column whose `ColumnSpec` says how
+# its numbers are written, every number is a number cell.
+_render_empty_align(values, hdr, format=nothing) =
+    any(v -> _render_shows_text(v, format), values) ? String(something(_header_align(hdr), :left)) : nothing
+_render_shows_text(x, format) = _render_shows_text(x)
+_render_shows_text(x::Real, ::NamedTuple) = x isa Bool
 _render_shows_text(_) = true
 _render_shows_text(::Union{Nothing,Missing,AbstractFloat}) = false
 
@@ -26028,6 +26114,10 @@ function sortable_table(headers, rows;
     # Its rows are built already: a column's sort keys name the orders, and
     # each cell carries the values (`sort_values`).
     for (i, hdr) in enumerate(headers)
+        isnothing(_column_number_format(hdr)) || throw(ArgumentError(string("sortable_table: column ",
+            repr(_header_label(hdr)), " says how its numbers are written (`ColumnSpec(…; digits, sigdigits, ",
+            "percent)`), which render_table reads when it writes the cells; this table's cells are built ",
+            "already, so write them with `number_cell(x; digits, sigdigits, percent)`")))
         _computed_sort_keys(hdr) && throw(ArgumentError(string("sortable_table: column ",
             repr(_header_label(hdr)), " gives its sort keys functions, but sortable_table's rows are ",
             "built already. Name the keys (`sort_keys = [\"Estimate\", …]`) and give each cell its ",
@@ -26386,6 +26476,76 @@ if (!window.htmxoLoadOnceGuarded) {
 # native button (`_md_interactive_label`).
 const _MD_ROW_CONTROLS = (:a, :button, :input, :textarea, :select, :label, :form, :details)
 
+# How the browser writes numbers as `format_number` does (the table runtime's
+# group sums and number cells, the values a browser-computed page shows). It
+# rides the master/detail runtime, which every page shell carries
+# (`comparison`), after `htmxoGrouped` and `htmxoTableTextsDefault`.
+const _NUMBER_TEXT_JS = raw"""
+// `_format_fixed`; `minus` is the sign (a machine-read key keeps `-`).
+function htmxoFixed(x, digits, decimal, thousands, minus = '-') {
+    const scaled = Math.round(Math.abs(x) * [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10][digits]);
+    const s = BigInt(scaled).toString().padStart(digits + 1, '0');
+    const out = (x < 0 && scaled !== 0 ? minus : '') + htmxoGrouped(s.slice(0, s.length - digits), thousands);
+    return digits > 0 ? out + decimal + s.slice(s.length - digits) : out;
+}
+// `_round_sig`: x to k significant digits, halves away from zero, as
+// [negative, digits, point] for ±0.digits × 10^point, by the same steps.
+function htmxoSigDigits(x, k) {
+    const a = Math.abs(x), pow10 = n => Number('1e' + n);
+    if (!isFinite(a)) throw new RangeError('cannot round ' + x + ' to significant digits: it is not a finite number');
+    if (a === 0) return [false, '', 0];
+    let e = Math.floor(Math.log10(a));
+    while (a < pow10(e)) e--;
+    while (a >= pow10(e + 1)) e++;
+    const d = k - 1 - e;
+    const s = String(Math.round(d > 300 ? a * 1e300 * pow10(d - 300) : d >= 0 ? a * pow10(d) : a / pow10(-d)));
+    return [x < 0, s.replace(/0+$/, ''), s.length + e + 1 - k];
+}
+// `_format_digits`: ±0.ds × 10^point, as a power of ten (`sci`) or positionally.
+function htmxoDigitsText(negative, ds, point, decimal, thousands, sci, minus = '-') {
+    if (!ds) return '0';
+    const sup = n => (n < 0 ? '⁻' : '') + String(Math.abs(n)).replace(/[0-9]/g, c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]);
+    const out = negative ? minus : '';
+    if (sci) return out + ds[0] + (ds.length > 1 ? decimal + ds.slice(1) : '') + '·10' + sup(point - 1);
+    if (point <= 0) return out + '0' + decimal + '0'.repeat(-point) + ds;
+    if (point >= ds.length) return out + htmxoGrouped(ds + '0'.repeat(point - ds.length), thousands);
+    return out + htmxoGrouped(ds.slice(0, point), thousands) + decimal + ds.slice(point);
+}
+// `_shortest_digits`: the digits of the number's shortest round-trip form,
+// which the browser's `toExponential()` writes as Julia's `string` does.
+function htmxoShortestDigits(x) {
+    const m = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(x.toExponential());
+    return [m[1] === '-', (m[2] + (m[3] || '')).replace(/0+$/, ''), Number(m[4]) + 1];
+}
+// `_percent_value`: 100x, its decimal point moved by two places.
+function htmxoPercentValue(x, integer) {
+    if (integer) return x * 100;
+    const [negative, ds, point] = htmxoShortestDigits(x);
+    return ds ? Number((negative ? '-' : '') + '0.' + ds + 'e' + (point + 2)) : 0;
+}
+// `format_number`: the number `x` (`integer` when it is a Julia integer) with
+// `f.digits` or `f.sigdigits` and `f.percent`, in the language of `f.texts`
+// (`decimal`, `thousands`, `minus`, `percent`).
+function htmxoNumberText(x, f, integer) {
+    const t = f.texts || htmxoTableTextsDefault, minus = t.minus;
+    if (x === null || x === undefined) return '–';
+    if (x !== x) return 'NaN';
+    if (x === Infinity || x === -Infinity) return (x < 0 ? minus : '') + '∞';
+    if (f.percent) x = htmxoPercentValue(x, integer);
+    let s;
+    if (integer && !f.sigdigits) {
+        s = (x < 0 ? minus : '') + htmxoGrouped(String(Math.abs(x)), t.thousands);
+        if (f.digits) s += t.decimal + '0'.repeat(f.digits);
+    } else if (f.digits !== undefined && f.digits !== null) {
+        s = htmxoFixed(x, f.digits, t.decimal, t.thousands, minus);
+    } else {
+        const [negative, ds, point] = f.sigdigits ? htmxoSigDigits(x, f.sigdigits) : htmxoShortestDigits(x);
+        s = htmxoDigitsText(negative, ds, point, t.decimal, t.thousands, !integer && (point <= -4 || point >= 16), minus);
+    }
+    return f.percent ? t.percent.replace('{number}', s) : s;
+}
+"""
+
 _md_runtime_js() = _move_before_guard_js() * _load_once_guard_js() * """
 // A table text (`TableTexts`) with its {placeholders} filled in: from the
 // nearest `data-htmxo-texts` the table's `texts=` wrote, else English.
@@ -26399,15 +26559,19 @@ function htmxoGrouped(whole, thousands) {
     }
     return out;
 }
-function htmxoText(el, name, values) {
-    var holder = el && el.closest ? el.closest('[data-htmxo-texts]') : null, texts = htmxoTableTextsDefault;
-    if (holder) {
-        if (holder.htmxoTextsSource !== holder.dataset.htmxoTexts) {
-            holder.htmxoTextsSource = holder.dataset.htmxoTexts;
-            holder.htmxoTexts = JSON.parse(holder.htmxoTextsSource);
-        }
-        texts = holder.htmxoTexts;
+$(_NUMBER_TEXT_JS)
+// The texts of the table `el` is in: the nearest `data-htmxo-texts`, else English.
+function htmxoTexts(el) {
+    var holder = el && el.closest ? el.closest('[data-htmxo-texts]') : null;
+    if (!holder) return htmxoTableTextsDefault;
+    if (holder.htmxoTextsSource !== holder.dataset.htmxoTexts) {
+        holder.htmxoTextsSource = holder.dataset.htmxoTexts;
+        holder.htmxoTexts = JSON.parse(holder.htmxoTextsSource);
     }
+    return holder.htmxoTexts;
+}
+function htmxoText(el, name, values) {
+    var texts = htmxoTexts(el);
     // `_table_text`: a number takes the table's `thousands`, a string stays as it is.
     return texts[name].replace(/[{]([A-Za-z_]+)[}]/g, function(m, k) {
         if (!values || !(k in values)) return m;
@@ -27893,7 +28057,7 @@ _summary_rounding_fields(r::_FixedDigits) = (; digits=r.k)
 _summary_rounding_fields(r::_SigDigits) = (; sigdigits=r.k)
 
 """
-    format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing) -> String
+    format_number(x; texts=table_texts(), digits=nothing, sigdigits=nothing, percent=false) -> String
 
 Format a number using the decimal mark, grouping and rounding rules of the selected table language.
 
@@ -27917,8 +28081,17 @@ writes `0,156`, `1.234.567` and `3,81·10⁻⁵`; the default English texts writ
   `0.15623` writes `0,16` with `digits=2`. It never switches to a power of
   ten.
 
+- `percent=true` writes the share `x` as a percent: `0.45` writes `45%` with
+  the default English texts and `45 %` with `table_texts(:de)` (their
+  `percent` text, `{number}%`). `x` is multiplied by 100 by moving its decimal
+  point, so 0.145 is 14.5 exactly and rounds to `15%` with `digits=0`, and
+  `digits` or `sigdigits` round the percent: `0.4517` writes `45.2%` with
+  `digits=1`. `∞`, `-∞` and `NaN` take no `%`.
+
 The group sums of [`ColumnSummary`](@ref) take the same `digits` or
-`sigdigits` and write the same text, in the browser too.
+`sigdigits` and write the same text, in the browser too, and so do the values
+`bound(x; digits, sigdigits, percent, texts)` shows on a page whose results the
+browser computes.
 
 `missing` and `nothing` write `–`; `Inf`, `-Inf` and `NaN` write `∞`, `-∞` and
 `NaN`. A negative number starts with the `minus` of `texts`: `-` in English,
@@ -27931,16 +28104,17 @@ value. Unlike [`fmt_number`](@ref), which shortens a number with an English
 unit suffix (`1.5K`), `format_number` writes the number itself.
 """
 format_number(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Integer}=nothing,
-              sigdigits::Union{Nothing,Integer}=nothing) =
-    _format_number(_number_value(x), texts, _number_rounding(digits, sigdigits))
+              sigdigits::Union{Nothing,Integer}=nothing, percent::Bool=false) =
+    _format_number(_number_value(x), texts, _number_rounding(digits, sigdigits), percent)
 
 """
-    number_cell(x; texts=table_texts(), digits=nothing, sigdigits=nothing, attrs...)
+    number_cell(x; texts=table_texts(), digits=nothing, sigdigits=nothing, percent=false, attrs...)
 
 Render a numeric table cell with localized display text and its unformatted value for sorting and export.
 
-A table cell, `<td>`, that shows `format_number(x; texts, digits, sigdigits)`
-(see [`format_number`](@ref)) and keeps the exact value of `x` twice:
+A table cell, `<td>`, that shows `format_number(x; texts, digits, sigdigits, percent)`
+(see [`format_number`](@ref)) and keeps the exact value of `x` twice (the
+share itself under `percent=true`, `0.45` for `45%`):
 
 - as `data-sort-value`, so sorting compares the numbers and not the rounded or
   localised text (German `0,156` would otherwise sort as 0);
@@ -27956,8 +28130,8 @@ pass the table's `texts` to cells you build for
 [`sortable_table`](@ref).
 """
 number_cell(x; texts::TableTexts=_EN_TABLE_TEXTS, digits::Union{Nothing,Integer}=nothing,
-            sigdigits::Union{Nothing,Integer}=nothing, attrs...) =
-    _number_cell(_number_value(x), format_number(x; texts, digits, sigdigits), attrs)
+            sigdigits::Union{Nothing,Integer}=nothing, percent::Bool=false, attrs...) =
+    _number_cell(_number_value(x), format_number(x; texts, digits, sigdigits, percent), attrs)
 _number_cell(::Nothing, text, attrs) = h.td(; data_htmxo_number="", attrs...)(text)
 _number_cell(x, text, attrs) = let key = _number_key(x)
     h.td(; data_sort_value=key, data_htmxo_number=key, attrs...)(text)
@@ -28023,6 +28197,8 @@ _format_date(d::Dates.DateTime, texts, layout) = throw(ArgumentError(string(
 _format_date(d, texts, layout) = throw(ArgumentError(string(
     "format_date: expected a Date, missing or nothing; got ", repr(d))))
 
+_format_number(x, texts, rounding, percent::Bool) =
+    percent ? _format_percent(x, texts, rounding) : _format_number(x, texts, rounding)
 _format_number(::Nothing, texts, rounding) = "–"
 _format_number(x::Integer, texts, rounding) = _format_finite(x, texts, rounding)
 _format_number(x::AbstractFloat, texts, rounding) =
@@ -28050,6 +28226,21 @@ _format_finite(x::AbstractFloat, texts, r::_SigDigits) = let (negative, ds, poin
 end
 _format_finite(x::AbstractFloat, texts, ::Nothing) = let (negative, ds, point) = _shortest_digits(x)
     _format_digits(negative, ds, point, texts.decimal, texts.thousands, _float_sci(point); texts.minus)
+end
+
+# A share as a percent: 100x, filled into the `percent` text; a value that is
+# not a finite number is written as it is. `htmxoNumberText` writes the same.
+_format_percent(::Nothing, texts, rounding) = "–"
+_format_percent(x::Real, texts, rounding) = isfinite(x) ?
+    _fill_text(texts.percent; number=_format_finite(_percent_value(x), texts, rounding)) :
+    _format_number(x, texts, rounding)
+# 100x, its decimal point moved by two places: 0.145 → 14.5 exactly, where
+# `0.145 * 100` is 14.499999999999998 and would round to 14. The browser
+# parses the same digits (`htmxoPercentValue`), so both read one Float64.
+_percent_value(x::Integer) = 100 * widen(x)
+function _percent_value(x::AbstractFloat)
+    negative, ds, point = _shortest_digits(x)
+    isempty(ds) ? 0.0 : parse(Float64, string(negative ? "-" : "", "0.", ds, "e", point + 2))
 end
 
 # A float is written as a power of ten below 10⁻⁴ and from 10¹⁵ up: for
@@ -28397,7 +28588,7 @@ _interval_csv_json(values...) = JSON.json(map(v -> isnothing(v) ? "" : _number_k
 # An `IntervalEstimate` is its cell wherever a table makes a float a
 # `number_cell`: a `render_table` column, a bare `master` cell, and the text
 # in a `SemanticTable`'s Markdown.
-_render_table_cell(::Nothing, value::IntervalEstimate, c, ri, texts, empty_align) = interval_cell(value; texts)
+_render_table_cell(::Nothing, value::IntervalEstimate, c, ri, texts, empty_align, format) = interval_cell(value; texts)
 _render_shows_text(::IntervalEstimate) = false
 _md_master_cell(x::IntervalEstimate, texts) = interval_cell(x; texts)
 _semantic_table_cell(x::IntervalEstimate) = format_interval(x)

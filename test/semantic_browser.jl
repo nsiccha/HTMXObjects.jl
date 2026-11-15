@@ -2,7 +2,7 @@ using TestItemRunner
 
 @testmodule BrowserFixtures begin
     using HTMXObjects
-    export Lines, StaleCaption, ServerTwin, OpaqueHelp, TOY_JS, browser_region, bound_texts
+    export Lines, StaleCaption, ServerTwin, OpaqueHelp, Shield, TOY_JS, browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -115,6 +115,38 @@ using TestItemRunner
         @get result() = h.p("total ", bound(line.total), " ", bound(b))
     end
 
+    # The snow-shielding picture's facts and table (Portfolio's client
+    # visualizer): rational functions only, so the browser computes the same
+    # Float64 as the server and the two write identical cells.
+    const SHIELD_JS = """
+    export function shield(water, attenuation) {
+      return { water, depth: water.map(w => w / 2.5), share: water.map(w => 1 / (1 + attenuation * w)),
+               half: 1 / attenuation, at: [1 / (1 + attenuation * 20), 1 / (1 + attenuation * 100)] };
+    }
+    export const INPUTS = [{ name: "water", type: "Vector{Float64}" }, { name: "attenuation", type: "Float64" }];
+    """
+
+    @htmx struct Shield
+        "Attenuation per mm of snow water"
+        @param attenuation::Float64 = 0.01
+        @options(attenuation) = number_domain(0.005, 0.02)
+        water = [0.0, 20.0, 50.0, 100.0]
+        shield = (; water, depth = water ./ 2.5, share = 1 ./ (1 .+ attenuation .* water), half = 1 / attenuation,
+                  at = [1 / (1 + attenuation * 20), 1 / (1 + attenuation * 100)])
+        @browser(shield) = browser_module(; source = SHIELD_JS, entry = :shield)
+        __page__(content) = HTMXObjects.htmx(content; title = "Shield", assets = "assets/vendor", runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "What the snow lets through"
+        @get picture() = h.div(h.p(bound(shield.half; digits = 0), " mm of water"; class = "half"),
+            h.p(bound(shield.at[1]; percent = true, digits = 0), " and ",
+                bound(shield.at[2]; percent = true, digits = 0); class = "at"),
+            h.p(bound(shield.at[1]; digits = 3, texts = table_texts(:de)); class = "de"),
+            render_table(bound(shield; columns = (:water, :depth, :share));
+                columns = [:water => ColumnSpec("Snow water (mm)"; digits = 0), :depth => ColumnSpec("Depth (cm)"; digits = 0),
+                           :share => ColumnSpec("Share passing"; digits = 3)],
+                link = "shield", link_key = :water))
+    end
+
     browser_region(html) = match(r"<div id=\"[^\"]*-result\"[^>]*data-htmxo-browser=[^>]*>", html)
     bound_texts(html) = [m.captures[1] for m in eachmatch(r"<span data-htmxo-bound=\"[^\"]*\"[^>]*>([^<]*)</span>", html)]
 end
@@ -187,7 +219,8 @@ end
     @test count("<div class=\"htmxo-browser-view\"", html) == 1
     @test count("<template data-htmxo-variant=", html) == 2
     @test occursin("data-htmxo-number=", html)  # `a`'s range control
-    @test bound_texts(html)[1:4] == ["3.0", "5.0", "2.0", "0.5"]
+    # Numbers as `format_number` writes them: `extra` with exactly two decimals.
+    @test bound_texts(html)[1:4] == ["3", "5", "2", "0.50"]
     # The binding: the module's arguments in its order, data embedded once.
     binding = JSON.parse(match(r"<script type=\"application/json\" id=\"[^\"]*\" data-htmxo-browser-binding=\"\">([^<]*)</script>", html).captures[1])
     @test binding["entry"] == "toy"
@@ -206,7 +239,7 @@ end
     @test occursin("data-htmxo-bound-columns=", html)
     # Text peers show the values.
     plain = String(HTMXObjects._response_bytes(dispatch(:GET, "/result?a=3&b=4&plain=1")))
-    @test occursin("total 7.0", plain) && occursin("second 10.0", plain) && occursin("slope 3.0", plain)
+    @test occursin(r"total 7(?![.\d])", plain) && occursin(r"second 10(?![.\d])", plain) && occursin(r"slope 3(?![.\d])", plain)
     @test HTMXObjects._browser_skeleton("<p><span data-htmxo-bound=\"[&quot;a&quot;]\" data-htmxo-kind=\"float\">2.0</span> <div id=\"p\" data-htmxo-bound-columns=\"x\"><div><script>var s = '</div>';</script>1</div></div></p>") ==
           "<p><span data-htmxo-bound=\"[&quot;a&quot;]\" data-htmxo-kind=\"float\"></span> <div id=\"p\" data-htmxo-bound-columns=\"x\"></div></p>"
 end
@@ -354,7 +387,7 @@ end
               await fetch('/complete?status=passed&search=' + encodeURIComponent(location.search));
               return;
             }
-            await until(() => shown() === '3.0|5.0|2.0|0.5', 'first: ' + shown());
+            await until(() => shown() === '3|5|2|0.50', 'first: ' + shown());
             const floats = ($(repr(floats))).map(window.__htmxoJuliaFloat).join(' ');
             if (floats !== $(repr(join(expected_floats, " "))))
               throw new Error('julia floats: ' + floats);
@@ -364,38 +397,40 @@ end
             });
             await fetch('/mark?phase=start');
             type('a', '3'); type('b', '4');
-            await until(() => shown() === '7.0|10.0|3.0|0.5', 'a=3 b=4: ' + shown());
-            // Computed in the browser from embedded Inf and -0.0, both intact.
-            if (echo() !== 'Inf|-0.0|1|1') throw new Error('non-finite data: ' + echo());
+            await until(() => shown() === '7|10|3|0.50', 'a=3 b=4: ' + shown());
+            // Computed in the browser from embedded Inf and -0.0, both intact
+            // (the `ok` outputs say so; -0.0 is written `0`, as format_number does).
+            if (echo() !== '∞|0|1|1') throw new Error('non-finite data: ' + echo());
             if (!columns || columns.columns.y.join(',') !== '4,7,10') throw new Error('columns: ' + JSON.stringify(columns));
             // A single value's table keeps its one row: the new value, not none.
             if (!rule || rule.n !== 1 || JSON.stringify(rule.columns) !== '{"total":[7]}')
               throw new Error('one-row columns: ' + JSON.stringify(rule));
             await until(() => relevant('extra'), 'extra applies (a*b > 10)');
             type('extra', '0.125');
-            await until(() => shown() === '7.0|10.0|3.0|0.12', 'extra digits: ' + shown());
+            // Exactly two decimals, halves away from zero, as on the server.
+            await until(() => shown() === '7|10|3|0.13', 'extra digits: ' + shown());
             choose('show', 'total');
             await until(() => shown() === '7.0', 'total view: ' + shown());
             choose('show', 'line');
-            await until(() => shown() === '7.0|10.0|3.0|0.12', 'line view again: ' + shown());
+            await until(() => shown() === '7|10|3|0.13', 'line view again: ' + shown());
             type('b', '-1');
             await until(() => { const n = region().querySelector('.htmxo-browser-fault'); return n && n.textContent.startsWith('DomainError: toy was called with b = -1'); }, 'fault');
             if (!region().querySelector('.htmxo-browser-view').hasAttribute('data-htmxo-stale')) throw new Error('not stale');
             type('b', '2');
             // a*b = 6: `extra` no longer applies and reads its default, as on the server.
-            await until(() => shown() === '5.0|8.0|3.0|0.5' && !region().querySelector('.htmxo-browser-fault'), 'recovered: ' + shown());
+            await until(() => shown() === '5|8|3|0.50' && !region().querySelector('.htmxo-browser-fault'), 'recovered: ' + shown());
             // A slider held down sends `input` events only, which its field
             // relays: the result follows each, the address waits for the release.
             const slider = document.querySelector('label[data-htmxo-number]:has(input[name="a"]) input[data-htmxo-number-slider]');
             slider.value = '100';
             slider.dispatchEvent(new Event('input', {bubbles: true}));
-            await until(() => shown() === '4.0|6.0|2.0|0.5', 'held slider: ' + shown());
+            await until(() => shown() === '4|6|2|0.50', 'held slider: ' + shown());
             if (control('a').value !== '2' || new URLSearchParams(location.search).get('a') !== '3')
               throw new Error('held slider field or address: ' + control('a').value + ' ' + location.search);
             // A number being typed: `input` events of the field alone.
             control('a').value = '4';
             control('a').dispatchEvent(new Event('input', {bubbles: true}));
-            await until(() => shown() === '6.0|10.0|4.0|0.5', 'typed: ' + shown());
+            await until(() => shown() === '6|10|4|0.50', 'typed: ' + shown());
             slider.dispatchEvent(new Event('change', {bubbles: true}));
             await until(() => new URLSearchParams(location.search).get('a') === '4', 'address on release: ' + location.search);
             await fetch('/mark?phase=end');
@@ -453,6 +488,206 @@ end
             start = findfirst(==("/mark?phase=start"), requests)
             stop = findfirst(==("/mark?phase=end"), requests)
             @test start !== nothing && stop !== nothing
+            @test start !== nothing && stop !== nothing && stop == start + 1
+        end
+    end
+end
+
+@testitem "bound writes a number as format_number does, with its digits, percent and language" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    b(x; kw...) = HTMXObjects._bound((:x,), x; kw...)
+    html(v) = repr("text/html", v)
+    # Exactly `digits` decimals, a share as a percent, the language's marks.
+    @test repr("text/plain", b(0.12; digits = 3)) == "0.120" && repr("text/plain", b(45.0; digits = 0)) == "45"
+    @test repr("text/plain", b(0.4517; percent = true, digits = 0)) == "45%"
+    @test repr("text/plain", b(0.12; digits = 3, texts = table_texts(:de))) == "0,120"
+    @test repr("text/plain", b(0.4517; percent = true, sigdigits = 2, texts = table_texts(:de))) == "45 %"
+    # Without keywords as format_number writes it: no `.0`, a power of ten, grouped integers.
+    @test repr("text/plain", b(2.0)) == "2" && repr("text/plain", b(3.81e-5)) == "3.81·10⁻⁵"
+    @test repr("text/plain", b(1234)) == "1,234" && repr("text/plain", b(Inf)) == "∞"
+    @test repr("text/plain", b(true)) == "true" && repr("text/plain", b("on")) == "on"
+    # The page writes it again with the same rounding, percent and language.
+    @test occursin("data-htmxo-format=\"{&quot;digits&quot;:3}\"", html(b(0.12; digits = 3)))
+    @test occursin("&quot;percent&quot;:true", html(b(0.45; percent = true)))
+    de = html(b(0.12; digits = 3, texts = table_texts(:de)))
+    @test occursin("&quot;decimal&quot;:&quot;,&quot;", de) && occursin("&quot;percent&quot;:&quot;{number} %&quot;", de)
+    @test !occursin("data-htmxo-format", html(b(2.0))) && occursin("data-htmxo-kind=\"int\"", html(b(1234)))
+    # The facts of the shielding picture, as its page shows them first.
+    route!(Shield(); operation_policy = :blocking)
+    facts = String(HTMXObjects._response_bytes(dispatch(:GET, "/picture"; headers = ["HX-Request" => "true"])))
+    @test bound_texts(facts) == ["100", "83%", "50%", "0,833"]
+    # Refused: a rounding that is no integer, both roundings, and rounding a table.
+    @test_throws ArgumentError b(1.0; digits = 1.5)
+    @test_throws ArgumentError b(1.0; digits = 1, sigdigits = 2)
+    e = try; HTMXObjects._bound((:x,), (; a = [1.0]); columns = (:a,), digits = 1); nothing; catch err; err; end
+    @test e isa ArgumentError && occursin("ColumnSpec(label; digits, sigdigits, percent)", e.msg)
+end
+
+@testitem "render_table of browser outputs describes its rows for the page, and a static page keeps it" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, JSON
+    route!(Shield(); operation_policy = :blocking)
+    html = String(HTMXObjects._response_bytes(dispatch(:GET, "/picture"; headers = ["HX-Request" => "true"])))
+    # The first rows, as any render_table writes them, each column with its rounding.
+    @test [m[1] for m in eachmatch(r"<td[^>]*>([^<]*)</td>", html)] ==
+          ["0", "0", "1.000", "20", "8", "0.833", "50", "20", "0.667", "100", "40", "0.500"]
+    @test occursin("data-sort-value=\"0.8333333333333334\" data-htmxo-number=\"0.8333333333333334\">0.833<", html)
+    # Keyed for hover linking as AlgebraOfVega keys a plot's marks: `20`, not `20.0`.
+    @test [m[1] for m in eachmatch(r"data-htmxo-link-key=\"([^\"]*)\"", html)] == ["0", "20", "50", "100"]
+    spec = JSON.parse(replace(match(r"data-htmxo-bound-table=\"([^\"]*)\"", html)[1], "&quot;" => "\""))
+    @test spec["path"] == ["shield"] && spec["link_key"] == "water"
+    @test [c["name"] for c in spec["columns"]] == ["water", "depth", "share"]
+    @test all(c -> c["kind"] == "float", spec["columns"]) && [c["digits"] for c in spec["columns"]] == [0, 0, 3]
+    # The text peer shows the rows the server computes.
+    plain = String(HTMXObjects._response_bytes(dispatch(:GET, "/picture?attenuation=0.02&plain=1")))
+    @test occursin("0.714", plain) && occursin("0.333", plain)
+    # The page writes the rows again, so the static export takes the page.
+    HTMXObjects.vendorfiles("assets/vendor")
+    mktempdir() do dir
+        export_site(joinpath(dir, "site"); pages = ["/"])
+        @test occursin("data-htmxo-bound-table=", read(joinpath(dir, "site", "index.html"), String))
+    end
+    @test HTMXObjects._browser_skeleton("<table data-htmxo-bound-table=\"x\"><tbody><tr><td>1</td></tr></tbody></table><small data-htmxo-table-count=\"\" role=\"status\">4 of 4 rows shown</small>") ==
+          "<table data-htmxo-bound-table=\"x\"></table><small data-htmxo-table-count=\"\" role=\"status\"></small>"
+    # The browser runs no Julia: a function of the table is refused, naming it.
+    t = HTMXObjects._bound((:shield,), (; water = [1.0, 2.0], share = [0.5, 0.25]); columns = (:water, :share))
+    refused(; kw...) = try; render_table(t; kw...); nothing; catch err; err; end
+    for (kw, phrase) in (((; cell = (v, c, i) -> v), "`cell` function"), ((; search_text = r -> "x"), "`search_text` function"),
+                         ((; link = "g", link_key = r -> r.water), "`link_key` function"), ((; selectable = "s"), "`selectable`"),
+                         ((; columns = [:share => ColumnSpec("S"; sort_keys = ["a" => r -> 1, "b" => r -> 2])]), "sort keys computed"))
+        e = refused(; kw...)
+        @test e isa ArgumentError && occursin(phrase, e.msg) && occursin("the table of shield", e.msg)
+    end
+    @test occursin("data-htmxo-link-key=\"2\"", repr("text/html", render_table(t; link = "g", link_key = :water)))
+end
+
+@testitem "a static page writes its bound table and facts again offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, JSON
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(Shield(); operation_policy = :blocking)
+        HTMXObjects.vendorfiles("assets/vendor")
+        # What format_number writes, which the page's `htmxoNumberText` must write too.
+        js(x::Integer) = string(x)
+        js(x::AbstractFloat) = HTMXObjects._js_number_text(Float64(x))
+        numbers = (0.15623, 2.0, -0.0, 3.81e-5, -1234.5, 1e15, 1.5e15, 0.125, 0.145, 0.07, 2850.0, 9.96, 1234567.25,
+                   5e-324, 0.4517, Inf, -Inf, NaN, 0, 42, -1234, 1234567)
+        formats = ((;), (; digits = 0), (; digits = 3), (; sigdigits = 2), (; percent = true),
+                   (; percent = true, digits = 1), (; percent = true, sigdigits = 2))
+        cases = String[]
+        for x in numbers, f in formats, texts in (table_texts(), table_texts(:de))
+            t = Dict(string(n) => getfield(texts, n) for n in (:decimal, :thousands, :minus, :percent))
+            fjs = JSON.json(merge(Dict{String,Any}(string(k) => v for (k, v) in pairs(f)), Dict{String,Any}("texts" => t)))
+            push!(cases, string("[", js(x), ",", fjs, ",", x isa Integer, ",", JSON.json(format_number(x; texts, f...)), "]"))
+        end
+        driver = """
+        <script>
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + (typeof label === 'function' ? label() : label)); await sleep(25); }
+          }
+          const table = () => document.querySelector('table[data-htmxo-bound-table]');
+          const rows = () => Array.from(table().tBodies[0].rows);
+          const cell = c => [c.textContent, c.getAttribute('data-sort-value'), c.getAttribute('data-htmxo-number'), c.getAttribute('data-htmxo-align')].join('~');
+          const snapshot = () => rows().map(r => r.getAttribute('data-htmxo-link-key') + '=' + Array.from(r.cells).map(cell).join('|')).sort().join(' ');
+          const column = j => rows().map(r => r.cells[j].textContent).join(',');
+          const fact = name => Array.from(document.querySelectorAll('.' + name + ' [data-htmxo-bound]')).map(e => e.textContent).join('|');
+          const facts = () => [fact('half'), fact('at'), fact('de')].join(' ');
+          const field = () => document.querySelector('input[name="attenuation"]');
+          function typed(v) { const c = field(); c.value = v; c.dispatchEvent(new Event('input', {bubbles: true})); }
+          try {
+            const cases = [$(join(cases, ",\n"))];
+            const wrong = cases.filter(c => htmxoNumberText(c[0], c[1], c[2]) !== c[3])
+              .map(c => [c[0], c[1], htmxoNumberText(c[0], c[1], c[2]), c[3]]);
+            if (wrong.length) throw new Error(wrong.length + ' numbers differ: ' + JSON.stringify(wrong.slice(0, 4)));
+            await until(() => table() && rows().length === 4, 'table');
+            const server = snapshot();
+            if (facts() !== '100 83%|50% 0,833') throw new Error('first facts: ' + facts());
+            // The reader sorts by the share, ascending.
+            const th = table().tHead.rows[0].cells[2];
+            sortTable(th);
+            if (column(0) !== '100,50,20,0') throw new Error('sorted: ' + column(0));
+            await fetch('/mark?phase=start');
+            typed('0.02');
+            await until(() => facts() === '50 71%|33% 0,714', () => 'typed facts: ' + facts());
+            await until(() => column(2) === '0.333,0.500,0.714,1.000', () => 'typed table: ' + column(2));
+            // The reader's sort holds for the new rows.
+            if (column(0) !== '100,50,20,0' || th.getAttribute('aria-sort') !== 'ascending')
+              throw new Error('sort kept: ' + column(0) + ' ' + th.getAttribute('aria-sort'));
+            // The ⬇ CSV and the sort read the unrounded share.
+            const r20 = table().querySelector('tr[data-htmxo-link-key="20"]');
+            if (r20.cells[2].getAttribute('data-htmxo-number') !== $(repr(string(1 / 1.4))))
+              throw new Error('csv value: ' + r20.cells[2].getAttribute('data-htmxo-number'));
+            // Hover linking lights the new rows.
+            htmxoLink('shield', '50');
+            await until(() => table().querySelector('tr[data-htmxo-link-key="50"]').hasAttribute('data-htmxo-linked'), 'linked row');
+            htmxoLink('shield', null);
+            // A slider held down: its `input` events alone redraw facts and table.
+            const slider = document.querySelector('input[data-htmxo-number-slider]');
+            slider.value = slider.min;
+            slider.dispatchEvent(new Event('input', {bubbles: true}));
+            await until(() => fact('half') === '200', () => 'held slider: ' + facts());
+            await until(() => column(2) === '0.667,0.800,0.909,1.000', () => 'held slider table: ' + column(2));
+            // Back at the first value, the browser's rows are the server's, cell by cell.
+            typed('0.01');
+            await until(() => facts() === '100 83%|50% 0,833', () => 'back: ' + facts());
+            await until(() => snapshot() === server, () => 'parity: ' + snapshot() + ' / ' + server);
+            await fetch('/mark?phase=end');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        </script>
+        """
+        mktempdir() do dir
+            site = joinpath(dir, "site")
+            export_site(site; pages = ["/"])
+            receipt = Channel{String}(1)
+            requests = String[]
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose = false) do req
+                uri = HTTP.URI(req.target)
+                path = uri.path
+                push!(requests, req.target)
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                path == "/mark" && return HTTP.Response(204)
+                file = joinpath(site, lstrip(path == "/" ? "/index.html" : HTTP.URIs.unescapeuri(path), '/'))
+                isfile(file) || return HTTP.Response(404)
+                body = read(file, String)
+                endswith(file, "index.html") && (body = replace(body, "</body>" => driver * "</body>"))
+                type = endswith(file, ".js") ? "application/javascript" : endswith(file, ".css") ? "text/css" : "text/html"
+                HTTP.Response(200, ["Content-Type" => type], body)
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/index.html`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout = devnull, stderr = browser_log); wait = false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint = 0.05) === :ok
+                        outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                        @test HTTP.URIs.unescapeuri(outcome) == "/complete?status=passed"
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
+            # Between the marks the page computed and redrew without a single request.
+            start = findfirst(==("/mark?phase=start"), requests)
+            stop = findfirst(==("/mark?phase=end"), requests)
             @test start !== nothing && stop !== nothing && stop == start + 1
         end
     end

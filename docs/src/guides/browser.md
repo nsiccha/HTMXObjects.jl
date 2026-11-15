@@ -15,7 +15,7 @@ static export (`export_site`) and offline:
 using HTMXObjects
 const LINE_JS = """
 export function line(grid, a, b) {
-  return { y: grid.map(x => a * x + b), total: a + b };
+  return { x: grid, y: grid.map(x => a * x + b), total: a + b };
 }
 export const INPUTS = [{ name: "grid", type: "Vector{Float64}" },
   { name: "a", type: "Float64" }, { name: "b", type: "Float64" }];
@@ -26,10 +26,13 @@ export const INPUTS = [{ name: "grid", type: "Vector{Float64}" },
     "Intercept"
     @param b::Float64 = 1.0
     grid = [0.0, 1.0, 2.0]
-    fit = (; y = a .* grid .+ b, total = a + b)
+    fit = (; x = grid, y = a .* grid .+ b, total = a + b)
     @browser(fit) = browser_module(; source = LINE_JS, entry = :line)
     "Line"
-    @get result() = h.p("total ", bound(fit.total), " at slope ", bound(a))
+    @get result() = h.p("total ", bound(fit.total; digits = 1), " at slope ", bound(a))
+    "Points"
+    @get points() = render_table(bound(fit; columns = (:x, :y));
+        columns = [:y => ColumnSpec("y"; digits = 2)], link = "line", link_key = :x)
     @get index() = semantic_app(__self__; presentation=:tabs,
         select=entry -> entry.name !== :index)
 end
@@ -48,14 +51,22 @@ println(String(response.body))
   goes into the page, non-finite numbers and `-0.0` included. A named tuple comes back as an object of named outputs.
 - **`bound`** marks where a view shows a browser value: the property, one of its
   outputs (`bound(fit.total)`), an element of one (`bound(fit.y[2])`, the index
-  an integer literal) or a `@param` (`bound(a)`), rounded with `digits=`. The server shows
-  the value as Julia's `string` writes it, and so does the browser after each
-  change. `bound(fit; columns=(:x, :y))` is the outputs' table for a plot's
-  `data(...)`; give the element that draws it `bound_columns_attrs(...)`, and
-  the browser hands it the new rows through AlgebraOfVega's `AoV.updateData`
-  and an `htmxo:bound-columns` event. The table is its own `Tables.columns`,
-  so a plot's `data(...)` layer (AlgebraOfGraphics keeps `Tables.columns` of
-  its data) still holds it, and a plotting package can mark the element itself.
+  an integer literal) or a `@param` (`bound(a)`). The server writes a number as
+  `format_number` does, and so does the browser after each change: `digits=1`
+  writes exactly one decimal (`4.0`), `digits=0` a whole number, `sigdigits=k`
+  significant digits, `percent=true` the share 0.45 as `45%`, and
+  `texts=table_texts(:de)` German marks (`0,120`, `45 %`). Without them a
+  number keeps its digits (`4`, `3.81·10⁻⁵`). The value itself is not rounded.
+- **A table of outputs:** `bound(fit; columns=(:x, :y))`. Given to
+  `render_table` (`points` above), it is written again after each change, each
+  column as its `ColumnSpec(label; digits, sigdigits, percent)` says, sorted
+  and exported to CSV by the unrounded values, with the reader's sort kept and
+  rows hover-linked by `link_key = :x`. For a plot's `data(...)`, give the
+  element that draws it `bound_columns_attrs(...)`, and the browser hands it the
+  new rows through AlgebraOfVega's `AoV.updateData` and an
+  `htmxo:bound-columns` event. The table is its own `Tables.columns`, so a
+  plot's `data(...)` layer (AlgebraOfGraphics keeps `Tables.columns` of its
+  data) still holds it, and a plotting package can mark the element itself.
   Single-value outputs (a number, a `Bool`, text) make a table of one row,
   `bound(fit; columns=(:half,))` with `half::Float64`, for a mark at that
   value such as a rule. One table holds vectors of one length or single
