@@ -50,7 +50,7 @@ const _NUMBERING_TEXT_PLACEHOLDERS = (section = (:number,), figure = (:number,),
     numbering_texts(locale::Symbol=:en; texts...)
 
 The [`NumberingTexts`](@ref) for `locale` (`:en` or `:de`), with any of its
-texts replaced by keyword:
+texts replaced by keyword.
 
 ```julia
 numbered(report; texts=numbering_texts(:de))                         # "Abbildung 3", "Inhalt"
@@ -84,7 +84,7 @@ end
 
 Content whose sections, captioned figures and captioned tables are numbered,
 with the same numbers in the HTML page, the Markdown (`?plain`,
-[`to_markdown_string`](@ref)) and a [`pdf_report`](@ref) made from it:
+`to_markdown_string`) and a [`pdf_report`](@ref) made from it.
 
 - a [`SemanticSection`](@ref) shows its number before its title: `1`, `2`,
   `2.1`, … by how the sections nest. A section at `level=1` is the document's
