@@ -1,6 +1,7 @@
 [routes]
 names = [
     "@htmx",
+    "BrowserModule",
     "InputSection",
     "MultilineText",
     "OpenAPIRoutes",
@@ -21,6 +22,8 @@ names = [
     "application_explorer_view",
     "application_observations",
     "bodyparams",
+    "bound_columns_attrs",
+    "browser_module",
     "create_app",
     "dispatch",
     "drain_service!",
@@ -47,6 +50,7 @@ names = [
     "route!",
     "select_routes",
     "semantic_app",
+    "semantic_browser_script",
     "semantic_control",
     "semantic_descriptor",
     "semantic_follow_script",
@@ -121,6 +125,7 @@ names = [
     "redirect_history_script",
     "redirect_to",
     "render_markdown",
+    "report_view",
     "semantic_card",
     "semantic_texts",
     "syntax_script",

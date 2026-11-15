@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.121
+## 0.1.123
 
 - `render_table` writes no value, `missing` or `nothing`, as `–` with no sort
   value and an empty ⬇ CSV field (an empty `number_cell`), in every column.
@@ -17,6 +17,53 @@
   text outside any cell); a bare `nothing` stays no cell, as HTMX drops a
   `nothing` child. A `SemanticTable`'s Markdown shows the dash too, and its
   tab-separated text writes an empty field (three in an interval column).
+
+## 0.1.122
+
+- A `semantic_app(…; presentation=:tabs)` page can compute a result in the
+  browser. `@browser(name) = browser_module(file, entry)` gives a property an
+  ES module that computes it from the inputs, in the contract
+  `ReactiveKernels.js_source` emits (positional arguments named by its
+  `INPUTS`, a named tuple returned as an object, errors named by their Julia
+  exception); `browser_module(; source, entry)` takes the module's text. In a
+  view, `bound(x)`, `bound(x.output)`, `bound(x.output[i])` and `bound(a)` (a
+  `@param`), with `digits=`, show such a value; `bound(x; columns)` is a table
+  for a plot, whose element takes `bound_columns_attrs(...)`. A result reading
+  such a property is computed and redrawn in the browser with no request: the
+  page carries its view for each value of the finite inputs it reads, the
+  property's module and the data the module takes. A module error is shown in
+  the result. So the page follows its inputs as a static export and offline.
+- `export_site` refuses a page with such a result where it would show
+  something stale, naming each part: a view showing an input outside `bound`,
+  a result that reads inputs and computes nothing in the browser, a control the
+  server draws again.
+- A `presentation=:tabs` page applies the inputs its address names to its
+  controls when it loads, so a static page's shared link reopens them; where
+  the server already did, nothing changes.
+- A `@relevant` condition comparing arithmetic of `@param`s (`a * b > 10`) is
+  evaluated in the browser instead of re-rendering the control from the server.
+- With DynamicObjects 0.5.21, which removed the private helper HTMXObjects read
+  an operation's dependencies with, a `presentation=:tabs` page treated every
+  operation as reading every input: all inputs went to the sidebar and every
+  result was asked again on any change. Its dependencies are read again.
+
+## 0.1.121
+
+- `HTMXObjects.page_report()` says whether the Markdown being written is for a
+  report. It is `true` while `pdf_report(value, …)` writes the value's
+  Markdown, and inside `dispatch(…; report=true)` and
+  `to_markdown_string(x; report=true)`, which take the new keyword. A
+  `dispatch` or `to_markdown_string` made inside a report keeps it unless it
+  passes `report=false`; live requests, `?plain` and `?markdown` reads, static
+  exports and code outside any request read `false`. The flag reaches
+  `@queued` bodies on a worker process and requests forwarded to another
+  service slice.
+- `report_view(content, report)` shows `content` in HTML and in ordinary
+  Markdown reads, and `report` in a report's Markdown (`nothing` shows
+  nothing there). Chrome is stripped from whichever view is shown. A figure
+  can be an interactive plot in the browser, a summary in `?plain` and a
+  picture in a PDF, and a control can stay out of a report without leaving
+  `?plain`.
 
 ## 0.1.120
 

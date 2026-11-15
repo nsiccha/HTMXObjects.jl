@@ -41,7 +41,7 @@ export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
 export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
-export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot
+export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot, report_view
 export CaptionTexts, caption_texts
 export fmt_time, fmt_bytes, fmt_number, query_url, route_url, hidden_inputs, post_form, get_form, @query_url
 export Long, option_wire_value, ainput, sinput, sinput_custom, soption, linput, rinput, ninput, cinput, tinput, radio_group, choice_list, choice_options, choice_list_script, loading_indicator_script, request_feedback, request_feedback_style, request_feedback_script, preload_runtime_js, show_when_script, tabset, tabset_styles, tabset_script, htmx_tabset, status_badge, nav_sidebar, app_layout, htmxo_breadcrumb, lazy, editor_form, editor_styles, GitRepo, EditorRoutes, htmxo_utility_styles, escape_html, html_escape, compose_box, compose_box_assets, compose_box_styles, compose_box_script, toast_styles, toast_script, overlay_bar, overlay_bar_style, overlay_bar_script
@@ -76,6 +76,7 @@ export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
 export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs, Records, record_view, all_records
 export NumberDomain, number_domain, number_record, number_control_script
+export browser_module, BrowserModule, bound_columns_attrs, semantic_browser_script
 
 using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
@@ -2180,7 +2181,7 @@ end
 _param_names(::Type) = ()
 
 """
-    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets)
+    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets, browser)
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
 to plain derived-property assignments that call
@@ -2211,8 +2212,12 @@ extracts its submitted value only while that property is `true`: otherwise it
 is its default, whatever was submitted. A `@relevant` parameter therefore needs
 a default.
 
+A `@browser(name) = browser_module(file, entry)` line becomes the property
+`__browser_<name>__`: the module a static page computes `name` with.
+
 Returns the ordered list of declared param names for later `_param_names`
-emission, the `@relevant` conditions, and each `@resets` target's source names.
+emission, the `@relevant` conditions, each `@resets` target's source names, and
+the `@browser` property names.
 """
 function _convert_params!(struct_expr; parent_params=())
     body = struct_expr.args[3]
@@ -2239,6 +2244,11 @@ function _convert_params!(struct_expr; parent_params=())
     reset_names = Set(first.(resets))
     length(reset_names) == length(resets) || throw(ArgumentError(
         "@htmx: an input has two `@resets` declarations; name its sources in one tuple"))
+    browser = Symbol[first(declared) for declared in
+                     (_browser_declaration(arg) for arg in body.args) if declared !== nothing]
+    allunique(browser) || throw(ArgumentError(string(
+        "@htmx: a property has two `@browser` declarations: ",
+        join(unique(n for n in browser if count(==(n), browser) > 1), ", "))))
     names = Symbol[]
     new_args = Any[]
     process_line! = inner -> begin
@@ -2276,6 +2286,13 @@ function _convert_params!(struct_expr; parent_params=())
             # The help text, likewise a property: a generated form draws it
             # under the control and draws it again when what it reads changes.
             push!(new_args, Expr(:(=), _help_property(first(declared)), last(declared)))
+            continue
+        end
+        declared = _browser_declaration(arg)
+        if declared !== nothing
+            # The browser module computing the property: a property of its own,
+            # evaluated where a page renders the results that read it.
+            push!(new_args, Expr(:(=), _browser_property(first(declared)), last(declared)))
             continue
         end
         if !(arg isa Expr)
@@ -2336,6 +2353,11 @@ function _convert_params!(struct_expr; parent_params=())
             "@htmx: `@help($name)` names no `@param` of this struct; ",
             "declare `@param $name = <default>` next to it")))
     end
+    for name in browser
+        name in names && throw(ArgumentError(string(
+            "@htmx: `@browser($name)` names a `@param`, which the page's control ",
+            "supplies; declare it on a property computed from the inputs")))
+    end
     available = union(Set(names), Set(parent_params))
     for (name, sources) in resets
         name in names || throw(ArgumentError("@htmx: `@resets($name)` names no `@param` of this struct"))
@@ -2344,13 +2366,13 @@ function _convert_params!(struct_expr; parent_params=())
                 "@htmx: `@resets($name)` source `$source` names no `@param` of this struct or its parent"))
         end
     end
-    names, relevance, resets
+    names, relevance, resets, browser
 end
 
 # Companion declarations share the two Julia parser shapes, including
 # `@marker(name) = value` and `@marker name = value`.
-function _param_declaration(arg, marker, value)
-    message = "@htmx: write `$marker(name) = $value` with the name of one `@param`"
+function _param_declaration(arg, marker, value; what="one `@param`")
+    message = "@htmx: write `$marker(name) = $value` with the name of $what"
     if Meta.isexpr(arg, :(=), 2) && Meta.isexpr(arg.args[1], :macrocall)
         lhs = arg.args[1]
         mname = lhs.args[1]
@@ -2378,6 +2400,69 @@ _relevance_property(name::Symbol) = Symbol("__relevant_", name, "__")
 _help_declaration(arg) = _param_declaration(arg, Symbol("@help"), "text")
 
 _help_property(name::Symbol) = Symbol("__help_", name, "__")
+
+# `@browser(name) = browser_module(file, entry)` (and `@browser name = …`), as
+# `name => module`; `nothing` for any other line. `name` is a property the
+# browser computes with that module on a static page (`semantic_browser.jl`).
+_browser_declaration(arg) = _param_declaration(arg, Symbol("@browser"),
+    "browser_module(file, entry)"; what="one property")
+_browser_property(name::Symbol) = Symbol("__browser_", name, "__")
+
+# Default: no `@browser` declarations.
+_browser_properties(::Type) = ()
+
+# `bound(x)`, `bound(x.field)`, `bound(x.field[2])` and `bound(x; columns=…)` in
+# an `@htmx` struct become `_bound(path, x…)`: the path names, for the browser,
+# where the value comes from (a `@browser` property or a `@param`), which a
+# value alone cannot tell. Quoted code is left alone.
+function _rewrite_bound!(struct_expr)
+    body = struct_expr.args[3]
+    body.args = Any[_rewrite_bound(arg) for arg in body.args]
+    struct_expr
+end
+_rewrite_bound(x) = x
+function _rewrite_bound(ex::Expr)
+    ex.head in (:quote, :inert) && return ex
+    Meta.isexpr(ex, :call) && ex.args[1] === :bound && return _lower_bound(ex)
+    Expr(ex.head, Any[_rewrite_bound(a) for a in ex.args]...)
+end
+function _lower_bound(ex::Expr)
+    positional = Any[]
+    keywords = Any[]
+    for arg in ex.args[2:end]
+        if Meta.isexpr(arg, :parameters)
+            append!(keywords, arg.args)
+        elseif Meta.isexpr(arg, :kw)
+            push!(keywords, arg)
+        else
+            push!(positional, arg)
+        end
+    end
+    length(positional) == 1 || throw(ArgumentError(string(
+        "@htmx: `bound` takes one value, a property or `@param` name with optional ",
+        "`.field` and `[i]` parts: got `", ex, "`")))
+    value = only(positional)
+    path = _bound_path(value)
+    path === nothing && throw(ArgumentError(string(
+        "@htmx: `bound` takes a property or `@param` name with optional `.field` and ",
+        "`[i]` parts (`i` an integer literal), such as `bound(prediction.half)` or ",
+        "`bound(prediction.at[1])`: got `bound(", value, ")`")))
+    Expr(:call, GlobalRef(@__MODULE__, :_bound),
+         Expr(:parameters, Any[_rewrite_bound(k) for k in keywords]...),
+         Expr(:tuple, path...), value)
+end
+_bound_path(x::Symbol) = Any[QuoteNode(x)]
+_bound_path(_) = nothing
+function _bound_path(ex::Expr)
+    if Meta.isexpr(ex, :., 2) && ex.args[2] isa QuoteNode && ex.args[2].value isa Symbol
+        head = _bound_path(ex.args[1])
+        return head === nothing ? nothing : push!(head, ex.args[2])
+    elseif Meta.isexpr(ex, :ref, 2) && ex.args[2] isa Integer
+        head = _bound_path(ex.args[1])
+        return head === nothing ? nothing : push!(head, Int(ex.args[2]))
+    end
+    nothing
+end
 
 # Default: no `@relevant` declarations.
 _param_relevance(::Type) = (;)
@@ -2602,7 +2687,8 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     reroute && _warn_redundant_req_decl!(struct_expr)
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
-    own_params, own_relevance, own_resets = _convert_params!(struct_expr; parent_params)
+    _rewrite_bound!(struct_expr)
+    own_params, own_relevance, own_resets, own_browser = _convert_params!(struct_expr; parent_params)
     own_headers = _convert_headers!(struct_expr)
     # Merge: parent params/headers first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -2675,6 +2761,12 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
             Expr(:call, _reset_fname, :(::Type{$type_name})),
             Expr(:tuple, Expr(:parameters,
                 (Expr(:kw, name, QuoteNode(sources)) for (name, sources) in own_resets)...))))
+    end
+    # Emit `_browser_properties`: the properties a page computes in the browser.
+    if !isempty(own_browser)
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, GlobalRef(@__MODULE__, :_browser_properties), :(::Type{$type_name})),
+            Tuple(own_browser)))
     end
     # Emit _inline_struct_props for backward compat
     all_nested = Symbol[p for (p, _) in inline_props]
@@ -3833,6 +3925,50 @@ answers, the page shell, an error page), and in the work the route runs on
 other tasks.
 """
 page_progress_pause() = _page_meta().progress_pause
+
+# Whether the Markdown being written is a report's. A scope of its own rather
+# than a page meta field: a route's answer replaces the page meta with its own
+# mount chain's, while a report reaches every answer rendered inside it (a
+# `dispatch` that a component's Markdown makes, say). A request from outside
+# has none: `_register_handler` enters the request's own.
+const _REPORT = ScopedValues.ScopedValue{Bool}(false)
+
+"""
+    HTMXObjects.page_report() -> Bool
+
+Whether the Markdown being written is for a report, such as the PDF that
+[`pdf_report`](@ref) makes of a value. A component reads it to give a report a
+Markdown view of its own, for example a figure's picture where an ordinary
+`?plain` read gets a summary of the figure's data; [`report_view`](@ref) is the
+ready-made form of that.
+
+It is `true` while `pdf_report(value, …)` writes the value's Markdown, while a
+`dispatch(…; report=true)` answer is built and written, and inside
+`to_markdown_string(x; report=true)`. A `dispatch` or `to_markdown_string` made
+inside one of these keeps it unless it passes `report=false`, so it reaches
+nested renders: a component that shows its children, and a route a component
+fetches with `dispatch`. It is `false` everywhere else: in live requests, in
+`?plain` and `?markdown` reads, in static exports, and outside any request.
+
+Read it where the Markdown is written, in `show(io, MIME"text/markdown"(), x)`,
+not where a value is built: a built value can be cached and shown again to a
+reader who is not making a report.
+"""
+page_report() = _REPORT[]
+
+_with_report(f, ::Nothing) = f()
+_with_report(f, report::Bool) = ScopedValues.with(f, _REPORT => report)
+
+# `report=` of `dispatch` and `to_markdown_string`: `true`, `false`, or
+# `nothing` to keep the one of the answer it is called in.
+_check_report(::Nothing, who) = nothing
+_check_report(report::Bool, who) = report
+_check_report(report, who) = throw(ArgumentError(string(
+    who, ": report must be true, false, or nothing to keep the enclosing answer's; got ", repr(report))))
+
+# Whether a request's answer is written for a report: `dispatch(…; report)`
+# sets it, and so does a service slice that forwards such a request.
+_request_report(req::HTTP.Request) = get(req.context, :htmxo_report, false)::Bool
 
 # Read and checked before the route body runs, so a bad declaration is the
 # route's error, named after its struct, rather than a failure inside the shell.
@@ -5987,7 +6123,7 @@ _finalized_response(r::HTTP.Response) = r
 _finalized_response(m::MIMEResponse) = to_response(m)
 
 """
-    to_markdown_string(val; audience=nothing, lang=nothing) -> String
+    to_markdown_string(val; audience=nothing, lang=nothing, report=nothing) -> String
 
 The Markdown of `val`, as a `?plain` or `Accept: text/markdown` answer holds it:
 `show(io, MIME"text/markdown"(), val)` once interactive chrome (forms, inputs,
@@ -6005,20 +6141,29 @@ HTMXObjects writes itself, such as the label of private content ("nicht
 (`HTMXObjects.page_lang`), and are English outside any route. The
 Markdown keeps the language it is rendered in.
 
-Library code that assembles a document from values it renders itself passes
-the document's audience and language, also when it runs inside a live request,
-which is `:private`:
+`report=true` writes the Markdown for a report: components that read
+`HTMXObjects.page_report()` give their report view, such as a figure's
+picture (see [`report_view`](@ref)). Without it, the Markdown is a report's
+when the answer it is rendered in is one, and an ordinary read's otherwise;
+`report=false` asks for an ordinary read inside a report.
+
+Library code that assembles a report from values it renders itself passes the
+report's audience and language, also when it runs inside a live request, which
+is `:private`, and `report=true`:
 
 ```julia
-chunks = [to_markdown_string(section; audience, lang="de-DE") for section in sections]
+chunks = [to_markdown_string(section; audience, lang="de-DE", report=true) for section in sections]
 pdf_report(join(chunks, "\\n\\n"), "konzept.pdf"; title="Konzept", lang="de-DE", audience)
 ```
 
-An `audience` other than `:public` and `:private`, and a `lang` that is not a
-language tag (`"German"`), are an `ArgumentError`.
+An `audience` other than `:public` and `:private`, a `lang` that is not a
+language tag (`"German"`), and a `report` other than `true`, `false` and
+`nothing` are an `ArgumentError`.
 """
-to_markdown_string(val; audience=nothing, lang=nothing) =
-    _with_page_lang(() -> _to_markdown_string(val, audience), _check_lang(lang, "to_markdown_string"))
+to_markdown_string(val; audience=nothing, lang=nothing, report=nothing) =
+    _with_report(_check_report(report, "to_markdown_string")) do
+        _with_page_lang(() -> _to_markdown_string(val, audience), _check_lang(lang, "to_markdown_string"))
+    end
 # HTMX.jl defines show for Node; users can extend with show(io, MIME"text/markdown", val::MyType).
 # Interactive chrome (form/input/textarea/button) is dropped first by
 # `_strip_md_chrome` so a `?plain`/`?markdown` read never serializes a form's
@@ -6082,6 +6227,68 @@ Base.show(io::IO, ::MIME"text/markdown", val::MarkdownOnly) = print(io, val.text
 # Plain text among semantic content is a text reader's too, so it reads the text
 # (a `SemanticProse`'s plain peer is its Markdown source as well).
 _semantic_show_leaf(io::IO, ::MIME"text/plain", val::MarkdownOnly) = print(io, val.text)
+
+"""
+    report_view(content, report)
+
+Content with a view of its own for reports: HTML and ordinary Markdown reads
+show `content`, and the Markdown of a report shows `report` in its place, or
+nothing when `report` is `nothing`.
+
+A report's Markdown is the one [`pdf_report`](@ref) writes of a value, a
+`dispatch(…; report=true)` answer, and `to_markdown_string(x; report=true)`:
+where `HTMXObjects.page_report()` is `true`. Every other Markdown read
+(`?plain`, `?markdown`, `to_markdown_string(x)`) reads `content`, and so does
+the browser.
+
+Interactive chrome is dropped from the view that is shown, as from any Markdown,
+so `report_view(controls, nothing)` keeps a figure's controls out of a report
+and leaves an ordinary read as it was. A figure that is an interactive plot in
+the browser and a summary of its data in `?plain` can be a picture on paper:
+
+```julia
+h.figure(report_view(plot, h.img(; src=svg_data_uri, alt="Weekly sales by region")),
+         h.figcaption("Weekly sales"))
+```
+
+`report` is shown when the Markdown is written, so a value whose Markdown is
+costly to make (a rendered image, say) costs nothing outside reports when it
+renders itself in its `show(io, MIME"text/markdown"(), x)`. The readers of the
+HTML (`?error`, static exports, the page's prestarted fragments) see `content`.
+"""
+struct ReportView
+    content::Any
+    report::Any
+end
+report_view(content, report) = ReportView(content, report)
+
+# The view that the Markdown being written shows.
+_report_shown(r::ReportView) = page_report() ? r.report : r.content
+
+# HTML, HXML and a whole HTML answer: `content`, as without the wrapper.
+Base.show(io::IO, m::MIME"text/html", r::ReportView) = _show_html_content(io, m, r.content)
+Base.show(io::IO, m::MIME"application/vnd.hyperview+xml", r::ReportView) =
+    _show_html_content(io, m, r.content)
+to_response(r::ReportView) = to_response(r.content)
+auto(r::ReportView; wrap) = auto(r.content; wrap)
+filter_errors(r::ReportView) = filter_errors(r.content)
+_filter_errors_child(r::ReportView) = _filter_errors_child(r.content)
+_semantic_layout_children(r::ReportView) = (r.content,)
+
+# Markdown and plain text: the view of the Markdown being written, which is
+# stripped of chrome like the rest of it.
+function Base.show(io::IO, m::MIME"text/markdown", r::ReportView)
+    shown = _report_shown(r)
+    isnothing(shown) || show(io, m, shown)
+    nothing
+end
+Base.show(io::IO, m::MIME"text/plain", r::ReportView) = _show_html_content(io, m, _report_shown(r))
+HTMX.markdown_block(r::ReportView) = HTMX.markdown_block(_report_shown(r))
+_strip_md_chrome(r::ReportView) = _strip_md_chrome(_report_shown(r))
+_strip_md_chrome_child(r::ReportView) = _strip_md_chrome(r)
+_rescue_semantic!(out, r::ReportView) = _rescue_semantic!(out, _report_shown(r))
+_shows_nothing(r::ReportView, audience) = _shows_nothing(_report_shown(r), audience)
+_private_block(r::ReportView) = _private_block(_report_shown(r))
 
 # --- Audience: content that public views leave out ---
 
@@ -7547,6 +7754,13 @@ function _static_walk(val::HtmlOnly, rules::_StaticRules)
     walked === _STATIC_REMOVED ? walked : HtmlOnly(walked)
 end
 _static_walk_child(val::HtmlOnly, rules) = _static_walk(val, rules)
+# A report view is walked through its HTML content; its report view stays as
+# given, for a report made of the export.
+function _static_walk(r::ReportView, rules::_StaticRules)
+    walked = _static_walk(r.content, rules)
+    walked === _STATIC_REMOVED ? walked : ReportView(walked, r.report)
+end
+_static_walk_child(r::ReportView, rules) = _static_walk(r, rules)
 function _static_walk(c::_LabelledControl, rules::_StaticRules)
     walked = _static_walk(c.control, rules)
     walked === _STATIC_REMOVED ? walked : _LabelledControl(walked)
@@ -7873,10 +8087,11 @@ struct _SiteLog
     targets::Vector{Tuple{String,String,Bool}}  # key, address, fragment
     provisional::Dict{String,Int}
     checks::Vector{Tuple{String,String,Symbol}}  # base, url, kind
+    problems::Vector{String}  # what the page reports a static site cannot serve
     lock::ReentrantLock  # a route may name addresses from several tasks
 end
 _SiteLog() = _SiteLog(Tuple{String,String,Bool}[], Dict{String,Int}(), Tuple{String,String,Symbol}[],
-                      ReentrantLock())
+                      String[], ReentrantLock())
 
 # The `url_map` of one dispatch in the crawl: `base` is the address being
 # rendered, against which a relative address resolves.
@@ -8661,6 +8876,10 @@ function _site_write!(crawl::_SiteCrawl, written::_SiteWritten, i::Int, run::_Si
     resp = rendered.answer
     resp isa PrivateContentEscaped &&
         return lock(() -> push!(crawl.failed, e.address => sprint(showerror, resp)), crawl.lock)
+    # A page that knows it would be stale as a static file says why
+    # (`_browser_report!`): a semantic page computing results in the browser.
+    isempty(rendered.log.problems) || return lock(() -> push!(crawl.failed,
+        e.address => join(unique(rendered.log.problems), "; ")), crawl.lock)
     if _private_page_response(resp)
         return lock(() -> (crawl.private[i] = length(crawl.private) + 1), crawl.lock)
     end
@@ -9014,6 +9233,8 @@ _prestart_walk(doc::HTMLDocument, walk, blocked) =
     _prestart_rewrap(_prestart_walk(doc.root, walk, blocked), HTMLDocument)
 _prestart_walk(val::HtmlOnly, walk, blocked) =
     _prestart_rewrap(_prestart_walk(val.content, walk, blocked), HtmlOnly)
+_prestart_walk(r::ReportView, walk, blocked) =
+    _prestart_rewrap(_prestart_walk(r.content, walk, blocked), content -> ReportView(content, r.report))
 _prestart_walk(p::Private, walk, blocked) = _ambient_audience() === :public ?
     _prestart_rewrap(_prestart_walk(p.public, walk, blocked), x -> Private(p.content, x, p.mark)) :
     _prestart_walk_private(_built(p.content), p, walk, blocked)
@@ -11013,8 +11234,10 @@ function _register_handler(method, path, handler; resume_only::Bool=false,
         catch err
             return _route_error_response(req, err, catch_backtrace())
         end
-        # The whole answer renders for the request's audience (`private`).
-        _with_audience(() -> handler(req), export_audience(req))
+        # The whole answer renders for the request's audience (`private`), and
+        # for a report when the request is one's (`page_report`).
+        ScopedValues.with(() -> handler(req),
+            _AUDIENCE => export_audience(req), _REPORT => _request_report(req))
     end
     operation && (wrapped = _OperationRoute(wrapped))
     if http_method == "GET" && !resume_only
@@ -20110,7 +20333,7 @@ dispatch_parent(req::HTTP.Request) = get(req.context, :htmxo_parent_progress, no
 
 """
     dispatch(method, url; headers=[], body=UInt8[], parent=nothing, static=nothing,
-             operation_policy=nothing, audience=nothing, lang=nothing) -> HTTP.Response
+             operation_policy=nothing, audience=nothing, lang=nothing, report=nothing) -> HTTP.Response
 
 Run one request against the registered route tree in-process and return the
 handler's `HTTP.Response` — no listener, no socket, no serialization
@@ -20191,6 +20414,16 @@ for a loopback request.
   `dispatch` made inside another request. A follow-up poll is a request of its
   own: dispatch it with the same `lang`. A `lang` that is not a language tag
   (`"German"`) is an `ArgumentError`.
+- `report` — `true` writes the answer for a report: while the route runs and
+  its answer is written, `HTMXObjects.page_report()` is `true`, so a Markdown
+  answer holds the report view of each [`report_view`](@ref) and of the
+  components that read it, such as a figure's picture. Fetch a report's
+  Markdown with it before passing the string to [`pdf_report`](@ref). By
+  default it is the report flag of the request or report this `dispatch` is
+  made in, and `false` outside any; `report=false` asks for an ordinary
+  answer inside a report. A follow-up poll is a request of its own: dispatch
+  it with the same `report`. A `report` other than `true`, `false` and
+  `nothing` is an `ArgumentError`.
 
 Unmatched targets return the router's own 404/405 responses rather than
 throwing, so `(resp.status, String(resp.body))` is the complete fetch
@@ -20209,11 +20442,13 @@ markdown = String(resp.body)
 ```
 """
 function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
-        parent=nothing, static=nothing, operation_policy=nothing, audience=nothing, lang=nothing)
+        parent=nothing, static=nothing, operation_policy=nothing, audience=nothing, lang=nothing,
+        report=nothing)
     spec = _dispatch_static(static)
     audience = _dispatch_audience(audience, spec)
     policy = _dispatch_operation_policy(operation_policy)
     lang = _check_lang(lang, "dispatch")
+    report = something(_check_report(report, "dispatch"), page_report())
     req = HTTP.Request(_dispatch_method(method), _dispatch_target(url),
                        _dispatch_headers(headers), _dispatch_body(body))
     parent !== nothing && (req.context[:htmxo_parent_progress] = parent)
@@ -20221,6 +20456,7 @@ function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
     policy !== nothing && (req.context[:htmxo_operation_policy] = policy)
     lang !== nothing && (req.context[:htmxo_lang] = lang)
     req.context[:htmxo_audience] = audience
+    report && (req.context[:htmxo_report] = true)
     resp = _with_dispatch_parent(() -> _service_dispatch(req), parent)
     audience === :public ? _check_public(resp, "the answer to $(req.method) $(req.target)") : resp
 end
@@ -21112,8 +21348,8 @@ end
 Write a report as an accessible and archival PDF (PDF/UA-1, ISO 14289-1, and
 PDF/A-2a, ISO 19005-2) at `pdf_path`. The input is Markdown, typically a page's own projection: a `value` such as an
 `h.article(...)` is converted with `to_markdown_string`, and the body of
-`dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"])` is passed as
-it is. Tables, figures and captions keep their structure: header rows become
+`dispatch(:GET, "/report"; headers=["Accept" => "text/markdown"], report=true)`
+is passed as it is. Tables, figures and captions keep their structure: header rows become
 table header cells, captions stay attached to their table or figure. A table
 longer than the rest of its page continues on the next, its header row
 repeated, and a caption above it moves along with its first rows. A code block
@@ -21208,6 +21444,13 @@ stays in the language it was rendered in. A public report refuses Markdown
 that holds private markup rendered for the live app, raw HTML carrying
 `<!--htmxo-private-->` ([`PrivateContentEscaped`](@ref)).
 
+A value's Markdown is written for a report: while it is written,
+`HTMXObjects.page_report()` is `true`, so each [`report_view`](@ref) shows its
+report view, and so do the components that read it, such as a figure that
+gives a report its picture where an ordinary `?plain` read gets a summary of
+its data. A Markdown string is written already: fetch it with `dispatch(…;
+report=true)` or render it with `to_markdown_string(x; report=true)`.
+
 `glossary`, a [`Glossary`](@ref), is the app's glossary: by default the one a
 route's mount chain declares as `__glossary__` while `pdf_report` runs inside
 it, else none. A value's uses of its terms are linked as on a page
@@ -21297,7 +21540,9 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
                     glossary=_page_glossary(), archival=_PDF_REPORT_ARCHIVAL_DEFAULT)
     archival = _pdf_report_archival(archival)
     _check_audience(audience, "pdf_report") === :public && _check_public(markdown, "the report's Markdown")
-    markdown = _glossary_report(markdown, _check_glossary(glossary, "pdf_report"); audience, lang)
+    markdown = _with_report(true) do
+        _glossary_report(markdown, _check_glossary(glossary, "pdf_report"); audience, lang)
+    end
     isempty(strip(title)) &&
         throw(ArgumentError("pdf_report: `title` is blank; PDF/UA-1 requires a document title"))
     occursin(_PDF_REPORT_LANG, lang) || throw(ArgumentError(
@@ -21347,12 +21592,13 @@ function pdf_report(markdown::AbstractString, pdf_path::AbstractString;
     return pdf_path
 end
 # The value renders in the report's language, which the words HTMXObjects
-# writes itself follow (`page_lang`: the label of private content).
+# writes itself follow (`page_lang`: the label of private content), and for a
+# report (`page_report`: the report view of each `report_view`).
 pdf_report(value, pdf_path::AbstractString; audience=:public, lang::AbstractString,
            glossary=_page_glossary(), kwargs...) =
     pdf_report(_with_page_lang(lang) do
                    to_markdown_string(_glossary_answer(value, _check_glossary(glossary, "pdf_report"));
-                                      audience=_check_audience(audience, "pdf_report"))
+                                      audience=_check_audience(audience, "pdf_report"), report=true)
                end, pdf_path; audience, lang, glossary, kwargs...)
 
 # --- Captions ---
@@ -30809,8 +31055,9 @@ the predicate `show_when_script` reads (`data-show-when`); `nothing` for any
 other condition, which the page evaluates on the server instead. The browser
 evaluates comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `∉`) of one of
 `names` (the struct's `@param`s) with literals (strings, numbers, booleans,
-symbols, or a tuple or vector of them), a bare `Bool` parameter, and `!`, `&&`
-and `||` of those.
+symbols, or a tuple or vector of them), numeric comparisons in which either
+side is arithmetic (`+`, `-`, `*`, `/`) of `names` and number literals
+(`a * b > 10`), a bare `Bool` parameter, and `!`, `&&` and `||` of those.
 """
 _client_relevance(_, _names) = nothing
 _client_relevance(ex::Symbol, names) = ex in names ?
@@ -30839,6 +31086,13 @@ function _client_relevance(ex::Expr, names)
     end
     op = get(_CLIENT_COMPARISONS, f, nothing)
     isnothing(op) && return nothing
+    # Arithmetic of numeric inputs on either side (`a * b > 10`): compared as
+    # numbers, so a comparison of two plain inputs stays on the server.
+    if Meta.isexpr(a, :call) || Meta.isexpr(b, :call)
+        left, right = _client_arith(a, names), _client_arith(b, names)
+        (isnothing(left) || isnothing(right)) && return nothing
+        return Dict{String,Any}("cmp" => op, "left" => left, "right" => right)
+    end
     if !(a isa Symbol && a in names)
         b isa Symbol && b in names || return nothing
         a, b, op = b, a, _FLIPPED_COMPARISONS[op]
@@ -30847,6 +31101,23 @@ function _client_relevance(ex::Expr, names)
     isnothing(literal) && return nothing
     Dict{String,Any}("field" => string(a), "op" => op, "value" => first(literal),
                      "numeric" => last(literal))
+end
+
+# An arithmetic expression `show_when_script` evaluates: `+`, `-`, `*` and `/`
+# of `names` (numeric inputs) and number literals; `nothing` for anything else.
+_client_arith(x::Bool, _names) = nothing
+_client_arith(x::Real, _names) = isfinite(x) ? Dict{String,Any}("num" => x) : nothing
+_client_arith(x::Symbol, names) = x in names ? Dict{String,Any}("field" => string(x)) : nothing
+_client_arith(_, _names) = nothing
+function _client_arith(ex::Expr, names)
+    Meta.isexpr(ex, :call) || return nothing
+    f = ex.args[1]
+    f in (:+, :-, :*, :/) || return nothing
+    args = Any[_client_arith(arg, names) for arg in ex.args[2:end]]
+    (isempty(args) || any(isnothing, args)) && return nothing
+    length(args) == 1 && return f === :- ? Dict{String,Any}("neg" => only(args)) :
+                                f === :+ ? only(args) : nothing
+    Dict{String,Any}("arith" => string(f), "args" => args)
 end
 
 # The `@param`s a `@relevant` condition reads, which re-render its control
@@ -30874,11 +31145,34 @@ end
 # --- What an operation reads ---
 
 # DynamicObjects' dependency closure of `name` on `T` (the property and every
-# property it reads, transitively); `nothing` on a DynamicObjects without it.
-_dependency_closure(T::Type, name::Symbol) =
-    isdefined(DynamicObjects, :_semantic_dependency_closure) ?
-        Base.invokelatest(getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,)) :
-        nothing
+# property it reads, transitively), in declaration order; `nothing` on a
+# DynamicObjects without the per-property `dependson` metadata. DynamicObjects
+# 0.5.21 (`878dd48`) removed its private `_semantic_dependency_closure`, which
+# this used to call, so the closure is walked here from that metadata, as it was
+# there; an older DynamicObjects keeps answering through its own helper.
+function _dependency_closure(T::Type, name::Symbol)
+    isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
+        getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,))
+    isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
+    metafirst = getproperty(DynamicObjects, :metafirst)
+    meta = getproperty(DynamicObjects, :meta)
+    Base.invokelatest(applicable, meta, T) || return nothing
+    closure = Set{Symbol}()
+    pending = Symbol[name]
+    while !isempty(pending)
+        current = pop!(pending)
+        current in closure && continue
+        info = Base.invokelatest(metafirst, T, current)
+        info === nothing && continue
+        push!(closure, current)
+        dependencies = get(info, :dependson, nothing)
+        dependencies === nothing && continue
+        for dependency in dependencies
+            dependency isa Symbol && push!(pending, dependency)
+        end
+    end
+    unique!(Symbol[n for (n, _) in Base.invokelatest(meta, T) if n in closure])
+end
 
 # The properties of `T` that hand `__self__` to other code, whose reads no
 # static scan follows.
@@ -32675,6 +32969,9 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                     context_entries)
 
     open = _semantic_open_tab(obj, names, active)
+    # Results that read `@browser` properties are computed in the browser.
+    browser_page = _BrowserPage(context_id, _browser_static(obj))
+    browser_regions = falses(length(specs))
     operations = map(enumerate(specs)) do (i, spec)
         base = spec.base_entry
         route = routes[i]
@@ -32696,15 +32993,23 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
             # Its own arguments are inputs of its tab, and it reads them all.
             sent = union(shared_names, Set{Symbol}(param.name for param in own_params))
             key_reads = complete[i] ? union(reads[i], setdiff(sent, shared_names)) : nothing
-            initial = names[i] == open ?
-                Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
-                Any[]
-            form, h.div(initial...; id=base.target_id,
+            region_attrs = (; id=base.target_id,
                 class="htmxo-semantic-operation-result", aria_live="polite",
                 data_htmxo_follow=string(target), data_htmxo_inputs=join(selectors, ' '),
                 (isnothing(key_reads) ? (;) :
                     (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
                 data_htmxo_live="", hx_sync="this:replace")
+            browser = _browser_reads(spec.mounted, base.name)
+            if !isempty(browser)
+                browser_regions[i] = true
+                form, _browser_region(browser_page, spec, route, current, target, sent,
+                                      region_attrs, browser)
+            else
+                initial = names[i] == open ?
+                    Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
+                    Any[]
+                form, h.div(initial...; region_attrs...)
+            end
         else
             form = base.verb in (:WEBSOCKET, :SSE) ? nothing : operation_form(
                 spec.mounted, spec.local_route;
@@ -32721,6 +33026,12 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         end
         merge(base, (; form, result, tab=names[i], follows=follows[i],
                       placed=get(placed_controls, names[i], Any[])))
+    end
+    # A static export of a page that computes in the browser: whatever else on
+    # it still needs the server is reported, not shipped stale.
+    if browser_page.static !== nothing && any(browser_regions)
+        _browser_server_parts!(browser_page, specs, routes, follows, browser_regions, reads, complete)
+        _browser_report!(browser_page)
     end
 
     _activate_semantic_root_provider!(obj)
@@ -33194,6 +33505,21 @@ show_when_script() = h.script(Raw(raw"""
   // A JSON condition: true or false, or null when a field it reads is on no
   // form of the page.
   function number(v) { return v === '' ? NaN : Number(v); }
+  // An arithmetic expression of numeric fields: null when a field is on no form.
+  function calc(e, el) {
+    if (e.num !== undefined) return e.num;
+    if (e.field !== undefined) {
+      var values = fieldValues(scopeOf(el), e.field);
+      if (!values && scopeOf(el) !== document.body) values = fieldValues(document.body, e.field);
+      return values ? number(values[0]) : null;
+    }
+    if (e.neg) { var v = calc(e.neg, el); return v === null ? null : -v; }
+    var args = e.args.map(function(x) { return calc(x, el); });
+    if (args.some(function(x) { return x === null; })) return null;
+    return args.reduce(function(x, y) {
+      return e.arith === '+' ? x + y : e.arith === '-' ? x - y : e.arith === '*' ? x * y : x / y;
+    });
+  }
   function holds(p, el) {
     var parts, i, r;
     if (p.all || p.any) {
@@ -33206,6 +33532,12 @@ show_when_script() = h.script(Raw(raw"""
       return !!p.all;
     }
     if (p.not) { r = holds(p.not, el); return r === null ? null : !r; }
+    if (p.cmp) {
+      var a = calc(p.left, el), b = calc(p.right, el);
+      if (a === null || b === null) return null;
+      return p.cmp === 'eq' ? a === b : p.cmp === 'neq' ? a !== b : p.cmp === 'lt' ? a < b :
+             p.cmp === 'le' ? a <= b : p.cmp === 'gt' ? a > b : a >= b;
+    }
     var values = fieldValues(scopeOf(el), p.field);
     if (!values && scopeOf(el) !== document.body) values = fieldValues(document.body, p.field);
     if (!values) return null;
@@ -35382,7 +35714,12 @@ that is written into the address (`history.replaceState`, no new history
 entry); one back at it, an empty one, one that does not apply (its
 control is hidden) and one that shows its computed default are left out. Other parameters, such as the tab's `?tab=`,
 stay. The page shows the values its address names, so a reload or a shared
-link reopens the same inputs and results.
+link reopens the same inputs and results: the server applies them to a page
+it renders, and the script applies them to the controls when the page loads,
+which is what a static page (`export_site`) needs.
+
+A result that reads a `@browser` property is computed in the browser
+([`semantic_browser_script`](@ref)) instead of asked for, under the same rules.
 Automatic — no consumer wiring. The `htmx()` shell installs it; include it
 once per page when building a `<head>` by hand.
 """
@@ -35481,6 +35818,11 @@ semantic_follow_script() = h.script(Raw(raw"""
     var key = keyOf(region, pairs);
     if (region.getAttribute('data-htmxo-shown') === key) return;
     region.setAttribute('data-htmxo-shown', key);
+    // A result computed in the browser (`@browser`) asks nothing of the server.
+    if (region.hasAttribute('data-htmxo-browser') && window.__htmxoBrowserCompute) {
+      window.__htmxoBrowserCompute(region, pairs);
+      return;
+    }
     // A result asked for the first time shows that it is coming.
     if (!region.children.length) region.appendChild(document.createElement('progress'));
     var url = region.getAttribute('data-htmxo-follow');
@@ -35624,12 +35966,58 @@ semantic_follow_script() = h.script(Raw(raw"""
     try { sessionStorage.setItem('htmx-current-path-for-history', url.pathname + url.search); } catch (_) {}
   }
   function kept(form) { return form && form.hasAttribute && form.hasAttribute('data-htmxo-address'); }
+  // The page shows the values its address names. The server applies them to
+  // a page it renders; a static page (`export_site`) applies them here, when
+  // it loads. Where the server did, the controls already show them and this
+  // changes nothing.
+  var applying = false;
+  function setControls(form, name, wanted, changed) {
+    Array.prototype.forEach.call(form.elements, function(c) {
+      if (c.name !== name || PRESSED.test(c.type)) return;
+      var toggle = c.type === 'radio' || c.type === 'checkbox';
+      var before = toggle ? c.checked : c.value;
+      if (c.type === 'radio') c.checked = wanted.indexOf(c.value) >= 0;
+      else if (c.type === 'checkbox')
+        c.checked = c.value === 'true' && !c.closest('[data-htmxo-multiple]') ?
+          wanted[0] === 'true' : wanted.indexOf(c.value) >= 0;
+      else if (c.type === 'select-multiple')
+        Array.prototype.forEach.call(c.options, function(o) { o.selected = wanted.indexOf(o.value) >= 0; });
+      else c.value = wanted[0];
+      if ((toggle ? c.checked : c.value) !== before) changed.push(c);
+    });
+  }
+  function applyAddress() {
+    var params = new URLSearchParams(location.search), changed = [];
+    document.querySelectorAll('form[data-htmxo-address]').forEach(function(form) {
+      var defaults;
+      try { defaults = JSON.parse(form.getAttribute('data-htmxo-address')); } catch (_) { return; }
+      Object.keys(defaults).forEach(function(name) {
+        if ((defaults[name] && defaults[name].records) || !params.has(name)) return;
+        var wanted = params.getAll(name);
+        if (same(valuesOf(form, name) || [], wanted, numeric(form, name))) return;
+        setControls(form, name, wanted, changed);
+      });
+    });
+    if (!changed.length) return;
+    // Every result that reads these forms is asked again, also one armed only
+    // after this (its shown key could not match).
+    changed.forEach(function(c) {
+      if (c.form) readers(c.form).forEach(function(r) { r.setAttribute('data-htmxo-shown', '*'); });
+    });
+    applying = true;
+    try {
+      changed.forEach(function(c) { c.dispatchEvent(new Event('change', {bubbles: true})); });
+    } finally { applying = false; }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', applyAddress);
+  else applyAddress();
   document.addEventListener('change', function(e) {
     var form = e.target && e.target.form;
     if (!form) return;
     readers(form).forEach(function(r) { if (visible(r)) later(r); });
     // After the page's own listeners, which show and hide inputs that apply.
-    if (kept(form)) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
+    // Applying the address on load writes nothing back.
+    if (kept(form) && !applying) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
   });
   document.addEventListener('htmx:load', function(e) { arm(e.target); });
   // A control re-rendered in place (a dependent domain, a `@relevant` input
@@ -39320,6 +39708,7 @@ _tabset_key(x::Node, h::UInt) =
     _tabset_key(HTMX.children(x), _tabset_key(HTMX.attrs(x), _tabset_key(HTMX.tag(x), h)))
 _tabset_key(x::_TabsetPart, h::UInt) = _tabset_key(x.node, h)
 _tabset_key(x::HtmlOnly, h::UInt) = _tabset_key(x.content, h)
+_tabset_key(x::ReportView, h::UInt) = _tabset_key(x.content, h)
 _tabset_key(x::Private, h::UInt) = _tabset_key(x.public, hash("private", h))
 function _tabset_key(x::SemanticNode, h::UInt)
     h = hash(string(nameof(typeof(x))), h)
@@ -39348,6 +39737,7 @@ include("glossary.jl")
 include("content_units.jl")
 
 include("comparison.jl")
+include("semantic_browser.jl")
 
 """
     tabset(tabs::Pair...; active=1, id=<from the labels, names and content>, preload=nothing,
@@ -40726,15 +41116,17 @@ function __init__()
     # A part a worker-bound body sends ahead comes back as a requester message.
     _has_requester_messages() &&
         DynamicObjects.on_requester_message!(_receive_sent_ahead!, :htmxo_sent_ahead)
-    # The answer's page language and audience reach a worker-bound body: the
-    # worker binds these two scopes to the requester's values around its
-    # computation (DynamicObjects 0.5.8, `carry_to_worker!`). Both processes
-    # register, since the worker loads this package too. The page meta travels
-    # as its plain fields; the glossary stays with the page shell here.
+    # The answer's page language, audience and report flag reach a
+    # worker-bound body: the worker binds these scopes to the requester's
+    # values around its computation (DynamicObjects 0.5.8, `carry_to_worker!`).
+    # Both processes register, since the worker loads this package too. The
+    # page meta travels as its plain fields; the glossary stays with the page
+    # shell here.
     if isdefined(DynamicObjects, :carry_to_worker!)
         DynamicObjects.carry_to_worker!(@__MODULE__, :_PAGE_META;
             wire=_wire_page_meta, unwire=_unwire_page_meta)
         DynamicObjects.carry_to_worker!(@__MODULE__, :_AUDIENCE)
+        DynamicObjects.carry_to_worker!(@__MODULE__, :_REPORT)
     end
 end
 
