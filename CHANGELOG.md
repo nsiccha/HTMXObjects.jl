@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.135
+## 0.1.136
 
 - A `semantic_app(…; presentation=:tabs)` page's Markdown (`?plain`,
   `Accept: text/markdown`, `to_markdown_string`, and a report:
@@ -29,6 +29,26 @@
   when it has one. A state names inputs of the page (else an
   `ArgumentError`), and a value an input refuses makes the report throw.
   The page and an ordinary Markdown read are unchanged.
+
+## 0.1.135
+
+- A `SemanticProse`'s own headings follow the nesting, as a
+  `SemanticSection`'s do, in its Markdown (`?plain`, `to_markdown_string`,
+  `pdf_report`) and HTML (pages, static export) projections. Its shallowest
+  heading is at the level a section opens where the prose renders (`##` /
+  `<h2>` at the top of a page, one below each enclosing section or card
+  heading), each other heading at most one level below the heading before it
+  (a skipped level is closed up), none deeper than the sixth. A Julia
+  docstring's `# Usage` inside a section headed `####` is now `#####`, so a
+  `pdf_report` of it passes PDF/UA-1 where it failed with "the first heading
+  must be of level 1" / "skipped from heading level 1 to 3" (snag
+  `semanticprose-em-202acc7a`, design decision `120mafs`). Only heading lines
+  change in the Markdown (a setext heading becomes one `#` line); prose
+  without headings, or whose headings already sit there, is unchanged, and
+  plain text keeps the source. Glossary-linked prose is placed the same way.
+  A top-level prose's `# Title` is now `##` / `<h2>`; a page's title is
+  `SemanticSection(title; level=1)`. Hand demotion of embedded headings
+  (TenderViews' `_nest_headings`) is no longer needed and does no harm.
 
 ## 0.1.134
 
