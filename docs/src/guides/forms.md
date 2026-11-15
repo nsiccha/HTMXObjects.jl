@@ -219,9 +219,20 @@ println(number_record(number_domain(0.001, 0.015; log=true, digits=4)))
 The generated form draws each as a slider with a number field beside it,
 followed by the unit. A `log` domain spaces the slider evenly in ratio, for a
 positive quantity spanning orders of magnitude. A slider value lies on the
-`step` grid counted from the lower bound; without a step it keeps `digits`
-decimal places, or three significant digits. Typing in the field moves the
-slider. A result computed in the browser (`@browser`) follows the field while
+`step` grid counted from the lower bound; without a step it keeps three
+significant digits. Typing in the field moves the slider.
+
+`digits` is how many decimals the field shows while the reader is not editing
+it, written as `format_number(x; digits)` writes it: with `digits=4`, a fitted
+default of 0.003035586062774531 shows as `0.0030`, and 0.004 as `0.0040`. Only
+the text is rounded. The form submits the exact value, a result computed in
+the browser reads it, the page address leaves out a value equal to its default,
+Reset writes the default back, and clicking or tabbing into the field shows
+the value in full for typing. A typed number stays as typed and shows rounded
+once the field is left. Without `digits` the field shows the value as its
+shortest exact text.
+
+A result computed in the browser (`@browser`) follows the field while
 the slider moves, redrawn once an animation frame at most; a result asked of
 the server and the page address follow it once the slider is released.
 Without JavaScript, the field alone still submits.
