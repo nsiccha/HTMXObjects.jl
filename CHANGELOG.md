@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.143
+
+- A static export no longer refuses a browser result (`@browser`) for markup
+  that differs between two renders of the same inputs. Under a root with
+  `__glossary__`, a result whose text used a term was refused with one "shows
+  `a` outside `bound`" line per continuous input, although every input was
+  shown through `bound(...)`: a linked term's definition carries an id that is
+  new in every answer, and the export took that difference for the input's
+  (snag `browser-result-u-88fa1fae`). When a view rendered with an input
+  changed differs, the export now renders the unchanged inputs once more and
+  names the input only if the view differs in more than those two renders do.
+  A view that writes an id or a time of its own exports the same way. A
+  refusal quotes what changed (`… for slope 2.0` becomes `… for slope 2.2…`),
+  and a result whose renders of the same inputs do not line up, because it
+  holds more or less markup each time, is named once, saying so.
+
 ## 0.1.142
 
 - A computed default that reads no input stays static on an input that has a
