@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.156
+
+- A `semantic_app(…; presentation=:tabs)` page's result taller than its bound
+  scrolls inside itself instead of lengthening the page, so the inputs beside
+  it and the text around it stay where they are. A 201-row table in a picture
+  embedded in an article made the page 15,072 px tall; it now scrolls in a box
+  no taller than the window. `semantic_app(…; result_height = "32rem")` bounds
+  the results at that CSS length, and `result_height = nothing` keeps them
+  growing with the page; the default is `:window`, the window's height less
+  `--htmxo-sticky-top`. A result that fits its bound stays in the page as it
+  is, so nothing in it (a glossary term's explanation, a focus ring) is cut at
+  an edge. Inside the box a table's controls and header stick to the box top,
+  and a wide table's own box fits inside it; sorting, search, CSV, the
+  keyboard row moves, hover linking and the page's Markdown are unchanged
+  (snag `keep-the-caesium-ac035f3b`).
+
 ## 0.1.155
 
 - A generated `Bool` input is a switch where a change applies at once: the
