@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.1.150
+
+- A page that shows several `semantic_app(…; presentation=:tabs)` apps keeps
+  each app's inputs and open tab in the page address under the app's address
+  name, its mount path with dots: two apps mounted at `/first` and `/second`
+  that both have an input `rate` write `?first.rate=5&second.rate=9`, and the
+  open tab of the first `first.tab=other`. Until now the address kept one
+  `rate` and one `tab` for the whole page, the one changed last, and a
+  reopened link set it in every app. A page that shows one app, the app's own
+  page included, writes plain names as before (`?rate=5&tab=other`), and the
+  root object's own app writes plain names beside the others. An app reads its
+  own name first, else the plain one, so a link written with plain names opens
+  as before; where an app without a name keeps an input plainly, an app with a
+  name writes it under its own name even at its default, so it does not take
+  the other app's value. The browser chooses the names (it sees the whole
+  page: `semantic_follow_script`, `tabset_script`), the server reads the same
+  names when it renders a page, and a static export (`export_site`) applies
+  them when it loads. The forms and the tab bar carry the app's name as
+  `data-htmxo-url-scope` (snag `put-two-mounted-398bd499`, user decision
+  `1wq2uyi`).
+- `tabset(…; url_scope="first")` names the app a tabset belongs to: on a page
+  that shows apps of more than one name it keeps its tab as `?first.tab=`,
+  else as `?tab=`. A custom `semantic_app` `layout(parts)` passes
+  `url_scope=parts.url_scope`.
+
 ## 0.1.149
 
 - A day computed in the browser shows as a date, and a `NaN` from a browser

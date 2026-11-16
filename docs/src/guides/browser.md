@@ -92,7 +92,10 @@ println(String(response.body))
 - **An error** the module throws is shown in the result under its name
   (`DomainError: …`), which keeps its last answer faded until the next one.
 - **The page address**: a page applies the inputs its address names to its
-  controls when it loads, so a static page's shared link reopens them.
+  controls when it loads, so a static page's shared link reopens them. On a
+  page that shows several apps, each app's inputs and open tab are under its
+  own name (`?melt.rate=5&rain.rate=9`; Forms guide, *Several apps on one
+  page*).
 - **`@relevant`** conditions with arithmetic of inputs (`a * b > 10`) are
   evaluated in the browser, like comparisons with literals.
 

@@ -13219,7 +13219,7 @@ instance_scope_script() = h.script(Raw(raw"""
     'data-htmxo-select-key': 1, 'data-htmxo-select-value': 1, 'data-htmxo-search': 1,
     'data-htmxo-sort-keys': 1, 'data-htmxo-number': 1, 'data-htmxo-texts': 1,
     'data-htmxo-group-by': 1, 'data-htmxo-grouped': 1, 'data-htmxo-regroup': 1,
-    'data-htmxo-url-params': 1, 'data-htmxo-address': 1};
+    'data-htmxo-url-params': 1, 'data-htmxo-address': 1, 'data-htmxo-url-scope': 1};
   var reEscape = function (s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
 
   // `--<key>` for each `data-htmxo-instance` around `el`, outermost first;
@@ -33601,6 +33601,62 @@ _semantic_address_input(param) = param.source !== :path &&
     get(param, :kind, nothing) !== nothing && !_semantic_fixed_context(param) &&
     !_is_upload_type(param.type)
 
+# A `:tabs` app's address name: its mount path with dots (`/first` → `first`,
+# `/pictures/3` → `pictures.3`), and "" for the root object's own app. On a page
+# that shows apps of more than one name, the page address keeps each app's
+# inputs and open tab under it (`first.rate`, `first.tab`): the browser decides,
+# since only it sees the whole page (`semantic_follow_script`, `tabset_script`).
+function _semantic_url_scope(obj)
+    prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
+    join(filter(!isempty, split(string(prefix), '/')), '.')
+end
+
+# The query `target` with each parameter named under `scope` (`first.rate`)
+# under its plain name (`rate`), in place of every plain parameter of that name
+# (`rate`, and a list of records' `scenarios.<i>.<field>` for `scenarios`), or
+# `nothing` when no parameter is named under `scope`. A plain parameter the
+# scope does not name stays: a page of one app, and a link written before the
+# apps of a page were told apart, name them plainly.
+function _semantic_scoped_target(target::AbstractString, scope::AbstractString)
+    at = findfirst('?', target)
+    at === nothing && return nothing
+    unescape(t) = _percent_decode_lenient(replace(t, '+' => ' '))
+    prefix = scope * "."
+    parts = split(target[nextind(target, at):end], '&'; keepempty=false)
+    names = [unescape(first(split(part, '='; limit=2))) for part in parts]
+    own = Set{String}(first(split(name[ncodeunits(prefix)+1:end], '.'; limit=2))
+                      for name in names if startswith(name, prefix))
+    isempty(own) && return nothing
+    query = String[]
+    for (part, key) in zip(parts, names)
+        if startswith(key, prefix)
+            value = split(part, '='; limit=2)
+            push!(query, HTTP.URIs.escapeuri(key[ncodeunits(prefix)+1:end]) *
+                         (length(value) == 2 ? "=" * value[2] : ""))
+        elseif !(first(split(key, '.'; limit=2)) in own)
+            push!(query, part)
+        end
+    end
+    string(target[1:prevind(target, at)], isempty(query) ? "" : "?" * join(query, '&'))
+end
+
+# `obj` as its app reads its page's address: a parameter the address keeps
+# under the app's name (`_semantic_url_scope`) is its own, before the plain
+# one, so its `@param`s, its controls and its open tab read their own values
+# beside another app's of the same name. The page's request keeps its context.
+function _semantic_scoped_view(obj, scope::AbstractString)
+    isempty(scope) && return obj
+    req = _req_of(obj)
+    req isa HTTP.Request || return obj
+    target = _semantic_scoped_target(req.target, scope)
+    target === nothing && return obj
+    scoped = HTTP.Request(req.method, target, collect(req.headers), _request_body_bytes(req))
+    # The field itself: HTTP 2's `req.context` is a view of it.
+    setfield!(scoped, :context, getfield(req, :context))
+    Base.invokelatest(getproperty(DynamicObjects, :remount), obj;
+                      __req__=scoped, __param_request__=_param_request(scoped))
+end
+
 # The value the page's address gives the input `param` of `obj`'s route, or
 # `_NO_DEFAULT` when the address names none. A request context input reads it
 # as its property does; an operation argument through its declared options.
@@ -33684,14 +33740,17 @@ _semantic_address_wire(value::AbstractVector) =
 _semantic_address_wire(value) = String[_option_wire_string(value)]
 
 # A form's inputs the page's address keeps, with their defaults
-# (`semantic_follow_script` writes them). A page whose address keeps none
-# (`url_state=false`) names the same defaults for its Reset alone, as
-# `data-htmxo-defaults`.
-function _semantic_address_attrs(defaults, params; key::Symbol=:data_htmxo_address)
+# (`semantic_follow_script` writes them), and the app's address name
+# (`_semantic_url_scope`). A page whose address keeps none (`url_state=false`)
+# names the same defaults for its Reset alone, as `data-htmxo-defaults`.
+function _semantic_address_attrs(defaults, params; key::Symbol=:data_htmxo_address,
+                                 scope::AbstractString="")
     isnothing(defaults) && return (;)
     kept = Dict{String,Any}(string(param.name) => defaults[param.name]
                             for param in params if haskey(defaults, param.name))
-    isempty(kept) ? (;) : NamedTuple{(key,)}((_schema_json(kept),))
+    isempty(kept) && return (;)
+    attrs = NamedTuple{(key,)}((_schema_json(kept),))
+    key === :data_htmxo_address ? merge(attrs, (; data_htmxo_url_scope=scope)) : attrs
 end
 
 # The inputs a page's Reset returns to following their default rather than to
@@ -33741,7 +33800,7 @@ shows the values it names, and the script writes the inputs into it. With
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
         reset::Bool=true, sections=InputSection[], place=nothing,
-        report_states=_ReportState[])
+        report_states=_ReportState[], url_scope::AbstractString="")
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places. The fields of
@@ -33833,7 +33892,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
               _semantic_entry_control(entry, shared_names; radio_max, placed=context_id))
     end
     sidebar_defaults = _semantic_address_attrs(defaults,
-        [entry.param for entry in context_entries]; key=defaults_key)
+        [entry.param for entry in context_entries]; key=defaults_key, scope=url_scope)
     sidebar_form = isempty(context_entries) ? nothing :
         h.form(_sectioned_controls(sidebar_fields, sidebar_sections)...;
                id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
@@ -33858,7 +33917,8 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 radio_max, sections)
             inputs_id = base.target_id * "-inputs"
             own_params = _operation_control_params(route, shared_names)
-            own_defaults = _semantic_address_attrs(defaults, own_params; key=defaults_key)
+            own_defaults = _semantic_address_attrs(defaults, own_params; key=defaults_key,
+                                                   scope=url_scope)
             form = isempty(own_params) ? nothing :
                 h.form(controls...; id=inputs_id,
                        class="htmxo-semantic-operation-form htmxo-semantic-inputs",
@@ -33933,7 +33993,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                sidebar=isempty(sidebar_entries) ? nothing : sidebar_form, context=sidebar_form,
                reset=reset_button,
                tabs=Pair[entry.title => render_operation(entry) for entry in operations],
-               tab_names=names, active=open, operations)
+               tab_names=names, active=open, url_scope, operations)
     layout(parts)
 end
 
@@ -33978,7 +34038,7 @@ end
 function _default_semantic_tabs_layout(parts)
     heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
     tabs = tabset(parts.tabs...; id=parts.id * "-tabs", names=parts.tab_names,
-                  active=parts.active)
+                  active=parts.active, url_scope=get(parts, :url_scope, nothing))
     reset = get(parts, :reset, nothing)
     body = !isnothing(parts.sidebar) ?
         app_layout(h.aside(parts.sidebar, (isnothing(reset) ? () : (reset,))...), tabs;
@@ -34028,7 +34088,16 @@ its inputs and results, so it can be one part of a longer page, between
 paragraphs of an article or a report. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
-reopens the same page; `url_state=false` keeps only the tab. Its Reset button
+reopens the same page; `url_state=false` keeps only the tab. A page that shows
+several apps keeps each app's inputs and open tab under the app's address
+name, its mount path with dots: apps mounted at `/first` and `/second` that
+both have an input `rate` write `?first.rate=5&second.rate=9&first.tab=other`,
+and the root object's own app writes plain names beside them. A page that shows
+one app, the app's own page included, writes `?rate=5&tab=other`. An app reads
+its own name first, else the plain one, so a link written with plain names
+opens as before. The browser decides which to write, since it sees the whole
+page. A custom `layout(parts)` that draws its own [`tabset`](@ref) keeps the
+open tab so with `url_scope=parts.url_scope`. Its Reset button
 (`reset=true`, the default; words: `__error_texts__`'s `reset_inputs`)
 returns every one of those inputs, each tab's included, to what the page shows
 when its address names nothing: a `values=` entry or the declared default, a
@@ -34227,6 +34296,10 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         "semantic_app url_state must be true or false, got $(repr(url_state))"))
     isnothing(reset) || reset isa Bool || throw(ArgumentError(
         "semantic_app reset must be true or false, got $(repr(reset))"))
+    # An app page reads what the page address keeps under the app's name
+    # (`first.rate`) before the plain name.
+    url_scope = presentation === :tabs ? _semantic_url_scope(obj) : ""
+    obj = _semantic_scoped_view(obj, url_scope)
     descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
@@ -34275,7 +34348,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
         reset=something(reset, true), sections=input_sections, place, report_states=states,
-        render_operation=render_operation === _default_semantic_operation ?
+        url_scope, render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
 
@@ -36746,6 +36819,18 @@ link reopens the same inputs and results: the server applies them to a page
 it renders, and the script applies them to the controls when the page loads,
 which is what a static page (`export_site`) needs.
 
+On a page that shows apps of more than one address name (each form's
+`data-htmxo-url-scope`: the app's mount path with dots, empty for the root
+object's own app), each app's inputs are written under its name
+(`first.rate`), and their plain spelling (`rate`) is left to an app without a
+name; on a page of one app they are written plainly, and the other spelling
+goes. An app reads its own name first, else the plain one. Where an app
+without a name keeps an input plainly, an app with a name writes that input
+under its own name even at its default (empty when it has no value to write,
+which reads as its default), so the plain value does not become its own when
+the page opens again. [`tabset_script`](@ref) keeps the open tab by the same
+rule.
+
 A result that reads a `@browser` property is computed in the browser
 ([`semantic_browser_script`](@ref)) instead of asked for, under the same rules,
 and it also follows an input while it moves: on each `input` event (a slider
@@ -36944,12 +37029,19 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   // A list of records is kept as `name.<i>.label`, `name.<i>.on` (only when
   // off) and each field that differs from its default; nothing at all while
-  // the list is the one record a request that names none has.
-  function writeRecords(url, form, name, spec) {
-    var prefix = name + '.';
+  // the list is the one record a request that names none has, unless `pinned`.
+  // `key` is its name in the address (`addressName`).
+  function dropRecords(url, key) {
     Array.from(url.searchParams.keys()).forEach(function(k) {
-      if (k.indexOf(prefix) === 0) url.searchParams.delete(k);
+      if (k.indexOf(key + '.') === 0) url.searchParams.delete(k);
     });
+  }
+  function hasRecords(url, key) {
+    return Array.from(url.searchParams.keys()).some(function(k) { return k.indexOf(key + '.') === 0; });
+  }
+  function writeRecords(url, form, name, spec, key, pinned) {
+    var prefix = name + '.';
+    dropRecords(url, key);
     var records = [];
     Array.prototype.forEach.call(form.elements, function(c) {
       if (!c.name || c.disabled || c.name.indexOf(prefix) !== 0 || PRESSED.test(c.type)) return;
@@ -36974,11 +37066,11 @@ semantic_follow_script() = h.script(Raw(raw"""
     function atDefault(rec, key) {
       return same(rec.fields[key] || [], spec.fields[key], rec.numeric && rec.numeric[key]);
     }
-    if (records.length === 1 && records[0].on !== false &&
+    if (!pinned && records.length === 1 && records[0].on !== false &&
         records[0].label === spec.label + ' 1' &&
         Object.keys(records[0].fields).every(function(k) { return atDefault(records[0], k); })) return;
     records.forEach(function(rec, j) {
-      var p = prefix + (j + 1) + '.';
+      var p = key + '.' + (j + 1) + '.';
       url.searchParams.append(p + 'label', rec.label || '');
       if (rec.on === false) url.searchParams.append(p + 'on', 'false');
       Object.keys(rec.fields).forEach(function(k) {
@@ -36987,25 +37079,88 @@ semantic_follow_script() = h.script(Raw(raw"""
       });
     });
   }
+  // Each app keeps its inputs under its address name (`data-htmxo-url-scope`:
+  // its mount path with dots, empty for the root object's app) once the page
+  // shows apps of more than one name, so two apps' `rate` stay apart
+  // (`first.rate`, `second.rate`); a page of one app names them plainly. An
+  // app reads its own name first, else the plain one, which a page of one app
+  // and a link from before the apps were told apart write. `tabset_script`
+  // keeps the open tab by the same rule: keep `several` alike in both.
+  var SCOPE = 'data-htmxo-url-scope';
+  function several() {
+    var found = {};
+    document.querySelectorAll('[' + SCOPE + ']').forEach(function(el) {
+      if (!el.closest('.htmxo-embed')) found[el.getAttribute(SCOPE)] = true;
+    });
+    return Object.keys(found).length > 1;
+  }
+  function scopeOf(form) { return form.getAttribute(SCOPE) || ''; }
+  function addressName(form, name, apart) {
+    return apart && scopeOf(form) ? scopeOf(form) + '.' + name : name;
+  }
+  function addressOf(form) {
+    try { return JSON.parse(form.getAttribute('data-htmxo-address')); } catch (_) { return null; }
+  }
+  // Whether `name` is a list of values (checkboxes, a multiple select), whose
+  // empty value is an empty selection.
+  function listed(form, name) {
+    return Array.prototype.some.call(form.elements, function(c) {
+      return c.name === name && (c.type === 'select-multiple' ||
+        (c.type === 'checkbox' && !!c.closest('[data-htmxo-multiple]')));
+    });
+  }
   var touched = false;
   function writeAddress(last) {
     var forms = Array.prototype.slice.call(document.querySelectorAll('form[data-htmxo-address]'));
     if (!forms.length || forms.some(busy)) return;
     // The changed form last, so its value wins a name two forms keep.
     if (last && forms.indexOf(last) >= 0) forms.splice(forms.indexOf(last), 1), forms.push(last);
-    var url = new URL(location.href);
+    var url = new URL(location.href), apart = several();
+    // The spelling of an app's input that the page does not write now goes
+    // first: the plain one on a page of several apps (an app without a name
+    // that keeps it writes it again below), the app's own on a page of one.
     forms.forEach(function(form) {
-      var defaults;
-      try { defaults = JSON.parse(form.getAttribute('data-htmxo-address')); } catch (_) { return; }
+      var defaults = addressOf(form);
+      if (!defaults || !scopeOf(form)) return;
       Object.keys(defaults).forEach(function(name) {
+        var other = apart ? name : scopeOf(form) + '.' + name;
+        if (defaults[name] && defaults[name].records) dropRecords(url, other);
+        else url.searchParams.delete(other);
+      });
+    });
+    forms.forEach(function(form) {
+      var defaults = addressOf(form);
+      if (!defaults) return;
+      Object.keys(defaults).forEach(function(name) {
+        var key = addressName(form, name, apart);
         if (defaults[name] && defaults[name].records) {
-          writeRecords(url, form, name, defaults[name].records);
+          writeRecords(url, form, name, defaults[name].records, key, false);
           return;
         }
-        url.searchParams.delete(name);
+        url.searchParams.delete(key);
         var values = valuesOf(form, name);
         if (!values || !values.length || same(values, defaults[name], numeric(form, name))) return;
-        values.forEach(function(v) { url.searchParams.append(name, v); });
+        values.forEach(function(v) { url.searchParams.append(key, v); });
+      });
+    });
+    // An app's input the address leaves out reads the plain name when the page
+    // opens again; where an app without a name keeps that name, the input is
+    // written under its own name too, so the other app's value does not become
+    // its own. One with no value to write is written empty: the app then shows
+    // its default (an empty selection, for a list).
+    if (apart) forms.forEach(function(form) {
+      var defaults = addressOf(form);
+      if (!defaults || !scopeOf(form)) return;
+      Object.keys(defaults).forEach(function(name) {
+        var key = addressName(form, name, apart);
+        if (defaults[name] && defaults[name].records) {
+          if (hasRecords(url, name) && !hasRecords(url, key))
+            writeRecords(url, form, name, defaults[name].records, key, true);
+          return;
+        }
+        if (!url.searchParams.has(name) || url.searchParams.has(key)) return;
+        var values = valuesOf(form, name);
+        (values && values.length ? values : ['']).forEach(function(v) { url.searchParams.append(key, v); });
       });
     });
     if (url.href === location.href) return;
@@ -37036,11 +37191,18 @@ semantic_follow_script() = h.script(Raw(raw"""
   function applyAddress() {
     var params = new URLSearchParams(location.search), changed = [];
     document.querySelectorAll('form[data-htmxo-address]').forEach(function(form) {
-      var defaults;
-      try { defaults = JSON.parse(form.getAttribute('data-htmxo-address')); } catch (_) { return; }
+      var defaults = addressOf(form);
+      if (!defaults) return;
       Object.keys(defaults).forEach(function(name) {
-        if ((defaults[name] && defaults[name].records) || !params.has(name)) return;
-        var wanted = params.getAll(name);
+        if (defaults[name] && defaults[name].records) return;
+        // The app's own name first, else the plain one.
+        var own = scopeOf(form) ? scopeOf(form) + '.' + name : null;
+        var key = own && params.has(own) ? own : name;
+        if (!params.has(key)) return;
+        var wanted = params.getAll(key);
+        // Its own name with no value: the app shows its default.
+        if (key === own && !listed(form, name) &&
+            wanted.every(function(v) { return v === ''; })) return;
         if (same(valuesOf(form, name) || [], wanted, numeric(form, name))) return;
         setControls(form, name, wanted, changed);
       });
@@ -40657,6 +40819,26 @@ tabset_script() = h.script(Raw("""
     const tabOf = e => e.target instanceof Element ? e.target.closest('.tabset > nav [role=tab]') : null;
     const panelOf = (ts, a) => ts.querySelector(':scope > .tab-panel[data-panel="' + a.dataset.panel + '"]');
     const recording = ts => Boolean(ts.dataset.tabParam) && !ts.closest('.htmxo-embed');
+    // A tabset of an app (`url_scope`, its address name) keeps its tab under
+    // that name (`first.tab`) once the page shows apps of more than one name,
+    // so two apps' tabs stay apart, and under the plain parameter otherwise.
+    // It reads its own name first, else the plain one, which a page of one app
+    // and a link from before the apps were told apart write. Keep `several`
+    // alike with `semantic_follow_script`'s, which keeps the inputs so.
+    const SCOPE = 'data-htmxo-url-scope';
+    const several = () => new Set(Array.from(document.querySelectorAll('[' + SCOPE + ']'))
+        .filter(el => !el.closest('.htmxo-embed')).map(el => el.getAttribute(SCOPE))).size > 1;
+    const scopeOf = ts => ts.getAttribute(SCOPE) || '';
+    const ownKey = ts => scopeOf(ts) ? scopeOf(ts) + '.' + ts.dataset.tabParam : null;
+    // The parameter whose value names the tab of `ts`.
+    const readKey = (ts, params) => {
+        const own = ownKey(ts);
+        return own && params.has(own) ? own : ts.dataset.tabParam;
+    };
+    const shownName = ts => {
+        const a = links(ts).find(l => l.classList.contains('contrast'));
+        return a ? a.dataset.tabName : null;
+    };
 
     // Shows tab `a` before htmx has processed the tabset. A lazy panel that is
     // shown loads itself once visible, a hidden one from its tab's first click
@@ -40697,16 +40879,17 @@ tabset_script() = h.script(Raw("""
     const warned = new Set();
     window.htmxoTabset = ts => {
         if (!recording(ts)) return;
-        const key = ts.dataset.tabParam;
-        const name = new URLSearchParams(location.search).get(key);
+        const params = new URLSearchParams(location.search);
+        const key = readKey(ts, params);
+        const name = params.get(key);
         if (name === null) return;
         const a = links(ts).find(l => l.dataset.tabName === name);
         if (a) { if (!a.classList.contains('contrast')) open(ts, a); return; }
         // Tabsets that share a parameter share its value: warn only when no
-        // tabset on the page has a tab of that name.
+        // tabset on the page that reads it has a tab of that name.
         setTimeout(() => {
             const known = Array.from(document.querySelectorAll('.tabset > nav a[data-tab-name]')).some(l =>
-                l.dataset.tabName === name && l.closest('.tabset').dataset.tabParam === key);
+                l.dataset.tabName === name && readKey(l.closest('.tabset'), params) === key);
             if (known || warned.has(key + '=' + name)) return;
             warned.add(key + '=' + name);
             console.warn('tabset: no tab is named "' + name + '" (?' + key + '=); showing the default tab');
@@ -40727,8 +40910,28 @@ tabset_script() = h.script(Raw("""
         const ts = a.closest('.tabset');
         tabs(ts).forEach(t => t.setAttribute('tabindex', t === a ? '0' : '-1'));
         if (!recording(ts)) return;
-        const url = new URL(location.href);
-        url.searchParams.set(ts.dataset.tabParam, a.dataset.tabName);
+        const url = new URL(location.href), param = ts.dataset.tabParam, own = ownKey(ts);
+        if (own && several()) {
+            url.searchParams.set(own, a.dataset.tabName);
+        } else {
+            url.searchParams.set(param, a.dataset.tabName);
+            if (own) url.searchParams.delete(own);
+        }
+        if (several()) {
+            const others = Array.from(document.querySelectorAll('.tabset[data-tab-param]')).filter(o =>
+                o !== ts && recording(o) && o.dataset.tabParam === param);
+            // Where the address names the tab plainly, each other app's tabset
+            // that has no tab under its own name is written under it, with the
+            // tab it shows, so the plain value does not become its tab when
+            // the page is opened again. The plain parameter goes once no
+            // tabset without an app keeps it.
+            if (url.searchParams.has(param)) others.forEach(o => {
+                const name = shownName(o);
+                if (ownKey(o) && !url.searchParams.has(ownKey(o)) && name !== null)
+                    url.searchParams.set(ownKey(o), name);
+            });
+            if (own && !others.some(o => !ownKey(o))) url.searchParams.delete(param);
+        }
         if (url.href === location.href) return;
         history.replaceState(history.state, '', url);
         if (window.htmx) try { sessionStorage.setItem('htmx-current-path-for-history', url.pathname + url.search); } catch (_) {}
@@ -40838,12 +41041,14 @@ end
 
 # What lets `tabset_script` keep the open tab in the URL: the key on the
 # tabset (with the `preload` trigger a lazy tab regains when the URL opens
-# another one), each tab's name, and the call that shows the URL's tab.
-_tabset_url_attrs(::Nothing, preload) = (;)
-function _tabset_url_attrs(url_param::AbstractString, preload)
+# another one, and the address name of the app it belongs to), each tab's
+# name, and the call that shows the URL's tab.
+_tabset_url_attrs(::Nothing, preload, url_scope=nothing) = (;)
+function _tabset_url_attrs(url_param::AbstractString, preload, url_scope=nothing)
     isempty(url_param) && throw(ArgumentError("tabset: `url_param` is empty; pass `nothing` to keep the tab out of the URL"))
     trigger = _preload_attrs(preload)
-    (; data_tab_param=url_param, (isempty(trigger) ? (;) : (; data_tab_preload=trigger.preload))...)
+    (; data_tab_param=url_param, (isempty(trigger) ? (;) : (; data_tab_preload=trigger.preload))...,
+       (isnothing(url_scope) ? (;) : (; data_htmxo_url_scope=url_scope))...)
 end
 _tabset_name_attrs(::Nothing, names, i) = (;)
 _tabset_name_attrs(url_param, names, i) = (; data_tab_name=names[i])
@@ -40955,16 +41160,18 @@ function _tabset_key(x::SemanticNode, h::UInt)
 end
 
 # What a call names the tabset by counts too: its tab bar's `label`, its
-# `url_param` and its tabs' `names`, so tabsets a page tells apart by one of
-# them have ids of their own. Each counts only when the call passes it (the
-# default `url_param="tab"` does not), so a tabset that passes none keeps the id
-# its tabs give it. Which tab is open (`active`, which may follow the request)
-# and `preload` do not count.
-function _tabset_default_id(tabs, label=nothing, url_param="tab", names=nothing)
+# `url_param`, its tabs' `names` and its `url_scope`, so tabsets a page tells
+# apart by one of them have ids of their own. Each counts only when the call
+# passes it (the default `url_param="tab"` does not), so a tabset that passes
+# none keeps the id its tabs give it. Which tab is open (`active`, which may
+# follow the request) and `preload` do not count.
+function _tabset_default_id(tabs, label=nothing, url_param="tab", names=nothing,
+                            url_scope=nothing)
     key = _tabset_key(tabs, zero(UInt))
     isnothing(label) || (key = _tabset_key(label, hash("label", key)))
     isequal(url_param, "tab") || (key = _tabset_key(url_param, hash("url_param", key)))
     isnothing(names) || (key = _tabset_key(names, hash("names", key)))
+    isnothing(url_scope) || (key = _tabset_key(url_scope, hash("url_scope", key)))
     "tabset-" * string(key; base=36)
 end
 
@@ -40979,7 +41186,7 @@ include("semantic_report.jl")
 
 """
     tabset(tabs::Pair...; active=1, id=<from the labels, names and content>, preload=nothing,
-           url_param="tab", names=nothing, label=nothing)
+           url_param="tab", names=nothing, label=nothing, url_scope=nothing)
 
 Client-side tabs using Pico CSS nav + hyperscript.
 
@@ -41001,7 +41208,7 @@ Mixed (eager + lazy):
 
 Each tabset switches only its own panels, also beside tabsets with the same
 labels. `id` comes from the labels, from what the panels say and from the
-`label`, `url_param` and `names` the call passes, so it stays the same from one
+`label`, `url_param`, `names` and `url_scope` the call passes, so it stays the same from one
 render to the next as long as they do, and it changes with them. Which tab is
 open (`active`) and `preload` do not count. [`private`](@ref Private) content
 does not count, only its public stand-in. Tabsets alike in all of it share an
@@ -41023,6 +41230,16 @@ URL or `active` picks tabs by name.
 share its value, so give each tabset on a page its own when they should keep
 their tabs apart. `url_param=nothing` leaves the URL alone. Inside a docs embed
 (`.htmxo-embed`) the URL is the host page's and is left alone too.
+
+`url_scope="first"` names the app the tabset belongs to (a
+[`semantic_app`](@ref) page passes its app's address name, `""` for the root
+object's own app). Once the page shows apps of more than one name, the tabset
+writes its tab under its app's name, `?first.tab=<name>`, and on a page of one
+app `?tab=<name>`. It reads its app's name first, else the plain parameter, so
+a link that names the tab plainly opens it as before. A tab click on such a
+page also writes the open tab of each other app's tabset that would read the
+plain parameter under that app's name, so the plain value does not become its
+tab when the page opens again.
 
 A lazy tab the URL names loads like the initially active one: once it is
 scrolled into view, so a tabset below the fold waits for the reader. A link
@@ -41057,11 +41274,12 @@ content, a lazy tab as `Details (/api/details)`.
 """
 function tabset(tabs::Pair...; active=1, preload=nothing, url_param="tab", names=nothing,
                 label::Union{Nothing,AbstractString}=nothing,
-                id=_tabset_default_id(tabs, label, url_param, names)) # after what it reads
+                url_scope::Union{Nothing,AbstractString}=nothing,
+                id=_tabset_default_id(tabs, label, url_param, names, url_scope)) # after what it reads
     tab_names = isnothing(url_param) && isnothing(names) && active isa Integer ? nothing :
         _tabset_checked_names(_tabset_names(tabs, names))
     active = _tabset_active_index(active, tab_names)
-    h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload)...)(
+    h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload, url_scope)...)(
         _TabsetPart(h.nav(; role="none")(
             h.ul(; role="tablist", aria_label=label)([
                 h.li(h.a(tab_label;
