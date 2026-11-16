@@ -6110,8 +6110,9 @@ Base.show(io::IO, mime::MIME"text/plain", alt::SemanticAlternatives) =
 # as it does anywhere else. A link writes `label (target)`, as `SemanticLink`
 # does; a table writes one tab-separated line per row, as `SemanticTable` does;
 # a list item writes `- item` (`1. item` in an `<ol>`); an image its `alt`.
-# Scripts, styles and buttons write nothing, and a `<details>` its body without
-# the toggle label, as in Markdown.
+# Scripts, styles and buttons write nothing. A `<details>` writes its
+# `<summary>` as a paragraph and then its body, as a `SemanticDisclosure` writes
+# its label and body: plain text has no viewport to collapse into.
 mutable struct _PlainText
     io::IO
     wrote::Bool   # whether any text is out yet
@@ -6168,10 +6169,20 @@ for t in (:dt, :dd)
 end
 _plain_node!(w::_PlainText, node::Node, ::Val{:br}) = _plain_break!(w, 1)
 _plain_node!(w::_PlainText, node::Node, ::Val{:hr}) = _plain_break!(w, 2)
-_plain_node!(w::_PlainText, node::Node, ::Val{:details}) = _plain_block!(w) do
-    for c in HTMX.children(node)
-        c isa Node && HTMX.tag(c) === :summary && continue
-        _plain!(w, c)
+# The summary is text the reader reads, so it stays, as its own paragraph before
+# the body (snag `in-the-kb-lane-c-bacb9ce6`). A body that writes nothing (only
+# buttons or scripts, say) has nothing to open, so its label goes with it, as a
+# `SemanticDisclosure`'s does. The body is written once, into a string, so
+# nested disclosures cost what their text costs.
+_plain_is_summary(c) = c isa Node && HTMX.tag(c) === :summary
+function _plain_node!(w::_PlainText, node::Node, ::Val{:details})
+    body = _plain_string(filter(!_plain_is_summary, HTMX.children(node)))
+    all(isspace, body) && return nothing
+    _plain_block!(w) do
+        for c in HTMX.children(node)
+            _plain_is_summary(c) && _plain_block!(() -> _plain_children!(w, c), w)
+        end
+        _plain_block!(() -> _plain_text!(w, body), w)
     end
 end
 function _plain_node!(w::_PlainText, node::Node, ::Val{:img})

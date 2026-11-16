@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.156
+
+- A `<details>` among semantic content keeps its `<summary>` in plain text
+  (`repr("text/plain", …)`): the summary is a paragraph of its own before the
+  body, as a `SemanticDisclosure` writes its label, instead of being dropped as
+  a toggle label. A `<details>` whose body writes nothing (only buttons, or
+  nothing at all) writes nothing, its summary included, as a
+  `SemanticDisclosure` with nothing to open does.
+
 ## 0.1.155
 
 - A generated `Bool` input is a switch where a change applies at once: the
