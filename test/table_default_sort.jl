@@ -91,6 +91,56 @@ end
         HTMXObjects._js_parse_float("-Infinity") == -Inf
 end
 
+@testitem "default_sort preserves equal numeric keys without comparing their spelling" setup=[DefaultSortFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    order(rows, dir=:asc) = row_ids(repr("text/html", sortable_table(["Value"], rows; default_sort=1 => dir)))
+    # Every zero is the same sort value. Keep its sign in the source and CSV.
+    zeros = [0.0, -0.0, 0.0, -0.0]
+    for cell in (number_cell, x -> h.td("0.000"; data_sort_value=string(x)),
+                 x -> h.td("0.000"; data_htmxo_number=string(x)))
+        rows = [h.tr(id="row-$i")(cell(x)) for (i, x) in enumerate(zeros)]
+        for dir in (:asc, :desc)
+            @test order(rows, dir) == ["row-$i" for i in 1:4]
+        end
+        @test [HTMXObjects._row_id(r) for r in rows] == ["row-$i" for i in 1:4]
+    end
+    @test isequal(zeros, [0.0, -0.0, 0.0, -0.0])
+
+    # Equal explicit numbers may have different decimal/exponent spellings.
+    keys = ["2.50", "2.5", "25e-1", "+2.500", "Infinity", "+Infinity", "-Infinity", " -0.0 ", "0"]
+    rows = [h.tr(id="row-$i")(h.td("label $i"; data_sort_value=k)) for (i, k) in enumerate(keys)]
+    @test order(rows) == ["row-$i" for i in [7, 8, 9, 1, 2, 3, 4, 5, 6]]
+    @test order(rows, :desc) == ["row-$i" for i in [5, 6, 1, 2, 3, 4, 8, 9, 7]]
+
+    # Ordinary text retains the text tie-break. At the same leading number,
+    # numeric keys precede text ascending, with stable ties in either direction.
+    mixed = [h.tr(id="row-a")(h.td("2.50")),
+             h.tr(id="row-b")(h.td("numeric"; data_sort_value="2.50")),
+             h.tr(id="row-c")(h.td("2.5")),
+             h.tr(id="row-d")(number_cell(2.5)),
+             h.tr(id="row-e")(h.td("2.5 x 10")),
+             h.tr(id="row-f")(h.td("label"; data_sort_value="2.5 x 5", data_htmxo_number="99"))]
+    @test order(mixed) == ["row-b", "row-d", "row-c", "row-f", "row-e", "row-a"]
+    @test order(mixed, :desc) == ["row-a", "row-e", "row-f", "row-c", "row-b", "row-d"]
+    # Every permutation of equal numeric spellings and one text label has the
+    # same category order; equality must not depend on which pair is compared.
+    for indices in ((1,2,3), (1,3,2), (2,1,3), (2,3,1), (3,1,2), (3,2,1))
+        triple = mixed[[2, 4, 3]][collect(indices)]
+        numeric_ids = filter(!=("row-c"), [HTMXObjects._row_id(r) for r in triple])
+        @test order(triple) == [numeric_ids; "row-c"]
+        @test order(triple, :desc) == ["row-c"; numeric_ids]
+    end
+
+    # data-sort-value wins over data-htmxo-number, including a nonnumeric key.
+    overridden = [h.tr(id="row-a")(h.td("first"; data_sort_value="z", data_htmxo_number="0")),
+                  h.tr(id="row-b")(h.td("second"; data_sort_value="a", data_htmxo_number="1"))]
+    @test order(overridden) == ["row-b", "row-a"]
+    # A numeric prefix is not a complete explicit number.
+    prefix = [h.tr(id="row-$i")(h.td("value"; data_sort_value=k)) for (i,k) in enumerate(["2 x 10", "2 x 5"])]
+    @test order(prefix) == ["row-2", "row-1"]
+end
+
 @testitem "default_sort orders texts that start with the same number by their texts" setup=[DefaultSortFixtures] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h
@@ -174,7 +224,19 @@ end
     else
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
         texts = [h.tr(id="t-$i")(h.td(t)) for (i, t) in enumerate(["beta", "Alpha", "10 Tsd.", "Äpfel", "–", "alpha", "9 Tsd."])]
+        zero_rows = [h.tr(id="zero-$i")(h.td(string(i)), number_cell(x)) for (i,x) in enumerate([0.0, -0.0, 0.0, -0.0])]
+        spellings = ["2.50", "2.5", "25e-1", "+2.500", "Infinity", "+Infinity", "-Infinity", " -0.0 ", "0"]
+        spelling_rows = [h.tr(id="spelling-$i")(h.td("label $i"; data_sort_value=k)) for (i,k) in enumerate(spellings)]
+        mixed_rows = [h.tr(id="mixed-a")(h.td("2.50")),
+                      h.tr(id="mixed-b")(h.td("numeric"; data_sort_value="2.50")),
+                      h.tr(id="mixed-c")(h.td("2.5")),
+                      h.tr(id="mixed-d")(number_cell(2.5)),
+                      h.tr(id="mixed-e")(h.td("2.5 x 10")),
+                      h.tr(id="mixed-f")(h.td("label"; data_sort_value="2.5 x 5", data_htmxo_number="99"))]
         tables = h.div(
+            sortable_table(["Row", "Value"], zero_rows; id="zeros", default_sort=2),
+            sortable_table(["Value"], spelling_rows; id="spellings", default_sort=1),
+            sortable_table(["Value"], mixed_rows; id="mixed", default_sort=1),
             sortable_table(["Abschnitt", "Beschäftigte"],
                 [value_row(l, v) for (l, v) in (("B", 0.0), ("C", 0.0), ("D", 0.047), ("E", 0.0), ("F", 46.5))];
                 id="flat", default_sort=2 => :desc),
@@ -190,15 +252,42 @@ end
         # what a regroup or a row update runs): the rows must not move. Then
         # the grouped tables regroup to the flat view and back.
         driver = h.script(Raw(raw"""
-        window.addEventListener('load', function() {
+        window.addEventListener('load', async function() {
             const checks = [];
             const rows = id => Array.from(document.getElementById(id).rows).map(r => r.id || r.textContent.trim()).join(',');
-            for (const id of ['flat', 'text', 'regimen', 'regimen-desc', 'pins', 'keyed', 'tree', 'g', 'e']) {
+            for (const id of ['zeros', 'spellings', 'mixed', 'flat', 'text', 'regimen', 'regimen-desc', 'pins', 'keyed', 'tree', 'g', 'e']) {
                 const before = rows(id);
                 htmxoResort(document.getElementById(id).closest('table'));
                 const after = rows(id);
                 checks.push(id + ':' + (before === after ? 'true' : 'false ' + before + ' VS ' + after));
             }
+            // Real header clicks retain equal-key order in both directions.
+            const orders = [
+                ['zeros', 'zero-1,zero-2,zero-3,zero-4', 'zero-1,zero-2,zero-3,zero-4'],
+                ['spellings', 'spelling-7,spelling-8,spelling-9,spelling-1,spelling-2,spelling-3,spelling-4,spelling-5,spelling-6',
+                    'spelling-5,spelling-6,spelling-1,spelling-2,spelling-3,spelling-4,spelling-8,spelling-9,spelling-7'],
+                ['mixed', 'mixed-b,mixed-d,mixed-c,mixed-f,mixed-e,mixed-a', 'mixed-a,mixed-e,mixed-f,mixed-c,mixed-b,mixed-d']
+            ];
+            for (const [id, ascending, descending] of orders) {
+                const table = document.getElementById(id).closest('table');
+                const header = table.querySelector('th[aria-sort]');
+                checks.push(id + '-initial:' + (rows(id) === ascending));
+                const click = () => (header.querySelector('button') || header).click();
+                click();
+                checks.push(id + '-descending:' + (rows(id) === descending && header.getAttribute('aria-sort') === 'descending'));
+                click();
+                checks.push(id + '-ascending:' + (rows(id) === ascending && header.getAttribute('aria-sort') === 'ascending'));
+            }
+            // CSV follows the DOM order and keeps the exact signed values.
+            const createURL = URL.createObjectURL, anchorClick = HTMLAnchorElement.prototype.click;
+            let blob = null;
+            URL.createObjectURL = b => { blob = b; return 'blob:test'; };
+            HTMLAnchorElement.prototype.click = function() {};
+            try { downloadTableCsv(document.getElementById('zeros'), 'zeros.csv'); }
+            finally { URL.createObjectURL = createURL; HTMLAnchorElement.prototype.click = anchorClick; }
+            const csv = blob ? await blob.text() : '';
+            const data = csv.trim().split(/\r?\n/).slice(1).map(line => line.split(','));
+            checks.push('zeros-csv:' + (JSON.stringify(data) === JSON.stringify([['1','0.0'],['2','-0.0'],['3','0.0'],['4','-0.0']])));
             for (const id of ['g', 'e']) {
                 const before = rows(id);
                 const pills = () => document.getElementById(id).closest('[data-htmxo-grouped]').querySelector('.htmxo-group-pills');
@@ -228,7 +317,7 @@ end
                 for line in lines
                     @test endswith(line, ":true")
                 end
-                @test length(lines) == 11
+                @test length(lines) == 24
             end
         finally
             close(server)
