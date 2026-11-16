@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.164
+
+- A static export (`StaticExport`, `export_site`) no longer greys or removes
+  a `semantic_app` control whose choices can change. Its refresh region,
+  which only draws the control again through the server, loses that request
+  and stays as it is under both `controls=:disable` and `controls=:remove`,
+  so a browser-computed input keeps its full contrast and takes mouse input
+  (the injected `[data-static-disabled]` style had dimmed it to 0.45 and set
+  `pointer-events: none`). Operations that need the server are still greyed
+  or removed.
+
 ## 0.1.163
 
 - Tables accept independent `density=:compact` and `header_align=:left`

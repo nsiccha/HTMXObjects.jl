@@ -7175,6 +7175,20 @@ const _STATIC_DISABLED_STYLE = Node("style", "[data-static-disabled]{opacity:.45
 # HTMX converts underscores to hyphens in attribute names, so these use hyphens.
 const _HX_NONGET_ATTRS = Set([Symbol("hx-post"), Symbol("hx-put"), Symbol("hx-patch"), Symbol("hx-delete")])
 
+# Whether `attrs` carry a request that only draws the element's controls again:
+# its address carries the `__htmxo_form` marker, which renders an operation's
+# form without running it (`_operation_form_request`). `semantic_app` wires
+# its controls' refresh regions this way (`_semantic_context_control`,
+# `_semantic_refresh_attrs`). LOCKSTEP: the runtime's `[?&]__htmxo_form=` tests.
+_static_controls_redraw(attrs) = any(sym -> _is_controls_redraw(get(attrs, sym, nothing)),
+                                     (Symbol("hx-get"), _HX_NONGET_ATTRS...))
+_is_controls_redraw(address::AbstractString) = occursin(r"[?&]__htmxo_form=", address)
+_is_controls_redraw(_) = false
+
+# What wires such a redraw besides its address, left with nothing to send.
+const _STATIC_REDRAW_WIRING = (Symbol("hx-trigger"), Symbol("hx-include"), Symbol("hx-target"),
+                               Symbol("hx-swap"), Symbol("hx-params"))
+
 """
     StaticExport(; url_map=nothing, controls=:disable, record_base="", runtime=:inline,
                  audience=:public)
@@ -7225,6 +7239,11 @@ alone, so concurrent ordinary requests are unaffected.
   behaviour) strips those attributes and greys the element out
   (`data-static-disabled` + `disabled`, plus the dimming style in a full
   page's `<head>`). `:remove` drops the element and its subtree instead.
+  A region whose request only draws its controls again (a
+  [`semantic_app`](@ref) control whose choices can change) is neither: it
+  loses that request and keeps its controls as they are, so a control that
+  works without a server (a browser-computed result's input) stays usable
+  at full contrast.
 - `record_base` — the prefix the default rules prepend to rooted addresses an
   unmapped attribute keeps (`hx-get` → `<record_base>/hx/…`, `href`/`src` →
   `<record_base>/…`). Empty (default) leaves them unchanged.
@@ -7499,7 +7518,9 @@ Walk a Node tree and make it static-safe under `rules`:
   `_static_sends_values`), or that name one of `rules.unservable` (kwargs
   routes)
 - Mark affected elements with `data-static-disabled` and `disabled`, or —
-  under `controls=:remove` — drop them (`_STATIC_REMOVED`)
+  under `controls=:remove` — drop them (`_STATIC_REMOVED`); an element whose
+  request only draws its controls again (`_static_controls_redraw`) instead
+  loses that request's wiring and stays
 - Give a [`url_params`](@ref) element the file of each value it declares
   (`data-htmxo-url-files`), its `hx-get` the file of the value it shows
 - Map the path of an `hx-push-url`/`hx-replace-url` address like an `href`,
@@ -7886,7 +7907,13 @@ function _static_walk(node::Node, rules::_StaticRules)
         new_attrs[sym] = _static_page_url(spec, new_attrs[sym])
     end
 
-    if unservable
+    if unservable && _static_controls_redraw(attrs)
+        # A region that only draws its controls again (a `semantic_app`
+        # control whose choices can change) is no control itself: its request
+        # goes, and the controls it holds are walked as their own, so a
+        # control the browser still serves is neither greyed nor removed.
+        foreach(sym -> delete!(new_attrs, sym), _STATIC_REDRAW_WIRING)
+    elseif unservable
         spec.controls === :remove && return _STATIC_REMOVED
         new_attrs[Symbol("data-static-disabled")] = "true"  # renders as data-static-disabled
         new_attrs[:disabled] = "true"                        # renders as boolean attribute

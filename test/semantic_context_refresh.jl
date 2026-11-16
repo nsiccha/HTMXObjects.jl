@@ -130,6 +130,45 @@ end
     @test !contains(static_html, "data-htmxo-context")
 end
 
+@testitem "a static export keeps a context control that draws itself again, and still disables the server's operations" setup=[ContextRefreshFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    # Snag keep-enabled-bro-6df018d2: the region's redraw request cannot be
+    # served statically, and the export greyed the region, and with it the
+    # control it holds (`[data-static-disabled]` dims and stops the pointer).
+    reset_draws!()
+    route!(DrawPage(); operation_policy=:blocking)
+    live = String(dispatch(:GET, "/").body)
+    # Control: the live page wires the region's redraw, and the operations'
+    # forms send values a static server cannot answer.
+    @test region_attrs(live, "htmxo-semantic-context-control")["hx-trigger"] == "htmxo-refresh"
+    @test contains(live, "hx-post=\"/ops/import_draws")
+    for controls in (:disable, :remove)
+        html = String(dispatch(:GET, "/"; static=StaticExport(; controls)).body)
+        # The region stays with its control, neither greyed nor removed, and
+        # without the request no static server can answer.
+        @test count("class=\"htmxo-semantic-context-control\"", html) == 1
+        attrs = region_attrs(html, "htmxo-semantic-context-control")
+        @test !any(startswith("hx-"), keys(attrs))
+        @test !haskey(attrs, "data-static-disabled") && !haskey(attrs, "disabled")
+        @test attrs["data-htmxo-depends"] == "model"
+        region = match(r"<div class=\"htmxo-semantic-context-control\".*?</div>"s, html).match
+        @test contains(region, "name=\"draws_source\"") && !contains(region, "data-static-disabled")
+        # No redraw request survives anywhere, and the server's own
+        # operations (the import and the simulation) are still disabled, or
+        # removed; a redraw region inside one is not marked a second time.
+        @test !contains(html, "__htmxo_form=")
+        @test !contains(html, "hx-post=")
+        forms = [m.match for m in eachmatch(r"<form [^>]*class=\"htmxo-semantic-operation-form\"[^>]*>", html)]
+        if controls === :disable
+            @test length(forms) == 2 && all(f -> contains(f, "data-static-disabled=\"true\""), forms)
+            @test count("data-static-disabled=\"true\"", html) == 2
+        else
+            @test isempty(forms) && !contains(html, "data-static-disabled")
+        end
+    end
+end
+
 @testitem "a context refresh re-resolves one control against the submitted group" setup=[ContextRefreshFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects
 
