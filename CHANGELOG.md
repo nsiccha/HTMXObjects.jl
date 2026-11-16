@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.149
+## 0.1.150
 
 - A page that shows several `semantic_app(…; presentation=:tabs)` apps keeps
   each app's inputs and open tab in the page address under the app's address
@@ -26,6 +26,33 @@
   that shows apps of more than one name it keeps its tab as `?first.tab=`,
   else as `?tab=`. A custom `semantic_app` `layout(parts)` passes
   `url_scope=parts.url_scope`.
+
+## 0.1.149
+
+- A day computed in the browser shows as a date, and a `NaN` from a browser
+  module as no value (snag `show-a-year-s-wi-b018d869`, design `1lzmd6s`).
+  `bound(x; date = :long)` and `ColumnSpec(label; date = :short)` (also
+  `:month`) write a number of milliseconds since 1970, UTC (the unit of
+  JavaScript dates and of a plot's temporal axis), or a `Dates.Date`, as
+  `format_date` writes that day in the language of `texts`: `16 November
+  2019`, `16 Nov 2019`, `Nov 2019` (`16. Nov. 2019` in German), on the
+  server's first paint and, through the new `htmxoDateText`, in the browser
+  after each computation. A day cell sorts by its value and exports its ISO
+  day (`2019-11-16`) to the ⬇ CSV; `ColumnSpec(…; date)` works in any
+  `render_table` and also writes `Date` values, which a column without it
+  still shows as ISO. A `NaN`, `±Inf`, `missing` or `nothing` is no day:
+  `–`. `date` takes no `digits`, `sigdigits` or `percent`, and
+  `sortable_table` / `master_detail_table` refuse it as they refuse those.
+- `bound(x)` and a table of browser outputs (`render_table(bound(p; columns))`)
+  write a `NaN` as no value, `–`, as they write `missing`: in the table an
+  empty number cell with no sort value and an empty ⬇ CSV field, on the server
+  and in the browser. A module that returns numbers only has no other way to
+  say "no reading". **Behaviour change** for those two only: they used to
+  write `NaN`. `format_number(NaN)` and other tables still write `NaN`.
+- The month names and layout of a day's style reach the browser only where a
+  day is written (a bound mark's `data-htmxo-format`, a bound table's column
+  description), so a page or table without days is byte-identical apart from
+  the shared runtime's new `htmxoDateText`, which carries no month names.
 
 ## 0.1.148
 

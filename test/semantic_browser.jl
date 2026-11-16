@@ -3,7 +3,7 @@ using TestItemRunner
 @testmodule BrowserFixtures begin
     using HTMXObjects
     export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, Shield, Grid, TermSite,
-           TOY_JS, browser_region, bound_texts
+           Window, WINDOW_START, TOY_JS, browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -196,6 +196,43 @@ using TestItemRunner
                 link = "shield", link_key = :water),
             # A single-value output is a table of one row, redrawn the same way.
             render_table(bound(shield; columns = (:half,)); columns = [:half => ColumnSpec("Half (mm)"; digits = 0)]))
+    end
+
+    # A year's window of a daily series (Portfolio's snow article, snag
+    # show-a-year-s-wi-b018d869): the module returns numbers only, so a day is
+    # its milliseconds since 1970 (UTC) and a day without a reading is NaN.
+    const WINDOW_START = 1_569_888_000_000.0  # 1 October 2019, 00:00 UTC
+    const WINDOW_JS = """
+    export function yearWindow(start, reading, shift) {
+      const t = reading.map((r, i) => start + (i + shift) * 86400000);
+      return { t, read: reading, peak: t[2], none: NaN };
+    }
+    export const INPUTS = [{ name: "start", type: "Float64" }, { name: "reading", type: "Vector{Float64}" },
+      { name: "shift", type: "Float64" }];
+    """
+    function year_window(start, reading, shift)
+        t = [start + (i - 1 + shift) * 86400000.0 for i in eachindex(reading)]
+        (; t, read = reading, peak = t[3], none = NaN)
+    end
+
+    @htmx struct Window
+        "Days after 1 October 2019"
+        @param shift::Float64 = 0.0
+        @options(shift) = number_domain(0, 400)
+        start = WINDOW_START
+        reading = [1.5, NaN, 3.25, 2.0]
+        window = year_window(start, reading, shift)
+        @browser(window) = browser_module(; source = WINDOW_JS, entry = :yearWindow)
+        __page__(content) = HTMXObjects.htmx(content; title = "Window", assets = "assets/vendor", runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "The year's readings"
+        @get days() = h.div(h.p("on ", bound(window.peak; date = :long); class = "peak"),
+            h.p(bound(window.peak; date = :short, texts = table_texts(:de)), " ", bound(window.peak; date = :month); class = "peak-de"),
+            h.p(bound(window.none), " ", bound(window.none; date = :short); class = "none"),
+            render_table(bound(window; columns = (:t, :read)); id = "days",
+                columns = [:t => ColumnSpec("Day"; date = :short), :read => ColumnSpec("Reading"; digits = 1)]),
+            render_table(bound(window; columns = (:t,)); id = "tage", texts = table_texts(:de),
+                columns = [:t => ColumnSpec("Tag"; date = :long)]))
     end
 
     # Matrix data in the shape `ReactiveKernels.js_source` modules take
@@ -924,6 +961,209 @@ end
         @test e isa ArgumentError && occursin(phrase, e.msg) && occursin("the table of shield", e.msg)
     end
     @test occursin("data-htmxo-link-key=\"2\"", repr("text/html", render_table(t; link = "g", link_key = :water)))
+end
+
+@testitem "bound and ColumnSpec write a day as format_date does, and a NaN as no value" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, JSON
+    import Dates
+    b(x; kw...) = HTMXObjects._bound((:x,), x; kw...)
+    plain(v) = repr("text/plain", v)
+    day = 1_573_862_400_000.0  # 16 November 2019, the reporter's peak day
+    @test plain(b(day; date = :long)) == "16 November 2019"
+    @test plain(b(day; date = :short)) == "16 Nov 2019" && plain(b(day; date = :month)) == "Nov 2019"
+    @test plain(b(day; date = :long, texts = table_texts(:de))) == "16. November 2019"
+    @test plain(b(day; date = :short, texts = table_texts(:de))) == "16. Nov. 2019"
+    # The same day as an integer and as a Date; the UTC day of a later instant
+    # of it; a fraction before 1970 dropped toward zero, as JavaScript does.
+    @test plain(b(Int(day); date = :long)) == plain(b(Dates.Date(2019, 11, 16); date = :long)) == "16 November 2019"
+    @test plain(b(day + 86_399_999; date = :short)) == "16 Nov 2019" && plain(b(day + 86_400_000; date = :short)) == "17 Nov 2019"
+    @test plain(b(-0.5; date = :short)) == "1 Jan 1970" && plain(b(-1.0; date = :short)) == "31 Dec 1969"
+    # No day: no number, NaN, ±Inf and beyond the range of JavaScript's dates.
+    for x in (NaN, Inf, -Inf, missing, nothing, 8.64e15 + 1)
+        @test plain(b(x; date = :long)) == "–"
+    end
+    @test plain(b(8.64e15; date = :short)) == "13 Sep 275760"
+    # A NaN number is no value, as missing is; format_number itself keeps NaN.
+    @test plain(b(NaN)) == plain(b(NaN; digits = 1)) == plain(b(NaN; percent = true)) == plain(b(missing)) == "–"
+    @test plain(b(Inf)) == "∞" && format_number(NaN) == "NaN"
+    # The page writes the day again from the words of its style alone.
+    fmt(v) = JSON.parse(replace(match(r"data-htmxo-format=\"([^\"]*)\"", repr("text/html", v))[1], "&quot;" => "\""))
+    @test fmt(b(day; date = :long)) == Dict("date" => Dict("layout" => "{day} {month} {year}",
+        "months" => collect(table_texts().months)))
+    de = fmt(b(day; date = :short, texts = table_texts(:de)))["date"]
+    @test de["layout"] == table_texts(:de).date_short && de["months_short"][11] == "Nov." && !haskey(de, "months")
+    @test fmt(b(day; date = :month))["date"] == Dict("layout" => "{month_short} {year}",
+        "months_short" => collect(table_texts().months_short))
+    # Refused: an unknown style, a day written with digits, a DateTime, text, days in a table.
+    refused(x; kw...) = try; b(x; kw...); nothing; catch err; err; end
+    for (kw, phrase) in (((; date = :weekday), "`date` is :long, :short or :month"), ((; date = "long"), "`date` is :long"),
+                         ((; date = :long, digits = 1), "takes no `digits`"), ((; date = :long, percent = true), "takes no `digits`"))
+        e = refused(day; kw...)
+        @test e isa ArgumentError && occursin(phrase, e.msg)
+    end
+    e = refused(Dates.DateTime(2019, 11, 16); date = :long)
+    @test e isa ArgumentError && occursin("Date(x)", e.msg)
+    @test refused("2019-11-16"; date = :long) isa ArgumentError && refused(true; date = :long) isa ArgumentError
+    e = try; HTMXObjects._bound((:x,), (; t = [day]); columns = (:t,), date = :short); nothing; catch err; err; end
+    @test e isa ArgumentError && occursin("ColumnSpec(label; date)", e.msg)
+
+    # The year window as its page shows it first: facts, a table of days with
+    # an empty cell for the missing reading, and a German table.
+    route!(Window(); operation_policy = :blocking)
+    page = String(HTMXObjects._response_bytes(dispatch(:GET, "/days"; headers = ["HX-Request" => "true"])))
+    @test bound_texts(page) == ["3 October 2019", "3. Okt. 2019", "Oct 2019", "–", "–"]
+    @test [m[1] for m in eachmatch(r"<td[^>]*>([^<]*)</td>", page)] ==
+          ["1 Oct 2019", "1.5", "2 Oct 2019", "–", "3 Oct 2019", "3.3", "4 Oct 2019", "2.0",
+           "1. Oktober 2019", "2. Oktober 2019", "3. Oktober 2019", "4. Oktober 2019"]
+    # A day sorts by its number and exports its ISO day; the missing reading is
+    # an empty number cell, no sort value and an empty ⬇ CSV field.
+    @test occursin("<td data-sort-value=\"1.569888e12\" data-htmxo-number=\"2019-10-01\">1 Oct 2019</td>", page)
+    @test occursin("<td data-htmxo-number=\"\">–</td>", page) && !occursin("NaN<", page)
+    # The day column is right-aligned like a number column, header included.
+    @test occursin(r"<th[^>]*data-htmxo-align=\"right\"[^>]*>(?:(?!</th>).)*Day"s, page)
+    specs = [JSON.parse(replace(m[1], "&quot;" => "\"")) for m in eachmatch(r"data-htmxo-bound-table=\"([^\"]*)\"", page)]
+    @test specs[1]["columns"][1]["date"] == Dict("layout" => "{day} {month_short} {year}", "months_short" => collect(table_texts().months_short))
+    @test specs[1]["columns"][2]["digits"] == 1 && !haskey(specs[1]["columns"][2], "date")
+    @test specs[2]["columns"][1]["date"]["months"][10] == "Oktober"
+    # The text peer writes the days and the empty reading too.
+    plaintext = String(HTMXObjects._response_bytes(dispatch(:GET, "/days?shift=100&plain=1")))
+    @test occursin("11 January 2020", plaintext) && occursin("9 Jan 2020", plaintext) && !occursin("NaN", plaintext)
+end
+
+@testitem "a static page writes bound days and missing values again offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, JSON
+        import Dates
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(Window(); operation_policy = :blocking)
+        HTMXObjects.vendorfiles("assets/vendor")
+        # What format_date and the ISO day write, which `htmxoDateText` and
+        # `htmxoDateKey` must write too: every month in each style and
+        # language, an American override, and the edges of JavaScript's dates.
+        js(x::Real) = HTMXObjects._js_number_text(Float64(x))
+        ms(d) = Dates.value(Dates.DateTime(d)) - Dates.UNIXEPOCH
+        american = table_texts(; date_long = "{month} {day}, {year}", date_month = "{month} {year}")
+        cases = String[]
+        case(x, style, texts) = let day = HTMXObjects._date_day(x)
+            push!(cases, string("[", js(x), ",", JSON.json(HTMXObjects._date_words(texts, style)), ",",
+                JSON.json(format_date(day; texts, style)), ",", JSON.json(isnothing(day) ? nothing : string(day)), "]"))
+        end
+        for m in 1:12, d in (1, 28), style in (:long, :short, :month), texts in (table_texts(), table_texts(:de), american)
+            case(ms(Dates.Date(2021, m, d)) + 43_200_000, style, texts)
+        end
+        for x in (-0.5, -1.0, -1.5, 86_399_999.9, 8.64e15, -8.64e15, 8.64e15 + 1, NaN, Inf, -Inf, ms(Dates.Date(9, 3, 1)))
+            case(x, :short, table_texts())
+        end
+        driver = """
+        <script>
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + (typeof label === 'function' ? label() : label)); await sleep(25); }
+          }
+          // The page's two bound tables, in order (`id` names their ⬇ CSV files).
+          const table = id => document.querySelectorAll('table[data-htmxo-bound-table]')[id === 'days' ? 0 : 1];
+          const rows = id => Array.from(table(id).tBodies[0].rows);
+          const cell = c => [c.textContent, c.getAttribute('data-sort-value'), c.getAttribute('data-htmxo-number'), c.getAttribute('data-htmxo-align')].join('~');
+          const snapshot = () => ['days', 'tage'].map(id => rows(id).map(r => Array.from(r.cells).map(cell).join('|')).join(' ')).join(' / ');
+          const column = (id, j) => rows(id).map(r => r.cells[j].textContent).join(',');
+          const fact = name => Array.from(document.querySelectorAll('.' + name + ' [data-htmxo-bound]')).map(e => e.textContent).join('|');
+          const facts = () => [fact('peak'), fact('peak-de'), fact('none')].join(' ');
+          const field = () => document.querySelector('input[name="shift"]');
+          function typed(v) { const c = field(); c.value = v; c.dispatchEvent(new Event('input', {bubbles: true})); }
+          try {
+            const cases = [$(join(cases, ",\n"))];
+            const wrong = cases.filter(c => htmxoDateText(c[0], c[1]) !== c[2] || htmxoDateKey(c[0]) !== c[3])
+              .map(c => [c[0], c[1].layout, htmxoDateText(c[0], c[1]), c[2], htmxoDateKey(c[0]), c[3]]);
+            if (wrong.length) throw new Error(wrong.length + ' days differ: ' + JSON.stringify(wrong.slice(0, 4)));
+            await until(() => table('days') && rows('days').length === 4, 'table');
+            const server = snapshot();
+            if (facts() !== '3 October 2019 3. Okt. 2019|Oct 2019 –|–') throw new Error('first facts: ' + facts());
+            await fetch('/mark?phase=start');
+            typed('100');
+            await until(() => facts() === '11 January 2020 11. Jan. 2020|Jan 2020 –|–', () => 'typed facts: ' + facts());
+            await until(() => column('days', 0) === '9 Jan 2020,10 Jan 2020,11 Jan 2020,12 Jan 2020', () => 'typed days: ' + column('days', 0));
+            await until(() => column('tage', 0) === '9. Januar 2020,10. Januar 2020,11. Januar 2020,12. Januar 2020', () => 'typed Tage: ' + column('tage', 0));
+            // The missing reading stays an empty cell; a day sorts by its number
+            // and exports its ISO day.
+            if (column('days', 1) !== '1.5,–,3.3,2.0') throw new Error('readings: ' + column('days', 1));
+            const first = rows('days')[0].cells[0], empty = rows('days')[1].cells[1];
+            if (first.getAttribute('data-sort-value') !== $(repr(string(WINDOW_START + 100 * 86400000.0))) || first.getAttribute('data-htmxo-number') !== '2020-01-09')
+              throw new Error('day cell: ' + cell(first));
+            if (empty.hasAttribute('data-sort-value') || empty.getAttribute('data-htmxo-number') !== '') throw new Error('empty cell: ' + cell(empty));
+            // The reader sorts the days, latest first, and the sort holds for new rows.
+            const th = table('days').tHead.rows[0].cells[0];
+            sortTable(th); sortTable(th);
+            if (column('days', 0) !== '12 Jan 2020,11 Jan 2020,10 Jan 2020,9 Jan 2020') throw new Error('sorted: ' + column('days', 0));
+            // Half a day later is still the same UTC day.
+            typed('100.5');
+            await until(() => fact('peak') === '11 January 2020' && rows('days')[0].cells[0].getAttribute('data-sort-value') !== first.getAttribute('data-sort-value'),
+              () => 'half a day: ' + facts());
+            if (column('days', 0) !== '12 Jan 2020,11 Jan 2020,10 Jan 2020,9 Jan 2020') throw new Error('half a day, sorted: ' + column('days', 0));
+            // Back at the first value, the browser's rows are the server's, cell by cell.
+            sortTable(th);
+            typed('0');
+            await until(() => facts() === '3 October 2019 3. Okt. 2019|Oct 2019 –|–', () => 'back: ' + facts());
+            await until(() => snapshot() === server, () => 'parity: ' + snapshot() + ' / ' + server);
+            await fetch('/mark?phase=end');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        </script>
+        """
+        mktempdir() do dir
+            site = joinpath(dir, "site")
+            export_site(site; pages = ["/"])
+            receipt = Channel{String}(1)
+            requests = String[]
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose = false) do req
+                uri = HTTP.URI(req.target)
+                path = uri.path
+                push!(requests, req.target)
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                path == "/mark" && return HTTP.Response(204)
+                file = joinpath(site, lstrip(path == "/" ? "/index.html" : HTTP.URIs.unescapeuri(path), '/'))
+                isfile(file) || return HTTP.Response(404)
+                body = read(file, String)
+                endswith(file, "index.html") && (body = replace(body, "</body>" => driver * "</body>"))
+                type = endswith(file, ".js") ? "application/javascript" : endswith(file, ".css") ? "text/css" : "text/html"
+                HTTP.Response(200, ["Content-Type" => type], body)
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/index.html`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout = devnull, stderr = browser_log); wait = false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint = 0.05) === :ok
+                        outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                        @test HTTP.URIs.unescapeuri(outcome) == "/complete?status=passed"
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
+            # Between the marks the page computed and redrew without a single request.
+            start = findfirst(==("/mark?phase=start"), requests)
+            stop = findfirst(==("/mark?phase=end"), requests)
+            @test start !== nothing && stop !== nothing && stop == start + 1
+        end
+    end
 end
 
 @testitem "a static page writes its bound table and facts again offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
