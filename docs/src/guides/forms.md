@@ -109,7 +109,7 @@ it. A page can show several such apps, each a mounted object:
 end
 ```
 
-From 0.1.141 each app keeps its inputs and its open tab under its address name,
+From 0.1.147 each app keeps its inputs and its open tab under its address name,
 its mount path with dots, so inputs of one name in two apps stay apart:
 `?melt.rate=5&rain.rate=9&melt.tab=snow`. A page that shows one app, the app's
 own page `/melt/` included, keeps the plain names. The root object's own app has

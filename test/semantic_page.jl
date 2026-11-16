@@ -3,7 +3,8 @@ using TestItemRunner
 @testmodule SemanticPageFixtures begin
     using HTMXObjects
     using HTMXObjects.DynamicObjects: option_domain
-    export SimPage, FitsPage, CriterionPage, IdentifierPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
+    export SimPage, FitsPage, CriterionPage, IdentifierPage, ToggledPage, UPLOADS, sidebar_of, tab_of, tag_attrs,
+           result_text
     export TwoAppsPage
 
     const UPLOADS = String[]
@@ -108,6 +109,29 @@ using TestItemRunner
         @get profile() = h.p("profile:", base; class="result")
         @get responding() = h.p("responding:", target, ":", direction, ":",
                                 threshold, ":", literal; class="result")
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            select=entry -> entry.name !== :index)
+    end
+
+    # A default computed from a fixed field reads no input, whatever else the
+    # extraction of its input reads: here its `@relevant` condition reads
+    # `limited`, and the struct's first `@options` declaration reads `level`
+    # (snag `export-site-rele-5a6fd953`).
+    @htmx struct ToggledPage
+        settings::Any = (; start = 1.5)
+        "Level"
+        @param level::String = "low"
+        "Unit"
+        @param unit::String = "a"
+        @options(unit) = option_domain(level == "low" ? ["a", "b"] : ["a"])
+        "Limited"
+        @param limited::Bool = true
+        "Limit"
+        @param limit::Float64 = Float64(settings.start)
+        @options(limit) = number_domain(0.0, 10.0)
+        @relevant(limit) = limited == true
+        "Profile"
+        @get profile() = h.p("profile:", level, ":", unit, ":", limited, ":", limit; class="result")
         @get index() = semantic_app(__self__; presentation=:tabs,
             select=entry -> entry.name !== :index)
     end
@@ -794,6 +818,31 @@ end
     @test defaults["target"] == ["-50.0"]
     @test defaults["threshold"] === nothing
     @test defaults["literal"] == ["above"]
+end
+
+@testitem "a default that reads no input is not drawn again for its @relevant condition or another input's @options" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, JSON
+
+    route!(ToggledPage(); operation_policy=:blocking)
+    page(url) = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
+    result(url) = result_text(dispatch(:GET, url; headers=["HX-Request" => "true"]))
+    html = page("/")
+    @test result("/profile") == "profile:low:a:true:1.5"
+    # The server draws the controls again when `level` changes, which the
+    # options of `unit` read. It does not when `limited` does: the default of
+    # `limit` reads the fixed field `settings` only, and the browser evaluates
+    # the condition (`data-show-when`).
+    redrawn = [m.captures[1] for m in eachmatch(
+        r"<div hx-get=\"[^\"]*__htmxo_controls=1[^\"]*\" hx-trigger=\"change\"[^>]*>\s*<label>[^<]*<input [^>]*name=\"([^\"]*)\"", html)]
+    @test redrawn == ["level"]
+    @test contains(html, r"<div class=\"htmxo-relevant\" data-htmxo-relevant=\"limit\" data-show-when=")
+    # So the address default of `limit` is the value it computes, as for any
+    # default that reads no input; `null` is for one that changes with others.
+    defaults = Dict{String,Any}()
+    for m in eachmatch(r"<form[^>]* data-htmxo-address=\"[^\"]*\"[^>]*>", html)
+        merge!(defaults, JSON.parse(tag_attrs(m.match, r"<form[^>]*>")["data-htmxo-address"]))
+    end
+    @test defaults["limit"] == ["1.5"]
 end
 
 @testitem "a default computed from other inputs follows them in a browser" setup=[SemanticPageFixtures] tags=[:browser, :semantic] begin

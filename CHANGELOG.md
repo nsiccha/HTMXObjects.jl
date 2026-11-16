@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.141
+## 0.1.147
 
 - A page that shows several `semantic_app(…; presentation=:tabs)` apps keeps
   each app's inputs and open tab in the page address under the app's address
@@ -26,6 +26,109 @@
   that shows apps of more than one name it keeps its tab as `?first.tab=`,
   else as `?tab=`. A custom `semantic_app` `layout(parts)` passes
   `url_scope=parts.url_scope`.
+
+## 0.1.146
+
+- The "Shown at" statement before each result of a
+  `semantic_app(…; presentation=:tabs)` page's Markdown and PDF (`?plain`, a
+  report, `pdf_report`) puts a colon after each input's label and each input
+  on a line of its own: "Shown at:", then "Slope (per day): 0.20" and
+  "Intercept: 80 units" below it, as one paragraph of lines. Since 0.1.135 it
+  was one line, "Shown at: Slope (per day) 0.20; Intercept 80 units", in which
+  a label that is a phrase with a comma ran into its value. A German page
+  writes "Dargestellt bei:" and "Bezeichnung: Wert"; a label that ends in a
+  colon keeps its own; a list of records writes its fields the same way,
+  "Scenario (Dose (mg): 5)". The HTML page is unchanged (snag
+  `shown-at-line-ru-25ece17f`, user decision `0xxd4et`).
+
+## 0.1.145
+
+- A numbered report's PDF contents list lists the sections `contents()`
+  lists, and no other heading. Typst's outline used to list every heading of
+  the PDF: an article's header and a plain `h.h2` in a view, once per state a
+  `semantic_app` report shows, so BRR's snow report listed 12 entries where
+  its page lists 2 (snag `pdf-contents-lis-087ca53a`). A report's Markdown
+  (`to_markdown_string(…; report=true)`, `pdf_report(value, …)`) now marks the
+  heading of each listed section with the class `htmxo-contents-entry`
+  (`## 1 Results {#section-1 .htmxo-contents-entry}`), and `pdf_report`
+  points the outline at those headings alone. Listed: each numbered section,
+  and a `SemanticSection` written outside any numbered document, such as a
+  closing "About this document" a report appends to its numbered body. Not
+  listed: the document's title (`level=1`), a section inside the numbered
+  document that took no number, and every heading that is not a
+  `SemanticSection`'s. Those stay headings of the body and bookmarks of the
+  PDF. Ordinary Markdown (`?plain`) is unchanged, and report Markdown that
+  marks no heading keeps the outline of every heading.
+
+## 0.1.144
+
+- A static export no longer refuses a browser result (`@browser`) for markup
+  that differs between two renders of the same inputs. Under a root with
+  `__glossary__`, a result whose text used a term was refused with one "shows
+  `a` outside `bound`" line per continuous input, although every input was
+  shown through `bound(...)`: a linked term's definition carries an id that is
+  new in every answer, and the export took that difference for the input's
+  (snag `browser-result-u-88fa1fae`). When a view rendered with an input
+  changed differs, the export now renders the unchanged inputs once more and
+  names the input only if the view differs in more than those two renders do.
+  A view that writes an id or a time of its own exports the same way. A
+  refusal quotes what changed (`… for slope 2.0` becomes `… for slope 2.2…`),
+  and a result whose renders of the same inputs do not line up, because it
+  holds more or less markup each time, is named once, saying so.
+
+## 0.1.143
+
+- `pdf_report` keeps a captioned figure's pictures and caption on one page
+  with or without an id. Quarto makes a figure only of a div whose id starts
+  with `fig-` (a table with `tbl-`), so an id-less `with_caption` figure, such
+  as AoV's `with_plot_caption` without `id=`, was a picture and a separate
+  paragraph: the picture could end one page and its caption start the next,
+  untagged as a caption (snag `pdf-report-id-le-8a1607df`). A report's
+  Markdown (`report=true`, and every `pdf_report(value, …)`) now writes a
+  `<!-- htmxo:caption -->` line just before the caption of each captioned
+  figure Quarto does not float, and `pdf_report` sets a figure of pictures
+  marked so as one Typst figure, its caption tagged `Caption`, that moves to
+  the next page whole. An id-less captioned `render_table` becomes a captioned
+  table the same way: its caption above it and tagged, the table still
+  breaking across pages (HTMXObjects todo `0ikz55q`). A figure taller than
+  the page's text area, with an id or without, has its pictures scaled down
+  until it fits with its caption, where its caption ran over the page bottom.
+  Figures of other content (prose, code) are unchanged, and so is Markdown
+  outside a report. Regenerate saved report Markdown to get the marks. A
+  figure Quarto numbers (`fig-…`) prints as before unless it is taller than a
+  page.
+
+## 0.1.142
+
+- A computed default that reads no input stays static on an input that has a
+  `@relevant` condition or declared `@options`. With
+  `settings::Any = (; start = 1.0)`, `@param limit::Float64 = Float64(settings.start)`
+  and `@relevant(limit) = has_limit`, the inputs the condition reads were
+  taken as inputs the default reads, because both are arguments of the one
+  call that extracts `limit`. The struct's first `@options` declaration was
+  taken the same way for every input with a declared domain. Such an input now
+  behaves as it already did without them: `export_site` writes a page with a
+  browser result (`@browser`) instead of refusing it with "the server draws
+  the control of `limit` again when other inputs change (its default reads
+  other inputs)", a live page no longer asks the server to draw the controls
+  again when `has_limit` changes, and the page address default of `limit` is
+  its value, not `null`. A default that does read an input (`= median / 2`,
+  `= has_limit ? 1.0 : 2.0`) is unchanged.
+- That refusal names the inputs the default reads: "(its default reads
+  `median`)" (snag `export-site-rele-5a6fd953`).
+
+## 0.1.141
+
+- A private `pdf_report` keeps the "not public" label ("nicht öffentlich")
+  of a block of private content on the page where that content starts. The
+  label is the first paragraph of the block's `::: {.htmxo-private}` div,
+  `*not public*`, and nothing held it to the next block, so a private section
+  starting near a page end left the label alone at the bottom of one page and
+  the section's heading at the top of the next (snag
+  `pdf-report-priva-c25e0698`). `pdf-report-labels.lua` now makes that
+  paragraph sticky, as it does a disclosure's `::: {.htmxo-label}`; the
+  private content itself can still continue across pages, paragraph spacing
+  is unchanged, and the Markdown is the same as before.
 
 ## 0.1.140
 
