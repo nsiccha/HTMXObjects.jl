@@ -30608,10 +30608,11 @@ The interval is any IntervalSets interval of real numbers (`a .. b`, or one
 with an open end such as `Interval{:open,:closed}(0, 1)`); `lower, upper` is the
 closed interval.
 [`semantic_app`](@ref) and [`operation_form`](@ref) then draw the input as a
-slider with a number field beside it, followed by the unit. In a column too
-narrow for that row, such as the sidebar of a `presentation=:tabs` page, the
-slider takes a line of its own above the field and its unit, and a unit too
-long to fit beside the field goes under it. A submitted number
+slider with a number field and its unit. In a semantic app's sidebar, the
+slider always fills a row above the field and unit, preserving the width
+available for dragging. Elsewhere they share a row when they fit; in narrower
+columns the slider takes its own row. A unit too long to fit beside the field
+goes under it. A submitted number
 outside the interval is refused with a 400 at that field, as a value outside a
 finite `@options` list is. A bare interval, `@options(x) = 0 .. 1`, is the same
 domain with no other settings. The label and help text stay where they are
@@ -39650,19 +39651,17 @@ table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; 
 tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
 
 /* A number input with a range (`number_domain`): the slider, then the number
-   field and its unit (`.htmxo-number-entry`), on one row under the label,
-   spaced as a field is. In a column narrower than that row (a :tabs page's
-   sidebar, a narrow card) the slider takes a line of its own, as wide as the
-   column, above the field and its unit, which stay together; a unit wider
-   than the room beside its field goes under the field. No part leaves the
-   column (snag number-control-u-68445236). The slider's basis is its least
-   width, so the row wraps only when it cannot fit at all: a row that fits
-   keeps the one line it had. The field comes first in the document, so the
-   label names it and Tab reaches it first. UNLAYERED: Pico styles `input`
-   unlayered. */
+   field and its unit (`.htmxo-number-entry`). Semantic-app sidebars give the
+   slider a full row to keep its drag precision (snag preserve-the-ori-d1133e38).
+   Elsewhere its minimum basis keeps fitting rows inline and wraps narrower
+   ones. A unit too wide beside the field wraps below it; no part leaves the
+   column (snag number-control-u-68445236). The field comes first in the
+   document, so the label names it and Tab reaches it first. UNLAYERED:
+   Pico styles `input` unlayered. */
 .htmxo-number { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; margin: calc(var(--pico-spacing, 1rem) * .25) 0 var(--pico-spacing, 1rem); }
 .htmxo-number input { margin: 0; }
 .htmxo-number > input[type="range"] { order: 0; flex: 1 1 5rem; width: auto; min-width: min(5rem, 100%); }
+.htmxo-semantic-sidebar .htmxo-number > input[type="range"] { flex-basis: 100%; }
 .htmxo-number > .htmxo-number-entry { order: 1; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; }
 .htmxo-number-entry > input[type="number"] { flex: 0 1 7rem; width: 7rem; min-width: 0; }
 .htmxo-number-entry > .htmxo-number-unit { overflow-wrap: anywhere; }
@@ -41926,8 +41925,10 @@ sidebar's divider reaches the window's bottom on a short page. Inside a
 of a page and only as tall as its inputs and results, so the page's next
 paragraph follows it.
 
-Sidebar width defaults to `12rem` via the `--htmxo-sidebar-width` CSS variable;
-apps can override it in their own scoped style:
+Sidebar width defaults to `12rem` via the `--htmxo-sidebar-width` CSS variable.
+It includes the sidebar's right padding (`1rem`) and divider (`1px`); a
+`calc(20rem + 1px)` sidebar therefore provides `19rem` for its controls.
+Apps can override it in their own scoped style:
 
     .htmxo-app-layout { --htmxo-sidebar-width: 10rem; }
 

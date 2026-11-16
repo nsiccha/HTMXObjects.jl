@@ -89,8 +89,14 @@ println(refused.status)
 println(number_record(number_domain(0.001, 0.015; log=true, digits=4)))
 ```
 
-The generated form draws each as a slider with a number field beside it,
-followed by the unit. A `log` domain spaces the slider evenly in ratio, for a
+In a semantic app's sidebar, each slider fills a row above its number field
+and unit. Other generated forms keep them together when they fit, wrapping
+the slider onto its own row in narrower columns. A long unit wraps below
+the field. [`app_layout`](@ref)'s `--htmxo-sidebar-width` includes the right
+padding and divider: `calc(20rem + 1px)` leaves `19rem` for controls (304 px
+at the default 16 px root font).
+
+A `log` domain spaces the slider evenly in ratio, for a
 positive quantity spanning orders of magnitude. A slider value, like the
 field's arrow keys, lies on the `step` grid counted from the lower bound;
 without a step it keeps three significant digits. A typed number need only

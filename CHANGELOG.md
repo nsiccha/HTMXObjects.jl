@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.161
+
+- Generated number sliders in a `semantic_app` sidebar now fill a row above
+  their exact number field and unit, keeping the full control width for
+  dragging even when an inline row would fit. Other forms keep their existing
+  wrapping layout. `--htmxo-sidebar-width` still includes padding and the
+  divider; `calc(20rem + 1px)` leaves 304 px for controls at a 16 px root font.
+
 ## 0.1.160
 
 - `semantic_app(...; presentation=:tabs, result_height)` accepts a named tuple
