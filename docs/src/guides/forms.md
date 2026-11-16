@@ -116,14 +116,15 @@ end
         h.section(semantic_app(melt; presentation=:tabs)),
         h.section(semantic_app(rain; presentation=:tabs)))
 end
-route!(Article(); prefix="/article", operation_policy=:blocking);
-response = dispatch(:GET, "/article?melt.rate=5&rain.rate=9&melt.tab=snow";
+route!(Article(); operation_policy=:blocking);
+response = dispatch(:GET, "/?melt.rate=5&rain.rate=9&melt.tab=snow";
     headers=["HX-Request" => "true"]);
 page = String(response.body);
+input_values = [m.captures[1] for m in
+    eachmatch(r"<input[^>]* name=\"rate\"[^>]* value=\"([^\"]*)\"", page)];
 checks = (
     success=response.status == 200,
-    melt_value=occursin("Snow: 5", page),
-    rain_value=occursin("Rain: 9", page),
+    independent_values=input_values == ["5", "9"],
 )
 @assert all(checks) # hide
 foreach(println, pairs(checks))
