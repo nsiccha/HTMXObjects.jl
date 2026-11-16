@@ -3,7 +3,7 @@ using TestItemRunner
 # `format_date` writes a day in a table's language, the date counterpart of
 # `format_number` (snag formatting-a-dat-6e544028, design decision 1y3u6pj:
 # `:short` writes the abbreviated month, the words live in `TableTexts`, no
-# browser twin yet: `htmxoDateText`, 0.1.146, writes days in the browser).
+# browser twin yet: `htmxoDateText`, 0.1.149, writes days in the browser).
 
 @testitem "format_date writes a day in English and German" tags=[:unit] begin
     using HTMXObjects
