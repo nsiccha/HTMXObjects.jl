@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.139
+## 0.1.141
 
 - A private `pdf_report` keeps the "not public" label ("nicht öffentlich")
   of a block of private content on the page where that content starts. The
@@ -14,6 +14,46 @@
   paragraph sticky, as it does a disclosure's `::: {.htmxo-label}`; the
   private content itself can still continue across pages, paragraph spacing
   is unchanged, and the Markdown is the same as before.
+
+## 0.1.140
+
+- In a `numbered(…)` document, the captioned figures and tables of a
+  `semantic_app(…; presentation=:tabs)` result computed in the browser
+  (`@browser`) take the document's next numbers ("Figure 1:", "Table 1:"), in
+  reading order, on the page and in its Markdown and PDF alike, and `ref(id)`
+  cites them. Since 0.1.135 they took none. The views the browser switches
+  between for a finite input read the same numbers as the view shown. The
+  page fetches each view with its captions' numbers left as markers, which the
+  document fills in when it renders; the Markdown asks the result with the
+  counts the document had reached at the view, and the result numbers its own
+  captions from there in the page's reading order. A report's further states
+  (`report_states`) are only in the report and take no number, so every number
+  in the report reads as on the page; a state's copy renames its element ids
+  (`fig-curve` becomes `fig-curve-state-1`), since a PDF refuses a cited id it
+  finds twice, so `ref` cites the copy at the page's inputs. A result the
+  server computes, which the page loads later, still takes none, as
+  `numbered` documents for lazily loaded content; sections inside a result
+  take none either. Outside a `numbered` document nothing changes (snag
+  `semantic-app-tab-c64170a6`, user decision `1gxfoo7`).
+
+## 0.1.139
+
+- `pdf_report` sizes a table's columns by their content, as a browser sizes an
+  HTML table: each column is at least as wide as its longest word, and the
+  room left goes to the columns whose text would otherwise wrap, in proportion
+  to how much longer their text is than their longest word. Pandoc gave a
+  table with a row longer than 72 characters equal columns (from HTMX's equal
+  `---` separators), so a long label wrapped to 8–10 lines beside nearly empty
+  number columns, and a one-word header such as `Attempted` was hyphenated. A
+  table that fits keeps its natural widths, and unequal widths an author wrote
+  in hand-made Markdown are kept. A row that fits on a page is no longer split
+  between two pages; a row taller than a page still breaks, so none of it runs
+  past the page bottom. The table, its header and data cells, its caption and
+  both PDF standards are unchanged. Done by `pdf-report-tables.lua`, which hands
+  each table to `pdf-report-table` in `pdf-report-tables.typ` (snag
+  `export-the-caesi-d781d110`, which also covers todo `0cjfnl2`). A
+  600-row × 7-column table compiles in about 4.2 s and 990 MB instead of
+  2.3 s and 610 MB (and on 47 pages instead of 124).
 
 ## 0.1.138
 
