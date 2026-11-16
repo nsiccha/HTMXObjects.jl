@@ -260,7 +260,7 @@ end
     numbered_typst, contents_filter = HTMXObjects._PDF_REPORT_NUMBERED_TYPST, HTMXObjects._PDF_REPORT_CONTENTS_FILTER
     @test isfile(numbered_typst) && isfile(contents_filter)
     doc = qmd(md(report()))
-    @test occursin("include-in-header: [$(y(HTMXObjects._PDF_REPORT_TABLES_TYPST)), $(y(HTMXObjects._PDF_REPORT_CODE_TYPST)), $(y(numbered_typst))]", doc)
+    @test occursin("include-in-header: [$(y(HTMXObjects._PDF_REPORT_TABLES_TYPST)), $(y(HTMXObjects._PDF_REPORT_FIGURES_TYPST)), $(y(HTMXObjects._PDF_REPORT_CODE_TYPST)), $(y(numbered_typst))]", doc)
     @test occursin("  - $(y(contents_filter))\n---\n", doc)
     # Without numbers or a contents list, nothing changes.
     plain_doc = qmd("# A\n\nText.\n")
