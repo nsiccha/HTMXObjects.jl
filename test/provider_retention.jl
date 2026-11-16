@@ -457,3 +457,66 @@ end
     @test contains(rows_get("/retained-fixed"), "rows=A1,B2-changed")
     @test (row_runs("a"), row_runs("b")) == (1, 2)
 end
+
+# A construction keyword is an input of the object it builds: a child mounted as
+# `@include steep = Part(; a=0.4)`, and a root routed as `route!(App(; a=0.4))`,
+# show that value in every request, also when a retained root serves it and the
+# property's own default reads the request (every `@param`'s does). A
+# DynamicObjects remount view recomputed such a property from its default, so a
+# retained root answered with the type default: from its second request on, and
+# from the first one under a managed `RootRetention` (snag
+# `retained-semanti-865defc0`).
+@testmodule RetainedKeywordFixtures begin
+    using HTMXObjects
+    import HTMXObjects: h
+
+    export KeywordArticle, KeywordRoot, keyword_get
+
+    @htmx struct KeywordPart
+        "Slope"
+        @param a::Float64 = 0.2
+        "Show the slope"
+        @direct @get slope() = h.p("slope a=$a")
+    end
+
+    @htmx struct KeywordArticle
+        @include gentle = KeywordPart()
+        @include steep = KeywordPart(; a=0.4)
+        @direct @get values() = h.p("gentle=$(gentle.a) steep=$(steep.a)")
+        @get index() = semantic_app(steep; title="steep")
+    end
+
+    @htmx struct KeywordRoot
+        @param a::Float64 = 0.2
+        @direct @get index() = h.p("root a=$a")
+    end
+
+    keyword_get(target) = String(HTMXObjects._message_body_bytes(
+        dispatch(:GET, target; headers=["HX-Request" => "true"])))
+end
+
+@testitem "retained roots keep the construction keywords of @param properties" setup=[RetainedKeywordFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    providers = (; fresh=RootProvider(),
+        managed=RootProvider(; scope=:job, key=_ -> :keywords, retention=RootRetention()))
+    for (label, provider) in pairs(providers)
+        route!(KeywordArticle(); prefix="keywords", root_provider=provider)
+        route!(KeywordRoot(; a=0.4); prefix="keyword-root", root_provider=provider)
+        for _ in 1:3
+            @test contains(keyword_get("/keywords/values"), "gentle=0.2 steep=0.4")
+            @test contains(keyword_get("/keywords/steep/slope"), "slope a=0.4")
+            @test contains(keyword_get("/keyword-root"), "root a=0.4")
+        end
+    end
+
+    # The store `semantic_app` switches on retains the root of the first request
+    # that renders it and serves every later request from it.
+    route!(KeywordArticle(); prefix="keywords", root_provider=RootProvider())
+    @test contains(keyword_get("/keywords"), "Show the slope")
+    @test HTMXObjects._is_semantic_root_provider(HTMXObjects._root_providers[KeywordArticle])
+    for _ in 1:3
+        @test contains(keyword_get("/keywords/values"), "gentle=0.2 steep=0.4")
+        @test contains(keyword_get("/keywords/steep/slope"), "slope a=0.4")
+    end
+end
