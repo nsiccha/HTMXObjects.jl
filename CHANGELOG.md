@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.151
+
+- A `semantic_app(…; presentation=:tabs)` page draws its controls again for
+  an input whose `@options` range or computed default reads another input with
+  a range declared after it. With `@param a::Float64 = 1.0` and
+  `@options(a) = number_domain(0.0, 2b)` declared before `@param b::Float64`
+  and `@options(b) = number_domain(0.0, 1.0)`, the request the page sends when
+  `b` changes evaluated `2b` with the text it sent for `b` (`2 * "0.9"`):
+  `MethodError: no method matching *(::Int64, ::String)`, and the page showed
+  an error in place of the controls, the control of `a` with them. A computed
+  default (`@param c::Float64 = 2b`) that an out-of-range `c` falls back to
+  failed the same way. An input's range and default now read each input they
+  name as its control shows it, whichever was declared first. Declared after
+  `b`, or read through a property (`upper = 2b`), the range was already right
+  (snag `options-param-re-3392079f`).
+
 ## 0.1.150
 
 - A page that shows several `semantic_app(…; presentation=:tabs)` apps keeps
