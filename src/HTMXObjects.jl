@@ -2182,7 +2182,7 @@ end
 _param_names(::Type) = ()
 
 """
-    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets, browser)
+    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets, browser, controls)
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
 to plain derived-property assignments that call
@@ -2216,15 +2216,20 @@ a default.
 A `@browser(name) = browser_module(file, entry)` line becomes the property
 `__browser_<name>__`: the module a static page computes `name` with.
 
+A `@control(name) = :switch` (or `:checkbox`) line chooses how a generated form
+draws the `Bool` `@param` `name`, whatever its form; without one, a form whose
+changes apply at once draws a switch and a form sent with a button a checkbox.
+
 Returns the ordered list of declared param names for later `_param_names`
-emission, the `@relevant` conditions, each `@resets` target's source names, and
-the `@browser` property names.
+emission, the `@relevant` conditions, each `@resets` target's source names, the
+`@browser` property names, and each `@control` input's control.
 """
 function _convert_params!(struct_expr; parent_params=())
     body = struct_expr.args[3]
     option_names = Set{Symbol}()
     relevance = Pair{Symbol,Any}[]
     resets = Pair{Symbol,Tuple}[]
+    controls = Pair{Symbol,Symbol}[]
     for arg in body.args
         name = _option_parameter_name(arg)
         name === nothing || push!(option_names, name)
@@ -2232,7 +2237,12 @@ function _convert_params!(struct_expr; parent_params=())
         declared === nothing || push!(relevance, declared)
         reset = _reset_declaration(arg)
         reset === nothing || push!(resets, reset)
+        control = _control_declaration(arg)
+        control === nothing || push!(controls, control)
     end
+    allunique(first.(controls)) || throw(ArgumentError(string(
+        "@htmx: a `@param` has two `@control` declarations: ",
+        join(unique(n for n in first.(controls) if count(==(n), first.(controls)) > 1), ", "))))
     relevant_names = Set{Symbol}(first.(relevance))
     length(relevant_names) == length(relevance) || throw(ArgumentError(string(
         "@htmx: a `@param` has two `@relevant` declarations: ",
@@ -2275,6 +2285,7 @@ function _convert_params!(struct_expr; parent_params=())
     end
     for arg in body.args
         _reset_declaration(arg) === nothing || continue
+        _control_declaration(arg) === nothing || continue
         declared = _relevance_declaration(arg)
         if declared !== nothing
             # The condition, as a property of its own: DynamicObjects reads its
@@ -2367,7 +2378,12 @@ function _convert_params!(struct_expr; parent_params=())
                 "@htmx: `@resets($name)` source `$source` names no `@param` of this struct or its parent"))
         end
     end
-    names, relevance, resets, browser
+    for (name, _) in controls
+        name in names || throw(ArgumentError(string(
+            "@htmx: `@control($name)` names no `@param` of this struct; ",
+            "declare `@param $name::Bool = <default>` next to it")))
+    end
+    names, relevance, resets, browser, controls
 end
 
 # Companion declarations share the two Julia parser shapes, including
@@ -2478,6 +2494,20 @@ function _reset_declaration(arg)
     !isempty(sources) && all(source -> source isa Symbol, sources) ||
         throw(ArgumentError("@htmx: `@resets($name)` needs a source input name or a tuple of names"))
     name => Tuple(unique(sources))
+end
+
+# How a generated form draws a `Bool` `@param`, per `@control(name) = :switch`
+# or `:checkbox`; absent, by its form (`_bool_switch`).
+const _BOOL_CONTROLS = (:switch, :checkbox)
+_param_controls(::Type) = (;)
+function _control_declaration(arg)
+    declared = _param_declaration(arg, Symbol("@control"), ":switch")
+    declared === nothing && return nothing
+    name, rhs = declared
+    rhs isa QuoteNode && rhs.value in _BOOL_CONTROLS || throw(ArgumentError(string(
+        "@htmx: `@control($name)` takes `:switch` or `:checkbox`, the control a ",
+        "generated form draws for a `Bool`: got `", rhs, "`")))
+    name => rhs.value
 end
 
 # Read the parameter name from either supported declaration spelling before
@@ -2689,7 +2719,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
     _rewrite_bound!(struct_expr)
-    own_params, own_relevance, own_resets, own_browser = _convert_params!(struct_expr; parent_params)
+    own_params, own_relevance, own_resets, own_browser, own_controls = _convert_params!(struct_expr; parent_params)
     own_headers = _convert_headers!(struct_expr)
     # Merge: parent params/headers first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -2762,6 +2792,13 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
             Expr(:call, _reset_fname, :(::Type{$type_name})),
             Expr(:tuple, Expr(:parameters,
                 (Expr(:kw, name, QuoteNode(sources)) for (name, sources) in own_resets)...))))
+    end
+    # Emit `_param_controls`: the control each `@control` line chooses.
+    if !isempty(own_controls)
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, GlobalRef(@__MODULE__, :_param_controls), :(::Type{$type_name})),
+            Expr(:tuple, Expr(:parameters,
+                (Expr(:kw, name, QuoteNode(control)) for (name, control) in own_controls)...))))
     end
     # Emit `_browser_properties`: the properties a page computes in the browser.
     if !isempty(own_browser)
@@ -26412,7 +26449,10 @@ that is wider than the column runs past it and the page scrolls sideways, so
 give such a block its own scroll box. A table inside another table's cell (a
 detail row) does not stick to the window; wider than that cell, it becomes the
 same box, as tall as the window below the outer table's line and header, so its
-sideways scrollbar is on screen too. An app whose page has its own sticky header moves
+sideways scrollbar is on screen too. In a [`semantic_app`](@ref)`(…; presentation=:tabs)`
+result taller than its bound (`result_height`), which scrolls inside itself,
+the line and the header stick to that box's top, and a wide table's own box
+fits inside it. An app whose page has its own sticky header moves
 both below it with `--htmxo-sticky-top` (e.g. `:root { --htmxo-sticky-top: 3.5rem; }`);
 inside a card, set `--htmxo-sticky-bg` to the card's background.
 `sticky=false` keeps one table's line and header in the flow. None of this
@@ -30737,7 +30777,11 @@ end
     cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=nothing, kwargs...)
 
 A labeled checkbox `<input type="checkbox">`. Set `switch=true` to use Pico CSS's
-toggle-switch style (`role="switch"`). Extra `kwargs` go on the `<input>`.
+toggle-switch style (`role="switch"`); the `htmx()` shell draws its "on" track
+in the text colour, never Pico's azure. A generated form draws a `Bool` input
+with it: a switch where a change applies at once, a checkbox in a form a button
+sends, or as the input's `@control` line says ([`semantic_app`](@ref)). Extra
+`kwargs` go on the `<input>`.
 """
 cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=nothing, kwargs...) = begin
     name = _aname(nv)
@@ -31097,6 +31141,15 @@ function _with_resets(obj, param)
     source === nothing && return param
     sources = get(Base.invokelatest(_param_resets, typeof(source)), param.name, ())
     isempty(sources) ? param : merge(param, (; resets=sources))
+end
+
+# `param` with the control its `@control` line chooses (`:switch`/`:checkbox`).
+function _with_control(obj, param)
+    param.source === :path && return param
+    source = _param_declaring_object(obj, param.name)
+    source === nothing && return param
+    control = get(Base.invokelatest(_param_controls, typeof(source)), param.name, nothing)
+    control === nothing ? param : merge(param, (; control))
 end
 
 # The value a computed default takes for the request `obj` answers, or
@@ -31464,7 +31517,8 @@ field's label; each card's field names it in `aria-describedby`. The page
 runtime (`semantic_follow_script`) adds, duplicates and removes cards and
 numbers them again, and folds a card to its head with a summary of its values.
 """
-function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX)
+function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX,
+        live::Bool=false)
     records = value isa Records ? value : getproperty(obj, param.name)
     name = string(param.name)
     texts = _error_texts(obj)
@@ -31475,7 +31529,7 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
     shared = _records_shared_help(fields)
     help_ids = Dict{Symbol,String}(help.name => help.id for help in shared)
     cards = Any[_record_card(T, name, records, fields, i, entry, views[i], values[i], texts;
-                             radio_max, help_ids)
+                             radio_max, help_ids, live)
                 for (i, entry) in enumerate(records.entries)]
     h.fieldset(h.legend(label), cards...,
         h.button(_fill_text(texts.record_add; label=records.label); type="button",
@@ -31527,11 +31581,12 @@ function _record_field_param(obj, T, field::Symbol)
     param = promoted === nothing ?
         merge(base, (; kind=:context, context_source=(type=T, property=field),
                        context_scope=:request)) : promoted
-    _with_help(obj, _with_relevance(obj, param))
+    _with_control(obj, _with_help(obj, _with_relevance(obj, param)))
 end
 
 function _record_card(T, name, records, fields, i, entry, view, values, texts;
-                      radio_max::Int=_RADIO_MAX, help_ids=Dict{Symbol,String}())
+                      radio_max::Int=_RADIO_MAX, help_ids=Dict{Symbol,String}(),
+                      live::Bool=false)
     prefix = string(name, ".", i, ".")
     kept = Set{String}(Base.values(help_ids))
     # The fold control names the fields it shows and hides; the id carries
@@ -31558,7 +31613,7 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
     # Its fields are laid out as a section's are: short ones share a row. A
     # help text the list shows once is named, not repeated.
     controls = Any[h.div(_record_scoped(_semantic_control(view, T, field, values; radio_max,
-                                                          help_id=get(help_ids, field.name, nothing)),
+                                                          help_id=get(help_ids, field.name, nothing), live),
                                         name, i, records.fields, kept);
                          class="htmxo-input-field",
                          (_semantic_short_field(view, T, field, values; radio_max) ?
@@ -31755,17 +31810,19 @@ function _semantic_control_owner(obj, owner, param)
 end
 
 # `help_id` names a help text shown elsewhere (once under a list's cards): the
-# control is described by it instead of carrying the text.
+# control is described by it instead of carrying the text. `live` says the
+# control's form applies a change at once, with no button to send it: the
+# sidebar and a following tab's inputs of a `presentation=:tabs` page.
 function _semantic_control(obj, owner, param, values;
         radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto, help_id=nothing,
-        heading=nothing)
+        heading=nothing, live::Bool=false)
     value = get(values, param.name, nothing)
     doc_label, doc_help = _doc_label_help(param.doc)
     label = isnothing(doc_label) ? Long(param.name) : doc_label
     help = _param_help(obj, param, doc_help)
     control_obj, ControlT = _semantic_control_owner(obj, owner, param)
     default = _semantic_default_control(control_obj, ControlT, param, label, value, values;
-                                        radio_max, presentation)
+                                        radio_max, presentation, live)
     default = help_id === nothing ? _with_help_text(default, help) : _with_help_ref(default, help_id)
     # Alone in an input section whose heading already says its label.
     isnothing(heading) || (default = _heading_named(default, heading))
@@ -31880,15 +31937,25 @@ function _described_field(child::Node, id)
 end
 
 function _semantic_default_control(control_obj, ControlT, param, label, value, values;
-        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
+        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto, live::Bool=false)
     param.type isa Type && param.type <: Records &&
-        return _records_control(control_obj, ControlT, param, label, value; radio_max)
+        return _records_control(control_obj, ControlT, param, label, value; radio_max, live)
     input = (name=param.name, domain=get(param, :domain, nothing))
     # Keep the resolved domain's actual option objects alongside its selected
     # value: evaluating a rebuilt source again may create fresh option objects.
     domains = get(values, _SEMANTIC_DOMAINS, (;))
     domain = haskey(domains, param.name) ? domains[param.name] :
         _resolved_input_domain(control_obj, ControlT, input, values)
+    # `@control` draws a `Bool` the type gives a box to; on anything else it
+    # would be ignored, so it is refused.
+    haskey(param, :control) && !(param.type === Bool &&
+        (domain === nothing || get(domain, :kind, :unrestricted) === :unrestricted)) &&
+        throw(ArgumentError(string(
+            "@control(", param.name, ") = ", repr(param.control), " chooses how a `Bool` ",
+            "input is drawn, but `", param.name, "` is ",
+            param.type === Bool ? "a `Bool` with `@options`, drawn as its choices" :
+                string("declared as `", something(param.type, Any), "`"),
+            "; declare it `@param ", param.name, "::Bool = <default>`")))
 
     # A range of numbers: a slider with a number field (a vector of numbers
     # keeps its typed control; each element is still checked against it).
@@ -31920,9 +31987,16 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
         end
     end
 
-    _typed_control(param.type, string(param.name), label, value,
-                   param.required ? (; required="true") : (;))
+    required_attrs = param.required ? (; required="true") : (;)
+    param.type === Bool && return _typed_control(Bool, string(param.name), label, value,
+        required_attrs; switch=_bool_switch(param, live))
+    _typed_control(param.type, string(param.name), label, value, required_attrs)
 end
+
+# Whether a `Bool` input is drawn as a switch: as its `@control` line says,
+# else when its form applies a change at once (a switch's promise), not when
+# a button sends the form (a checkbox's).
+_bool_switch(param, live::Bool) = get(param, :control, live ? :switch : :checkbox) === :switch
 
 # Whether the generated control of `param` is a short field: a number, a
 # checkbox, or a choice between two pills. In an input section short fields
@@ -32269,9 +32343,10 @@ end
 _typed_control(T, name, label, value, required_attrs) =
     linput(name; label, value=something(value, ""), required_attrs...)
 # A checked box submits "true", which a `Bool` input parses; the browser's
-# default "on" does not.
-_typed_control(::Type{Bool}, name, label, value, required_attrs) =
-    cinput(name; label, checked=something(value, false), value="true", required_attrs...)
+# default "on" does not. A switch is the same box, drawn as Pico's switch.
+_typed_control(::Type{Bool}, name, label, value, required_attrs; switch::Bool=false) =
+    cinput(name; label, checked=something(value, false), value="true", switch,
+           required_attrs...)
 _typed_control(::Type{T}, name, label, value, required_attrs) where {T<:Number} =
     ninput(name; label, value=something(value, 0), step=_number_step(T), required_attrs...)
 
@@ -32391,8 +32466,8 @@ function _semantic_runtime_route(obj, route)
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
     merge(route, (params=NamedTuple[
-        _with_domain_reads(obj, _with_resets(obj,
-            _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param)))))
+        _with_domain_reads(obj, _with_control(obj, _with_resets(obj,
+            _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param))))))
         for param in params],))
 end
 
@@ -32573,8 +32648,8 @@ whole group, and the operation's hidden request context rides the URL, so the
 domain is evaluated exactly as the operation's own form would evaluate it.
 """
 function _semantic_context_control(obj, route, param, current, action, shared_names;
-        radio_max::Int=_RADIO_MAX, placed=nothing, heading=nothing)
-    control = _semantic_control(obj, route.owner, param, current; radio_max, heading)
+        radio_max::Int=_RADIO_MAX, placed=nothing, heading=nothing, live::Bool=false)
+    control = _semantic_control(obj, route.owner, param, current; radio_max, heading, live)
     # A control placed outside the group's form (`semantic_app(…; place)`)
     # still belongs to it: its fields name the form (`form=`).
     isnothing(placed) || (control = _with_form_owner(control, placed, param.name))
@@ -32586,6 +32661,8 @@ function _semantic_context_control(obj, route, param, current, action, shared_na
         __htmxo_shared_context=_semantic_names_attr(shared_names, ','),
         (isnothing(lifted) ? (;) : (; __htmxo_lifted=_semantic_names_attr(lifted, ',')))...,
         (radio_max == _RADIO_MAX ? (;) : (; __htmxo_radio_max=radio_max))...,
+        # The refreshed control is drawn for a form that applies at once again.
+        (live ? (; __htmxo_live=1) : (;))...,
         (isnothing(placed) ? (;) : (; __htmxo_placed=placed))...,
         # The refreshed control is drawn under its section's heading again.
         (isnothing(heading) ? (;) : (; __htmxo_heading=heading))...,
@@ -32684,6 +32761,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, string(_RADIO_MAX)))
     navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
     presentation = Symbol(_operation_form_setting(req, :__htmxo_presentation, "auto"))
+    live = _operation_form_setting(req, :__htmxo_live, "0") == "1"
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
     sections = _input_sections_unwire(_operation_form_setting(req, :__htmxo_sections))
     controls_only = _operation_poll_marker(get(queryparams(req), "__htmxo_controls", nothing))
@@ -32698,14 +32776,14 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
             "$(LeafT).$(name) carries no shared context input $(repr(name)) to refresh"))
         current = _semantic_form_values(target.leaf, route, extracted.values)
         _semantic_context_control(target.leaf, route, route.params[index], current,
-                                  request_path, shared_context; radio_max,
+                                  request_path, shared_context; radio_max, live,
                                   placed=_operation_form_setting(req, :__htmxo_placed),
                                   heading=_operation_form_setting(req, :__htmxo_heading))
     elseif controls_only
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
             radio_max, presentation, shared_names=shared_context, context_selector,
-            fragment=true, lifted, sections))
+            fragment=true, lifted, sections, live))
     else
         # Accept full-form refresh requests from pages rendered before the
         # controls-only protocol; new pages keep the form and button in place.
@@ -32759,7 +32837,7 @@ _operation_control_params(route, shared_names) = [param for param in route.param
 function _operation_form_controls(obj, route, current, action;
         radio_max=_RADIO_MAX, presentation=:auto, shared_names=Set{Symbol}(),
         context_selector=nothing, fragment=false, lifted=nothing,
-        sections=InputSection[])
+        sections=InputSection[], live::Bool=false)
     presentation in (:auto, :cards) || throw(ArgumentError(
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
     refresh_dependencies = _semantic_refresh_dependencies(route)
@@ -32770,6 +32848,8 @@ function _operation_form_controls(obj, route, current, action;
     settings = (; __htmxo_controls=1)
     radio_max == _RADIO_MAX || (settings = merge(settings, (; __htmxo_radio_max=radio_max)))
     presentation === :auto || (settings = merge(settings, (; __htmxo_presentation=presentation)))
+    # A form that applies a change at once (`live`) is drawn so on refresh too.
+    live && (settings = merge(settings, (; __htmxo_live=1)))
     isempty(shared_names) || (settings = merge(settings, (;
         __htmxo_shared_context=join(string.(sort!(collect(shared_names))), ','))))
     # A `:tabs` page's form names the `@param`s it lifted, possibly none, so
@@ -32796,7 +32876,7 @@ function _operation_form_controls(obj, route, current, action;
     headings = _input_section_headings(sections, sectioned)
     for param in control_params
         control = _semantic_control(obj, route.owner, param, current; radio_max, presentation,
-                                    heading=get(headings, param.name, nothing))
+                                    heading=get(headings, param.name, nothing), live)
         if param.name in refresh_dependencies
             control = h.div(control;
                 _semantic_refresh_attrs(route, action, settings; context_selector)...)
@@ -33562,18 +33642,18 @@ function _semantic_context_entries(items; names=nothing)
 end
 
 _semantic_context_controls(entries, shared_context; radio_max::Int=_RADIO_MAX,
-        headings=Dict{Symbol,String}()) = Any[
-    _semantic_entry_control(entry, shared_context; radio_max,
+        headings=Dict{Symbol,String}(), live::Bool=false) = Any[
+    _semantic_entry_control(entry, shared_context; radio_max, live,
                             heading=get(headings, entry.param.name, nothing))
     for entry in entries]
 _semantic_entry_control(entry, shared_context; radio_max::Int=_RADIO_MAX, placed=nothing,
-        heading=nothing) =
+        heading=nothing, live::Bool=false) =
     _semantic_context_control(entry.object, entry.route, entry.param, entry.current,
         _semantic_context_refreshable(entry.route, entry.param) ?
             _operation_form_action(entry.route, entry.current,
                 _operation_form_target(entry.object, entry.route)) :
             nothing,
-        shared_context; radio_max, placed, heading)
+        shared_context; radio_max, placed, heading, live)
 
 # --- Input sections (`semantic_app(…; presentation=:tabs, sections)`) ---
 
@@ -33990,6 +34070,24 @@ function _semantic_reset_button(obj, forms, follows)
                  (; data_htmxo_reset_follows=_semantic_names_attr(follows)))...)
 end
 
+# A `:tabs` page's result taller than its bound scrolls inside itself
+# (`semantic_app(…; result_height)`): `:window` bounds it at the window's height
+# less `--htmxo-sticky-top`, a CSS length at that length, `nothing` not at all.
+# The bound is CSS on the result (`htmxo_utility_styles`); the page runtime
+# keeps a result that fits in the page (`semantic_follow_script`). A length is
+# written into a `style` attribute, so only the characters of a length pass.
+const _RESULT_HEIGHT_LENGTH =
+    r"^(?:[0-9.]+[a-z%]*|(?:calc|min|max|clamp)\([0-9A-Za-z.%+\-*/(), ]+\))$"
+_semantic_result_bound(::Nothing) = (;)
+function _semantic_result_bound(height)
+    height === :window && return (; data_htmxo_result_height="window")
+    value = height isa AbstractString ? String(strip(height)) : ""
+    occursin(_RESULT_HEIGHT_LENGTH, value) || throw(ArgumentError(string(
+        "semantic_app result_height must be :window, nothing or a CSS length such as ",
+        "\"32rem\", got ", repr(height))))
+    (; data_htmxo_result_height=value, style="--htmxo-result-height: " * value)
+end
+
 """
     _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
                    render_operation, layout, url_state, reset)
@@ -34000,11 +34098,12 @@ and every read's result following its inputs (`semantic_follow_script`). With
 `url_state`, the page's address keeps every input the reader set: the page
 shows the values it names, and the script writes the inputs into it. With
 `reset`, a Reset button returns every one of those inputs to its default.
+`result_bound` (from `_semantic_result_bound`) goes on every result.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
         reset::Bool=true, sections=InputSection[], place=nothing,
-        report_states=_ReportState[], url_scope::AbstractString="")
+        report_states=_ReportState[], url_scope::AbstractString="", result_bound=(;))
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places. The fields of
@@ -34083,8 +34182,10 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     sidebar_entries = [entry for entry in context_entries if !haskey(placements, entry.param.name)]
     sidebar_names = Set{Symbol}(entry.param.name for entry in sidebar_entries)
     sidebar_sections = _input_sections_for(sections, sidebar_names)
+    # The sidebar, the shared inputs placed in tabs and a following tab's own
+    # inputs apply a change at once (`live`): no button sends them.
     sidebar_controls = _semantic_context_controls(sidebar_entries, shared_names; radio_max,
-        headings=_input_section_headings(sidebar_sections, sidebar_names))
+        headings=_input_section_headings(sidebar_sections, sidebar_names), live=true)
     sidebar_fields = [(; name=entry.param.name, control,
                          short=!isempty(sidebar_sections) && _semantic_short_field(
                              entry.object, entry.route.owner, entry.param, entry.current;
@@ -34093,7 +34194,8 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     placed_controls = Dict{String,Vector{Any}}()
     for entry in placed_entries
         push!(get!(placed_controls, placements[entry.param.name], Any[]),
-              _semantic_entry_control(entry, shared_names; radio_max, placed=context_id))
+              _semantic_entry_control(entry, shared_names; radio_max, placed=context_id,
+                                      live=true))
     end
     sidebar_defaults = _semantic_address_attrs(defaults,
         [entry.param for entry in context_entries]; key=defaults_key, scope=url_scope)
@@ -34118,7 +34220,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
             target = _operation_form_target(spec.mounted, spec.local_route)
             controls = _operation_form_controls(spec.mounted, route, current,
                 string(target); shared_names, context_selector=selector, lifted=own[i],
-                radio_max, sections)
+                radio_max, sections, live=true)
             inputs_id = base.target_id * "-inputs"
             own_params = _operation_control_params(route, shared_names)
             own_defaults = _semantic_address_attrs(defaults, own_params; key=defaults_key,
@@ -34138,7 +34240,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 data_htmxo_follow=string(target), data_htmxo_inputs=join(selectors, ' '),
                 (isnothing(key_reads) ? (;) :
                     (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
-                data_htmxo_live="", hx_sync="this:replace")
+                data_htmxo_live="", hx_sync="this:replace", result_bound...)
             # The page's Markdown writes the result its address answers, at the
             # inputs it reads (`_tab_result_markdown`).
             markdown = _tab_result_markdown(spec.mounted, route, current, target, sent,
@@ -34166,7 +34268,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 radio_max, sections)
             form, h.div(; id=base.target_id, class="htmxo-semantic-operation-result",
                 aria_live="polite",
-                (refreshes ? (; data_htmxo_refreshes=context_id) : (;))...)
+                (refreshes ? (; data_htmxo_refreshes=context_id) : (;))..., result_bound...)
         end
         merge(base, (; form, result, tab=names[i], follows=follows[i],
                       placed=get(placed_controls, names[i], Any[])))
@@ -34257,7 +34359,8 @@ end
                  results=:each, layout=_default_semantic_layout,
                  select=entry -> true, presentation=:stacked, radio_max=8,
                  shared=nothing, active=nothing, url_state=true, reset=true,
-                 sections=nothing, place=nothing, report_states=nothing)
+                 sections=nothing, place=nothing, report_states=nothing,
+                 result_height=:window)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -34289,7 +34392,16 @@ carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
 read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
 the one it opens on), and results that follow their inputs. It is as tall as
 its inputs and results, so it can be one part of a longer page, between
-paragraphs of an article or a report. Its page address
+paragraphs of an article or a report. A result taller than its bound (a
+table of a few hundred rows, say) scrolls inside itself instead of
+lengthening the page, so the inputs beside it and the text around it stay
+where they are: `result_height=:window` (the default) bounds it at the
+window's height less `--htmxo-sticky-top`, a CSS length such as `"32rem"` at
+that length, and `nothing` keeps it growing with the page. A result that fits
+its bound stays in the page as it is. Inside the box a table's controls and
+header stick to the box top, a wide table's own box fits in it, and sorting,
+search, CSV, the keyboard row moves and hover linking work as on the page; the
+page's Markdown is unchanged. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
 reopens the same page; `url_state=false` keeps only the tab. A page that shows
@@ -34349,6 +34461,16 @@ cutoff applies to every control of the surface, the shared ones included, and
 survives their refreshes. Vector choices use checkbox pills up to the cutoff
 and a searchable checkbox list above it; its closed field shows the selected
 count and every selected label.
+
+A `Bool` input is a switch where a change applies at once, with no button to
+send it (the sidebar of a `presentation=:tabs` page, the shared inputs `place`
+puts in its tabs, and a following tab's own inputs), and a checkbox in a form a
+button sends (an operation card, [`operation_form`](@ref), a `:tabs` mutation).
+Either is the same `<input type="checkbox" value="true">`, so submission,
+Reset, the address and the Markdown's `shown_yes`/`shown_no` are the same; the
+switch adds `role="switch"`, which Pico draws as a switch, its "on" track in
+the text colour. A `@control(name) = :switch` (or `:checkbox`) line next to the
+`@param name::Bool` chooses it for every generated form instead.
 
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` and `submit_attrs` may likewise be values or
@@ -34467,7 +34589,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
-        reset=nothing, sections=nothing, place=nothing, report_states=nothing)
+        reset=nothing, sections=nothing, place=nothing, report_states=nothing,
+        result_height=:window)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -34493,7 +34616,10 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app place= puts inputs of presentation=:tabs into its tabs"))
         isnothing(report_states) || throw(ArgumentError(
             "semantic_app report_states= shows the results of presentation=:tabs at further states in a report"))
+        result_height === :window || throw(ArgumentError(
+            "semantic_app result_height= bounds the results of presentation=:tabs"))
     end
+    result_bound = _semantic_result_bound(result_height)
     states = _report_states(report_states)
     input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
@@ -34552,7 +34678,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
         reset=something(reset, true), sections=input_sections, place, report_states=states,
-        url_scope, render_operation=render_operation === _default_semantic_operation ?
+        url_scope, result_bound, render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
 
@@ -37964,6 +38090,60 @@ semantic_follow_script() = h.script(Raw(raw"""
     arm(document.body);
   }
 })();
+// A result taller than its bound (`data-htmxo-result-height`,
+// `semantic_app(…; presentation=:tabs, result_height)`) scrolls inside
+// itself; the bound itself is CSS. A result that fits is marked
+// `data-htmxo-result-fits` and stays in the page, so nothing in it is cut at
+// its edge. A result is measured in a task of its own whenever its size
+// changes (a new result, its tab opened, the window resized), never inside the
+// observer's callback, whose layout changes would re-notify in the same frame.
+(function() {
+  if (window.__htmxoResultBounds) return;
+  window.__htmxoResultBounds = true;
+  var FITS = 'data-htmxo-result-fits';
+  var tracked = new WeakSet(), pending = new Set(), timer = 0, observer = null;
+  function measure(region) {
+    if (!region.isConnected) return;
+    // A result that fits is no scroll box but keeps its bound, so content
+    // that outgrows the bound still reads as a scroll height above its height.
+    var fits = region.scrollHeight <= region.clientHeight + 1;
+    if (fits === region.hasAttribute(FITS)) return;
+    if (fits) region.setAttribute(FITS, ''); else region.removeAttribute(FITS);
+  }
+  function queue(region) {
+    pending.add(region);
+    if (timer) return;
+    timer = setTimeout(function() {
+      timer = 0;
+      var regions = Array.from(pending);
+      pending.clear();
+      regions.forEach(measure);
+    }, 0);
+  }
+  function track(root) {
+    if (!root || !root.querySelectorAll) return;
+    var found = Array.prototype.slice.call(root.querySelectorAll('[data-htmxo-result-height]'));
+    if (root.matches && root.matches('[data-htmxo-result-height]')) found.push(root);
+    found.forEach(function(region) {
+      if (!tracked.has(region)) {
+        tracked.add(region);
+        if (window.ResizeObserver) {
+          observer = observer || new ResizeObserver(function(entries) {
+            entries.forEach(function(entry) { queue(entry.target); });
+          });
+          observer.observe(region);
+        }
+      }
+      queue(region);
+    });
+  }
+  document.addEventListener('htmx:load', function(e) { track(e.target); });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { track(document.body); });
+  } else {
+    track(document.body);
+  }
+})();
 """))
 
 # --- Theme ---
@@ -39147,6 +39327,20 @@ fieldset[data-htmxo-checkbox-group] > label:has(> input:disabled) {
     opacity: .5;
     cursor: not-allowed;
 }
+/* A switch (`cinput(…; switch=true)`, and the `Bool` control of a form that
+   applies a change at once): Pico draws the box as a switch, and its "on"
+   track takes the text colour with a knob in the page colour, as a chosen
+   pill is filled, never Pico's azure; its focus ring is the text colour's
+   too. UNLAYERED, like the pills. Without Pico it stays a box, ticked in the
+   text colour. */
+input[type="checkbox"][role="switch"] {
+    --pico-switch-checked-background-color: var(--pico-contrast-background, CanvasText);
+    --pico-form-element-focus-color: var(--pico-contrast-focus, color-mix(in srgb, currentColor 25%, transparent));
+    accent-color: currentColor;
+}
+input[type="checkbox"][role="switch"]:checked {
+    --pico-switch-color: var(--pico-contrast-inverse, Canvas);
+}
 /* In a card of a list of records (`Records`) the pills are smaller and
    closer, so a choice among a few options takes fewer rows. */
 .htmxo-record fieldset:not([role]) > label:has(> input[type="radio"]),
@@ -39371,14 +39565,28 @@ fieldset[data-htmxo-checkbox-group] > label > input[type="checkbox"],
 table[data-htmxo-sticky] > thead { position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px)); z-index: 2; }
 table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
 .table-wrap[data-htmxo-width="fits"] { overflow: visible; }
-.table-wrap[data-htmxo-width="wide"] { overflow: auto; max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px)); max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px)); }
+.table-wrap[data-htmxo-width="wide"] { overflow: auto; max-height: calc(var(--htmxo-frame-height, 100vh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px)); max-height: calc(var(--htmxo-frame-height, 100dvh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px)); }
 .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { top: 0; }
 .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: var(--htmxo-table-head-h, 0px); }
 :is(td, th) .htmxo-table-toolbar[data-htmxo-sticky], :is(td, th) table[data-htmxo-sticky] > thead { position: static; }
-:is(td, th) .table-wrap[data-htmxo-width="wide"] { max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); }
+:is(td, th) .table-wrap[data-htmxo-width="wide"] { max-height: calc(var(--htmxo-frame-height, 100vh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); max-height: calc(var(--htmxo-frame-height, 100dvh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { position: sticky; z-index: 1; }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead th { background-color: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
+/* A `presentation=:tabs` page's result taller than its bound
+   (`semantic_app(…; result_height)`: the window's height less
+   `--htmxo-sticky-top` by default, else the app's CSS length) scrolls inside
+   itself instead of lengthening the page, so the inputs beside it and the text
+   around it stay where they are. The page runtime marks a result that fits
+   `data-htmxo-result-fits`: it stays in the page, so nothing in it (a glossary
+   term's explanation, a focus ring) is cut at its edge. Inside the box a
+   table's controls and header stick to the box top (`--htmxo-sticky-top` is
+   0 below it, not on it, so the bound reads the page's), and a wide table's
+   own box fits inside it (`--htmxo-frame-height`). */
+[data-htmxo-result-height] { --htmxo-frame-height: var(--htmxo-result-height, calc(100dvh - var(--htmxo-sticky-top, 0px))); max-height: var(--htmxo-frame-height); overflow: auto; }
+@supports not (height: 1dvh) { [data-htmxo-result-height] { --htmxo-frame-height: var(--htmxo-result-height, calc(100vh - var(--htmxo-sticky-top, 0px))); } }
+[data-htmxo-result-height][data-htmxo-result-fits] { overflow: visible; }
+[data-htmxo-result-height]:not([data-htmxo-result-fits]) > * { --htmxo-sticky-top: 0px; }
 
 /* A table's columns keep their widths while its rows open, load and filter
    (`data-htmxo-columns`, held by the table runtime). While the runtime sizes

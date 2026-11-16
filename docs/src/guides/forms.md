@@ -223,6 +223,34 @@ inputs; scalar blanks retain their default behavior. Markdown reads show all
 selected labels. Records vector fields and `set_inputs` use the same selection
 semantics.
 
+## On/off settings
+
+A `Bool` input is drawn by the form it is in. Where a change applies at once,
+with no button to send it, it is a switch: the sidebar of a
+`semantic_app(…; presentation=:tabs)` page, the shared inputs `place=` puts in
+its tabs, and a following tab's own inputs. In a form a button sends (an
+operation card, `operation_form`, a `:tabs` mutation) it is a checkbox, which
+does not promise an effect before the button is pressed. Both are the same
+`<input type="checkbox" value="true">`; the switch adds `role="switch"`, which
+Pico draws as a switch, and the `htmx` shell fills its "on" track in the text
+colour. Submission, Reset, the page address and `?plain` read them alike.
+
+To choose the control for one input in every generated form, declare it next
+to the `@param`:
+
+```julia
+@htmx struct Picture
+    "Show the ploughed-soil difference"
+    @param ploughed::Bool = true
+    @param confirm::Bool = false
+    @control(confirm) = :checkbox
+end
+```
+
+`@control` takes `:switch` or `:checkbox` and names a `Bool` `@param` of the
+struct; on any other input the page throws an `ArgumentError` naming it. A
+hand-placed control is `cinput((; ploughed); switch=true)`.
+
 ## Numbers from a range
 
 From 0.1.119, a number input declares the numbers it takes, and how a reader
