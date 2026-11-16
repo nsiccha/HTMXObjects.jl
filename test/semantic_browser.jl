@@ -3,8 +3,8 @@ using TestItemRunner
 @testmodule BrowserFixtures begin
     using HTMXObjects
     export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, FixedRanges,
-           RangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, TOY_JS, browser_region,
-           bound_texts
+           RangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, Doses, DOSE_TEXTS, TOY_JS,
+           browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -302,6 +302,42 @@ using TestItemRunner
                 columns = [:t => ColumnSpec("Day"; date = :short), :read => ColumnSpec("Reading"; digits = 1)]),
             render_table(bound(window; columns = (:t,)); id = "tage", texts = table_texts(:de),
                 columns = [:t => ColumnSpec("Tag"; date = :long)]))
+    end
+
+    # The dose levels two rules recommend (Portfolio's dose report, snag
+    # bound-cannot-sho-5a0dbf64): the module returns whole numbers, 0 for no
+    # dose, and the page writes each as the text the original picture shows.
+    # A risk above 1.2 gives level 6, which the labels do not name.
+    const DOSE_TEXTS = [0 => "No dose", 1 => "50 mg (level 1)", 2 => "100 mg (level 2)",
+                        3 => "200 mg (level 3)", 4 => "300 mg (level 4)", 5 => "400 mg (level 5)"]
+    const DOSES_JS = """
+    export function doseRules(risk) {
+      const paper = Math.floor(risk * 5), mtd = paper > 0 ? paper - 1 : 0;
+      return { paper, mtd, dosed: paper > 0, rule: [1, 2], level: [paper, mtd] };
+    }
+    export const INPUTS = [{ name: "risk", type: "Float64" }];
+    """
+    function dose_rules(risk)
+        paper = floor(Int, risk * 5)
+        mtd = paper > 0 ? paper - 1 : 0
+        (; paper, mtd, dosed = paper > 0, rule = [1, 2], level = [paper, mtd])
+    end
+
+    @htmx struct Doses
+        "Risk"
+        @param risk::Float64 = 0.5
+        @options(risk) = number_domain(0, 1.4)
+        rules = dose_rules(risk)
+        @browser(rules) = browser_module(; source = DOSES_JS, entry = :doseRules)
+        __page__(content) = HTMXObjects.htmx(content; title = "Doses", assets = "assets/vendor", runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "The rules' doses"
+        @get facts() = h.div(h.p(bound(rules.paper; labels = DOSE_TEXTS); class = "paper"),
+            h.p(bound(rules.mtd; labels = Dict(DOSE_TEXTS)); class = "mtd"),
+            h.p(bound(rules.dosed; labels = [true => "Dosed", false => "Not dosed"]); class = "dosed"),
+            render_table(bound(rules; columns = (:rule, :level)); id = "rules",
+                columns = [:rule => ColumnSpec("Rule"; labels = [1 => "Paper's rule", 2 => "MTD rule"]),
+                           :level => ColumnSpec("Dose"; labels = DOSE_TEXTS)]))
     end
 
     # Matrix data in the shape `ReactiveKernels.js_source` modules take
@@ -1145,6 +1181,113 @@ end
     @test occursin("11 January 2020", plaintext) && occursin("9 Jan 2020", plaintext) && !occursin("NaN", plaintext)
 end
 
+@testitem "bound and ColumnSpec write a value as the text its labels name" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, JSON, HTTP
+    b(x; kw...) = HTMXObjects._bound((:x,), x; kw...)
+    plain(v) = repr("text/plain", v)
+    refused(f) = try; f(); nothing; catch err; err; end
+    @test plain(b(3; labels = DOSE_TEXTS)) == "200 mg (level 3)" && plain(b(0; labels = DOSE_TEXTS)) == "No dose"
+    # A number key names the same number, as a module returns it; a Dict reads the same.
+    @test plain(b(3.0; labels = DOSE_TEXTS)) == plain(b(Int32(3); labels = Dict(DOSE_TEXTS))) == "200 mg (level 3)"
+    @test plain(b(0.5; labels = [0.5 => "half"])) == "half"
+    # Booleans and text name only Booleans and text.
+    yes = [true => "Yes", false => "No"]
+    @test plain(b(true; labels = yes)) == "Yes" && plain(b(false; labels = yes)) == "No"
+    @test plain(b("a"; labels = ["a" => "Alpha", :b => "Beta"])) == "Alpha" && plain(b(:b; labels = ["a" => "Alpha", :b => "Beta"])) == "Beta"
+    # No value is `–`, as for every bound value.
+    for x in (NaN, missing, nothing)
+        @test plain(b(x; labels = DOSE_TEXTS)) == "–"
+    end
+    # The Markdown and the HTML say the label; the page carries the table to write it again.
+    @test repr("text/markdown", b(0; labels = DOSE_TEXTS)) == "No dose"
+    html = repr("text/html", b(3; labels = DOSE_TEXTS))
+    @test occursin(">200 mg (level 3)</span>", html) && occursin("data-htmxo-kind=\"int\"", html)
+    fmt(v) = JSON.parse(replace(match(r"data-htmxo-format=\"([^\"]*)\"", repr("text/html", v))[1], "&quot;" => "\"", "&#39;" => "'"))
+    @test fmt(b(3; labels = DOSE_TEXTS)) == Dict("labels" => Dict("pairs" => [[k, t] for (k, t) in DOSE_TEXTS],
+        "named" => "0, 1, 2, 3, 4, 5", "what" => "bound(x; labels)"))
+    @test fmt(b(true; labels = yes))["labels"]["pairs"] == [[true, "Yes"], [false, "No"]]
+    # A Dict's keys in order: Booleans, numbers, text.
+    @test fmt(b(1; labels = Dict("z" => "Z", 2 => "two", 1 => "one", false => "no")))["labels"]["named"] == "false, 1, 2, \"z\""
+    # A value the labels do not name is an error naming it and the keys,
+    # never a silent fallback: a number missing, a Bool for a number key, a
+    # number for a Bool key, text for a number key.
+    e = refused(() -> b(7; labels = DOSE_TEXTS))
+    @test e isa ArgumentError && e.msg == "bound(x; labels): 7 is not a value its labels name (0, 1, 2, 3, 4, 5)"
+    e = refused(() -> HTMXObjects._bound((:rules, :paper), 6.0; labels = DOSE_TEXTS))
+    @test e isa ArgumentError && e.msg == "bound(rules.paper; labels): 6.0 is not a value its labels name (0, 1, 2, 3, 4, 5)"
+    @test refused(() -> b(true; labels = [1 => "one"])) isa ArgumentError
+    @test refused(() -> b(1; labels = yes)) isa ArgumentError
+    @test refused(() -> b("1"; labels = [1 => "one"])) isa ArgumentError
+    # Refused as the page is built: with the number or day keywords, an empty
+    # or repeated table, a key that is no value or no key, a label that is no text.
+    for (kw, phrase) in (((; digits = 1), "takes no `digits`, `sigdigits`, `percent` or `date`"),
+                         ((; percent = true), "takes no `digits`"), ((; date = :long), "takes no `digits`"))
+        e = refused(() -> b(3; labels = DOSE_TEXTS, kw...))
+        @test e isa ArgumentError && occursin(phrase, e.msg)
+    end
+    for (table, phrase) in (([], "names no value"), (Dict{Int,String}(), "names no value"),
+                            ([3 => "a", 3.0 => "b"], "names 3.0 twice"), ([NaN => "none"], "cannot name NaN"),
+                            ([nothing => "none"], "a key of `labels` is a number, a Bool or text"),
+                            ([1 => 2], "the label of 1 is a $(Int); a label is text"), ([1, 2], "is a `value => text` pair"),
+                            ("No dose", "a list of `value => text` pairs or a Dict"))
+        e = refused(() -> b(1; labels = table))
+        @test e isa ArgumentError && occursin(phrase, e.msg) && startswith(e.msg, "bound(x; labels)")
+    end
+    e = refused(() -> HTMXObjects._bound((:x,), (; t = [1]); columns = (:t,), labels = DOSE_TEXTS))
+    @test e isa ArgumentError && occursin("ColumnSpec(label; labels)", e.msg)
+
+    # A column of labels in any render_table: each cell its label, sorted by
+    # its value, text at the left; no value is the empty cell; a value the
+    # labels do not name is an error naming the column.
+    dose = ColumnSpec("Dose"; labels = DOSE_TEXTS)
+    t = repr("text/html", render_table((; rule = ["paper", "mtd", "none"], level = [3, 0, missing]); columns = [:level => dose]))
+    @test occursin("<td data-sort-value=\"3\">200 mg (level 3)</td>", t) && occursin("<td data-sort-value=\"0\">No dose</td>", t)
+    @test occursin(r"<td[^>]*data-htmxo-number=\"\"[^>]*>–</td>", t)
+    @test !occursin(r"<th[^>]*data-htmxo-align=\"right\"[^>]*>(?:(?!</th>).)*Dose"s, t)
+    @test occursin("data-sort-value=\"1\">Yes", repr("text/html", render_table((; ok = [true]); columns = [:ok => ColumnSpec("OK"; labels = yes)])))
+    e = refused(() -> render_table((; level = [7]); columns = [:level => dose]))
+    @test e isa ArgumentError && e.msg == "ColumnSpec(\"Dose\"; labels): 7 is not a value its labels name (0, 1, 2, 3, 4, 5)"
+    for kw in ((; digits = 0), (; date = :short))
+        e = refused(() -> ColumnSpec("Dose"; labels = DOSE_TEXTS, kw...))
+        @test e isa ArgumentError && startswith(e.msg, "ColumnSpec(\"Dose\"; labels)") && occursin("takes no `digits`", e.msg)
+    end
+    e = refused(() -> sortable_table([dose], []))
+    @test e isa ArgumentError && occursin("numbers, days or labels", e.msg)
+
+    # The dose rules as their page shows them first, in HTML, as text and in the bound table's description.
+    route!(Doses(); operation_policy = :blocking)
+    page = String(HTMXObjects._response_bytes(dispatch(:GET, "/facts"; headers = ["HX-Request" => "true"])))
+    @test bound_texts(page) == ["100 mg (level 2)", "50 mg (level 1)", "Dosed"]
+    unescaped(x) = replace(x, "&#39;" => "'", "&apos;" => "'", "&quot;" => "\"", "&amp;" => "&")
+    @test [unescaped(m[1]) for m in eachmatch(r"<td[^>]*>([^<]*)</td>", page)] == ["Paper's rule", "100 mg (level 2)", "MTD rule", "50 mg (level 1)"]
+    spec = JSON.parse(unescaped(match(r"data-htmxo-bound-table=\"([^\"]*)\"", page)[1]))
+    @test spec["columns"][1]["labels"]["pairs"] == [[1, "Paper's rule"], [2, "MTD rule"]] && spec["columns"][2]["kind"] == "int"
+    @test spec["columns"][2]["labels"]["what"] == "ColumnSpec(\"Dose\"; labels)"
+    zero = String(HTMXObjects._response_bytes(dispatch(:GET, "/facts?risk=0.1&plain=1")))
+    @test occursin("No dose", zero) && occursin("Not dosed", zero) && !occursin("level", zero)
+    # A risk whose level the labels do not name fails on the server, naming it:
+    # the answer is a recorded error, whose log entry holds the cause.
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            answer = dispatch(:GET, "/facts?risk=1.3"; headers = ["HX-Request" => "true"])
+            uid = HTTP.header(answer, "X-HTMXO-Error-Id", "")
+            @test !isempty(uid)
+            logged = read(joinpath(dir, "$uid.log"), String)
+            @test contains(logged, "status:    500") &&
+                  contains(logged, "ArgumentError: bound(rules.paper; labels): 6 is not a value its labels name (0, 1, 2, 3, 4, 5)")
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+    # A static export of the page has nothing it would show stale.
+    mktempdir() do dir
+        export_site(joinpath(dir, "site"); pages = ["/"])
+        @test isfile(joinpath(dir, "site", "index.html"))
+    end
+end
+
 @testitem "a static page writes bound days and missing values again offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
@@ -1223,6 +1366,128 @@ end
             sortTable(th);
             typed('0');
             await until(() => facts() === '3 October 2019 3. Okt. 2019|Oct 2019 –|–', () => 'back: ' + facts());
+            await until(() => snapshot() === server, () => 'parity: ' + snapshot() + ' / ' + server);
+            await fetch('/mark?phase=end');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        </script>
+        """
+        mktempdir() do dir
+            site = joinpath(dir, "site")
+            export_site(site; pages = ["/"])
+            receipt = Channel{String}(1)
+            requests = String[]
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose = false) do req
+                uri = HTTP.URI(req.target)
+                path = uri.path
+                push!(requests, req.target)
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                path == "/mark" && return HTTP.Response(204)
+                file = joinpath(site, lstrip(path == "/" ? "/index.html" : HTTP.URIs.unescapeuri(path), '/'))
+                isfile(file) || return HTTP.Response(404)
+                body = read(file, String)
+                endswith(file, "index.html") && (body = replace(body, "</body>" => driver * "</body>"))
+                type = endswith(file, ".js") ? "application/javascript" : endswith(file, ".css") ? "text/css" : "text/html"
+                HTTP.Response(200, ["Content-Type" => type], body)
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/index.html`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout = devnull, stderr = browser_log); wait = false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint = 0.05) === :ok
+                        outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                        @test HTTP.URIs.unescapeuri(outcome) == "/complete?status=passed"
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
+            # Between the marks the page computed and redrew without a single request.
+            start = findfirst(==("/mark?phase=start"), requests)
+            stop = findfirst(==("/mark?phase=end"), requests)
+            @test start !== nothing && stop !== nothing && stop == start + 1
+        end
+    end
+end
+
+@testitem "a static page writes bound values and a table column as their labels again offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(Doses(); operation_policy = :blocking)
+        HTMXObjects.vendorfiles("assets/vendor")
+        driver = """
+        <script>
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + (typeof label === 'function' ? label() : label)); await sleep(25); }
+          }
+          const fact = name => document.querySelector('.' + name + ' [data-htmxo-bound]').textContent;
+          const facts = () => [fact('paper'), fact('mtd'), fact('dosed')].join('|');
+          const table = () => document.querySelector('table[data-htmxo-bound-table]');
+          const rows = () => Array.from(table().tBodies[0].rows);
+          const cell = c => [c.textContent, c.getAttribute('data-sort-value'), c.getAttribute('data-htmxo-number')].join('~');
+          const snapshot = () => rows().map(r => Array.from(r.cells).map(cell).join('|')).join(' ');
+          const column = j => rows().map(r => r.cells[j].textContent).join(',');
+          const fault = () => { const f = document.querySelector('.htmxo-browser-fault'); return f ? f.textContent : ''; };
+          const stale = () => !!document.querySelector('.htmxo-browser-view[data-htmxo-stale]');
+          const field = () => document.querySelector('input[name="risk"]');
+          function typed(v) { const c = field(); c.value = v; c.dispatchEvent(new Event('input', {bubbles: true})); }
+          try {
+            await until(() => table() && rows().length === 2, 'table');
+            const server = snapshot();
+            if (facts() !== '100 mg (level 2)|50 mg (level 1)|Dosed') throw new Error('first facts: ' + facts());
+            await fetch('/mark?phase=start');
+            // No dose for either rule: the labels of 0 and of false.
+            typed('0.1');
+            await until(() => facts() === 'No dose|No dose|Not dosed', () => 'no dose: ' + facts());
+            await until(() => column(1) === 'No dose,No dose', () => 'no dose column: ' + column(1));
+            if (column(0) !== "Paper's rule,MTD rule") throw new Error('rules: ' + column(0));
+            const none = rows()[0].cells[1];
+            if (none.getAttribute('data-sort-value') !== '0' || none.hasAttribute('data-htmxo-number')) throw new Error('label cell: ' + cell(none));
+            // Level 1 and 0: sorted by the value, "No dose" comes first, which its text would not.
+            typed('0.25');
+            await until(() => facts() === '50 mg (level 1)|No dose|Dosed', () => 'levels 1 and 0: ' + facts());
+            await until(() => column(1) === '50 mg (level 1),No dose', () => 'levels 1 and 0 column: ' + column(1));
+            const th = table().tHead.rows[0].cells[1];
+            sortTable(th);
+            if (column(1) !== 'No dose,50 mg (level 1)') throw new Error('sorted by level: ' + column(1));
+            // Level 6, which the labels do not name: the result shows the
+            // server's error and fades, the value keeps its last text and the
+            // table its rows, and what the labels do name is written.
+            typed('1.3');
+            await until(() => fault() !== '', () => 'fault: ' + facts());
+            if (fault() !== 'ArgumentError: bound(rules.paper; labels): 6 is not a value its labels name (0, 1, 2, 3, 4, 5)')
+              throw new Error('fault text: ' + fault());
+            if (!stale()) throw new Error('not faded');
+            if (facts() !== '50 mg (level 1)|400 mg (level 5)|Dosed') throw new Error('fault facts: ' + facts());
+            if (column(1) !== 'No dose,50 mg (level 1)') throw new Error('fault rows: ' + column(1));
+            // Back at the first value: no fault, and the browser's rows are the
+            // server's, cell by cell. A second click sorts by level, highest
+            // first, which is the server's order of these two rows (2, then 1).
+            sortTable(th);
+            if (column(1) !== '50 mg (level 1),No dose') throw new Error('sorted by level, highest first: ' + column(1));
+            typed('0.5');
+            await until(() => fault() === '' && !stale() && facts() === '100 mg (level 2)|50 mg (level 1)|Dosed', () => 'back: ' + facts() + ' ' + fault());
             await until(() => snapshot() === server, () => 'parity: ' + snapshot() + ' / ' + server);
             await fetch('/mark?phase=end');
             await fetch('/complete?status=passed');
