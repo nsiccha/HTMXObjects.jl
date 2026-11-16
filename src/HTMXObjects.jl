@@ -4794,6 +4794,13 @@ _markdown_plain_text(text::AbstractString) =
 # Appended to a heading line: the heading carries its element's anchor.
 _markdown_heading_anchor(anchor::AbstractString) =
     isempty(anchor) ? "" : " " * _markdown_anchor_attr(anchor)
+# A heading the report's contents list lists also carries this class
+# (`_contents_entry_class`), inside the same braces as its anchor.
+function _markdown_heading_anchor(anchor::AbstractString, class::AbstractString)
+    isempty(class) && return _markdown_heading_anchor(anchor)
+    isempty(anchor) && return " {." * class * "}"
+    " " * chop(_markdown_anchor_attr(anchor)) * " ." * class * "}"
+end
 
 _semantic_metric_text(metric::SemanticMetric) = isempty(metric.unit) ?
     string(metric.value) : string(metric.value, " ", metric.unit)
@@ -5940,7 +5947,8 @@ Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_opening_level(section)) do level
         _numbered_section(section, level) do number, anchor
             print(io, _semantic_heading_sigil(level), " ", _section_number_text(number),
-                _markdown_plain_text(section.title), _markdown_heading_anchor(anchor))
+                _markdown_plain_text(section.title),
+                _markdown_heading_anchor(anchor, _contents_entry_class(number, level)))
             _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
             _semantic_show_children(io, mime, section.children, "\n\n")
         end
