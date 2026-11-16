@@ -736,6 +736,39 @@ end
     end
 end
 
+@testitem "export_site preserves each browser tab's result height" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    @htmx struct BrowserTabHeights
+        @param a::Float64 = 2.0
+        @param b::Float64 = 1.0
+        grid = collect(0.0:200.0)
+        lim = Inf
+        z = -0.0
+        line = (; x=grid, y=a .* grid .+ b, total=a+b)
+        @browser(line) = browser_module(; source=TOY_JS, entry=:toy)
+        __page__(content) = HTMXObjects.htmx(content; assets="assets/vendor", runtime=:linked)
+        @get figure() = h.div(h.p("Picture ", bound(line.total)), h.p("All facts"))
+        @get numbers() = render_table(bound(line; columns=(:x, :y)))
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            select=e -> e.name in (:figure, :numbers),
+            result_height=(figure=nothing, numbers="32rem"))
+    end
+    route!(BrowserTabHeights(); operation_policy=:blocking)
+    HTMXObjects.vendorfiles("assets/vendor")
+    mktempdir() do dir
+        export_site(joinpath(dir, "site"); pages=["/"])
+        html = read(joinpath(dir, "site", "index.html"), String)
+        regions = Dict(m.captures[1] => m.match for m in eachmatch(
+            r"<div [^>]*id=\"[^\"]*-get-(figure|numbers)-result\"[^>]*>", html))
+        @test length(regions) == 2
+        @test contains(regions["figure"], "data-htmxo-browser=")
+        @test !contains(regions["figure"], "data-htmxo-result-height=")
+        @test contains(regions["numbers"], "data-htmxo-browser=")
+        @test contains(regions["numbers"], "data-htmxo-result-height=\"32rem\"")
+        @test contains(html, "All facts")
+    end
+end
+
 @testitem "export_site writes a toggled input whose default reads no input, and names the inputs a default reads" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects
     HTMXObjects.vendorfiles("assets/vendor")
