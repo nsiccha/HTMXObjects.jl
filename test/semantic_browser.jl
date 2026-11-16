@@ -2,8 +2,8 @@ using TestItemRunner
 
 @testmodule BrowserFixtures begin
     using HTMXObjects
-    export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, Shield, Grid, TOY_JS,
-           browser_region, bound_texts
+    export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, Shield, Grid, TermSite,
+           TOY_JS, browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -252,6 +252,45 @@ using TestItemRunner
                             bound(grid.size[2]), " ", bound(grid.none[1]), "x", bound(grid.none[2]), " ",
                             bound(grid.wide[1]), "x", bound(grid.wide[2]), " ", bound(grid.inf), bound(grid.flag);
                             class = "grid")
+    end
+
+    # Results whose markup differs between two answers of the same inputs
+    # (snag browser-result-u-88fa1fae). `result` uses a term of the site's
+    # glossary, whose link carries an id that is new in every answer; `shown`
+    # also shows an input outside `bound`; `own` writes an id of its own; and
+    # `growing` holds one more element every time it is rendered.
+    const RENDERS = Ref(0)
+    @htmx struct TermLine
+        "Slope"
+        @param a::Float64 = 2.0
+        "Intercept"
+        @param b::Float64 = 1.0
+        grid = [0.0, 1.0]
+        lim = Inf    # an unbounded limit: data, not a missing value
+        z = -0.0
+        line = (; x = grid, y = a .* grid .+ b, total = a + b, at = [a + b, 2a + b], lim, z,
+                ok = [lim == Inf ? 1 : 0, signbit(z) ? 1 : 0])
+        @browser(line) = browser_module(; source = TOY_JS, entry = :toy)
+        "Result"
+        @get result() = h.p("The widget total is ", bound(line.total), ".")
+        "Slope shown"
+        @get shown() = h.p("The widget total is ", bound(line.total), " for slope ", string(a), ".")
+        "Own id"
+        @get own() = h.p("total ", bound(line.total); id = string("own-", rand(UInt64)))
+        "Growing"
+        @get growing() = h.p("total ", bound(line.total), (h.b("+") for _ in 1:(RENDERS[] += 1))...)
+    end
+
+    # The shape of Portfolio's dose article: a site that declares a glossary
+    # and mounts the picture.
+    @htmx struct TermSite
+        __glossary__ = Glossary([GlossaryTerm("Widget", "A thing."; forms = ["widget"])]; href = "", title = "Glossary")
+        @include line = TermLine()
+        __page__(content) = HTMXObjects.htmx(content; title = "Terms", assets = "assets/vendor", runtime = :linked)
+        @get index() = h.main(semantic_app(line; presentation = :tabs, select = e -> e.name == :result))
+        @get shown() = h.main(semantic_app(line; presentation = :tabs, select = e -> e.name == :shown))
+        @get own() = h.main(semantic_app(line; presentation = :tabs, select = e -> e.name == :own))
+        @get growing() = h.main(semantic_app(line; presentation = :tabs, select = e -> e.name == :growing))
     end
 
     browser_region(html) = match(r"<div id=\"[^\"]*-result\"[^>]*data-htmxo-browser=[^>]*>", html)
@@ -513,6 +552,86 @@ end
         @test e !== nothing && any(((a, why),) -> a == "/" && occursin(
             "the server draws the control of `b` again when other inputs change (its default reads `a`)", why), e.failed)
     end
+end
+
+@testitem "a static export compares a browser result with what two renders of the same inputs differ in" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    # Snag browser-result-u-88fa1fae: under a root with a glossary, a result
+    # whose text uses a term was refused, one line per continuous input.
+    route!(TermSite(); operation_policy = :blocking)
+    HTMXObjects.vendorfiles("assets/vendor")
+    fragment() = String(HTMXObjects._response_bytes(dispatch(:GET, "/line/result"; headers = ["HX-Request" => "true"])))
+    one, other = fragment(), fragment()
+    # The linked term's definition id is new in every answer, and nothing else is.
+    @test occursin("aria-describedby=\"htmxo-term-widget-", one)
+    @test one != other
+    @test replace(one, r"htmxo-term-widget-[0-9a-z]+-1" => "") == replace(other, r"htmxo-term-widget-[0-9a-z]+-1" => "")
+    static = dispatch(:GET, "/"; static = StaticExport(; controls = :disable, runtime = :linked, audience = :public))
+    @test static.status == 200
+    page = String(HTMXObjects._response_bytes(static))
+    @test occursin("data-htmxo-browser=", page) && occursin("class=\"htmxo-term\"", page)
+    function failure(address)
+        mktempdir() do dir
+            try
+                export_site(joinpath(dir, "site"); pages = [address])
+                nothing
+            catch err
+                err
+            end
+        end
+    end
+    @test failure("/") === nothing
+    # An id of the view's own, new in every answer, is no input either.
+    @test failure("/own") === nothing
+    # An input shown outside `bound` is still named, with what changed, and
+    # the input that only `bound` shows is not.
+    e = failure("/shown")
+    @test e isa HTMXObjects.StaticSiteIncomplete
+    why = e === nothing ? "" : join((why for (_, why) in e.failed), "\n")
+    @test occursin("the result `shown` shows `a` outside `bound`: its view changes when `a` does", why)
+    @test occursin(r"for slope 2\.0\.</p>` becomes `[^`]*for slope 2\.2[0-9]*\.</p>` with `a` = 2\.2", why)
+    @test !occursin("shows `b` outside", why)
+    # Renders of the same inputs that do not line up cannot be compared with a
+    # changed input's: said once for the result, not once per input.
+    e = failure("/growing")
+    @test e isa HTMXObjects.StaticSiteIncomplete
+    why = e === nothing ? "" : join((why for (_, why) in e.failed), "\n")
+    @test count("the export could not check the result `growing`: with the same inputs", why) == 1
+    @test occursin("which do not line up", why) && !occursin("outside `bound`:", why)
+
+    # The comparison itself, on skeletons: `again()` hands out one more
+    # rendering of the unchanged inputs.
+    control() = Ref{Union{Nothing,HTMXObjects._BrowserControl}}(nothing)
+    compare!(ref, base, changed, renders) =
+        HTMXObjects._browser_compare!(ref, base, changed, () -> popfirst!(renders))
+    base = "<p id=\"t-1\">00 min 58 s</p>"
+    @test join(HTMXObjects._browser_pieces(base)) == base
+    @test HTMXObjects._browser_pieces("<a id=\"x-1\">b c</a>") == ["<", "a", " ", "id", "=", "\"", "x-1", "\"", ">", "b", " ", "c", "<", "/a", ">"]
+    ref = control()
+    # The id and the seconds differ between two renderings of the same inputs.
+    @test compare!(ref, base, "<p id=\"t-2\">00 min 59 s</p>", ["<p id=\"t-3\">00 min 59 s</p>"]) === :same
+    # The minutes did not, until now: one more rendering shows that they do too.
+    @test compare!(ref, base, "<p id=\"t-4\">01 min 00 s</p>", ["<p id=\"t-5\">01 min 00 s</p>"]) === :same
+    # What no rendering of the same inputs differs in is the input's doing.
+    @test compare!(ref, base, "<p id=\"t-6\">01 min 00 s!</p>", ["<p id=\"t-7\">01 min 01 s</p>"]) === :changed
+    @test compare!(control(), base, "<p id=\"t-1\">00 min 58 s</p><b></b>", [base]) === :changed
+    # A rendering of the same inputs that did not render teaches nothing.
+    @test compare!(control(), base, "<p id=\"t-2\">00 min 58 s</p>", [nothing]) === :changed
+    # Renderings of the same inputs with different numbers of pieces do not line up.
+    ref = control()
+    @test compare!(ref, base, "<p id=\"t-2\">00 min 59 s</p>", ["<p id=\"t-3\">59 s</p>"]) === :unlike
+    # What a message quotes: where they part (past the id, which differs first),
+    # and of a long view only what surrounds the difference.
+    @test HTMXObjects._browser_difference(ref[].pieces, ref[].unlike, nothing) ==
+          ("<p id=\"t-1\">00 min 58 s</p>", "<p id=\"t-3\">59 s</p>")
+    far = string("<p id=\"t-1\">", "x"^60, " a b</p>")
+    @test HTMXObjects._browser_difference(HTMXObjects._browser_pieces(far),
+              HTMXObjects._browser_pieces(string("<p id=\"t-2\">", "x"^60, " a</p>")), nothing) ==
+          (string("…", "x"^38, " a b</p>"), string("…", "x"^38, " a</p>"))
+    long = string("<p>", "x"^60, " 2.0 ", "y"^60, "</p>")
+    @test HTMXObjects._browser_difference(HTMXObjects._browser_pieces(long),
+              HTMXObjects._browser_pieces(replace(long, "2.0" => "2.5")), falses(11)) ==
+          (string("…", "x"^37, " 2.0 ", "y"^39, "…"), string("…", "x"^37, " 2.5 ", "y"^39, "…"))
 end
 
 @testitem "a static browser page follows its inputs offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
