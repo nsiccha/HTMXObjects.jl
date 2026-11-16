@@ -4,7 +4,7 @@ using TestItemRunner
     using HTMXObjects
     export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, ChosenDefault, ChosenStale,
            FixedRanges, RangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, Doses, DOSE_TEXTS, TOY_JS,
-           browser_region, bound_texts
+           Halving, browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -383,6 +383,30 @@ using TestItemRunner
             render_table(bound(rules; columns = (:rule, :level)); id = "rules",
                 columns = [:rule => ColumnSpec("Rule"; labels = [1 => "Paper's rule", 2 => "MTD rule"]),
                            :level => ColumnSpec("Dose"; labels = DOSE_TEXTS)]))
+    end
+
+    const HALVING_JS = """
+    export function halving(slope) {
+      const half = slope === 2 ? NaN : slope === -2 ? -Infinity : 1 / slope;
+      return {half, values: [half, 2.125, 0]};
+    }
+    export const INPUTS = [{name: "slope", type: "Float64"}];
+    """
+    const HALF_LABELS = [Inf => "No finite halving time", -Inf => "Negative infinity", 0.0 => "None"]
+    @htmx struct Halving
+        "Slope"
+        @param slope::Float64 = 0.5
+        @options(slope) = number_domain(-2, 2)
+        prediction = (; half = slope == 2 ? NaN : slope == -2 ? -Inf : 1 / slope,
+                        values = [slope == 2 ? NaN : slope == -2 ? -Inf : 1 / slope, 2.125, 0.0])
+        @browser(prediction) = browser_module(; source = HALVING_JS, entry = :halving)
+        __page__(content) = HTMXObjects.htmx(content; title = "Halving", assets = "assets/vendor", runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Halving time"
+        @get facts() = h.div(h.p(bound(prediction.half; digits = 1, labels = HALF_LABELS, unit = "years"); class = "half"),
+            h.p(bound(prediction.half; sigdigits = 2, labels = HALF_LABELS, unit = "Jahre", texts = table_texts(:de)); class = "half-de"),
+            render_table(bound(prediction; columns = (:values,)); id = "halving", searchable = true,
+                columns = [:values => ColumnSpec("Years"; digits = 1, labels = HALF_LABELS)]))
     end
 
     # Matrix data in the shape `ReactiveKernels.js_source` modules take
@@ -1271,6 +1295,52 @@ end
     @test occursin("11 January 2020", plaintext) && occursin("9 Jan 2020", plaintext) && !occursin("NaN", plaintext)
 end
 
+@testitem "bound numeric exceptions and units agree with table and Markdown text" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, JSON, Dates
+    labels = [Inf => "No finite halving time", -Inf => "Not finite", 0.0 => "None"]
+    b(x; kw...) = HTMXObjects._bound((:x,), x; kw...)
+    for (value, expected) in ((12.34, "12.3 years"), (1.25, "1.3 years"), (Inf, "No finite halving time"),
+                              (-Inf, "Not finite"), (0, "None"), (NaN, "–"), (missing, "–"), (nothing, "–"))
+        value = b(value; digits = 1, labels, unit = "years")
+        @test repr("text/plain", value) == repr("text/markdown", value) == expected
+        @test occursin(">" * expected * "</span>", repr("text/html", value))
+    end
+    @test repr("text/plain", b(12.34; sigdigits = 3, labels, unit = "Jahre", texts = table_texts(:de))) == "12,3 Jahre"
+    @test repr("text/plain", b(0.125; percent = true, labels, unit = "per year")) == "12.5% per year"
+    @test repr("text/plain", b(-Inf; digits = 1, labels = [Inf => "Positive"], unit = "years")) == "-∞ years"
+    @test repr("text/plain", b(Inf; labels = Dict(Inf => "Infinite"))) == "Infinite"
+    @test repr("text/plain", b("Inf"; labels = [Inf => "Number", "Inf" => "Text"])) == "Text"
+    @test repr("text/plain", b(2.0; unit = "")) == "2"
+    for x in (true, "hello", Date(2020, 1, 1))
+        kw = x isa Date ? (; date = :long) : (;)
+        @test repr("text/plain", b(x; unit = "years", kw...)) == repr("text/plain", b(x; kw...))
+    end
+    for x in (false, "unlabelled")
+        @test_throws ArgumentError b(x; digits = 1, labels)
+    end
+    @test_throws ArgumentError b(12.34; labels, unit = "years")
+    @test_throws ArgumentError b(NaN; labels = [NaN => "None"])
+    @test_throws ArgumentError b(Inf; labels = [Inf => "a", Float32(Inf) => "b"])
+    @test_throws ArgumentError HTMXObjects._bound((:x,), (; values = [1]); columns = (:values,), unit = "years")
+    @test occursin("&lt;years&gt;", repr("text/html", b(1; unit = "<years>")))
+    @test occursin("&lt;none&gt;", repr("text/html", b(Inf; digits = 1, labels = [Inf => "<none>"])))
+    # A valid JSON key carries each infinity without colliding with text keys.
+    wire = HTMXObjects._labels_wire(b(Inf; digits = 1, labels).labels)
+    @test JSON.parse(JSON.json(wire))["pairs"][1:2] == [[Dict("infinite" => 1), "No finite halving time"],
+        [Dict("infinite" => -1), "Not finite"]]
+    table = render_table((; years = [12.34, Inf, -Inf, 0.0, missing]);
+        columns = [:years => ColumnSpec("Years"; digits = 1, labels)])
+    html = repr("text/html", table)
+    @test occursin("data-htmxo-number=\"12.34\"", html) && occursin(">12.3</td>", html)
+    @test occursin("data-sort-value=\"Infinity\">No finite halving time", html)
+    @test occursin("data-sort-value=\"-Infinity\">Not finite", html)
+    @test occursin("data-sort-value=\"0.0\">None", html)
+    @test occursin("No finite halving time", HTMXObjects.to_markdown_string(table))
+    route!(Halving(); operation_policy = :blocking)
+    page = String(HTMXObjects._response_bytes(dispatch(:GET, "/facts?slope=0&plain=1")))
+    @test occursin("No finite halving time", page) && !occursin("years", page) && !occursin("Jahre", page)
+end
+
 @testitem "bound and ColumnSpec write a value as the text its labels name" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, JSON, HTTP
     b(x; kw...) = HTMXObjects._bound((:x,), x; kw...)
@@ -1308,10 +1378,9 @@ end
     @test refused(() -> b(true; labels = [1 => "one"])) isa ArgumentError
     @test refused(() -> b(1; labels = yes)) isa ArgumentError
     @test refused(() -> b("1"; labels = [1 => "one"])) isa ArgumentError
-    # Refused as the page is built: with the number or day keywords, an empty
+    # Refused as the page is built: with day keywords, an empty
     # or repeated table, a key that is no value or no key, a label that is no text.
-    for (kw, phrase) in (((; digits = 1), "takes no `digits`, `sigdigits`, `percent` or `date`"),
-                         ((; percent = true), "takes no `digits`"), ((; date = :long), "takes no `digits`"))
+    for (kw, phrase) in (((; date = :long), "takes no `date`"),)
         e = refused(() -> b(3; labels = DOSE_TEXTS, kw...))
         @test e isa ArgumentError && occursin(phrase, e.msg)
     end
@@ -1337,15 +1406,16 @@ end
     @test occursin("data-sort-value=\"1\">Yes", repr("text/html", render_table((; ok = [true]); columns = [:ok => ColumnSpec("OK"; labels = yes)])))
     e = refused(() -> render_table((; level = [7]); columns = [:level => dose]))
     @test e isa ArgumentError && e.msg == "ColumnSpec(\"Dose\"; labels): 7 is not a value its labels name (0, 1, 2, 3, 4, 5)"
-    for kw in ((; digits = 0), (; date = :short))
+    for kw in ((; date = :short),)
         e = refused(() -> ColumnSpec("Dose"; labels = DOSE_TEXTS, kw...))
-        @test e isa ArgumentError && startswith(e.msg, "ColumnSpec(\"Dose\"; labels)") && occursin("takes no `digits`", e.msg)
+        @test e isa ArgumentError && startswith(e.msg, "ColumnSpec(\"Dose\"; labels)") && occursin("takes no `date`", e.msg)
     end
     e = refused(() -> sortable_table([dose], []))
     @test e isa ArgumentError && occursin("numbers, days or labels", e.msg)
 
     # The dose rules as their page shows them first, in HTML, as text and in the bound table's description.
     route!(Doses(); operation_policy = :blocking)
+    HTMXObjects.vendorfiles("assets/vendor")
     page = String(HTMXObjects._response_bytes(dispatch(:GET, "/facts"; headers = ["HX-Request" => "true"])))
     @test bound_texts(page) == ["100 mg (level 2)", "50 mg (level 1)", "Dosed"]
     unescaped(x) = replace(x, "&#39;" => "'", "&apos;" => "'", "&quot;" => "\"", "&amp;" => "&")
@@ -1584,6 +1654,120 @@ end
           } catch (error) {
             await fetch('/complete?status=' + encodeURIComponent(String(error)));
           }
+        }, {once: true});
+        </script>
+        """
+        mktempdir() do dir
+            site = joinpath(dir, "site")
+            export_site(site; pages = ["/"])
+            receipt = Channel{String}(1)
+            requests = String[]
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose = false) do req
+                uri = HTTP.URI(req.target)
+                path = uri.path
+                push!(requests, req.target)
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                path == "/mark" && return HTTP.Response(204)
+                file = joinpath(site, lstrip(path == "/" ? "/index.html" : HTTP.URIs.unescapeuri(path), '/'))
+                isfile(file) || return HTTP.Response(404)
+                body = read(file, String)
+                endswith(file, "index.html") && (body = replace(body, "</body>" => driver * "</body>"))
+                type = endswith(file, ".js") ? "application/javascript" : endswith(file, ".css") ? "text/css" : "text/html"
+                HTTP.Response(200, ["Content-Type" => type], body)
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/index.html`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout = devnull, stderr = browser_log); wait = false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint = 0.05) === :ok
+                        outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                        @test HTTP.URIs.unescapeuri(outcome) == "/complete?status=passed"
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
+            # Between the marks the page computed and redrew without a single request.
+            start = findfirst(==("/mark?phase=start"), requests)
+            stop = findfirst(==("/mark?phase=end"), requests)
+            @test start !== nothing && stop !== nothing && stop == start + 1
+        end
+    end
+end
+
+@testitem "numeric exceptions and units redraw offline through finite infinite and missing values" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(Halving(); operation_policy = :blocking)
+        HTMXObjects.vendorfiles("assets/vendor")
+        driver = """
+        <script>
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + label()); await sleep(25); }
+          }
+          const fact = name => document.querySelector('.' + name + ' [data-htmxo-bound]').textContent;
+          const facts = () => [fact('half'), fact('half-de')].join('|');
+          const table = () => document.querySelector('table[data-htmxo-bound-table]');
+          const rows = () => Array.from(table().tBodies[0].rows);
+          const cell = c => [c.textContent, c.getAttribute('data-sort-value'), c.getAttribute('data-htmxo-number')].join('~');
+          const snapshot = () => rows().map(r => cell(r.cells[0])).join('|');
+          function typed(v) { const c = document.querySelector('input[name="slope"]'); c.value = v; c.dispatchEvent(new Event('input', {bubbles: true})); }
+          try {
+            await until(() => table() && rows().length === 3, () => 'table');
+            const server = snapshot();
+            if (facts() !== '2.0 years|2 Jahre') throw new Error('first facts: ' + facts());
+            await fetch('/mark?phase=start');
+            for (const [slope, en, de, expectedCell] of [
+              ['0', 'No finite halving time', 'No finite halving time', 'No finite halving time~Infinity~'],
+              ['-2', 'Negative infinity', 'Negative infinity', 'Negative infinity~-Infinity~'],
+              ['2', '–', '–', '–~~'],
+              ['0.8', '1.3 years', '1,3 Jahre', '1.3~1.25~1.25'],
+              ['0', 'No finite halving time', 'No finite halving time', 'No finite halving time~Infinity~']
+            ]) {
+              typed(slope);
+              await until(() => facts() === en + '|' + de && cell(rows()[0].cells[0]) === expectedCell,
+                () => facts() + ' / ' + snapshot());
+              const words = document.createRange();
+              words.selectNodeContents(rows()[0].cells[0]);
+              if (words.getClientRects().length !== 1) throw new Error('label broken across lines: ' + en);
+              if (rows()[1].cells[0].getAttribute('data-htmxo-number') !== '2.125') throw new Error('numeric CSV');
+              if (cell(rows()[2].cells[0]) !== 'None~0.0~') throw new Error('zero label: ' + snapshot());
+            }
+            const search = document.querySelector('.sortable-table-search input, input[type="search"]');
+            if (!search) throw new Error('search control missing');
+            search.value = 'finite'; search.dispatchEvent(new Event('input', {bubbles: true}));
+            await until(() => rows().filter(r => !r.hidden && r.style.display !== 'none').length === 1, () => 'search labels');
+            search.value = ''; search.dispatchEvent(new Event('input', {bubbles: true}));
+            await until(() => rows().every(r => !r.hidden && r.style.display !== 'none'), () => 'clear search');
+            sortTable(table().tHead.rows[0].cells[0]);
+            if (rows().map(r => r.cells[0].textContent).join('|') !== 'None|2.1|No finite halving time') throw new Error('numeric sort: ' + snapshot());
+            // Clear the sort by returning to source order before testing exact parity.
+            typed('0.5');
+            await until(() => facts() === '2.0 years|2 Jahre', () => 'back: ' + facts());
+            const cells = rows().map(r => cell(r.cells[0])).sort().join('|');
+            if (cells !== server.split('|').sort().join('|')) throw new Error('server parity: ' + cells + ' / ' + server);
+            if (document.querySelector('.htmxo-browser-fault')) throw new Error('browser fault');
+            await fetch('/mark?phase=end');
+            await fetch('/complete?status=passed');
+          } catch (error) { await fetch('/complete?status=' + encodeURIComponent(String(error))); }
         }, {once: true});
         </script>
         """
