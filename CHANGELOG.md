@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.161
+
+- Table sorting keeps equal numeric cells and complete numeric
+  `data-sort-value` keys in their incoming order in either direction,
+  including signed zeros and equivalent decimal or exponent spellings.
+  Server `default_sort`, browser header clicks and offline redraws agree;
+  CSV retains the row order and original numeric values. Ordinary text keeps
+  its natural text tie-break (`2 x 5` before `2 x 10`). At the same leading
+  number, numeric keys precede text ascending and follow it descending.
+
 ## 0.1.160
 
 - `semantic_app(...; presentation=:tabs, result_height)` accepts a named tuple

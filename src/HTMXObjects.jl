@@ -22839,10 +22839,13 @@ so multiple sortable tables can coexist on the same page. A cell sorts by its
 [`number_cell`](@ref) or a group sum carries), else by its text (a
 master/detail row's label, without its controls; a glossary term's use by its
 text, without the definition [`link_terms`](@ref) places beside it, as the
-search and the ⬇ CSV read it too). Two values that both start
-with a number sort numerically, and when it is the same number by their whole
-texts, each run of digits read as its number (`2 x 5` before `2 x 10`);
-everything else uses `localeCompare`. Rows
+search and the ⬇ CSV read it too). Two values that both start with a number
+sort numerically. Complete numbers in either explicit attribute keep their
+incoming order when equal, including `-0.0` and `0.0`, in either direction.
+At the same leading number, these numeric keys precede ordinary text ascending
+(follow it descending); two texts compare by their whole texts, each run of
+digits read as its number (`2 x 5` before `2 x 10`). Everything else uses
+`localeCompare`. Rows
 marked `data-htmxo-pinned` stay ahead of the others in either direction.
 `sortable_table(...; default_sort)` writes its rows in the same order on the
 server.
@@ -22966,8 +22969,17 @@ function sortTable(col, th) {
     const keys = th.dataset.htmxoSortKeys ? JSON.parse(th.dataset.htmxoSortKeys) : null;
     const key = keys ? Number(th.dataset.htmxoSortKey || 0) : 0;
     const keyed = new Map();
+    const numeric = /^[+-]?(?:Infinity|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)$/;
     const keyOf = row => {
-        if (!keyed.has(row)) keyed.set(row, htmxoSortValue(htmxoCellAt(row, col), key, keys.length, sortKey));
+        if (!keyed.has(row)) {
+            const cell = htmxoCellAt(row, col);
+            if (keys) keyed.set(row, htmxoSortValue(cell, key, keys.length, sortKey));
+            else {
+                const text = sortKey(cell);
+                const explicit = cell.dataset.sortValue ?? cell.dataset.htmxoNumber;
+                keyed.set(row, {text, number: parseFloat(text), numeric: explicit !== undefined && numeric.test(text)});
+            }
+        }
         return keyed.get(row);
     };
     // Two texts that start with the same number compare as whole texts, each
@@ -22979,11 +22991,16 @@ function sortTable(col, th) {
         const c = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
         return asc ? c : -c;
     } : (a, b) => {
-        const av = sortKey(htmxoCellAt(a, col));
-        const bv = sortKey(htmxoCellAt(b, col));
-        const an = parseFloat(av), bn = parseFloat(bv);
-        // `an - bn` is 0 for the same number and NaN for two infinities: both tie.
-        const c = !isNaN(an) && !isNaN(bn) ? (an - bn) || natural(av, bv) : av.localeCompare(bv);
+        const av = keyOf(a), bv = keyOf(b);
+        let c;
+        if (!isNaN(av.number) && !isNaN(bv.number)) {
+            c = av.number < bv.number ? -1 : av.number > bv.number ? 1 : 0;
+            // Equal numeric keys tie even with different spellings or signs.
+            // Keep them a separate category from text at the same number so
+            // equality cannot depend on which pair happens to be compared.
+            if (!c) c = Number(bv.numeric) - Number(av.numeric) ||
+                (av.numeric ? 0 : natural(av.text, bv.text));
+        } else c = av.text.localeCompare(bv.text);
         return asc ? c : -c;
     };
     // A pinned row (`data-htmxo-pinned`) stays ahead of the others in every
@@ -26126,13 +26143,22 @@ function _cell_sort_text(cell)
 end
 
 # JavaScript's `parseFloat`: the number a string starts with, else `NaN`.
+const _JS_FLOAT_PREFIX = r"^[+-]?(?:Infinity|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
 function _js_parse_float(s::AbstractString)
-    m = match(r"^[+-]?(?:Infinity|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)", lstrip(s))
+    m = match(_JS_FLOAT_PREFIX, lstrip(s))
     isnothing(m) && return NaN
     t = m.match
     endswith(t, "Infinity") && return startswith(t, '-') ? -Inf : Inf
     # Out of `Float64`'s range: `parseFloat` gives ±Infinity or 0.
     something(tryparse(Float64, t), Float64(parse(BigFloat, t)))
+end
+
+# An explicit key is numeric only when its whole trimmed value is a number.
+# The selected text already honors data-sort-value over data-htmxo-number.
+function _cell_sort_numeric(cell, text)
+    all(name -> isnothing(_node_attr(cell, name)), ("data-sort-value", "data-htmxo-number")) && return false
+    m = match(_JS_FLOAT_PREFIX, text)
+    !isnothing(m) && ncodeunits(m.match) == ncodeunits(text)
 end
 
 # A cell's value for sort key `key` (0-based) of its column's `n`, as
@@ -26188,6 +26214,7 @@ struct _RowSortKey
     has_cell::Bool       # the row has a cell in the sorted column
     value::Any           # one order: the text; several: nothing, a Float64 or a String
     number::Float64      # one order: the number the text starts with, else NaN
+    numeric::Bool        # one order: a complete number from an explicit attribute
     text::Union{Nothing,String}  # the value as the text `localeCompare` reads
     text_key::Any        # its collation key, once a text is compared (`_collated`)
     tie_key::Any         # its numeric collation key, once its number ties another's (`_tie_collated`)
@@ -26198,34 +26225,35 @@ function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
     cell = has_cell ? cells[col] : nothing
     if nkeys == 0
         text = has_cell ? _cell_sort_text(cell) : ""
-        _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), text, nothing, nothing)
+        _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), _cell_sort_numeric(cell, text), text, nothing, nothing)
     else
         value = has_cell ? _cell_sort_value(cell, key, nkeys) : nothing
         text = value isa Float64 ? _js_number_string(value) : value
-        _RowSortKey(_row_pinned(row), has_cell, value, NaN, text, nothing, nothing)
+        _RowSortKey(_row_pinned(row), has_cell, value, NaN, false, text, nothing, nothing)
     end
 end
 # A row compares by text unless its value is a number on both sides.
 _compares_text(k::_RowSortKey, nkeys::Int) = k.has_cell && (nkeys == 0 ? isnan(k.number) : k.value isa String)
 _collated(k::_RowSortKey) = isnothing(k.text) ? k :
-    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.text, _collation_key(k.text), k.tie_key)
+    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.numeric, k.text, _collation_key(k.text), k.tie_key)
 # Texts that start with the same number compare as `Intl.Collator`'s `numeric` does.
-_tie_collated(k::_RowSortKey) = isnan(k.number) ? k :
-    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.text, k.text_key, _collation_key(k.text; numeric=true))
+_tie_collated(k::_RowSortKey) = k.numeric || isnan(k.number) ? k :
+    _RowSortKey(k.pinned, k.has_cell, k.value, k.number, k.numeric, k.text, k.text_key, _collation_key(k.text; numeric=true))
 # Whether two of these rows start with the same number (`-0` is `0`).
-_numbers_tie(ks) = !allunique(k.number + 0.0 for k in ks if !isnan(k.number))
+_numbers_tie(ks) = !allunique(k.number + 0.0 for k in ks if !k.numeric && !isnan(k.number))
 
 # `sortTable`'s comparison of two rows, `asc` or not, as -1, 0 or 1: pinned
 # rows first; with one order, numbers by value when both texts start with
-# one, the same number by the whole texts with each run of digits read as its
-# number, else texts; with several, a missing value last in either direction.
+# one; at the same number, numeric keys tie and precede text, two texts use
+# natural collation; with several, a missing value last in either direction.
 function _compare_rows(a::_RowSortKey, b::_RowSortKey, asc::Bool, nkeys::Int)
     pin = Int(b.pinned) - Int(a.pinned)
     pin == 0 || return pin
     c = if nkeys == 0
         if !isnan(a.number) && !isnan(b.number)
             n = _compare_numbers(a.number, b.number)
-            n == 0 ? cmp(a.tie_key, b.tie_key) : n
+            n != 0 ? n : a.numeric != b.numeric ? Int(b.numeric) - Int(a.numeric) :
+                a.numeric ? 0 : cmp(a.tie_key, b.tie_key)
         else
             cmp(a.text_key, b.text_key)
         end
