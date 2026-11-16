@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.154
+## 0.1.155
 
 - A generated `Bool` input is a switch where a change applies at once: the
   sidebar of a `semantic_app(…; presentation=:tabs)` page, the shared inputs
@@ -18,6 +18,24 @@
   shell draws a switch's "on" track in the text colour with a knob in the page
   colour, as a chosen pill is filled, never Pico's azure, also for a
   hand-placed `cinput(…; switch=true)` (snag `preserve-the-exi-b16bdeb1`).
+
+## 0.1.154
+
+- A result that computes in the browser (`@browser`) and reads a finite input
+  whose default is computed from a fixed field (`settings::Any = (; family = 0)`,
+  `@param family::Int = Int(settings.family)` with `@options(family)`) carries
+  the view rendered for each value of that input. Until now every view held the
+  result for the default, because an input that follows its computed default
+  was left out of each view's address, so after the reader picked another value
+  the page showed the default's text beside browser values for the new one, on
+  a live page and in a static export alike. A view at another value now sends
+  that value. A literal default was not affected.
+- The static export's check (`export_site`, `dispatch(…; static)`) changes a
+  continuous input whose default is computed from a fixed field too. It used to
+  leave such an input out of the address it probed, so a result that showed it
+  outside `bound(...)` exported without a word and went stale; now the export
+  names it, as for an input with a literal default (snag
+  `static-export-fi-2f405405`).
 
 ## 0.1.153
 

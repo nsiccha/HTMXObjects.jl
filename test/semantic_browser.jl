@@ -2,8 +2,8 @@ using TestItemRunner
 
 @testmodule BrowserFixtures begin
     using HTMXObjects
-    export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, FixedRanges,
-           RangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, Doses, DOSE_TEXTS, TOY_JS,
+    export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, ChosenDefault, ChosenStale,
+           FixedRanges, RangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, Doses, DOSE_TEXTS, TOY_JS,
            browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
@@ -231,6 +231,51 @@ using TestItemRunner
         @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
         "Result"
         @get result() = h.p("total ", bound(line.total))
+    end
+
+    const CHOSEN_JS = """
+    export function scaled(family, scale) { return { y: family === 0 ? scale : 2 * scale }; }
+    export const INPUTS = [{ name: "family", type: "Int64" }, { name: "scale", type: "Float64" }];
+    """
+
+    # A finite input and a continuous one whose defaults are computed from a
+    # fixed field, so both follow their defaults until the reader sets them
+    # (snag `static-export-fi-2f405405`, Portfolio's prior-families picture).
+    @htmx struct ChosenDefault
+        settings::Any = (; family = 0, scale = 0.3)
+        "Family"
+        @param family::Int = Int(settings.family)
+        @options(family) = [0 => "Exponential", 1 => "Log-normal"]
+        "Scale"
+        @param scale::Float64 = Float64(settings.scale)
+        @options(scale) = number_domain(0.1, 2; step = 0.1, digits = 2)
+        out = (; y = family == 0 ? scale : 2 * scale)
+        @browser(out) = browser_module(; source = CHOSEN_JS, entry = :scaled)
+        __page__(content) = HTMXObjects.htmx(content; title = "Chosen", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Result"
+        @get result() = h.div(h.p(family == 0 ? "exponential sentence" : "log-normal sentence"; class = "fact"),
+                              h.p(bound(out.y; digits = 2)))
+    end
+
+    # The same inputs, with the continuous one shown outside `bound`: stale on
+    # a static page.
+    @htmx struct ChosenStale
+        settings::Any = (; family = 0, scale = 0.3)
+        "Family"
+        @param family::Int = Int(settings.family)
+        @options(family) = [0 => "Exponential", 1 => "Log-normal"]
+        "Scale"
+        @param scale::Float64 = Float64(settings.scale)
+        @options(scale) = number_domain(0.1, 2; step = 0.1, digits = 2)
+        out = (; y = family == 0 ? scale : 2 * scale)
+        @browser(out) = browser_module(; source = CHOSEN_JS, entry = :scaled)
+        __page__(content) = HTMXObjects.htmx(content; title = "Stale", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Result"
+        @get result() = h.p(bound(out.y; digits = 2), " at scale ", string(scale))
     end
 
     # The snow-shielding picture's facts and table (Portfolio's client
@@ -740,6 +785,51 @@ end
     # The range of `a` it draws is the one `upper = 2b` gives.
     label = match(r"<label[^>]*data-htmxo-number=\"([^\"]*)\"(?:(?!</label>).)*?name=\"a\""s, controls)
     @test label !== nothing && occursin("upper&quot;:1.8", label.captures[1])
+end
+
+@testitem "a finite input whose default reads a fixed field has a view per value, and the export check changes a continuous one" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    HTMXObjects.vendorfiles("assets/vendor")
+    # Snag static-export-fi-2f405405: every view of `family` held the result
+    # for its default, because an input that follows its computed default was
+    # left out of each view's address.
+    route!(ChosenDefault(); operation_policy = :blocking)
+    fact(body) = (m = match(r"class=\"fact\"[^>]*>([^<]*)<", body); m === nothing ? nothing : m.captures[1])
+    for (family, sentence) in ((0, "exponential sentence"), (1, "log-normal sentence"))
+        r = dispatch(:GET, "/result?family=$family"; headers = ["HX-Request" => "true"])
+        @test fact(String(HTMXObjects._response_bytes(r))) == sentence
+    end
+    function views(body)
+        map(eachmatch(r"<(div|template)[^>]*data-htmxo-variant=\"([^\"]*)\"[^>]*>", body)) do m
+            (m.captures[1], replace(m.captures[2], "&quot;" => "\""),
+             fact(SubString(body, m.offset + ncodeunits(m.match))))
+        end
+    end
+    expected = [("div", "{\"family\":\"0\"}", "exponential sentence"),
+                ("template", "{\"family\":\"0\"}", "exponential sentence"),
+                ("template", "{\"family\":\"1\"}", "log-normal sentence")]
+    live = dispatch(:GET, "/"; headers = ["HX-Request" => "true"])
+    @test views(String(HTMXObjects._response_bytes(live))) == expected
+    static = dispatch(:GET, "/"; static = StaticExport(; controls = :disable, runtime = :linked, audience = :public))
+    @test static.status == 200
+    @test views(String(HTMXObjects._response_bytes(static))) == expected
+    mktempdir() do dir
+        @test export_site(joinpath(dir, "site"); pages = ["/"]).files > 0
+    end
+    # The export's check changes a continuous input that follows its computed
+    # default too, so a view showing it outside `bound` is named.
+    route!(ChosenStale(); operation_policy = :blocking)
+    mktempdir() do dir
+        e = try
+            export_site(joinpath(dir, "site"); pages = ["/"])
+            nothing
+        catch err
+            err
+        end
+        @test e isa HTMXObjects.StaticSiteIncomplete
+        @test e !== nothing && any(((a, why),) -> a == "/" && occursin(
+            "the result `result` shows `scale` outside `bound`: its view changes when `scale` does", why), e.failed)
+    end
 end
 
 @testitem "a static export compares a browser result with what two renders of the same inputs differ in" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
