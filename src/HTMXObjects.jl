@@ -30772,9 +30772,33 @@ function _computed_default_value(obj, param)
     end
 end
 
+# The names an expression writes: its symbols, those of a property access
+# (`settings.start`, `__self__.start`) included.
+_expression_names!(names, x::Symbol) = push!(names, x)
+_expression_names!(names, x::QuoteNode) = _expression_names!(names, x.value)
+_expression_names!(names, x::Expr) = (foreach(arg -> _expression_names!(names, arg), x.args); names)
+_expression_names!(names, _) = names
+
+# The dependency closure of the default of `T`'s `@param` `name`. The default
+# is one argument of the parameter's extractor call, which reads more than the
+# default does: its `@relevant` condition, its declared domain, the request.
+# So this is the closure of what that call reads directly and the default
+# expression names. Where DynamicObjects gives no direct reads for the
+# parameter, it is the parameter's own closure, which holds every such read.
+function _default_closure(T::Type, name::Symbol, default)
+    info = isdefined(DynamicObjects, :metafirst) ?
+        Base.invokelatest(getproperty(DynamicObjects, :metafirst), T, name) : nothing
+    direct = info === nothing ? nothing : get(info, :dependson, nothing)
+    direct === nothing && return _dependency_closure(T, name)
+    named = _expression_names!(Set{Symbol}(), default)
+    _dependency_closure(T, Symbol[n for n in direct if n isa Symbol && n in named])
+end
+
 # A computed default is drawn again when an input it reads changes
 # (`_semantic_param_dependencies`), so a control that follows it shows the
-# value the server computes for the inputs the page sends.
+# value the server computes for the inputs the page sends. An input that only
+# the parameter's `@relevant` condition or declared domain reads is none: the
+# default is the same for each of its values (`_default_closure`).
 function _with_default_reads(obj, param)
     _computed_default(param) || return param
     source = _param_declaring_object(obj, param.name)
@@ -30786,7 +30810,7 @@ function _with_default_reads(obj, param)
         declared = _reflect_local_param(T, param.name; unquote_default=false)
         declared.default isa QuoteNode && return merge(param, (; literal_default=true))
     end
-    closure = _dependency_closure(T, param.name)
+    closure = _default_closure(T, param.name, param.default)
     isnothing(closure) && return param
     params = Set{Symbol}(Base.invokelatest(_param_names, T))
     reads = Symbol[name for name in closure if name in params && name !== param.name]
@@ -31745,15 +31769,18 @@ end
 # 0.5.21 (`878dd48`) removed its private `_semantic_dependency_closure`, which
 # this used to call, so the closure is walked here from that metadata, as it was
 # there; an older DynamicObjects keeps answering through its own helper.
-function _dependency_closure(T::Type, name::Symbol)
+_dependency_closure(T::Type, name::Symbol) = _dependency_closure(T, (name,))
+
+# The same closure of several properties together.
+function _dependency_closure(T::Type, names)
     isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
-        getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,))
+        getproperty(DynamicObjects, :_semantic_dependency_closure), T, Tuple(names))
     isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
     metafirst = getproperty(DynamicObjects, :metafirst)
     meta = getproperty(DynamicObjects, :meta)
     Base.invokelatest(applicable, meta, T) || return nothing
     closure = Set{Symbol}()
-    pending = Symbol[name]
+    pending = collect(Symbol, names)
     while !isempty(pending)
         current = pop!(pending)
         current in closure && continue

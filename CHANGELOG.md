@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.140
+
+- A computed default that reads no input stays static on an input that has a
+  `@relevant` condition or declared `@options`. With
+  `settings::Any = (; start = 1.0)`, `@param limit::Float64 = Float64(settings.start)`
+  and `@relevant(limit) = has_limit`, the inputs the condition reads were
+  taken as inputs the default reads, because both are arguments of the one
+  call that extracts `limit`. The struct's first `@options` declaration was
+  taken the same way for every input with a declared domain. Such an input now
+  behaves as it already did without them: `export_site` writes a page with a
+  browser result (`@browser`) instead of refusing it with "the server draws
+  the control of `limit` again when other inputs change (its default reads
+  other inputs)", a live page no longer asks the server to draw the controls
+  again when `has_limit` changes, and the page address default of `limit` is
+  its value, not `null`. A default that does read an input (`= median / 2`,
+  `= has_limit ? 1.0 : 2.0`) is unchanged.
+- That refusal names the inputs the default reads: "(its default reads
+  `median`)" (snag `export-site-rele-5a6fd953`).
+
 ## 0.1.139
 
 - `pdf_report` sizes a table's columns by their content, as a browser sizes an
