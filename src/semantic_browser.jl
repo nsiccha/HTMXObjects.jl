@@ -856,15 +856,19 @@ function _browser_server_parts!(page::_BrowserPage, specs, routes, follows, brow
             " but computes nothing in the browser, so a static page would show it stale; ",
             "declare `@browser` for what it shows or leave it out with `semantic_app(…; select=…)`"))
     end
+    # What a page's controls can change: an `@options` domain that reads only
+    # fixed fields and what is computed from them is the same while it is used.
+    inputs = Set{Symbol}(param.name for route in routes for param in route.params
+                         if param.source !== :path)
     seen = Set{Symbol}()
     for route in routes, param in route.params
         param.name in seen && continue
         push!(seen, param.name)
         get(param, :kind, nothing) === nothing && continue
         reasons = String[]
-        domain = _semantic_domain_dependencies(param)
-        isnothing(domain) || isempty(domain) || push!(reasons, string(
-            "its `@options` read ", join((string("`", n, "`") for n in sort!(collect(domain))), ", ")))
+        domain = _semantic_domain_reads(param, inputs)
+        isempty(domain) || push!(reasons, string(
+            "its `@options` read ", join((string("`", n, "`") for n in domain), ", ")))
         relevance = get(param, :relevance, nothing)
         isnothing(relevance) || isempty(relevance.dependencies) || push!(reasons,
             "its `@relevant` condition is not one the browser evaluates (comparisons and arithmetic of `@param`s)")

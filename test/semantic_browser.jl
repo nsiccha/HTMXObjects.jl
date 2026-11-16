@@ -2,8 +2,9 @@ using TestItemRunner
 
 @testmodule BrowserFixtures begin
     using HTMXObjects
-    export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, Shield, Grid, TermSite,
-           Window, WINDOW_START, TOY_JS, browser_region, bound_texts
+    export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, FixedRanges,
+           RangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, TOY_JS, browser_region,
+           bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -158,6 +159,74 @@ using TestItemRunner
         line = (; total = a + (on ? b : 0.0))
         @browser(line) = browser_module(; source = OFFSET_JS, entry = :offset)
         __page__(content) = HTMXObjects.htmx(content; title = "Following", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Result"
+        @get result() = h.p("total ", bound(line.total))
+    end
+
+    const SUM_JS = """
+    export function sum(a, b) { return { total: a + b }; }
+    export const INPUTS = [{ name: "a", type: "Float64" }, { name: "b", type: "Float64" }];
+    """
+
+    # Ranges an application supplies: `@options` that read a fixed field with
+    # a default (`a`) or a property computed from one (`b`) read no input
+    # (snag `export-site-opti-97b7d7a9`).
+    @htmx struct FixedRanges
+        limits::Any = (; a = (0.0, 2.0))
+        scale::Float64 = 3.0
+        upper = 2scale
+        "A"
+        @param a::Float64 = 1.0
+        @options(a) = number_domain(limits.a...; digits = 3)
+        "B"
+        @param b::Float64 = 0.5
+        @options(b) = number_domain(0.0, upper; digits = 3)
+        line = (; total = a + b)
+        @browser(line) = browser_module(; source = SUM_JS, entry = :sum)
+        __page__(content) = HTMXObjects.htmx(content; title = "Ranges", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Result"
+        @get result() = h.p("total ", bound(line.total))
+    end
+
+    # One view drawn with the ranges its page hands it.
+    @htmx struct RangesView
+        limits::Any = nothing
+        "A"
+        @param a::Float64 = 1.0
+        @options(a) = number_domain(limits.a...; digits = 3)
+        "B"
+        @param b::Float64 = 0.5
+        @options(b) = number_domain(limits.b...; digits = 3)
+        line = (; total = a + b)
+        @browser(line) = browser_module(; source = SUM_JS, entry = :sum)
+        "Result"
+        @get result() = h.p("total ", bound(line.total))
+    end
+    @htmx struct RangesPage
+        limits::Any = (; a = (0.0, 4.0), b = (0.0, 5.0))
+        @include view = RangesView(; limits)
+        __page__(content) = HTMXObjects.htmx(content; title = "Mounted ranges", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(view; presentation = :tabs))
+    end
+
+    # A range that reads an input through a property: the server draws `a`
+    # again when `b` changes.
+    @htmx struct InputRange
+        "A"
+        @param a::Float64 = 1.0
+        upper = 2b
+        @options(a) = number_domain(0.0, upper; digits = 3)
+        "B"
+        @param b::Float64 = 0.5
+        @options(b) = number_domain(0.0, 1.0; digits = 3)
+        line = (; total = a + b)
+        @browser(line) = browser_module(; source = SUM_JS, entry = :sum)
+        __page__(content) = HTMXObjects.htmx(content; title = "Input range", assets = "assets/vendor",
                                              runtime = :linked)
         @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
         "Result"
@@ -589,6 +658,52 @@ end
         @test e !== nothing && any(((a, why),) -> a == "/" && occursin(
             "the server draws the control of `b` again when other inputs change (its default reads `a`)", why), e.failed)
     end
+end
+
+@testitem "export_site writes controls whose @options read fixed fields, and names the inputs @options read" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    HTMXObjects.vendorfiles("assets/vendor")
+    # Ranges from a fixed field with a default, from a property computed from
+    # one, and handed to a mounted view by its page: no control of the page
+    # changes them, so the export writes the page with those ranges.
+    for (T, uppers) in ((FixedRanges, ("2.0", "6.0")), (RangesPage, ("4.0", "5.0")))
+        route!(T(); operation_policy = :blocking)
+        mktempdir() do dir
+            out = export_site(joinpath(dir, "site"); pages = ["/"])
+            @test out.files > 0
+            index = read(joinpath(dir, "site", "index.html"), String)
+            @test occursin("data-htmxo-browser=", index)
+            @test all(upper -> occursin("upper&quot;:" * upper, index), uppers)
+        end
+    end
+    # A range that reads an input through a property is still refused, and
+    # the refusal names the input, not the property.
+    route!(InputRange(); operation_policy = :blocking)
+    mktempdir() do dir
+        e = try
+            export_site(joinpath(dir, "site"); pages = ["/"])
+            nothing
+        catch err
+            err
+        end
+        @test e isa HTMXObjects.StaticSiteIncomplete
+        @test e !== nothing && any(((a, why),) -> a == "/" && occursin(
+            "the server draws the control of `a` again when other inputs change (its `@options` read `b`)", why), e.failed)
+    end
+end
+
+@testitem "a live page draws a control again when an input its @options read through a property changes" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    route!(InputRange(); operation_policy = :blocking)
+    page = String(HTMXObjects.dispatch(:GET, "/").body)
+    # The control of `b` asks the server for the controls when it changes.
+    m = match(r"<div[^>]*hx-get=\"([^\"]*)\"[^>]*hx-trigger=\"change\"[^>]*>.{0,600}?name=\"(\w+)\""s, page)
+    @test m !== nothing && m.captures[2] == "b"
+    url = replace(m.captures[1], "&amp;" => "&")
+    controls = String(HTMXObjects.dispatch(:GET, url * "&a=1.0&b=0.9"; headers = ["HX-Request" => "true"]).body)
+    # The range of `a` it draws is the one `upper = 2b` gives.
+    label = match(r"<label[^>]*data-htmxo-number=\"([^\"]*)\"(?:(?!</label>).)*?name=\"a\""s, controls)
+    @test label !== nothing && occursin("upper&quot;:1.8", label.captures[1])
 end
 
 @testitem "a static export compares a browser result with what two renders of the same inputs differ in" setup=[BrowserFixtures] tags=[:unit, :semantic] begin

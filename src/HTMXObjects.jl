@@ -31982,8 +31982,10 @@ end
 # there; an older DynamicObjects keeps answering through its own helper.
 _dependency_closure(T::Type, name::Symbol) = _dependency_closure(T, (name,))
 
-# The same closure of several properties together.
-function _dependency_closure(T::Type, names)
+# The same closure of several properties together. A property in `stop` is
+# in the closure, but what it reads is not followed (on an older
+# DynamicObjects, whose helper follows everything, it is).
+function _dependency_closure(T::Type, names; stop=())
     isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
         getproperty(DynamicObjects, :_semantic_dependency_closure), T, Tuple(names))
     isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
@@ -31998,6 +32000,7 @@ function _dependency_closure(T::Type, names)
         info = Base.invokelatest(metafirst, T, current)
         info === nothing && continue
         push!(closure, current)
+        current in stop && continue
         dependencies = get(info, :dependson, nothing)
         dependencies === nothing && continue
         for dependency in dependencies
@@ -32027,10 +32030,18 @@ nothing else.
 """
 function _operation_reads(T::Type, name::Symbol)
     closure = _dependency_closure(T, name)
+    (isnothing(closure) || isnothing(_opaque_properties(T))) &&
+        return (; names=Set{Symbol}(), complete=false)
+    (; names=Set{Symbol}(closure), complete=_closure_complete(T, closure))
+end
+
+# Whether a static scan follows every read of the properties `closure` holds:
+# none hands `__self__` to other code or reads through `__parent__`.
+function _closure_complete(T::Type, closure)
     opaque = _opaque_properties(T)
-    (isnothing(closure) || isnothing(opaque)) && return (; names=Set{Symbol}(), complete=false)
+    isnothing(opaque) && return false
     params = Set{Symbol}(Base.invokelatest(_param_names, T))
-    complete = all(closure) do n
+    all(closure) do n
         # The parameter's wire input inherits through the mount chain, but
         # reads no application properties beyond the parameter itself.
         (n in params || n === :__param_request__) && return true
@@ -32038,7 +32049,6 @@ function _operation_reads(T::Type, name::Symbol)
         descriptor = _property_descriptor(T, n)
         isnothing(descriptor) || !(:__parent__ in get(descriptor, :dependencies, ()))
     end
-    (; names=Set{Symbol}(closure), complete)
 end
 
 # --- Inputs lifted into request context ---
@@ -32227,7 +32237,8 @@ function _semantic_runtime_route(obj, route)
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
     merge(route, (params=NamedTuple[
-        _with_resets(obj, _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param))))
+        _with_domain_reads(obj, _with_resets(obj,
+            _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param)))))
         for param in params],))
 end
 
@@ -32281,7 +32292,8 @@ to re-fetch the form when they change.
 
 A declaration that reads nothing (`static`) is fixed for the type and needs no
 refresh wiring; one that reads something names what it read, from the same
-`dependson` walk every property RHS gets. Not every dependency is an input —
+`dependson` walk every property RHS gets, and what the properties it read
+read in turn (`_semantic_domain_closure`). Not every dependency is an input —
 `@options(dataset) = choices(cohort)` reads the property `choices` as well as
 the field `cohort` — so the caller intersects this with the form's own controls.
 """
@@ -32296,10 +32308,11 @@ function _semantic_refresh_dependencies(params::AbstractVector)
 end
 
 # What one input's control reads, or `nothing` when it cannot change for a
-# given type: what its declared domain reads, and what its `@relevant`
-# condition reads when the browser cannot evaluate that condition.
+# given type: what its declared domain reads (through the properties it reads,
+# `_semantic_domain_closure`), and what its `@relevant` condition reads when
+# the browser cannot evaluate that condition.
 function _semantic_param_dependencies(param)
-    domain = _semantic_domain_dependencies(param)
+    domain = _semantic_domain_closure(param)
     # A hidden input (no kind) renders no control to show, hide or explain.
     shown = get(param, :kind, nothing) !== nothing
     relevance = shown ? get(param, :relevance, nothing) : nothing
@@ -32328,6 +32341,43 @@ function _semantic_domain_dependencies(param)
     declaration === nothing && return nothing
     get(declaration, :static, true) && return nothing
     Set{Symbol}(Symbol.(get(declaration, :dependencies, Symbol[])))
+end
+
+# `param` with every property its declared domain reads, the properties those
+# read included (`_dependency_closure` on the struct declaring it): DynamicObjects
+# records only the names the declaration writes, so `@options(a) =
+# number_domain(0, lim)` with `lim = 2b` names `lim` and not the input `b`. A
+# `@param` is followed no further: its value is the request's, and its
+# extractor's other reads (its own `@relevant` condition and domain) are not.
+# A struct that has not each recorded name as a property is not the declaring
+# one, and a closure whose reads no static scan follows (`_closure_complete`)
+# may read anything: the param then keeps only the recorded names.
+function _with_domain_reads(obj, param)
+    direct = _semantic_domain_dependencies(param)
+    isnothing(direct) && return param
+    source = something(_param_declaring_object(obj, param.name), obj)
+    T = typeof(source)
+    closure = _dependency_closure(T, sort!(collect(direct));
+                                  stop=Set{Symbol}(Base.invokelatest(_param_names, T)))
+    isnothing(closure) && return param
+    issubset(direct, closure) && _closure_complete(T, closure) || return param
+    merge(param, (; domain_reads=closure))
+end
+
+# What `param`'s declared domain reads (`_with_domain_reads`), else the names
+# its declaration records; `nothing` as `_semantic_domain_dependencies`.
+function _semantic_domain_closure(param)
+    direct = _semantic_domain_dependencies(param)
+    isnothing(direct) ? nothing : Set{Symbol}(get(param, :domain_reads, direct))
+end
+
+# The names among `inputs` that `param`'s declared domain reads. A fixed field
+# with a default, and a property computed from fixed fields only, is no input.
+function _semantic_domain_reads(param, inputs)
+    closure = _semantic_domain_closure(param)
+    isnothing(closure) && return Symbol[]
+    get(param, :domain_reads, nothing) === nothing && return sort!(collect(closure))
+    sort!(Symbol[name for name in closure if name in inputs])
 end
 
 function _semantic_refresh_attrs(route, action, settings=(;); context_selector=nothing)

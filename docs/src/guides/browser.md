@@ -104,11 +104,14 @@ stale, naming each part: a view that shows an input outside `bound` (the export
 renders it with each continuous input changed and compares everything else), a
 result that reads inputs but computes nothing in the browser, and a control the
 server draws again (`@options` or `@help` that read other inputs, a default
-computed from other inputs, which the refusal names, or a condition the
-browser cannot evaluate). A default that reads no input, such as a fixed
-field's value, is none of these, whatever `@relevant` condition or `@options`
-its input has. Bind it, compute it in the module, or leave that
-operation out of the page with `semantic_app(…; select=…)`.
+computed from other inputs, or a condition the browser cannot evaluate; the
+refusal names the inputs `@options` and a default read). A default that reads
+no input, such as a fixed field's value, is none of these, whatever
+`@relevant` condition or `@options` its input has, and neither are `@options`
+that read only fixed fields with a default and what is computed from them,
+such as ranges an application hands its view. Bind it, compute it in the
+module, or leave that operation out of the page with `semantic_app(…;
+select=…)`.
 
 The refusal of a view quotes what changed with the input. What two renders of
 the same inputs differ in is not an input's doing and is left out of the
