@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.1.151
+
+- `export_site` writes a page with a browser result (`@browser`) whose
+  controls take their `@options` from a fixed field with a default, or from a
+  property computed from fixed fields: `limits::Any = (; a = (0.0, 2.0))`
+  with `@options(a) = number_domain(limits.a...)`, a view mounted with its
+  ranges (`@include view = View(; limits)`), or a `Symbol` choice listing a
+  fixed field's pairs. Until now each such control was refused with "the
+  server draws the control of `a` again when other inputs change (its
+  `@options` read `limits`)", though no control of the page can change
+  `limits`. Options that read an input, directly or through a property
+  (`lim = 2b`, `@options(a) = number_domain(0.0, lim)`), are still refused,
+  and the refusal now names that input (`b`), not the property (snag
+  `export-site-opti-97b7d7a9`).
+- A live page draws a control again when an input its `@options` read
+  through a property changes: with `lim = 2b` and `@options(a) =
+  number_domain(0.0, lim)`, changing `b` now redraws the range of `a`. Until
+  now only the names the declaration writes counted, so the slider of `a`
+  kept the range of the first `b`.
+
 ## 0.1.150
 
 - A page that shows several `semantic_app(…; presentation=:tabs)` apps keeps
