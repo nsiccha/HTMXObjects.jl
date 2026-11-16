@@ -93,6 +93,16 @@ println(String(response.body))
 stale, naming each part: a view that shows an input outside `bound` (the export
 renders it with each continuous input changed and compares everything else), a
 result that reads inputs but computes nothing in the browser, and a control the
-server draws again (`@options`, `@help`, a computed default or a condition the
-browser cannot evaluate). Bind it, compute it in the module, or leave that
+server draws again (`@options` or `@help` that read other inputs, a default
+computed from other inputs, which the refusal names, or a condition the
+browser cannot evaluate). A default that reads no input, such as a fixed
+field's value, is none of these, whatever `@relevant` condition or `@options`
+its input has. Bind it, compute it in the module, or leave that
 operation out of the page with `semantic_app(…; select=…)`.
+
+The refusal of a view quotes what changed with the input. What two renders of
+the same inputs differ in is not an input's doing and is left out of the
+comparison: the link of a glossary term (its definition's id is new in every
+answer), or an id or a time the view writes itself. A view that holds more or
+less markup each time it is rendered cannot be compared, and the export says
+so.

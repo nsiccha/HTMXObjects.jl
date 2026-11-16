@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.139
+## 0.1.145
 
 - A numbered report's PDF contents list lists the sections `contents()`
   lists, and no other heading. Typst's outline used to list every heading of
@@ -20,6 +20,116 @@
   `SemanticSection`'s. Those stay headings of the body and bookmarks of the
   PDF. Ordinary Markdown (`?plain`) is unchanged, and report Markdown that
   marks no heading keeps the outline of every heading.
+
+## 0.1.144
+
+- A static export no longer refuses a browser result (`@browser`) for markup
+  that differs between two renders of the same inputs. Under a root with
+  `__glossary__`, a result whose text used a term was refused with one "shows
+  `a` outside `bound`" line per continuous input, although every input was
+  shown through `bound(...)`: a linked term's definition carries an id that is
+  new in every answer, and the export took that difference for the input's
+  (snag `browser-result-u-88fa1fae`). When a view rendered with an input
+  changed differs, the export now renders the unchanged inputs once more and
+  names the input only if the view differs in more than those two renders do.
+  A view that writes an id or a time of its own exports the same way. A
+  refusal quotes what changed (`… for slope 2.0` becomes `… for slope 2.2…`),
+  and a result whose renders of the same inputs do not line up, because it
+  holds more or less markup each time, is named once, saying so.
+
+## 0.1.143
+
+- `pdf_report` keeps a captioned figure's pictures and caption on one page
+  with or without an id. Quarto makes a figure only of a div whose id starts
+  with `fig-` (a table with `tbl-`), so an id-less `with_caption` figure, such
+  as AoV's `with_plot_caption` without `id=`, was a picture and a separate
+  paragraph: the picture could end one page and its caption start the next,
+  untagged as a caption (snag `pdf-report-id-le-8a1607df`). A report's
+  Markdown (`report=true`, and every `pdf_report(value, …)`) now writes a
+  `<!-- htmxo:caption -->` line just before the caption of each captioned
+  figure Quarto does not float, and `pdf_report` sets a figure of pictures
+  marked so as one Typst figure, its caption tagged `Caption`, that moves to
+  the next page whole. An id-less captioned `render_table` becomes a captioned
+  table the same way: its caption above it and tagged, the table still
+  breaking across pages (HTMXObjects todo `0ikz55q`). A figure taller than
+  the page's text area, with an id or without, has its pictures scaled down
+  until it fits with its caption, where its caption ran over the page bottom.
+  Figures of other content (prose, code) are unchanged, and so is Markdown
+  outside a report. Regenerate saved report Markdown to get the marks. A
+  figure Quarto numbers (`fig-…`) prints as before unless it is taller than a
+  page.
+
+## 0.1.142
+
+- A computed default that reads no input stays static on an input that has a
+  `@relevant` condition or declared `@options`. With
+  `settings::Any = (; start = 1.0)`, `@param limit::Float64 = Float64(settings.start)`
+  and `@relevant(limit) = has_limit`, the inputs the condition reads were
+  taken as inputs the default reads, because both are arguments of the one
+  call that extracts `limit`. The struct's first `@options` declaration was
+  taken the same way for every input with a declared domain. Such an input now
+  behaves as it already did without them: `export_site` writes a page with a
+  browser result (`@browser`) instead of refusing it with "the server draws
+  the control of `limit` again when other inputs change (its default reads
+  other inputs)", a live page no longer asks the server to draw the controls
+  again when `has_limit` changes, and the page address default of `limit` is
+  its value, not `null`. A default that does read an input (`= median / 2`,
+  `= has_limit ? 1.0 : 2.0`) is unchanged.
+- That refusal names the inputs the default reads: "(its default reads
+  `median`)" (snag `export-site-rele-5a6fd953`).
+
+## 0.1.141
+
+- A private `pdf_report` keeps the "not public" label ("nicht öffentlich")
+  of a block of private content on the page where that content starts. The
+  label is the first paragraph of the block's `::: {.htmxo-private}` div,
+  `*not public*`, and nothing held it to the next block, so a private section
+  starting near a page end left the label alone at the bottom of one page and
+  the section's heading at the top of the next (snag
+  `pdf-report-priva-c25e0698`). `pdf-report-labels.lua` now makes that
+  paragraph sticky, as it does a disclosure's `::: {.htmxo-label}`; the
+  private content itself can still continue across pages, paragraph spacing
+  is unchanged, and the Markdown is the same as before.
+
+## 0.1.140
+
+- In a `numbered(…)` document, the captioned figures and tables of a
+  `semantic_app(…; presentation=:tabs)` result computed in the browser
+  (`@browser`) take the document's next numbers ("Figure 1:", "Table 1:"), in
+  reading order, on the page and in its Markdown and PDF alike, and `ref(id)`
+  cites them. Since 0.1.135 they took none. The views the browser switches
+  between for a finite input read the same numbers as the view shown. The
+  page fetches each view with its captions' numbers left as markers, which the
+  document fills in when it renders; the Markdown asks the result with the
+  counts the document had reached at the view, and the result numbers its own
+  captions from there in the page's reading order. A report's further states
+  (`report_states`) are only in the report and take no number, so every number
+  in the report reads as on the page; a state's copy renames its element ids
+  (`fig-curve` becomes `fig-curve-state-1`), since a PDF refuses a cited id it
+  finds twice, so `ref` cites the copy at the page's inputs. A result the
+  server computes, which the page loads later, still takes none, as
+  `numbered` documents for lazily loaded content; sections inside a result
+  take none either. Outside a `numbered` document nothing changes (snag
+  `semantic-app-tab-c64170a6`, user decision `1gxfoo7`).
+
+## 0.1.139
+
+- `pdf_report` sizes a table's columns by their content, as a browser sizes an
+  HTML table: each column is at least as wide as its longest word, and the
+  room left goes to the columns whose text would otherwise wrap, in proportion
+  to how much longer their text is than their longest word. Pandoc gave a
+  table with a row longer than 72 characters equal columns (from HTMX's equal
+  `---` separators), so a long label wrapped to 8–10 lines beside nearly empty
+  number columns, and a one-word header such as `Attempted` was hyphenated. A
+  table that fits keeps its natural widths, and unequal widths an author wrote
+  in hand-made Markdown are kept. A row that fits on a page is no longer split
+  between two pages; a row taller than a page still breaks, so none of it runs
+  past the page bottom. The table, its header and data cells, its caption and
+  both PDF standards are unchanged. Done by `pdf-report-tables.lua`, which hands
+  each table to `pdf-report-table` in `pdf-report-tables.typ` (snag
+  `export-the-caesi-d781d110`, which also covers todo `0cjfnl2`). A
+  600-row × 7-column table compiles in about 4.2 s and 990 MB instead of
+  2.3 s and 610 MB (and on 47 pages instead of 124).
 
 ## 0.1.138
 

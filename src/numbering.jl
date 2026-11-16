@@ -74,12 +74,26 @@ function _numbering_page_texts()
     !isnothing(lang) && startswith(lowercase(lang), "de") ? numbering_texts(:de) : numbering_texts(:en)
 end
 
+# Where a result fetched for a numbered document starts counting: the
+# document's words, which numbers it gives, the figures and tables it counted
+# before the result, and the ids `ref` may cite (`_with_result_numbers`).
+struct _NumberingFrom
+    texts::NumberingTexts
+    figures::Bool
+    tables::Bool
+    figure::Int
+    table::Int
+    anchors::Dict{String,String}
+end
+
 struct _Numbered <: SemanticNode
     children::Vector{Any}
     sections::Bool
     figures::Bool
     tables::Bool
     texts::Union{Nothing,NumberingTexts}
+    # A result's numbers continuing a document's, or `nothing` for a document.
+    from::Union{Nothing,_NumberingFrom}
 end
 
 """
@@ -122,16 +136,24 @@ or PDF leaves private sections out and numbers what remains without gaps.
 What the browser loads later (a lazy tab, a detail row fetched on opening) is
 not part of the document when it is numbered, so it has no number and is not
 in the contents list. Nor is content only one form shows (`html_only`, a
-`SemanticAlternatives` view after the first). In a `pdf_report`, Quarto's and
+`SemanticAlternatives` view after the first).
+
+A [`semantic_app`](@ref)`(…; presentation=:tabs)` result that the browser
+computes (`@browser`) is drawn into the page by the server, so its captioned
+figures and tables take the document's next numbers, the same in the page, the
+Markdown and the PDF, and `ref` cites them; its sections take none. The further
+states a report shows of it (`report_states`) are only in the PDF and take no
+number, so every number reads as on the page. A result the server computes is
+loaded later, like a lazy tab, and takes none. In a `pdf_report`, Quarto's and
 Typst's own figure and table numbers are switched off for the whole document,
 so nothing is numbered twice; `metadata=(number_sections=true,)` is refused.
 """
 numbered(children...; sections::Bool=true, figures::Bool=true, tables::Bool=true,
          texts::Union{Nothing,NumberingTexts}=nothing) =
-    _Numbered(Any[children...], sections, figures, tables, texts)
+    _Numbered(Any[children...], sections, figures, tables, texts, nothing)
 
 _numbered_like(doc::_Numbered, children) =
-    _Numbered(Any[children...], doc.sections, doc.figures, doc.tables, doc.texts)
+    _Numbered(Any[children...], doc.sections, doc.figures, doc.tables, doc.texts, doc.from)
 
 # One numbered section, as the first pass met it.
 struct _SectionEntry
@@ -166,27 +188,41 @@ mutable struct _NumberingState
     tables::Int
     section_at::Int
     caption_at::Int
+    # A result drawn into the page (`_MarkedHtml`) => the figures and tables
+    # counted before it, where its Markdown starts counting.
+    result_from::IdDict{Any,Tuple{Int,Int}}
 end
 
 _NumberingState(doc::_Numbered, texts::NumberingTexts) = _NumberingState(doc, texts, true, true,
     _SectionEntry[], IdDict{Any,Vector{Int}}(), _CaptionEntry[], IdDict{Any,Int}(), Dict{String,String}(),
-    0, Int[], 0, 0, 0, 0)
+    0, Int[], 0, 0, 0, 0, IdDict{Any,Tuple{Int,Int}}())
 
 # The numbered document being rendered, and whether its numbers are paused for
 # content that only one form shows.
 const _NUMBERING = ScopedValues.ScopedValue{Union{Nothing,_NumberingState}}(nothing)
 const _NUMBERING_PAUSED = ScopedValues.ScopedValue{Bool}(false)
 
+# Whether a caption writes its number as a marker (`_MarkedHtml`): in the HTML
+# of a result fetched for a page, outside a numbered document of its own.
+const _CAPTION_MARKS = ScopedValues.ScopedValue{Bool}(false)
+
 # The document whose numbers an element takes here, or `nothing`.
 _numbering() = _NUMBERING_PAUSED[] ? nothing : _NUMBERING[]
 
 # Runs `f` with numbering paused: what it renders takes no number.
-_unnumbered(f) = isnothing(_NUMBERING[]) ? f() : ScopedValues.with(f, _NUMBERING_PAUSED => true)
+_unnumbered(f) = isnothing(_NUMBERING[]) && !_CAPTION_MARKS[] ? f() :
+    ScopedValues.with(f, _NUMBERING_PAUSED => true)
 
 # The first pass: renders the document's content as HTML into nothing, as the
-# reader of this render, and returns what it numbered.
+# reader of this render, and returns what it numbered. A result continuing a
+# document's numbers starts from its counts.
 function _numbering_collect(doc::_Numbered)
     state = _NumberingState(doc, something(doc.texts, _numbering_page_texts()))
+    from = doc.from
+    if !isnothing(from)
+        state.figures, state.tables = from.figure, from.table
+        merge!(state.anchors, from.anchors)
+    end
     ScopedValues.with(_NUMBERING => state, _NUMBERING_PAUSED => false) do
         show(devnull, MIME"text/html"(), _numbered_html_node(doc))
     end
@@ -330,20 +366,142 @@ function _caption_number_node(slot::_CaptionNumber)
     h.span(slot.bold ? h.strong(number) : number, " ")
 end
 
-for mime in (MIME"text/html", MIME"application/vnd.hyperview+xml", MIME"text/markdown")
+for mime in (MIME"application/vnd.hyperview+xml", MIME"text/markdown")
     @eval Base.show(io::IO, mime::$mime, slot::_CaptionNumber) = let node = _caption_number_node(slot)
         node isa Node && show(io, mime, node)
         nothing
     end
 end
+function Base.show(io::IO, mime::MIME"text/html", slot::_CaptionNumber)
+    _caption_marking() && return print(io, _caption_marker(slot))
+    node = _caption_number_node(slot)
+    node isa Node && show(io, mime, node)
+    nothing
+end
+
+# In the HTML of a result fetched for a page (`_CAPTION_MARKS`), a caption's
+# number is a marker naming the caption, which the page's `_MarkedHtml` turns
+# back into a caption the page's document numbers. A numbered document inside
+# the result, or content that only one form shows, writes none.
+_caption_marking() = _CAPTION_MARKS[] && !_NUMBERING_PAUSED[] && isnothing(_NUMBERING[])
+_caption_marker(slot::_CaptionNumber) = string("<!--htmxo:caption-number ", slot.kind, " ",
+    slot.bold ? 1 : 0, " ", HTTP.escapeuri(slot.anchor), "-->")
+const _CAPTION_MARKER = r"<!--htmxo:caption-number (figure|table) ([01]) ([^ >]*)-->"
 Base.show(io::IO, ::MIME"text/plain", slot::_CaptionNumber) = let words = _caption_words(slot)
     isnothing(words) || print(io, words, ": ")
     nothing
 end
 # Any text path writes what plain text does: the number, or nothing.
 Base.show(io::IO, slot::_CaptionNumber) = show(io, MIME"text/plain"(), slot)
-_static_walk(slot::_CaptionNumber, rules::_StaticRules) = _caption_number_node(slot)
+_static_walk(slot::_CaptionNumber, rules::_StaticRules) =
+    _caption_marking() ? Raw(_caption_marker(slot)) : _caption_number_node(slot)
 _static_walk_child(slot::_CaptionNumber, rules) = _static_walk(slot, rules)
+
+# --- A result shown in the document, fetched with a request of its own ---
+#
+# A `semantic_app` tab's result is answered by its own address (`dispatch`), so
+# its captions render outside the document that shows it. The page fetches the
+# result's HTML before the document is numbered, with caption markers
+# (`_with_result_numbers(:marks)`), and holds it split at them (`_MarkedHtml`):
+# each marker becomes a caption slot of the page's own, numbered as the
+# document's captions are, in the order the page shows them. The page's
+# Markdown fetches the result's Markdown while the document is written, and
+# the request carries the counts the document had reached at the result's
+# HTML (`_NumberingFrom`), so the result's own numbers continue from there, in
+# the page's reading order (`numbered`'s first pass), as on the page.
+
+# The HTML of a result fetched with caption markers, split at each marker into
+# the caption slot it stands for. It is the page's HTML only: Markdown and
+# plain text write nothing of it, as `html_only` would.
+struct _MarkedHtml
+    parts::Vector{Any}   # raw HTML text, or a caption slot
+end
+
+# `body` split at its markers. A view the browser shows in place of `like` (a
+# finite input's other value) gives its captions `like`'s slots, in order, so
+# they read the same numbers; a caption `like` does not have reads none.
+function _marked_html(body::AbstractString; like::Union{Nothing,_MarkedHtml}=nothing)
+    shared = isnothing(like) ? nothing :
+        Dict(kind => _CaptionNumber[p for p in like.parts if p isa _CaptionNumber && p.kind === kind]
+             for kind in (:figure, :table))
+    seen = Dict(:figure => 0, :table => 0)
+    parts = Any[]
+    last = firstindex(body)
+    for m in eachmatch(_CAPTION_MARKER, body)
+        m.offset > last && push!(parts, String(SubString(body, last, prevind(body, m.offset))))
+        kind = Symbol(m.captures[1])
+        if isnothing(shared)
+            push!(parts, _CaptionNumber(kind, HTTP.unescapeuri(m.captures[3]), m.captures[2] == "1"))
+        else
+            i = seen[kind] += 1
+            i <= length(shared[kind]) && push!(parts, shared[kind][i])
+        end
+        last = m.offset + ncodeunits(m.match)
+    end
+    last <= lastindex(body) && push!(parts, String(SubString(body, last)))
+    _MarkedHtml(parts)
+end
+
+function Base.show(io::IO, mime::MIME"text/html", v::_MarkedHtml)
+    state = _numbering()
+    # Where the result's Markdown starts counting: as the page first meets it.
+    !isnothing(state) && state.collecting && !haskey(state.result_from, v) &&
+        (state.result_from[v] = (state.figures, state.tables))
+    for part in v.parts
+        part isa _CaptionNumber ? show(io, mime, part) : print(io, part)
+    end
+    nothing
+end
+Base.show(::IO, ::MIME"text/markdown", ::_MarkedHtml) = nothing
+Base.show(::IO, ::MIME"text/plain", ::_MarkedHtml) = nothing
+_semantic_show_leaf(::IO, ::MIME"text/plain", ::_MarkedHtml) = nothing
+_static_walk(v::_MarkedHtml, rules::_StaticRules) = Raw(sprint(show, MIME"text/html"(), v))
+_static_walk_child(v::_MarkedHtml, rules) = _static_walk(v, rules)
+_tabset_key(v::_MarkedHtml, h::UInt) =
+    foldl((h, part) -> part isa _CaptionNumber ? hash(part.kind, h) : hash(part, h), v.parts;
+          init=hash("marked-html", h))
+
+# Where the Markdown of the result drawn as `view` starts counting in the
+# document being written, or `nothing` when the page numbered none of it.
+function _result_numbering_from(view)
+    state = _numbering()
+    (isnothing(state) || isnothing(view)) && return nothing
+    at = get(state.result_from, view, nothing)
+    isnothing(at) && return nothing
+    _NumberingFrom(state.texts, state.doc.figures, state.doc.tables, at..., copy(state.anchors))
+end
+
+# What a numbered document asks of the result it fetches with `dispatch`
+# while `f` runs: `:marks` (its HTML writes caption markers) or a
+# `_NumberingFrom` (its Markdown continues the document's numbers). `dispatch`
+# hands it to the one request it makes (`_dispatch_result_numbers`).
+const _RESULT_NUMBERS = ScopedValues.ScopedValue{Any}(nothing)
+_asking_result_numbers(f, ask) = isnothing(ask) ? f() : ScopedValues.with(f, _RESULT_NUMBERS => ask)
+
+# The request `dispatch` makes takes the ask; a request inside it asks nothing.
+function _dispatch_result_numbers(f, req::HTTP.Request)
+    ask = _RESULT_NUMBERS[]
+    isnothing(ask) && return f()
+    req.context[:htmxo_result_numbers] = ask
+    ScopedValues.with(f, _RESULT_NUMBERS => nothing)
+end
+
+# A request a numbered document made for a result: its answer is rendered as
+# the document asked. Caption markers hold while the answer renders, outside
+# the document (`_CAPTION_MARKS`); the Markdown's continued numbers come from
+# `_numbered_from` where the answer is written as Markdown.
+function _with_result_numbers(f, req::HTTP.Request)
+    get(req.context, :htmxo_result_numbers, nothing) === :marks || return f()
+    ScopedValues.with(f, _CAPTION_MARKS => true, _NUMBERING => nothing, _NUMBERING_PAUSED => false)
+end
+
+# The answer `val` of a request asked to continue a document's numbers, as a
+# numbered result whose sections take no number.
+function _numbered_from(req::HTTP.Request, val)
+    from = get(req.context, :htmxo_result_numbers, nothing)
+    from isa _NumberingFrom || return val
+    _Numbered(Any[val], false, from.figures, from.tables, from.texts, from)
+end
 
 # --- Cross-references ---
 
@@ -550,7 +708,9 @@ function Base.show(io::IO, mime::MIME"text/markdown", doc::_Numbered)
     text = _with_numbers(doc; in_order=false) do
         strip(sprint(show, mime, h.div(_NumberingStart(_NUMBERING[]), doc.children...)), '\n')
     end
-    print(io, _NUMBERED_MARKER, "\n\n", text)
+    # A result continuing a document's numbers stands inside that document,
+    # whose Markdown already starts with the marker.
+    print(io, isnothing(doc.from) ? _NUMBERED_MARKER * "\n\n" : "", text)
 end
 function Base.show(io::IO, mime::MIME"text/plain", doc::_Numbered)
     _with_numbers(() -> _semantic_show_children(io, mime, doc.children, "\n\n"), doc; in_order=false)
