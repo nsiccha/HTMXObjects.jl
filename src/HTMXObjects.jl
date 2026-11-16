@@ -22664,12 +22664,26 @@ _cell_blank(::Nothing) = true
 _cell_blank(x::Node) = all(_cell_blank, HTMX.children(x))
 _cell_blank(_) = false
 
-# A `String` or `ColumnSpec` header takes its column's alignment: its own, else
-# `:right` over a column of number cells. A pre-built `<th>` is the caller's own.
-function _aligned_th(th, hdr, numeric::Bool)
+# A table's header-only alignment wins over its column's alignment and number
+# inference. A pre-built `<th>` is the caller's own.
+function _aligned_th(th, hdr, numeric::Bool, header_align=nothing)
     th isa Node && !isnothing(_header_label(hdr)) || return th
-    align = something(_header_align(hdr), numeric ? :right : nothing, Some(nothing))
+    align = something(header_align, _header_align(hdr), numeric ? :right : nothing, Some(nothing))
     isnothing(align) ? th : _with_align(th, align)
+end
+
+_table_header_align(::Nothing) = nothing
+_table_header_align(align::AbstractString) = _table_header_align(Symbol(align))
+_table_header_align(align::Symbol) = align in _COLUMN_ALIGNS ? align : _bad_header_align(align)
+_table_header_align(align) = _bad_header_align(align)
+_bad_header_align(align) = throw(ArgumentError(
+    "sortable_table: header_align is nothing, :left, :center or :right; got $(repr(align))"))
+
+_table_density_attrs(density::AbstractString) = _table_density_attrs(Symbol(density))
+function _table_density_attrs(density)
+    density === :normal && return (;)
+    density === :compact && return (; data_htmxo_density="compact")
+    throw(ArgumentError("sortable_table: density is :normal or :compact; got $(repr(density))"))
 end
 
 # Resolve `default_sort` to `(1-based column index, "asc"|"desc", key)`, `key`
@@ -25340,6 +25354,19 @@ td[data-htmxo-number] { text-align: right; }
 :is(th, td)[data-htmxo-align="left"] { text-align: left; }
 :is(th, td)[data-htmxo-align="center"] { text-align: center; }
 :is(th, td)[data-htmxo-align="right"] { text-align: right; }
+/* Opt-in density. Direct cells only: a detail panel keeps its usual type and
+   spacing, and a table inside a cell starts at the normal root type size.
+   Unlayered to beat Pico's cell padding. Nothing clips or truncates text. */
+table[data-htmxo-density="compact"] > thead > tr > th,
+table[data-htmxo-density="compact"] > tbody > tr:not([id^="detail-"]) > :is(td, th) {
+    font-size: .9rem; line-height: 1.5; padding: .25rem .5rem;
+}
+table[data-htmxo-density="compact"] table { font-size: 1rem; }
+/* Keep the CSV action above the table, with less empty space around it.
+   The title, explanation and caption disclosure keep their own typography. */
+figure.captioned:has(> .table-wrap > table[data-htmxo-density="compact"]) > figcaption.caption {
+    padding-block: 0; margin-bottom: .25rem;
+}
 /* Hover linking (`link=`): the rows holding the hovered item are tinted and
    outlined; a shown row that holds it in a collapsed group gets a dashed
    outline, labelled on its top edge by the first cell's note. Neither moves
@@ -25817,7 +25844,7 @@ _with_table_texts(node, texts::TableTexts) = _table_browser_texts(texts) == _EN_
 _table_count_text(texts::TableTexts, shown, total) = _table_text(texts, :count; shown, total)
 
 """
-    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, columns=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, kwargs...)
+    render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, columns=nothing, cell=nothing, class="striped", density=:normal, header_align=nothing, search_text=nothing, link=nothing, link_key=nothing, kwargs...)
 
 Render any Tables.jl-compatible table (DataFrame, NamedTuple of vectors, etc.)
 as an `h.table` HTML node inside a `<div class="table-wrap">` scroll container,
@@ -25857,6 +25884,15 @@ so a wide table scrolls inside its own wrapper instead of widening the page.
   a column of numbers, and where the text sits in a column of text or
   integers. A custom `cell` gets `missing` and `nothing` as they are.
 - `class`: table CSS class (default `"striped"`)
+- `density`: `:normal` (default) or `:compact`. Compact uses 0.9rem text,
+  tighter cell padding and less space around the CSV/caption area. It keeps
+  every cell's full content and leaves detail panels at their usual size.
+- `header_align`: `nothing` (default), `:left`, `:center` or `:right`. Aligns
+  generated column headers only, overriding their `ColumnSpec(align)` or
+  inferred numeric alignment; cells keep their own alignment. Hand-built
+  headers and spanning group headings keep theirs. Symbols or strings work
+  for both options. For compact plain rows with left headers and right-aligned
+  numbers, use `density=:compact, header_align=:left, class=""`.
 - `searchable`: client-side search over the rows (default `false`); see
   [`sortable_table`](@ref)
 - `search_text(row)`: optional replacement for a row's searchable text, called
@@ -25907,7 +25943,7 @@ cap = CaptionSpec(; title="Scores", short="Ranked test scores.", long="Data coll
 page = htmx(h.main(render_table(df; download=true, caption=cap)); pico_version="2")
 ```
 """
-function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", search_text=nothing, link=nothing, link_key=nothing, columns=nothing, kwargs...)
+function render_table(table; id=nothing, sortable=true, download=true, download_filename=nothing, caption=nothing, cell=nothing, class="striped", density=:normal, header_align=nothing, search_text=nothing, link=nothing, link_key=nothing, columns=nothing, kwargs...)
     isnothing(link) == isnothing(link_key) || throw(ArgumentError(
         "render_table: `link` names the group and `link_key(row)` keys each row; give both or neither"))
     tcols = Tables.columns(table)
@@ -25932,7 +25968,7 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     ]
 
     sortable_table(map(_cells_written, headers), body_rows;
-        id, sortable, download, download_filename, caption, class, link, bound..., kwargs...)
+        id, sortable, download, download_filename, caption, class, density, header_align, link, bound..., kwargs...)
 end
 
 # What keys a row for hover linking: a function of the row, or the name of a
@@ -26329,7 +26365,7 @@ function _default_sort_rows(rows, ds, headers; hierarchy::Bool)
 end
 
 """
-    sortable_table(headers, rows; sortable=true, class="striped", id=nothing,
+    sortable_table(headers, rows; sortable=true, class="striped", density=:normal, header_align=nothing, id=nothing,
                    download=false, download_filename=nothing, caption=nothing,
                    default_sort=nothing, header_groups=nothing,
                    searchable=false, selectable=nothing,
@@ -26650,7 +26686,7 @@ Pair with [`sortable_table_js`](@ref) (which ships `htmxoSortState`) and
 `tables=false`.
 """
 function sortable_table(headers, rows;
-                        sortable=true, class="striped", id=nothing,
+                        sortable=true, class="striped", density=:normal, header_align=nothing, id=nothing,
                         download=false, download_filename=nothing,
                         caption=nothing, default_sort=nothing, role="grid",
                         header_groups=nothing,
@@ -26659,6 +26695,8 @@ function sortable_table(headers, rows;
                         sticky::Bool=true,
                         texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true,
                         _presorted::Bool=false, kwargs...)
+    density_attrs = _table_density_attrs(density)
+    header_align = _table_header_align(header_align)
     isnothing(link) || link isa Union{AbstractString,Symbol} && !isempty(string(link)) || throw(ArgumentError(
         "sortable_table: link must be the non-empty name of a link group; got $(repr(link))"))
     if !isnothing(default_sort) && !sortable
@@ -26700,7 +26738,7 @@ function sortable_table(headers, rows;
         (rows = _default_sort_rows(rows, ds, headers; hierarchy=haskey(kwargs, :data_htmxo_hierarchy)))
 
     th_nodes = [_aligned_th(i in interval_cols ? _interval_csv_th(_table_th(hdr, i, ds, sortable, texts), texts) :
-                            _table_th(hdr, i, ds, sortable, texts), hdr, i in number_cols)
+                            _table_th(hdr, i, ds, sortable, texts), hdr, i in number_cols, header_align)
                 for (i, hdr) in enumerate(headers)]
 
     # Always include `htmxo-sortable-table` when sorting is on — that's
@@ -26716,7 +26754,7 @@ function sortable_table(headers, rows;
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
     # `data-htmxo-columns`: the table runtime holds the columns' widths
     # (see "Columns keep their widths" above).
-    table_node = h.table(; class=table_class, role, link_attrs..., _sticky_attrs(sticky)...,
+    table_node = h.table(; class=table_class, role, density_attrs..., link_attrs..., _sticky_attrs(sticky)...,
                          data_htmxo_columns="", kwargs...)(
         thead,
         # Keep runtime-sized children as a collection. Splatting heterogeneous
@@ -27695,6 +27733,7 @@ _md_label_words!(io, x::Node) = HTMX.tag(x) === :br ? print(io, ' ') :
                         master_class=nothing,
                         detail_class=nothing,
                         groupings=nothing, group_by=nothing,
+                        density=:normal, header_align=nothing,
                         kwargs...)
 
 Render a `sortable_table` whose primary rows expand into paired,
@@ -27712,6 +27751,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
 - `items`: any iterable.
 
 # Keyword arguments
+- `density`, `header_align`, `class`: the independent presentation options of
+  [`render_table`](@ref), forwarded to [`sortable_table`](@ref). For compact
+  plain rows with left headers use `density=:compact, header_align=:left,
+  class=""`. Detail panels keep their usual spacing and type size.
 - `key(item)`: function returning the row key (sanitised internally).
 - A flat table's row shows its state as `data-htmxo-detail-open="true"|"false"`;
   key CSS off that. `aria-expanded` sits on the row's native detail control

@@ -307,7 +307,7 @@ using TestItemRunner
             render_table(bound(shield; columns = (:water, :depth, :share));
                 columns = [:water => ColumnSpec("Snow water (mm)"; digits = 0), :depth => ColumnSpec("Depth (cm)"; digits = 0),
                            :share => ColumnSpec("Share passing"; digits = 3)],
-                link = "shield", link_key = :water),
+                link = "shield", link_key = :water, density = :compact, header_align = :left, class = ""),
             # A single-value output is a table of one row, redrawn the same way.
             render_table(bound(shield; columns = (:half,)); columns = [:half => ColumnSpec("Half (mm)"; digits = 0)]))
     end
@@ -1892,6 +1892,17 @@ end
           const facts = () => [fact('half'), fact('at'), fact('de')].join(' ');
           // The one-row table of the single value `half`.
           const halfRow = () => Array.from(document.querySelectorAll('table[data-htmxo-bound-table]')[1].tBodies[0].rows).map(r => r.textContent).join(',');
+          function presentation() {
+            const t = table(), th = t.tHead.rows[0].cells[2], td = t.tBodies[0].rows[0].cells[2];
+            const normal = document.querySelectorAll('table[data-htmxo-bound-table]')[1];
+            if (t.dataset.htmxoDensity !== 'compact' || t.classList.contains('striped') ||
+                getComputedStyle(th).textAlign !== 'left' || getComputedStyle(td).textAlign !== 'right' ||
+                Math.abs(parseFloat(getComputedStyle(td).fontSize) - 14.4) > .01 ||
+                getComputedStyle(td).paddingTop !== '4px' || !t.hasAttribute('data-htmxo-sticky') ||
+                getComputedStyle(normal.tHead.rows[0].cells[0]).textAlign !== 'right' ||
+                getComputedStyle(normal.tBodies[0].rows[0].cells[0]).fontSize !== '16px')
+              throw new Error('bound table presentation changed');
+          }
           const field = () => document.querySelector('input[name="attenuation"]');
           function typed(v) { const c = field(); c.value = v; c.dispatchEvent(new Event('input', {bubbles: true})); }
           try {
@@ -1901,6 +1912,7 @@ end
             if (wrong.length) throw new Error(wrong.length + ' numbers differ: ' + JSON.stringify(wrong.slice(0, 4)));
             await until(() => table() && rows().length === 4, 'table');
             const server = snapshot();
+            presentation();
             if (facts() !== '100 83%|50% 0,833') throw new Error('first facts: ' + facts());
             if (halfRow() !== '100') throw new Error('first one-row table: ' + halfRow());
             // The reader sorts by the share, ascending.
@@ -1912,6 +1924,7 @@ end
             await until(() => facts() === '50 71%|33% 0,714', () => 'typed facts: ' + facts());
             await until(() => column(2) === '0.333,0.500,0.714,1.000', () => 'typed table: ' + column(2));
             await until(() => halfRow() === '50', () => 'typed one-row table: ' + halfRow());
+            presentation();
             // The reader's sort holds for the new rows.
             if (column(0) !== '100,50,20,0' || th.getAttribute('aria-sort') !== 'ascending')
               throw new Error('sort kept: ' + column(0) + ' ' + th.getAttribute('aria-sort'));
@@ -1934,6 +1947,7 @@ end
             typed('0.01');
             await until(() => facts() === '100 83%|50% 0,833', () => 'back: ' + facts());
             await until(() => snapshot() === server, () => 'parity: ' + snapshot() + ' / ' + server);
+            presentation();
             await fetch('/mark?phase=end');
             await fetch('/complete?status=passed');
           } catch (error) {

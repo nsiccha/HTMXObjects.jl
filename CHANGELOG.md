@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.163
+
+- Tables accept independent `density=:compact` and `header_align=:left`
+  options. Compact tables use readable 0.9rem text, tighter cells and less
+  space around the CSV/caption area; header alignment leaves numeric cells
+  right-aligned. Combine them with `class=""` for plain rows. The options
+  work with `render_table`, `sortable_table`, `master_detail_table` and
+  browser-computed rows. Existing defaults and detail-panel sizing stay the
+  same; sorting, CSV download and sticky headers remain available.
+
 ## 0.1.162
 
 - Generated number sliders in a `semantic_app` sidebar now fill a row above
