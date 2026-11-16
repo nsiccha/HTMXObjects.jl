@@ -385,10 +385,14 @@ end
 const _BROWSER_VARIANTS_MAX = 64
 
 # One rendering of a result's address, as the page loads it: the bare fragment,
-# under the page's static export when there is one.
+# under the page's static export when there is one. Its captions write their
+# numbers as markers, which the page's numbered document fills in
+# (`_MarkedHtml`).
 function _browser_render(url::AbstractString; static=nothing)
-    resp = dispatch(:GET, url; headers=["HX-Request" => "true"], static,
-                    operation_policy=:blocking)
+    resp = _asking_result_numbers(:marks) do
+        dispatch(:GET, url; headers=["HX-Request" => "true"], static,
+                 operation_policy=:blocking)
+    end
     (; status=resp.status, body=String(_response_bytes(resp)),
        error=HTTP.header(resp, "X-HTMXO-Error-Id"))
 end
@@ -446,15 +450,18 @@ function _browser_region(page::_BrowserPage, spec, route, current, target, sent,
     page.static === nothing ||
         _browser_check!(page, obj, route, current, target, sent, operation, names)
     # The page's Markdown holds the result's own Markdown (`markdown`), never
-    # the view's HTML, which a Markdown reader or a PDF cannot carry.
-    nodes = Any[h.div(html_only(Raw(views[shown][2])); class="htmxo-browser-view",
-                      data_htmxo_variant=views[shown][1])]
-    isnothing(markdown) || push!(nodes, markdown)
+    # the view's HTML, which a Markdown reader or a PDF cannot carry. In a
+    # numbered document the view's captions take the document's numbers, and
+    # the Markdown continues from where the view's start.
+    view = _marked_html(views[shown][2])
+    nodes = Any[h.div(view; class="htmxo-browser-view", data_htmxo_variant=views[shown][1])]
+    isnothing(markdown) || push!(nodes, _TabResultMarkdown(markdown.renderings, markdown.static, view))
     # Each view's markup as rendered, the shown one's too: the browser shows
     # a view again from its template, never from what the page made of it.
+    # Every view's captions read the shown view's numbers.
     if length(views) > 1
         for (key, body, _) in views
-            push!(nodes, h.template(Raw(body); data_htmxo_variant=key))
+            push!(nodes, h.template(_marked_html(body; like=view); data_htmxo_variant=key))
         end
     end
     # What an input sends when its control sends nothing (hidden, or not on
