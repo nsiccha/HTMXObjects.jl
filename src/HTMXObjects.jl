@@ -34114,6 +34114,22 @@ function _semantic_result_bound(height)
     (; data_htmxo_result_height=value, style="--htmxo-result-height: " * value)
 end
 
+_semantic_result_bounds(height, names) = fill(_semantic_result_bound(height), length(names))
+function _semantic_result_bounds(heights::Union{NamedTuple,AbstractDict}, names)
+    bounds = Dict{String,NamedTuple}()
+    for (name, height) in pairs(heights)
+        tab = string(name)
+        tab in names || throw(ArgumentError(string(
+            "semantic_app result_height names ", repr(name), ", which is no tab of the page; ",
+            "its tabs are ", join(repr.(names), ", "))))
+        haskey(bounds, tab) && throw(ArgumentError(string(
+            "semantic_app result_height names tab ", repr(tab), " more than once")))
+        bounds[tab] = _semantic_result_bound(height)
+    end
+    default = _semantic_result_bound(:window)
+    [get(bounds, name, default) for name in names]
+end
+
 """
     _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
                    render_operation, layout, url_state, reset)
@@ -34124,12 +34140,12 @@ and every read's result following its inputs (`semantic_follow_script`). With
 `url_state`, the page's address keeps every input the reader set: the page
 shows the values it names, and the script writes the inputs into it. With
 `reset`, a Reset button returns every one of those inputs to its default.
-`result_bound` (from `_semantic_result_bound`) goes on every result.
+`result_height` supplies one bound or a map keyed by the generated tab names.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
         reset::Bool=true, sections=InputSection[], place=nothing,
-        report_states=_ReportState[], url_scope::AbstractString="", result_bound=(;))
+        report_states=_ReportState[], url_scope::AbstractString="", result_height=:window)
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places. The fields of
@@ -34201,6 +34217,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         names=sidebar)
     shared_names = Set{Symbol}(entry.param.name for entry in context_entries)
     names = _semantic_tab_names(specs)
+    result_bounds = _semantic_result_bounds(result_height, names)
     # Shared inputs the app places in an operation's tab (`place`): their
     # controls belong to the sidebar's form, drawn in that tab.
     placements = _semantic_placements(place, shared_names, names, specs)
@@ -34240,6 +34257,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     browser_regions = falses(length(specs))
     operations = map(enumerate(specs)) do (i, spec)
         base = spec.base_entry
+        result_bound = result_bounds[i]
         route = routes[i]
         current = currents[i]
         form, result = if follows[i]
@@ -34423,8 +34441,13 @@ table of a few hundred rows, say) scrolls inside itself instead of
 lengthening the page, so the inputs beside it and the text around it stay
 where they are: `result_height=:window` (the default) bounds it at the
 window's height less `--htmxo-sticky-top`, a CSS length such as `"32rem"` at
-that length, and `nothing` keeps it growing with the page. A result that fits
-its bound stays in the page as it is. Inside the box a table's controls and
+that length, and `nothing` keeps it growing with the page. To choose per tab,
+pass a named tuple or dictionary keyed by its tab names, the same names as
+`active` and `parts.tab_names`: `result_height=(figure=nothing, numbers="32rem")`
+keeps the Picture result in the page and all of the Table result's tables in
+one 32rem box. An omitted tab keeps `:window`; an explicit `nothing` removes
+its bound. Unknown tab names throw and list the page's names. A result that
+fits its bound stays in the page as it is. Inside the box a table's controls and
 header stick to the box top, a wide table's own box fits in it, and sorting,
 search, CSV, the keyboard row moves and hover linking work as on the page; the
 page's Markdown is unchanged. Its page address
@@ -34645,7 +34668,6 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         result_height === :window || throw(ArgumentError(
             "semantic_app result_height= bounds the results of presentation=:tabs"))
     end
-    result_bound = _semantic_result_bound(result_height)
     states = _report_states(report_states)
     input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
@@ -34704,7 +34726,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
         reset=something(reset, true), sections=input_sections, place, report_states=states,
-        url_scope, result_bound, render_operation=render_operation === _default_semantic_operation ?
+        url_scope, result_height, render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
 

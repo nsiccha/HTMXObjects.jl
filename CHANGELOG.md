@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.160
+
+- `semantic_app(...; presentation=:tabs, result_height)` accepts a named tuple
+  or dictionary keyed by tab names. For example,
+  `result_height=(figure=nothing, numbers="32rem")` keeps the Picture tab's
+  charts and facts in the page flow while all the Table tab's tables share
+  one 32rem scrolling box. Omitted tabs keep the `:window` default; explicit
+  `nothing` removes a bound. Existing scalar values retain their behavior.
+
 ## 0.1.159
 
 - A `<details>` among semantic content keeps its `<summary>` in plain text

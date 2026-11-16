@@ -1409,6 +1409,62 @@ end
     @test contains(script, "data-htmxo-result-fits")
 end
 
+@testitem "a tabs page chooses result heights by tab name" tags=[:unit, :semantic] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string
+    @htmx struct TabHeights
+        @get figure() = h.p("Picture and facts")
+        @get numbers() = render_table((; row=collect(1:3)))
+        @post note(; text::String="") = h.p(text)
+    end
+    page(obj=TabHeights(); kws...) = semantic_app(obj; presentation=:tabs,
+        url_state=false, kws...)
+    results(obj=TabHeights(); kws...) = Dict(entry.tab => repr("text/html", entry.result)
+        for entry in page(obj; layout=identity, kws...).operations)
+    bounded(html, height) = contains(html, "data-htmxo-result-height=\"$height\"")
+    unbounded(html) = !contains(html, "data-htmxo-result-height")
+
+    heights = (figure=nothing, numbers="32rem", note="18rem")
+    mixed = results(; result_height=heights)
+    @test unbounded(mixed["figure"])
+    @test bounded(mixed["numbers"], "32rem")
+    @test bounded(mixed["note"], "18rem") # The action's result uses its own bound too.
+    partial = results(; result_height=(figure=nothing,))
+    @test unbounded(partial["figure"])
+    @test bounded(partial["numbers"], "window")
+    @test bounded(partial["note"], "window")
+    @test results(; result_height=(;)) == results()
+    @test results(; result_height=Dict{String,Any}()) == results()
+    dictionary = Dict{Any,Any}(:figure => nothing, "numbers" => "32rem", :note => "18rem")
+    original = copy(dictionary)
+    @test results(; result_height=dictionary) == mixed
+    @test dictionary == original
+    @test bounded(results(; result_height=(figure=:window,))["figure"], "window")
+    @test to_markdown_string(page(; result_height=heights)) == to_markdown_string(page())
+    @test_throws "which is no tab" page(; result_height=(typo=nothing,))
+    @test_throws "its tabs are" page(; result_height=Dict("typo" => "32rem"))
+    @test_throws "more than once" page(; result_height=Dict(:figure => nothing, "figure" => "32rem"))
+    @test_throws "CSS length" page(; result_height=(figure="red",))
+    @test_throws "which is no tab" page(; select=entry -> entry.name == :figure,
+        result_height=(numbers="32rem",))
+    @test_throws "bounds the results" semantic_app(TabHeights(); result_height=heights)
+
+    @htmx struct MountedTabHeights
+        @include first = TabHeights()
+        @include second = TabHeights()
+    end
+    # Duplicate operation names use generated verb/path names, just as active= does.
+    obj = MountedTabHeights()
+    names = page(obj; layout=identity).tab_names
+    @test length(names) == length(unique(names)) == 6
+    @test "figure" ∉ names
+    selected = first(names)
+    mounted = results(obj; result_height=Dict(selected => nothing), active=selected)
+    @test unbounded(mounted[selected])
+    @test all(bounded(mounted[name], "window") for name in names if name != selected)
+    @test_throws "which is no tab" page(obj; result_height=(figure=nothing,))
+end
+
 @testitem "a tabs page's long result scrolls inside its bound in a browser" tags=[:browser, :semantic] begin
     # The caesium pictures' Table tab: three tables (201, 1 and 151 rows) of
     # one result beside a sidebar, which the original picture held in one
@@ -1436,6 +1492,9 @@ end
                 result_height="32rem", select=entry -> entry.name in (:numbers, :picture))
             @get unbounded() = semantic_app(__self__; presentation=:tabs, url_state=false,
                 result_height=nothing, select=entry -> entry.name in (:numbers, :picture))
+            @get mixed() = semantic_app(__self__; presentation=:tabs, url_state=false,
+                result_height=(numbers="32rem", picture=nothing),
+                select=entry -> entry.name in (:numbers, :picture))
         end
         route!(LongPicture(); operation_policy=:blocking)
         assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
@@ -1490,6 +1549,7 @@ end
             await sleep(400);
             out.shortFits = picture.hasAttribute('data-htmxo-result-fits');
             out.shortOverflow = getComputedStyle(picture).overflowY;
+            out.pictureBound = picture.hasAttribute('data-htmxo-result-height');
             // The table shrinks below its bound: it leaves its box.
             const input = document.querySelector('input[name="rows"]');
             input.value = '5';
@@ -1546,7 +1606,8 @@ end
                 close(server)
             end
         end
-        for (path, bound) in ("/" => :window, "/rem" => 512, "/unbounded" => nothing)
+        for (path, bound) in ("/" => :window, "/rem" => 512, "/unbounded" => nothing,
+                             "/mixed" => 512)
             out = measured(path)
             @info "bounded tabs result" path out
             @test (path, get(out, "status", nothing)) == (path, "passed")
@@ -1561,7 +1622,8 @@ end
                 continue
             end
             @test (path, out["overflow"], out["fits"]) == (path, "auto", false)
-            @test (path, out["shortFits"], out["shrunkFits"]) == (path, true, true)
+            @test (path, out["pictureBound"]) == (path, path != "/mixed")
+            @test (path, out["shortFits"], out["shrunkFits"]) == (path, path != "/mixed", true)
             # The box is the bound: the window's height, or 32rem.
             @test (path, out["box"]) == (path, bound === :window ? out["window"] : bound)
             @test out["page"] < 2 * out["window"]
