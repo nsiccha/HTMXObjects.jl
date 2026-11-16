@@ -31047,6 +31047,14 @@ const _FOLLOWS_ATTR = Symbol("data-htmxo-follows")
 
 _semantic_follows(values) = get(values, _SEMANTIC_FOLLOWS, ())
 
+# `values` with the inputs `names` no longer following their computed defaults:
+# each has a value of its own (a declared state's, a browser view's, a probe's),
+# which the address its result loads from then sends (`_semantic_follow_url`).
+function _semantic_unfollow!(values, names)
+    values[_SEMANTIC_FOLLOWS] = setdiff(Set{Symbol}(_semantic_follows(values)), names)
+    values
+end
+
 # An unselected control has value `nothing`, but its parameter still has its
 # declared default (e.g. an empty String when no options exist). Dependencies
 # read that value, never the control's absence of a selection.
