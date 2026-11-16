@@ -1035,15 +1035,16 @@ end
 
         # The Typst rule alone: a figure taller than the page has its picture
         # scaled down to fit with its caption; one that fits keeps its size.
-        function fitted(rules, height)
+        function fitted(rules, height; width=nothing, intrinsic_width=100, caption="Cap")
             mktempdir() do dir
-                write(joinpath(dir, "p.svg"), """<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>""")
+                write(joinpath(dir, "p.svg"), """<svg xmlns="http://www.w3.org/2000/svg" width="$intrinsic_width" height="$height"/>""")
+                dimensions = isnothing(width) ? "height: $(height)pt" : "width: $width"
                 doc = joinpath(dir, "f.typ")
                 write(doc, rules, """
                     #set page(width: 300pt, height: 300pt, margin: 20pt)
                     #figure(kind: image, numbering: none,
-                      caption: figure.caption[Cap #context [#metadata((here().page(), here().position().y / 1pt)) <cap>]])[
-                      #box(image("p.svg", height: $(height)pt, alt: "A picture."))]
+                      caption: figure.caption[$caption #context [#metadata((here().page(), here().position().y / 1pt)) <cap>]])[
+                      #box(image("p.svg", $dimensions, alt: "A picture."))]
                     """)
                 out = IOBuffer()
                 run(pipeline(`$quarto typst eval "query(<cap>).map(it => it.value)" --in $doc`; stdout=out, stderr=out))
@@ -1057,6 +1058,18 @@ end
         tall = fitted(rules, 300)
         @test tall.page == 1 && 260 < tall.y < 280.01
         @test fitted(rules, 100) == fitted("", 100)
+        # The reported wide SVG has no explicit width, but is constrained by
+        # the available text width, so it needs the same sizing as a percent.
+        wide = fitted(rules, 1400; width="auto", intrinsic_width=700, caption="*" * repeat("A full caption. ", 4) * "*")
+        @test wide.page == 1 && wide.y <= 280.01
+        # A relative image width must be resolved before scaling: reflow gives
+        # the image more room, otherwise cancelling its reduction. Keep a long
+        # caption's wrapping width fixed in the whole-figure fallback, too.
+        for width in ("100%", "55%"), cap in ("*" * repeat("A full caption. ", 4) * "*", repeat("Caption text. ", 100))
+            @test fitted("", 300; width, caption=cap).y > 280
+            relative = fitted(rules, 300; width, caption=cap)
+            @test relative.page == 1 && relative.y <= 280.01
+        end
 
         mktempdir() do dir
             # The reporter's sweep: five paragraphs and k short lines before an

@@ -8,6 +8,7 @@ other pages link to it rather than repeating its contract.
 | Start | `index.md` | Install the current source and dispatch a complete HTML route. |
 | Guides | `guides/objects.md` | Separate persistent data from request objects and compose routes. |
 | Guides | `guides/forms.md` | Bind typed query and form inputs to routes. |
+| Guides | `guides/controls.md` | Choose generated choice, Boolean and numeric inputs. |
 | Guides | `guides/views.md` | Render HTML, Markdown, tables and captions from one value. |
 | Guides | `guides/operations.md` | Choose request execution and inspect runtime work. |
 | Guides | `guides/service-slices.md` | Select, connect and replace independent Julia services. |

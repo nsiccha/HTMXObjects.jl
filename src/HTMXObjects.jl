@@ -22173,16 +22173,17 @@ function _sort_dir_token(dir)
 end
 
 # A table from values to the texts that name them (`bound(x; labels)`,
-# `ColumnSpec(…; labels)`): each key a finite number, a `Bool` or text, in
+# `ColumnSpec(…; labels)`): each key a number, a `Bool` or text, in
 # the order given (a `Dict`'s sorted), and `what` the call that gave it, for
 # its errors. The browser runtime's `labelText` reads the same table.
 struct _Labels
     keys::Vector{Any}
     texts::Vector{String}
     what::String
+    format::Union{Nothing,NamedTuple}
 end
 
-function _labels(table, what::AbstractString)
+function _labels(table, what::AbstractString, format=nothing)
     entries = table isa AbstractDict ? sort!(collect(pairs(table)); by=_label_order) :
         table isa Union{AbstractVector,Tuple} ? collect(table) :
         throw(ArgumentError(string(what, ": `labels` is a list of `value => text` pairs or a Dict; got ", typeof(table))))
@@ -22198,12 +22199,12 @@ function _labels(table, what::AbstractString)
         push!(keys, key)
         push!(texts, String(text))
     end
-    _Labels(keys, texts, String(what))
+    _Labels(keys, texts, String(what), format)
 end
 _label_key(k::Bool, what) = k
 _label_key(k::Integer, what) = k
-_label_key(k::Real, what) = isfinite(k) ? Float64(k) : throw(ArgumentError(string(what, ": `labels` cannot name ", k,
-    "; a key is a finite number, a Bool or text, and no value (NaN, missing, nothing) writes `–`")))
+_label_key(k::Real, what) = !isnan(k) ? Float64(k) : throw(ArgumentError(string(what, ": `labels` cannot name ", k,
+    "; a key is a number, a Bool or text, and no value (NaN, missing, nothing) writes `–`")))
 _label_key(k::Union{AbstractString,Symbol}, what) = String(k)
 _label_key(k, what) = throw(ArgumentError(string(what, ": a key of `labels` is a number, a Bool or text; got ",
     repr(k), " (a ", typeof(k), ")")))
@@ -22217,26 +22218,36 @@ _label_same(a, b) = a isa Bool || b isa Bool ? (a isa Bool && b isa Bool && a ==
 
 # The label of `value`; `nothing` for no value (`missing`, `nothing`, NaN),
 # which is written `–` as every other no value is. A value the table does not
-# name is an error, never a silent fallback.
+# name is an error unless a number format was given: then an unnamed number
+# stays a number for the caller to format. Booleans and text still need a label.
 function _label_text(l::_Labels, value)
     (value === nothing || value === missing || (value isa AbstractFloat && isnan(value))) && return nothing
     v = value isa Symbol ? String(value) : value
     i = findfirst(k -> _label_same(k, v), l.keys)
+    isnothing(i) && !isnothing(l.format) && v isa Real && !(v isa Bool) && return v
     isnothing(i) && throw(ArgumentError(string(l.what, ": ", repr(value), " is not a value its labels name (",
         _label_named(l), ")")))
     l.texts[i]
 end
 _label_named(l::_Labels) = join((repr(k) for k in l.keys), ", ")
 # What the page carries to write the labels again in the browser.
-_labels_wire(l::_Labels) = Dict{String,Any}("pairs" => Any[Any[k, t] for (k, t) in zip(l.keys, l.texts)],
-    "named" => _label_named(l), "what" => l.what)
+function _labels_wire(l::_Labels)
+    wire = Dict{String,Any}("pairs" => Any[Any[_label_wire_key(k), t] for (k, t) in zip(l.keys, l.texts)],
+        "named" => _label_named(l), "what" => l.what)
+    isnothing(l.format) || (wire["numeric"] = true)
+    wire
+end
+# JSON has no infinity. A tagged key preserves its sign without conflating
+# the number Inf with a text key such as "Inf" or "Infinity".
+_label_wire_key(k) = k
+_label_wire_key(k::Real) = isinf(k) ? Dict("infinite" => (k > 0 ? 1 : -1)) : k
 
-# A value or a column written by its labels: never as numbers or days too.
-function _labels_alone(labels, what, digits, sigdigits, percent, date)
+# Labels alone are exhaustive; beside a number format they name exceptions.
+function _labels_format(labels, what, digits, sigdigits, percent, date)
     isnothing(labels) && return nothing
-    digits === sigdigits === date === nothing && !percent || throw(ArgumentError(string(what,
-        ": `labels` writes each value as the text it names, so it takes no `digits`, `sigdigits`, `percent` or `date`")))
-    _labels(labels, what)
+    isnothing(date) || throw(ArgumentError(string(what, ": `labels` takes no `date`")))
+    format = digits === sigdigits === nothing && !percent ? nothing : (; digits, sigdigits, percent)
+    _labels(labels, what, format)
 end
 
 """
@@ -22372,9 +22383,12 @@ Each cell shows its label and sorts by its value, so levels keep their order
 while the cells read as words; the table's search and its ⬇ CSV read the
 label. A value the table does not name is an error, an `ArgumentError` naming
 the value and the keys, never a silent fallback; `missing`, `nothing` and
-`NaN` are no value, the empty cell `–`. A column is written by its labels or
-as numbers or days, so `labels` takes no `digits`, `sigdigits`, `percent` or
-`date`. A single value is `bound(x; labels)` (see [`bound`](@ref)).
+`NaN` are no value, the empty cell `–`. With `digits`, `sigdigits` or
+`percent`, labels name exceptions and other numbers use that number format:
+`ColumnSpec("Years"; digits = 1, labels = [Inf => "No finite halving time"])`.
+`Inf` and `-Inf` are distinct keys. Without a number format labels must name
+every value; `labels` takes no `date`. A single value is `bound(x; labels)`
+(see [`bound`](@ref)).
 
 The tables whose cells you build ([`sortable_table`](@ref),
 [`master_detail_table`](@ref)) refuse these keywords: write those cells with
@@ -22410,7 +22424,7 @@ function ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=n
     what = string("ColumnSpec(", repr(label), ")")
     _number_rounding(digits, sigdigits, what)
     _date_style(date, what, digits, sigdigits, percent)
-    table = _labels_alone(labels, string("ColumnSpec(", repr(label), "; labels)"), digits, sigdigits, percent, date)
+    table = _labels_format(labels, string("ColumnSpec(", repr(label), "; labels)"), digits, sigdigits, percent, date)
     ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
         _column_sort_keys(label, sort_keys), _column_align(label, align),
         isnothing(digits) ? nothing : Int(digits), isnothing(sigdigits) ? nothing : Int(sigdigits), percent, date, table)
@@ -25992,6 +26006,7 @@ _render_cell(::Nothing, value, c, ri, texts, empty_align, format::_Labels) = _la
 # The browser runtime's `boundCell` writes the same cells.
 function _label_cell(value, labels, texts, empty_align)
     text = _label_text(labels, value)
+    text isa Real && return _render_number_cell(text, texts, labels.format)
     isnothing(text) && return isnothing(empty_align) ? number_cell(nothing; texts) :
         number_cell(nothing; texts, data_htmxo_align=empty_align)
     h.td(text; data_sort_value=_label_sort_key(value))
@@ -26460,7 +26475,10 @@ that is wider than the column runs past it and the page scrolls sideways, so
 give such a block its own scroll box. A table inside another table's cell (a
 detail row) does not stick to the window; wider than that cell, it becomes the
 same box, as tall as the window below the outer table's line and header, so its
-sideways scrollbar is on screen too. An app whose page has its own sticky header moves
+sideways scrollbar is on screen too. In a [`semantic_app`](@ref)`(…; presentation=:tabs)`
+result taller than its bound (`result_height`), which scrolls inside itself,
+the line and the header stick to that box's top, and a wide table's own box
+fits inside it. An app whose page has its own sticky header moves
 both below it with `--htmxo-sticky-top` (e.g. `:root { --htmxo-sticky-top: 3.5rem; }`);
 inside a card, set `--htmxo-sticky-bg` to the card's background.
 `sticky=false` keeps one table's line and header in the flow. None of this
@@ -34078,6 +34096,24 @@ function _semantic_reset_button(obj, forms, follows)
                  (; data_htmxo_reset_follows=_semantic_names_attr(follows)))...)
 end
 
+# A `:tabs` page's result taller than its bound scrolls inside itself
+# (`semantic_app(…; result_height)`): `:window` bounds it at the window's height
+# less `--htmxo-sticky-top`, a CSS length at that length, `nothing` not at all.
+# The bound is CSS on the result (`htmxo_utility_styles`); the page runtime
+# keeps a result that fits in the page (`semantic_follow_script`). A length is
+# written into a `style` attribute, so only the characters of a length pass.
+const _RESULT_HEIGHT_LENGTH =
+    r"^(?:[0-9.]+[a-z%]*|(?:calc|min|max|clamp)\([0-9A-Za-z.%+\-*/(), ]+\))$"
+_semantic_result_bound(::Nothing) = (;)
+function _semantic_result_bound(height)
+    height === :window && return (; data_htmxo_result_height="window")
+    value = height isa AbstractString ? String(strip(height)) : ""
+    occursin(_RESULT_HEIGHT_LENGTH, value) || throw(ArgumentError(string(
+        "semantic_app result_height must be :window, nothing or a CSS length such as ",
+        "\"32rem\", got ", repr(height))))
+    (; data_htmxo_result_height=value, style="--htmxo-result-height: " * value)
+end
+
 """
     _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
                    render_operation, layout, url_state, reset)
@@ -34088,11 +34124,12 @@ and every read's result following its inputs (`semantic_follow_script`). With
 `url_state`, the page's address keeps every input the reader set: the page
 shows the values it names, and the script writes the inputs into it. With
 `reset`, a Reset button returns every one of those inputs to its default.
+`result_bound` (from `_semantic_result_bound`) goes on every result.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
         reset::Bool=true, sections=InputSection[], place=nothing,
-        report_states=_ReportState[], url_scope::AbstractString="")
+        report_states=_ReportState[], url_scope::AbstractString="", result_bound=(;))
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
     # What each operation reads of the inputs the page places. The fields of
@@ -34229,7 +34266,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 data_htmxo_follow=string(target), data_htmxo_inputs=join(selectors, ' '),
                 (isnothing(key_reads) ? (;) :
                     (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
-                data_htmxo_live="", hx_sync="this:replace")
+                data_htmxo_live="", hx_sync="this:replace", result_bound...)
             # The page's Markdown writes the result its address answers, at the
             # inputs it reads (`_tab_result_markdown`).
             markdown = _tab_result_markdown(spec.mounted, route, current, target, sent,
@@ -34257,7 +34294,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 radio_max, sections)
             form, h.div(; id=base.target_id, class="htmxo-semantic-operation-result",
                 aria_live="polite",
-                (refreshes ? (; data_htmxo_refreshes=context_id) : (;))...)
+                (refreshes ? (; data_htmxo_refreshes=context_id) : (;))..., result_bound...)
         end
         merge(base, (; form, result, tab=names[i], follows=follows[i],
                       placed=get(placed_controls, names[i], Any[])))
@@ -34348,7 +34385,8 @@ end
                  results=:each, layout=_default_semantic_layout,
                  select=entry -> true, presentation=:stacked, radio_max=8,
                  shared=nothing, active=nothing, url_state=true, reset=true,
-                 sections=nothing, place=nothing, report_states=nothing)
+                 sections=nothing, place=nothing, report_states=nothing,
+                 result_height=:window)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -34380,7 +34418,16 @@ carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
 read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
 the one it opens on), and results that follow their inputs. It is as tall as
 its inputs and results, so it can be one part of a longer page, between
-paragraphs of an article or a report. Its page address
+paragraphs of an article or a report. A result taller than its bound (a
+table of a few hundred rows, say) scrolls inside itself instead of
+lengthening the page, so the inputs beside it and the text around it stay
+where they are: `result_height=:window` (the default) bounds it at the
+window's height less `--htmxo-sticky-top`, a CSS length such as `"32rem"` at
+that length, and `nothing` keeps it growing with the page. A result that fits
+its bound stays in the page as it is. Inside the box a table's controls and
+header stick to the box top, a wide table's own box fits in it, and sorting,
+search, CSV, the keyboard row moves and hover linking work as on the page; the
+page's Markdown is unchanged. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
 reopens the same page; `url_state=false` keeps only the tab. A page that shows
@@ -34568,7 +34615,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         results::Symbol=:each, layout=_default_semantic_layout,
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
-        reset=nothing, sections=nothing, place=nothing, report_states=nothing)
+        reset=nothing, sections=nothing, place=nothing, report_states=nothing,
+        result_height=:window)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -34594,7 +34642,10 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app place= puts inputs of presentation=:tabs into its tabs"))
         isnothing(report_states) || throw(ArgumentError(
             "semantic_app report_states= shows the results of presentation=:tabs at further states in a report"))
+        result_height === :window || throw(ArgumentError(
+            "semantic_app result_height= bounds the results of presentation=:tabs"))
     end
+    result_bound = _semantic_result_bound(result_height)
     states = _report_states(report_states)
     input_sections = _input_sections(sections)
     isnothing(url_state) || url_state isa Bool || throw(ArgumentError(
@@ -34653,7 +34704,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
         reset=something(reset, true), sections=input_sections, place, report_states=states,
-        url_scope, render_operation=render_operation === _default_semantic_operation ?
+        url_scope, result_bound, render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
 
@@ -38065,6 +38116,60 @@ semantic_follow_script() = h.script(Raw(raw"""
     arm(document.body);
   }
 })();
+// A result taller than its bound (`data-htmxo-result-height`,
+// `semantic_app(…; presentation=:tabs, result_height)`) scrolls inside
+// itself; the bound itself is CSS. A result that fits is marked
+// `data-htmxo-result-fits` and stays in the page, so nothing in it is cut at
+// its edge. A result is measured in a task of its own whenever its size
+// changes (a new result, its tab opened, the window resized), never inside the
+// observer's callback, whose layout changes would re-notify in the same frame.
+(function() {
+  if (window.__htmxoResultBounds) return;
+  window.__htmxoResultBounds = true;
+  var FITS = 'data-htmxo-result-fits';
+  var tracked = new WeakSet(), pending = new Set(), timer = 0, observer = null;
+  function measure(region) {
+    if (!region.isConnected) return;
+    // A result that fits is no scroll box but keeps its bound, so content
+    // that outgrows the bound still reads as a scroll height above its height.
+    var fits = region.scrollHeight <= region.clientHeight + 1;
+    if (fits === region.hasAttribute(FITS)) return;
+    if (fits) region.setAttribute(FITS, ''); else region.removeAttribute(FITS);
+  }
+  function queue(region) {
+    pending.add(region);
+    if (timer) return;
+    timer = setTimeout(function() {
+      timer = 0;
+      var regions = Array.from(pending);
+      pending.clear();
+      regions.forEach(measure);
+    }, 0);
+  }
+  function track(root) {
+    if (!root || !root.querySelectorAll) return;
+    var found = Array.prototype.slice.call(root.querySelectorAll('[data-htmxo-result-height]'));
+    if (root.matches && root.matches('[data-htmxo-result-height]')) found.push(root);
+    found.forEach(function(region) {
+      if (!tracked.has(region)) {
+        tracked.add(region);
+        if (window.ResizeObserver) {
+          observer = observer || new ResizeObserver(function(entries) {
+            entries.forEach(function(entry) { queue(entry.target); });
+          });
+          observer.observe(region);
+        }
+      }
+      queue(region);
+    });
+  }
+  document.addEventListener('htmx:load', function(e) { track(e.target); });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { track(document.body); });
+  } else {
+    track(document.body);
+  }
+})();
 """))
 
 # --- Theme ---
@@ -39486,14 +39591,28 @@ fieldset[data-htmxo-checkbox-group] > label > input[type="checkbox"],
 table[data-htmxo-sticky] > thead { position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px)); z-index: 2; }
 table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
 .table-wrap[data-htmxo-width="fits"] { overflow: visible; }
-.table-wrap[data-htmxo-width="wide"] { overflow: auto; max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px)); max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px)); }
+.table-wrap[data-htmxo-width="wide"] { overflow: auto; max-height: calc(var(--htmxo-frame-height, 100vh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px)); max-height: calc(var(--htmxo-frame-height, 100dvh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px)); }
 .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { top: 0; }
 .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: var(--htmxo-table-head-h, 0px); }
 :is(td, th) .htmxo-table-toolbar[data-htmxo-sticky], :is(td, th) table[data-htmxo-sticky] > thead { position: static; }
-:is(td, th) .table-wrap[data-htmxo-width="wide"] { max-height: calc(100vh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); max-height: calc(100dvh - var(--htmxo-sticky-top, 0px) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); }
+:is(td, th) .table-wrap[data-htmxo-width="wide"] { max-height: calc(var(--htmxo-frame-height, 100vh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); max-height: calc(var(--htmxo-frame-height, 100dvh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px) - var(--htmxo-table-head-h, 0px)); }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead { position: sticky; z-index: 1; }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > thead th { background-color: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
 :is(td, th) .table-wrap[data-htmxo-width="wide"] > table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
+/* A `presentation=:tabs` page's result taller than its bound
+   (`semantic_app(…; result_height)`: the window's height less
+   `--htmxo-sticky-top` by default, else the app's CSS length) scrolls inside
+   itself instead of lengthening the page, so the inputs beside it and the text
+   around it stay where they are. The page runtime marks a result that fits
+   `data-htmxo-result-fits`: it stays in the page, so nothing in it (a glossary
+   term's explanation, a focus ring) is cut at its edge. Inside the box a
+   table's controls and header stick to the box top (`--htmxo-sticky-top` is
+   0 below it, not on it, so the bound reads the page's), and a wide table's
+   own box fits inside it (`--htmxo-frame-height`). */
+[data-htmxo-result-height] { --htmxo-frame-height: var(--htmxo-result-height, calc(100dvh - var(--htmxo-sticky-top, 0px))); max-height: var(--htmxo-frame-height); overflow: auto; }
+@supports not (height: 1dvh) { [data-htmxo-result-height] { --htmxo-frame-height: var(--htmxo-result-height, calc(100vh - var(--htmxo-sticky-top, 0px))); } }
+[data-htmxo-result-height][data-htmxo-result-fits] { overflow: visible; }
+[data-htmxo-result-height]:not([data-htmxo-result-fits]) > * { --htmxo-sticky-top: 0px; }
 
 /* A table's columns keep their widths while its rows open, load and filter
    (`data-htmxo-columns`, held by the table runtime). While the runtime sizes

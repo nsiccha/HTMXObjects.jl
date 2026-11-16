@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.156
+## 0.1.159
 
 - A `<details>` among semantic content keeps its `<summary>` in plain text
   (`repr("text/plain", …)`): the summary is a paragraph of its own before the
@@ -16,6 +16,42 @@
   minimum supported HTMX version. A later summary stays in the body in both
   text projections (snag `in-the-kb-lane-c-bacb9ce6`).
 - The web and web app environments pin HTMX 1.4.1 with this rendering fix.
+
+## 0.1.158
+
+- `bound(x; labels)` and `ColumnSpec(label; labels)` accept `Inf` and `-Inf`
+  as distinct keys. Beside `digits`, `sigdigits` or `percent`, labels name
+  exceptions and other numbers use that format; labels alone remain exhaustive.
+  `bound(x; unit = "years")` appends a no-break space and the unit only to a
+  number, never a label or `–`. Thus a halving time can read `12.3 years` or
+  `No finite halving time`, on the server, in Markdown/PDF and after offline
+  browser recomputation. Label cells sort by their value and expose their
+  text to search and CSV; other numbers retain their exact CSV value. A bound
+  table sizes its label columns again when its results change into words.
+
+## 0.1.157
+
+- `pdf_report` keeps tall pictures and their full captions
+  inside the page body, clear of the footer. Image widths are resolved before
+  scaling, including wide intrinsic and percentage widths. A caption longer
+  than a page keeps its measured wrapping width
+  when the whole figure is scaled. Ordinary captions retain their text size.
+
+## 0.1.156
+
+- A `semantic_app(…; presentation=:tabs)` page's result taller than its bound
+  scrolls inside itself instead of lengthening the page, so the inputs beside
+  it and the text around it stay where they are. A 201-row table in a picture
+  embedded in an article made the page 15,072 px tall; it now scrolls in a box
+  no taller than the window. `semantic_app(…; result_height = "32rem")` bounds
+  the results at that CSS length, and `result_height = nothing` keeps them
+  growing with the page; the default is `:window`, the window's height less
+  `--htmxo-sticky-top`. A result that fits its bound stays in the page as it
+  is, so nothing in it (a glossary term's explanation, a focus ring) is cut at
+  an edge. Inside the box a table's controls and header stick to the box top,
+  and a wide table's own box fits inside it; sorting, search, CSV, the
+  keyboard row moves, hover linking and the page's Markdown are unchanged
+  (snag `keep-the-caesium-ac035f3b`).
 
 ## 0.1.155
 

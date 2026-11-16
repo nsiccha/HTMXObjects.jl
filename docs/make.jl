@@ -6,6 +6,7 @@ pages = [
     "Guides" => [
         "Objects and routes" => "guides/objects.md",
         "Forms" => "guides/forms.md",
+        "Generated controls" => "guides/controls.md",
         "Browser results" => "guides/browser.md",
         "Response views" => "guides/views.md",
         "Operations" => "guides/operations.md",
