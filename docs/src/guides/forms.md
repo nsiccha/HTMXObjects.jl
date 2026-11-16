@@ -93,6 +93,37 @@ become hidden inputs; attributes such as `hx_target` configure the form.
 Use `obj=__self__` to forward an object's set `@param` values, with `skip` for
 parameters already supplied by visible controls.
 
+## Several apps on one page
+
+A `presentation=:tabs` page keeps the inputs the reader set and its open tab in
+the page address (`?rate=5&tab=other`), so a reload or a shared link reopens
+it. A page can show several such apps, each a mounted object:
+
+```julia
+@htmx struct Article
+    @include melt = Melt()
+    @include rain = Rain()
+    @get index() = h.main(
+        h.section(semantic_app(melt; presentation=:tabs)),
+        h.section(semantic_app(rain; presentation=:tabs)))
+end
+```
+
+From 0.1.141 each app keeps its inputs and its open tab under its address name,
+its mount path with dots, so inputs of one name in two apps stay apart:
+`?melt.rate=5&rain.rate=9&melt.tab=snow`. A page that shows one app, the app's
+own page `/melt/` included, keeps the plain names. The root object's own app has
+no name and keeps plain names beside the others. A list of records keeps its
+fields below the app's name (`melt.scenarios.1.label`).
+
+An app reads its own name first, else the plain name. A link written with plain
+names, such as one shared before the page gained its second app, opens as it
+did, with every app taking the plain value, and the next change writes each app
+under its own name. Nothing needs configuring: the browser chooses the names,
+since it sees the whole page, and the server reads the same names when it
+renders the page. A custom `layout(parts)` that draws its own `tabset` passes
+`url_scope=parts.url_scope` to keep its tab the same way.
+
 ## Resetting every input
 
 From 0.1.127, a `presentation=:tabs` page has a Reset button. It returns every

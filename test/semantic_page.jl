@@ -4,6 +4,7 @@ using TestItemRunner
     using HTMXObjects
     using HTMXObjects.DynamicObjects: option_domain
     export SimPage, FitsPage, CriterionPage, IdentifierPage, UPLOADS, sidebar_of, tab_of, tag_attrs, result_text
+    export TwoAppsPage
 
     const UPLOADS = String[]
 
@@ -109,6 +110,54 @@ using TestItemRunner
                                 threshold, ":", literal; class="result")
         @get index() = semantic_app(__self__; presentation=:tabs,
             select=entry -> entry.name !== :index)
+    end
+
+    # Two mounted apps on one page, each with an input `rate` and the tabs
+    # `result` and `other`, computed in the browser so a static export follows.
+    const TWICE_JS = """
+    export function twice(rate) { return { total: 2 * rate }; }
+    export const INPUTS = [{ name: "rate", type: "Float64" }];
+    """
+    const TRIPLE_JS = """
+    export function triple(rate) { return { total: 3 * rate }; }
+    export const INPUTS = [{ name: "rate", type: "Float64" }];
+    """
+    const TWO_TABS = entry -> entry.name in (:result, :other)
+    @htmx struct TwoAppsFirst
+        "Rate of the first picture"
+        @param rate::Float64 = 3.0
+        @options(rate) = number_domain(0, 40; step=1)
+        fit = (; total=2 * rate)
+        @browser(fit) = browser_module(; source=TWICE_JS, entry=:twice)
+        @get index() = semantic_app(__self__; presentation=:tabs, select=TWO_TABS)
+        "Twice"
+        @get result() = h.p(h.strong(bound(fit.total; digits=1); data_result="first"))
+        "Also twice"
+        @get other() = h.p(h.strong(bound(fit.total; digits=1); data_other="first"))
+    end
+    @htmx struct TwoAppsSecond
+        "Rate of the second picture"
+        @param rate::Float64 = 10.0
+        @options(rate) = number_domain(0, 40; step=1)
+        fit = (; total=3 * rate)
+        @browser(fit) = browser_module(; source=TRIPLE_JS, entry=:triple)
+        "Triple"
+        @get result() = h.p(h.strong(bound(fit.total; digits=1); data_result="second"))
+        "Also triple"
+        @get other() = h.p(h.strong(bound(fit.total; digits=1); data_other="second"))
+    end
+    @htmx struct TwoAppsPage
+        @include first = TwoAppsFirst()
+        @include second = TwoAppsSecond()
+        __page__(content) = HTMXObjects.pico_page(content; title="Two apps", lang="en",
+            assets=:vendor, runtime=:linked)
+        @get index() = h.main(
+            h.section(semantic_app(first; presentation=:tabs, select=TWO_TABS)),
+            h.section(semantic_app(second; presentation=:tabs, select=TWO_TABS)))
+        @get one() = h.main(h.section(semantic_app(first; presentation=:tabs, select=TWO_TABS)))
+        @get without() = h.main(
+            h.section(semantic_app(first; presentation=:tabs, select=TWO_TABS, url_state=false)),
+            h.section(semantic_app(second; presentation=:tabs, select=TWO_TABS)))
     end
 
     # The sidebar form, and one tab's content, of a rendered page.
@@ -582,6 +631,69 @@ end
         select=entry -> entry.name !== :index)
 end
 
+@testitem "apps on one page keep their inputs and open tab under their own names in the page address" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+
+    route!(TwoAppsPage(); operation_policy=:blocking)
+    page(url) = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
+    # Each app's `rate` field, the tab each app opens on, its address name.
+    rates(html) = [m.captures[1] for m in
+                   eachmatch(r"<input[^>]* name=\"rate\"[^>]* value=\"([^\"]*)\"", html)]
+    opened(html) = [m.captures[1] for m in
+                    eachmatch(r"<a[^>]* class=\"contrast\"[^>]* data-tab-name=\"([^\"]*)\"", html)]
+    scopes(html) = unique(m.captures[1] for m in eachmatch(r" data-htmxo-url-scope=\"([^\"]*)\"", html))
+    shown(html, name) = [m.captures[1] for m in
+                         eachmatch(Regex("<strong data-$(name)=\"[a-z]+\"><span[^>]*>([^<]*)<"), html)]
+
+    # Each app's form of inputs and its tab bar carry the app's address name,
+    # its mount path with dots; the browser uses it once the page shows apps of
+    # more than one name.
+    html = page("/")
+    @test scopes(html) == ["first", "second"]
+    form = tag_attrs(html, r"<form[^>]* data-htmxo-address=[^>]*>")
+    @test form["data-htmxo-url-scope"] == "first"
+    tabs = tag_attrs(html, r"<div[^>]* class=\"tabset\"[^>]*>")
+    @test tabs["data-tab-param"] == "tab" && tabs["data-htmxo-url-scope"] == "first"
+    @test rates(html) == ["3", "10"] && opened(html) == ["result", "result"]
+
+    # The server reads an app's own name first: its field, its result and its
+    # open tab.
+    both = page("/?first.rate=5&second.rate=9&first.tab=other")
+    @test rates(both) == ["5", "9"]
+    @test opened(both) == ["other", "result"]
+    @test shown(both, "other")[1] == "10.0" && shown(both, "result")[2] == "27.0"
+    # A link written before the apps were told apart names them plainly, and
+    # every app reads it as before; the app's own name wins over it.
+    @test rates(page("/?rate=9")) == ["9", "9"]
+    @test opened(page("/?tab=other")) == ["other", "other"]
+    @test rates(page("/?first.rate=5&rate=9")) == ["5", "9"]
+    @test opened(page("/?tab=other&second.tab=result")) == ["other", "result"]
+    # Its own name with no value: the app shows its default, not the plain value.
+    @test rates(page("/?first.rate=&rate=9")) == ["3", "9"]
+
+    # A page of one app, and the app's own page, read the plain names, and the
+    # app's own name too.
+    @test scopes(page("/one")) == ["first"]
+    @test rates(page("/one?rate=7")) == ["7"]
+    @test rates(page("/first/?rate=7")) == ["7"] && rates(page("/first/?first.rate=8")) == ["8"]
+
+    # `url_state=false` keeps only the tab, also under the app's name.
+    off = page("/without?first.tab=other&first.rate=5")
+    @test opened(off) == ["other", "result"]
+    @test scopes(off) == ["first", "second"]
+    @test !contains(match(r"<section>.*?</section>"s, off).match, "data-htmxo-address")
+
+    # `tabset(…; url_scope)` names the app a tabset belongs to; a tabset that
+    # passes none renders and is named as before.
+    plain = repr("text/html", tabset("A" => "a", "B" => "b"))
+    scoped = repr("text/html", tabset("A" => "a", "B" => "b"; url_scope="first"))
+    @test !contains(plain, "data-htmxo-url-scope")
+    @test contains(scoped, " data-htmxo-url-scope=\"first\"")
+    @test tag_attrs(plain, r"<div[^>]*>")["id"] != tag_attrs(scoped, r"<div[^>]*>")["id"]
+    @test !contains(repr("text/html", tabset("A" => "a"; url_param=nothing, url_scope="first")),
+                    "data-htmxo-url-scope")
+end
+
 @testitem "a default computed from other inputs shows its value and follows them" setup=[SemanticPageFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP
 
@@ -963,6 +1075,150 @@ end
             end
         finally
             close(server)
+        end
+    end
+end
+
+@testitem "apps on one page keep their own inputs and open tab in the page address in a browser" setup=[SemanticPageFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        route!(TwoAppsPage(); operation_policy=:blocking)
+        vendorfiles()
+        # One driver for the live page and its static export. Each step that
+        # reopens the page stores where it is in sessionStorage.
+        driver(live) = """
+        <script>
+        const LIVE = $(live);
+        """ * raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label + ' at ' + location.search);
+              await sleep(25);
+            }
+          }
+          const fields = () => Array.from(document.querySelectorAll('input[name="rate"]:not([type="range"])'));
+          const rates = () => fields().map(c => c.value).join(',');
+          const text = s => (document.querySelector(s) || {}).textContent;
+          const opened = () => Array.from(document.querySelectorAll('.tabset > nav a.contrast')).map(a => a.dataset.tabName).join(',');
+          const params = () => Array.from(new URLSearchParams(location.search)).map(p => p.join('=')).sort().join('&');
+          function type(i, value) {
+            const c = fields()[i];
+            c.value = value;
+            c.dispatchEvent(new Event('input', {bubbles: true}));
+            c.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+          const tab = (i, name) => document.querySelectorAll('.tabset')[i].querySelector('a[data-tab-name="' + name + '"]').click();
+          const step = sessionStorage.getItem('htmxo-test-step');
+          try {
+            if (step === null) {
+              await until(() => text('[data-result=first]') === '6.0' && text('[data-result=second]') === '30.0', 'first');
+              await sleep(300);
+              if (location.search !== '') throw new Error('the first load wrote the address: ' + location.search);
+              // Each app's input and tab under the app's own name.
+              type(0, '5');
+              await until(() => params() === 'first.rate=5', 'first rate');
+              type(1, '9');
+              await until(() => params() === 'first.rate=5&second.rate=9', 'second rate');
+              await until(() => text('[data-result=first]') === '10.0' && text('[data-result=second]') === '27.0', 'results');
+              tab(0, 'other');
+              await until(() => params() === 'first.rate=5&first.tab=other&second.rate=9', 'first tab');
+              sessionStorage.setItem('htmxo-test-step', 'reopened');
+              location.reload();
+            } else if (step === 'reopened') {
+              // Reopened: each app as it was.
+              await until(() => rates() === '5,9', 'reopened rates: ' + rates());
+              await until(() => opened() === 'other,result', 'reopened tabs: ' + opened());
+              await until(() => text('[data-other=first]') === '10.0' && text('[data-result=second]') === '27.0',
+                          'reopened results');
+              // The server renders a live page at the address; a static page is
+              // the page at its defaults, which the browser sets.
+              const rendered = fields().map(c => c.getAttribute('value')).join(',');
+              if (rendered !== (LIVE ? '5,9' : '3,10')) throw new Error('rendered: ' + rendered);
+              // A link written before the apps were told apart.
+              sessionStorage.setItem('htmxo-test-step', 'old');
+              location.search = '?rate=9&tab=other';
+            } else if (step === 'old') {
+              await until(() => rates() === '9,9' && opened() === 'other,other', 'old link: ' + rates() + ' ' + opened());
+              // The next change writes every app under its own name.
+              type(1, '4');
+              await until(() => params() === 'first.rate=9&second.rate=4&tab=other', 'old link converted');
+              tab(1, 'result');
+              await until(() => params() === 'first.rate=9&first.tab=other&second.rate=4&second.tab=result',
+                          'old tab converted');
+              sessionStorage.removeItem('htmxo-test-step');
+              await fetch('/complete?status=passed&search=' + encodeURIComponent(params()));
+            }
+          } catch (error) {
+            sessionStorage.removeItem('htmxo-test-step');
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        </script>
+        """
+        function run_page(serve, url)
+            receipt = Channel{String}(1)
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+                path = HTTP.URI(req.target).path
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                path == "/favicon.ico" && return HTTP.Response(204)
+                serve(req)
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile --window-size=1400,1600 http://127.0.0.1:$port$url`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout=devnull, stderr=browser_log); wait=false)
+                    try
+                        timedwait(() -> isready(receipt) || process_exited(process), 90; pollint=0.05)
+                        isready(receipt) ? HTTP.URIs.unescapeuri(take!(receipt)) : read(browser_log, String)
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
+        end
+        expected = "/complete?status=passed&search=first.rate=9&first.tab=other&second.rate=4&second.tab=result"
+        # A live page: the server renders each app at its own values.
+        live = run_page("/") do req
+            response = dispatch(req.method, req.target; headers=collect(req.headers),
+                                body=HTMXObjects._request_body_bytes(req))
+            HTTP.URI(req.target).path == "/" || return response
+            HTTP.Response(200, ["Content-Type" => "text/html"],
+                          replace(String(response.body), "</body>" => driver(true) * "</body>"))
+        end
+        @test live == expected
+        # Its static export: the browser applies the address.
+        mktempdir() do dir
+            site = joinpath(dir, "site")
+            export_site(site; pages=["/"])
+            static = run_page("/index.html") do req
+                path = HTTP.URIs.unescapeuri(HTTP.URI(req.target).path)
+                file = joinpath(site, lstrip(path == "/" ? "/index.html" : path, '/'))
+                isfile(file) || return HTTP.Response(404)
+                body = read(file, String)
+                endswith(file, "index.html") && (body = replace(body, "</body>" => driver(false) * "</body>"))
+                type = endswith(file, ".js") ? "application/javascript" :
+                       endswith(file, ".css") ? "text/css" : "text/html"
+                HTTP.Response(200, ["Content-Type" => type], body)
+            end
+            @test static == expected
         end
     end
 end
