@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.139
+
+- A numbered report's PDF contents list lists the sections `contents()`
+  lists, and no other heading. Typst's outline used to list every heading of
+  the PDF: an article's header and a plain `h.h2` in a view, once per state a
+  `semantic_app` report shows, so BRR's snow report listed 12 entries where
+  its page lists 2 (snag `pdf-contents-lis-087ca53a`). A report's Markdown
+  (`to_markdown_string(…; report=true)`, `pdf_report(value, …)`) now marks the
+  heading of each listed section with the class `htmxo-contents-entry`
+  (`## 1 Results {#section-1 .htmxo-contents-entry}`), and `pdf_report`
+  points the outline at those headings alone. Listed: each numbered section,
+  and a `SemanticSection` written outside any numbered document, such as a
+  closing "About this document" a report appends to its numbered body. Not
+  listed: the document's title (`level=1`), a section inside the numbered
+  document that took no number, and every heading that is not a
+  `SemanticSection`'s. Those stay headings of the body and bookmarks of the
+  PDF. Ordinary Markdown (`?plain`) is unchanged, and report Markdown that
+  marks no heading keeps the outline of every heading.
+
 ## 0.1.138
 
 - A `@browser` module's data argument may be a matrix. The page passes a
