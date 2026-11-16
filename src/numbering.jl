@@ -124,7 +124,11 @@ numbered(
     SemanticSection("Model", …; anchor="model"))
 ```
 
-`sections`, `figures` and `tables` switch each kind of number off. `texts` (a
+`sections`, `figures` and `tables` switch each kind of number off for the
+whole document. One caption written with `kind=nothing`
+([`with_caption`](@ref)`(…; kind=nothing)`, [`render_caption`](@ref)) takes no
+number and is not counted, while the rest of the document stays numbered: a
+figure keeps its plain title, and the next figure is still "Figure 1". `texts` (a
 [`NumberingTexts`](@ref)) holds the words; without it they follow the page's
 language (`HTMXObjects.page_lang`): German on a German page or report, English
 otherwise.
