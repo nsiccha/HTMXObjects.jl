@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.151
+## 0.1.153
 
 - A `semantic_app(…; presentation=:tabs)` page draws its controls again for
   an input whose `@options` range or computed default reads another input with
@@ -17,6 +17,45 @@
   name as its control shows it, whichever was declared first. Declared after
   `b`, or read through a property (`upper = 2b`), the range was already right
   (snag `options-param-re-3392079f`).
+
+## 0.1.152
+
+- `bound(x; labels = [0 => "No dose", 3 => "200 mg (level 3)", …])` writes a
+  value as the text a table names for it, so a level or category a browser
+  module computes reads as words: on the server, in the page's Markdown
+  (which a PDF report reads), and in the browser after each computation.
+  The table is a list of `value => text` pairs or a `Dict`; a key is a
+  number (`3` also names a module's `3.0`), a `Bool` or text. A value the
+  table does not name is an `ArgumentError` naming the value and the keys,
+  thrown by the server and shown by the browser in the result as a module's
+  error is, never a silent fallback; no value (`NaN`, `missing`, `nothing`)
+  writes `–`. `labels` takes no `digits`, `sigdigits`, `percent` or `date`.
+- `ColumnSpec(label; labels)` does the same for a table column, in any
+  `render_table` and in a bound table the browser writes again: each cell
+  shows its label and sorts by its value, and search and the ⬇ CSV read the
+  label. `sortable_table` and `master_detail_table` refuse it, as they refuse
+  the number and day keywords (snag `bound-cannot-sho-5a0dbf64`, user
+  decision `07gq4zu`).
+
+## 0.1.151
+
+- `export_site` writes a page with a browser result (`@browser`) whose
+  controls take their `@options` from a fixed field with a default, or from a
+  property computed from fixed fields: `limits::Any = (; a = (0.0, 2.0))`
+  with `@options(a) = number_domain(limits.a...)`, a view mounted with its
+  ranges (`@include view = View(; limits)`), or a `Symbol` choice listing a
+  fixed field's pairs. Until now each such control was refused with "the
+  server draws the control of `a` again when other inputs change (its
+  `@options` read `limits`)", though no control of the page can change
+  `limits`. Options that read an input, directly or through a property
+  (`lim = 2b`, `@options(a) = number_domain(0.0, lim)`), are still refused,
+  and the refusal now names that input (`b`), not the property (snag
+  `export-site-opti-97b7d7a9`).
+- A live page draws a control again when an input its `@options` read
+  through a property changes: with `lim = 2b` and `@options(a) =
+  number_domain(0.0, lim)`, changing `b` now redraws the range of `a`. Until
+  now only the names the declaration writes counted, so the slider of `a`
+  kept the range of the first `b`.
 
 ## 0.1.150
 

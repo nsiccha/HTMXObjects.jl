@@ -68,9 +68,16 @@ println(String(response.body))
   the language of `texts`), and `ColumnSpec("Day"; date = :short)` a table
   column of them, sorted by the number and exported to CSV as `2019-11-16`.
   A `NaN` is no value: `–`, an empty cell in a table.
+- **Values that name a category**, such as a recommended level:
+  `bound(fit.level; labels = [0 => "No dose", 3 => "200 mg (level 3)"])`
+  writes the text its table names for the value (a number key also names the
+  module's `3.0`, a `Bool` key a `Bool`), and `ColumnSpec("Dose"; labels)` a
+  table column of them, each cell sorted by its value and exported to CSV as
+  its label. A value the table does not name shows as an `ArgumentError` in
+  the result, and no value as `–`.
 - **A table of outputs:** `bound(fit; columns=(:x, :y))`. Given to
   `render_table` (`points` above), it is written again after each change, each
-  column as its `ColumnSpec(label; digits, sigdigits, percent, date)` says, sorted
+  column as its `ColumnSpec(label; digits, sigdigits, percent, date, labels)` says, sorted
   and exported to CSV by the unrounded values, with the reader's sort kept and
   rows hover-linked by `link_key = :x`. For a plot's `data(...)`, give the
   element that draws it `bound_columns_attrs(...)`, and the browser hands it the
@@ -104,11 +111,14 @@ stale, naming each part: a view that shows an input outside `bound` (the export
 renders it with each continuous input changed and compares everything else), a
 result that reads inputs but computes nothing in the browser, and a control the
 server draws again (`@options` or `@help` that read other inputs, a default
-computed from other inputs, which the refusal names, or a condition the
-browser cannot evaluate). A default that reads no input, such as a fixed
-field's value, is none of these, whatever `@relevant` condition or `@options`
-its input has. Bind it, compute it in the module, or leave that
-operation out of the page with `semantic_app(…; select=…)`.
+computed from other inputs, or a condition the browser cannot evaluate; the
+refusal names the inputs `@options` and a default read). A default that reads
+no input, such as a fixed field's value, is none of these, whatever
+`@relevant` condition or `@options` its input has, and neither are `@options`
+that read only fixed fields with a default and what is computed from them,
+such as ranges an application hands its view. Bind it, compute it in the
+module, or leave that operation out of the page with `semantic_app(…;
+select=…)`.
 
 The refusal of a view quotes what changed with the input. What two renders of
 the same inputs differ in is not an input's doing and is left out of the

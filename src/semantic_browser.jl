@@ -109,6 +109,7 @@ browser_module(; source::AbstractString, entry) = BrowserModule(source, entry)
     bound(x.field[i])
     bound(x; digits=nothing, sigdigits=nothing, percent=false, texts=table_texts())
     bound(x; date=:long, texts=table_texts())
+    bound(x; labels=[value => text, …])
     bound(x; columns=(:a, :b, …))
 
 Inside an `@htmx` struct, marks where a route's view shows a value the browser
@@ -137,6 +138,20 @@ plot's temporal axis count them, or a `Dates.Date`; its day is the UTC
 calendar day of that instant. No day (`NaN`, `±Inf`, `missing`, `nothing`)
 writes `–`. A table's days are its `ColumnSpec(label; date)`.
 
+`labels` writes the value as the text a table names for it, a list of
+`value => text` pairs or a `Dict`, so a level or a category the module
+computes reads as words: `bound(rules.level; labels = [0 => "No dose", 3 =>
+"200 mg (level 3)"])` writes `No dose` for 0, on the server, in the page's
+Markdown and in the browser after each change. A key is a number, which names
+the same number (`3` also names the module's `3.0`), a `Bool`, or text; a
+page in another language passes its own texts. A value the table does not
+name is an error, never a silent fallback: the server throws an
+`ArgumentError` naming the value and the keys, and the browser shows the same
+message in the result, as it shows a module's error, until the next
+computation. No value writes `–`. `labels` takes no `digits`, `sigdigits`,
+`percent` or `date`; a table's column of such values is its
+`ColumnSpec(label; labels)`.
+
 With `columns` it is the property's equal-length vector outputs as a Tables.jl
 table, or its single-value outputs (a number, a Boolean, text) as a table of
 one row, for a mark at a value such as a rule; one table does not mix the two.
@@ -160,8 +175,8 @@ bound(_x...; _kw...) = throw(ArgumentError(string(
 
 What `bound(x)` is on the server: the value, shown as text, the path that
 tells a browser page where its value comes from, and how a number is written
-(`format_number`'s rounding, `percent` and language) or, with `date`, the
-day it names (`format_date`'s style).
+(`format_number`'s rounding, `percent` and language), with `date` the day it
+names (`format_date`'s style), or with `labels` the text its table names.
 """
 struct BoundValue{T}
     path::Vector{Any}
@@ -170,6 +185,7 @@ struct BoundValue{T}
     percent::Bool
     texts::TableTexts
     date::Union{Nothing,Symbol}
+    labels::Union{Nothing,_Labels}
 end
 
 """
@@ -191,12 +207,12 @@ struct BoundColumns{T}
 end
 
 function _bound(path::Tuple, value; digits=nothing, sigdigits=nothing, percent::Bool=false,
-                texts::TableTexts=_EN_TABLE_TEXTS, columns=nothing, date=nothing)
+                texts::TableTexts=_EN_TABLE_TEXTS, columns=nothing, date=nothing, labels=nothing)
     if columns !== nothing
-        digits === sigdigits === date === nothing && !percent && texts === _EN_TABLE_TEXTS || throw(ArgumentError(string(
-            "bound(…; columns) is a table; say how a column's numbers or days are written in the ",
+        digits === sigdigits === date === labels === nothing && !percent && texts === _EN_TABLE_TEXTS || throw(ArgumentError(string(
+            "bound(…; columns) is a table; say how a column's numbers, days or labels are written in the ",
             "`ColumnSpec` of `render_table`'s `columns` (`ColumnSpec(label; digits, sigdigits, percent)`, ",
-            "`ColumnSpec(label; date)`) and its language with `render_table(…; texts)`")))
+            "`ColumnSpec(label; date)`, `ColumnSpec(label; labels)`) and its language with `render_table(…; texts)`")))
         return _bound_columns(Any[path...], value, columns)
     end
     for (name, k) in (("digits", digits), ("sigdigits", sigdigits))
@@ -205,8 +221,10 @@ function _bound(path::Tuple, value; digits=nothing, sigdigits=nothing, percent::
     date === nothing || date isa Symbol || throw(ArgumentError(
         "bound: `date` is :long, :short or :month (the styles of format_date); got $(repr(date))"))
     _date_style(date, "bound", digits, sigdigits, percent)
-    b = BoundValue(Any[path...], value, _number_rounding(digits, sigdigits, "bound"), percent, texts, date)
-    isnothing(date) || _bound_text(b)  # a value that is no day is refused here, not in the page
+    table = _labels_alone(labels, string("bound(", _bound_label(path), "; labels)"), digits, sigdigits, percent, date)
+    b = BoundValue(Any[path...], value, _number_rounding(digits, sigdigits, "bound"), percent, texts, date, table)
+    # A value that is no day, or that its labels do not name, is refused here, not in the page.
+    isnothing(date) && isnothing(table) || _bound_text(b)
     b
 end
 
@@ -308,7 +326,9 @@ function _bound_table_attrs(b::BoundColumns, cols, headers, formats, empty_align
         column = Dict{String,Any}("name" => string(c),
             "kind" => isnothing(known) ? "float" : _bound_kind(values[known]))
         format = formats[j]
-        if format isa _DateColumn
+        if format isa _Labels
+            column["labels"] = _labels_wire(format)
+        elseif format isa _DateColumn
             column["date"] = _date_words(get(kwargs, :texts, _EN_TABLE_TEXTS), format.style)
         elseif !isnothing(format)
             isnothing(format.digits) || (column["digits"] = format.digits)
@@ -335,8 +355,10 @@ _bound_kind(::Real) = "float"
 _bound_kind(_) = "text"
 # A number as `format_number` writes it, NaN as no value (`–`: a module that
 # returns numbers only says "none" with it); a day as `format_date` writes
-# it; a Bool and text as `string` does.
-_bound_text(b::BoundValue) = isnothing(b.date) ? _bound_text(b.value, b) :
+# it; a value with `labels` as the text they name (`–` for no value); a Bool
+# and text as `string` does.
+_bound_text(b::BoundValue) = !isnothing(b.labels) ? something(_label_text(b.labels, b.value), "–") :
+    isnothing(b.date) ? _bound_text(b.value, b) :
     _format_date(_date_day(b.value), b.texts, _date_layout(b.texts, b.date))
 _bound_text(x::Bool, b) = string(x)
 _bound_text(x::Real, b) = x isa AbstractFloat && isnan(x) ? _format_number(nothing, b.texts, b.rounding, b.percent) :
@@ -346,10 +368,11 @@ _bound_text(x, b) = string(x)
 
 # How the browser writes the value again: the rounding, `percent` and the
 # language's number texts (`htmxoNumberText`), left out where they are the
-# defaults (no rounding, English); or, for a day, the layout and month names
-# of its style (`htmxoDateText`).
+# defaults (no rounding, English); for a day, the layout and month names of
+# its style (`htmxoDateText`); or the labels' table (`labelText`).
 function _bound_format(b::BoundValue)
     fields = Dict{String,Any}()
+    isnothing(b.labels) || return (; data_htmxo_format=JSON.json(Dict("labels" => _labels_wire(b.labels))))
     isnothing(b.date) || return (; data_htmxo_format=JSON.json(Dict("date" => _date_words(b.texts, b.date))))
     b.rounding === nothing || merge!(fields, Dict(string(k) => v for (k, v) in pairs(_summary_rounding_fields(b.rounding))))
     b.percent && (fields["percent"] = true)
@@ -359,8 +382,12 @@ function _bound_format(b::BoundValue)
 end
 
 _bound_node(b::BoundValue) = h.span(_bound_text(b);
-    data_htmxo_bound=JSON.json(_bound_wire(b.path)), data_htmxo_kind=_bound_kind(b.value),
+    data_htmxo_bound=JSON.json(_bound_wire(b.path)), data_htmxo_kind=_bound_node_kind(b),
     _bound_format(b)...)
+# What the browser reads the value as; a value with labels that the server
+# computed as no value (`missing`, `nothing`) is of the kind of its keys.
+_bound_node_kind(b::BoundValue) = !isnothing(b.labels) && (b.value === nothing || b.value === missing) ?
+    _bound_kind(first(b.labels.keys)) : _bound_kind(b.value)
 
 Base.show(io::IO, m::MIME"text/html", b::BoundValue) = show(io, m, _bound_node(b))
 Base.show(io::IO, ::MIME"text/markdown", b::BoundValue) = print(io, _bound_text(b))
@@ -856,15 +883,19 @@ function _browser_server_parts!(page::_BrowserPage, specs, routes, follows, brow
             " but computes nothing in the browser, so a static page would show it stale; ",
             "declare `@browser` for what it shows or leave it out with `semantic_app(…; select=…)`"))
     end
+    # What a page's controls can change: an `@options` domain that reads only
+    # fixed fields and what is computed from them is the same while it is used.
+    inputs = Set{Symbol}(param.name for route in routes for param in route.params
+                         if param.source !== :path)
     seen = Set{Symbol}()
     for route in routes, param in route.params
         param.name in seen && continue
         push!(seen, param.name)
         get(param, :kind, nothing) === nothing && continue
         reasons = String[]
-        domain = _semantic_domain_dependencies(param)
-        isnothing(domain) || isempty(domain) || push!(reasons, string(
-            "its `@options` read ", join((string("`", n, "`") for n in sort!(collect(domain))), ", ")))
+        domain = _semantic_domain_reads(param, inputs)
+        isempty(domain) || push!(reasons, string(
+            "its `@options` read ", join((string("`", n, "`") for n in domain), ", ")))
         relevance = get(param, :relevance, nothing)
         isnothing(relevance) || isempty(relevance.dependencies) || push!(reasons,
             "its `@relevant` condition is not one the browser evaluates (comparisons and arithmetic of `@param`s)")
@@ -900,8 +931,9 @@ end
 The runtime of the results a `semantic_app` page computes in the browser
 (`@browser`): it loads each property's module once, calls it with the page's
 inputs, shows the view of the finite inputs' values and writes the bound
-values into it, numbers as `format_number` writes them, and the rows of each
-`render_table` of bound columns. [`semantic_follow_script`](@ref) calls it on each `input`
+values into it, numbers as `format_number` writes them and values with
+`labels` as the texts they name, and the rows of each `render_table` of bound
+columns. [`semantic_follow_script`](@ref) calls it on each `input`
 event of an input the result reads, at most once an animation frame, so the
 result moves with a slider held down. A page that has such a result carries
 it in that result; nothing to add by hand.
@@ -996,12 +1028,44 @@ semantic_browser_script() = h.script(Raw(raw"""
   function number(value) {
     return typeof value === 'number' ? value : has(NONFINITE, value) ? NONFINITE[value] : Number(value);
   }
+  // `_label_text`: the text a value's labels name (`bound(x; labels)`,
+  // `ColumnSpec(…; labels)`), read as the value's `kind` (a number key names
+  // the same number, a Bool key a Bool, a text key the same text); null for
+  // no value (null, NaN); for a value they do not name, the server's
+  // `ArgumentError`, which the region shows as it shows a module's error.
+  function labelText(value, kind, labels) {
+    var v, shown;
+    if (kind === 'bool') {
+      v = value === true || value === 'true';
+      shown = String(v);
+    } else if (kind === 'int' || kind === 'float') {
+      v = value === null ? null : number(value);
+      if (v === null || v !== v) return null;
+      shown = kind === 'int' && Number.isInteger(v) ? String(v) : juliaFloat(v);
+    } else {
+      if (value === null) return null;
+      v = String(value);
+      shown = JSON.stringify(v);
+    }
+    for (var i = 0; i < labels.pairs.length; i++) {
+      var k = labels.pairs[i][0];
+      if (typeof k === typeof v && k === v) return labels.pairs[i][1];
+    }
+    var error = new Error(labels.what + ': ' + shown + ' is not a value its labels name (' + labels.named + ')');
+    error.name = 'ArgumentError';
+    throw error;
+  }
   // A bound value as the server wrote it (`_bound_text`): a number as
   // `format_number` writes it, with the span's rounding, percent and language,
-  // NaN as no value (`–`); with `date`, the day as `format_date` writes it.
+  // NaN as no value (`–`); with `date`, the day as `format_date` writes it;
+  // with `labels`, the text they name.
   function text(value, kind, format) {
     var numeric = kind === 'float' || kind === 'int';
     if (value === undefined) return null;
+    if (format.labels) {
+      var label = labelText(value, kind, format.labels);
+      return label === null ? '–' : label;
+    }
     if (format.date) return htmxoDateText(value === null ? null : number(value), format.date);
     if (value === null && !numeric) return null;
     if (kind === 'bool') return String(value === true || value === 'true');
@@ -1018,14 +1082,23 @@ semantic_browser_script() = h.script(Raw(raw"""
   // a number cell (its value the sort value and the ⬇ CSV's) for a float, or
   // for any number of a column whose `ColumnSpec` says how its numbers are
   // written; in a column of days (`ColumnSpec(…; date)`, `_date_cell`) the
-  // day, sorted by its number, its ISO day the ⬇ CSV's; an empty number cell
-  // for no value (NaN too, and no day); else the value's text.
+  // day, sorted by its number, its ISO day the ⬇ CSV's; in a column of labels
+  // (`ColumnSpec(…; labels)`, `_label_cell`) the label, sorted by the value;
+  // an empty number cell for no value (NaN too, and no day); else the value's text.
   function boundCell(v, c, texts) {
     var td = document.createElement('td'), integer = c.kind === 'int';
     var formatted = c.digits !== undefined || c.sigdigits !== undefined || c.percent;
+    var label = c.labels && v !== undefined ? labelText(v, c.kind, c.labels) : null;
+    if (label !== null) {
+      td.setAttribute('data-sort-value', c.kind === 'bool' ? (v === true || v === 'true' ? '1' : '0') :
+        c.kind === 'int' || c.kind === 'float' ? numberKey(number(v), integer) : String(v));
+      td.textContent = label;
+      if (c.align) td.setAttribute('data-htmxo-align', c.align);
+      return td;
+    }
     var x = c.date && v !== null && v !== undefined ? number(v) : v;
     var day = c.date ? htmxoDateKey(x) : null;
-    if (v === null || v === undefined || (typeof v === 'number' && v !== v) || (c.date && day === null)) {
+    if (v === null || v === undefined || (typeof v === 'number' && v !== v) || (c.date && day === null) || c.labels) {
       td.setAttribute('data-htmxo-number', '');
       if (c.empty) td.setAttribute('data-htmxo-align', c.empty);
       td.textContent = '–';
@@ -1072,18 +1145,25 @@ semantic_browser_script() = h.script(Raw(raw"""
     if (typeof htmxoFilterTable === 'function' && table.closest('.htmxo-searchable-table')) htmxoFilterTable(table);
     if (typeof htmxoLinkApply === 'function' && table.dataset.htmxoLink) htmxoLinkApply(table, false);
   }
+  // Writes every bound value and table it can; a value its labels do not
+  // name keeps its old text (a table its old rows), and the first such error
+  // is thrown once the rest is written, for the region to show.
   function patch(view, results, values, defaults) {
+    var failed = null;
     view.querySelectorAll('[data-htmxo-bound]').forEach(function(el) {
-      var path = JSON.parse(el.getAttribute('data-htmxo-bound')), root = path[0], value;
+      var path = JSON.parse(el.getAttribute('data-htmxo-bound')), root = path[0], value, shown;
       if (has(results, root)) value = at(results[root], path);
       else {
         var wire = values[root] && values[root].length ? values[root] : defaults[root];
         value = wire && wire.length ? wire[0] : undefined;
       }
-      var shown = text(value, el.getAttribute('data-htmxo-kind'), formatOf(el));
+      try { shown = text(value, el.getAttribute('data-htmxo-kind'), formatOf(el)); }
+      catch (error) { failed = failed || error; return; }
       if (shown !== null && el.textContent !== shown) el.textContent = shown;
     });
-    view.querySelectorAll('table[data-htmxo-bound-table]').forEach(function(table) { boundTable(table, results); });
+    view.querySelectorAll('table[data-htmxo-bound-table]').forEach(function(table) {
+      try { boundTable(table, results); } catch (error) { failed = failed || error; }
+    });
     view.querySelectorAll('[data-htmxo-bound-columns]').forEach(function(el) {
       var spec = JSON.parse(el.getAttribute('data-htmxo-bound-columns'));
       if (!has(results, spec.path[0])) return;
@@ -1098,6 +1178,7 @@ semantic_browser_script() = h.script(Raw(raw"""
       el.dispatchEvent(new CustomEvent('htmxo:bound-columns',
         {bubbles: true, detail: {path: spec.path, columns: columns, n: n}}));
     });
+    if (failed) throw failed;
   }
   function sameKey(a, b) {
     var ka = Object.keys(a), kb = Object.keys(b);
