@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.1.140
+
+- In a `numbered(…)` document, the captioned figures and tables of a
+  `semantic_app(…; presentation=:tabs)` result computed in the browser
+  (`@browser`) take the document's next numbers ("Figure 1:", "Table 1:"), in
+  reading order, on the page and in its Markdown and PDF alike, and `ref(id)`
+  cites them. Since 0.1.135 they took none. The views the browser switches
+  between for a finite input read the same numbers as the view shown. The
+  page fetches each view with its captions' numbers left as markers, which the
+  document fills in when it renders; the Markdown asks the result with the
+  counts the document had reached at the view, and the result numbers its own
+  captions from there in the page's reading order. A report's further states
+  (`report_states`) are only in the report and take no number, so every number
+  in the report reads as on the page; a state's copy renames its element ids
+  (`fig-curve` becomes `fig-curve-state-1`), since a PDF refuses a cited id it
+  finds twice, so `ref` cites the copy at the page's inputs. A result the
+  server computes, which the page loads later, still takes none, as
+  `numbered` documents for lazily loaded content; sections inside a result
+  take none either. Outside a `numbered` document nothing changes (snag
+  `semantic-app-tab-c64170a6`, user decision `1gxfoo7`).
+
 ## 0.1.139
 
 - `pdf_report` sizes a table's columns by their content, as a browser sizes an

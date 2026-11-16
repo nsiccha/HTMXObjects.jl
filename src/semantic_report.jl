@@ -40,7 +40,12 @@ end
 struct _TabResultMarkdown
     renderings::Vector{_ResultRendering}   # the page's inputs first, then each declared state
     static::Any                            # the page's `StaticExport`, or `nothing`
+    # The result's HTML the page draws (`_MarkedHtml`, a result the browser
+    # computes), whose numbers its Markdown continues; `nothing` for a result
+    # the browser loads later, which takes none.
+    view::Any
 end
+_TabResultMarkdown(renderings, static) = _TabResultMarkdown(renderings, static, nothing)
 
 Base.show(::IO, ::MIME"text/html", ::_TabResultMarkdown) = nothing
 Base.show(::IO, ::MIME"application/vnd.hyperview+xml", ::_TabResultMarkdown) = nothing
@@ -52,21 +57,46 @@ _tabset_key(::_TabResultMarkdown, h::UInt) = h
 
 function Base.show(io::IO, m::MIME"text/markdown", r::_TabResultMarkdown)
     parts = String[]
-    for rendering in r.renderings
+    for (i, rendering) in enumerate(r.renderings)
         isnothing(rendering.state) || page_report() || continue
-        append!(parts, _result_rendering_markdown(rendering, r.static))
+        append!(parts, _result_rendering_markdown(rendering, r.static, r.view, i - 1))
     end
     print(io, join(filter(!isempty, parts), "\n\n"))
     nothing
+end
+
+# A report's copy of a result at a declared state repeats the result's element
+# ids, and a PDF refuses a label it finds twice once `ref` cites it. The copy's
+# ids take its state's number (`fig-curve` → `fig-curve-state-1`), so an id
+# cites the result at the page's inputs, as on the page. Fenced code is left
+# as written.
+function _state_copy_ids(markdown::AbstractString, n::Integer)
+    fence = nothing
+    lines = String[]
+    for line in eachsplit(markdown, '\n')
+        m = match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if !isnothing(fence)
+            !isnothing(m) && startswith(m.captures[1], fence) && (fence = nothing)
+        elseif !isnothing(m)
+            fence = m.captures[1]
+        else
+            line = replace(line, r"\{#([^\s}]+)" => SubstitutionString("{#\\1-state-$n"))
+        end
+        push!(lines, line)
+    end
+    join(lines, '\n')
 end
 
 # The Markdown of one rendering: the state's caption, the line stating its
 # inputs, and what the result's address answers as Markdown. The answer is the
 # bare fragment the page loads into the tab, under the page's audience,
 # language, report flag and static export; in a report it is the result's
-# report view. It takes no number in a `numbered` document, as the result on
-# the page takes none.
-function _result_rendering_markdown(rendering::_ResultRendering, static)
+# report view. In a `numbered` document the rendering at the page's inputs of
+# a result the page draws (`view`) numbers its captions as the page does, from
+# the counts the document had reached there; a declared state, which only the
+# report shows, takes no number, so every number reads as on the page; its
+# ids take its place `n` among the tab's renderings (`_state_copy_ids`).
+function _result_rendering_markdown(rendering::_ResultRendering, static, view=nothing, n=0)
     state = rendering.state
     parts = String[]
     if !isnothing(state) && !isnothing(state.caption)
@@ -74,9 +104,12 @@ function _result_rendering_markdown(rendering::_ResultRendering, static)
     end
     line = _shown_at_node(rendering.shown)
     isnothing(line) || push!(parts, _markdown_of(line))
+    from = isnothing(state) ? _result_numbering_from(view) : nothing
     resp = _unnumbered() do
-        dispatch(:GET, rendering.url; headers=["HX-Request" => "true", "Accept" => "text/markdown"],
-                 static, operation_policy=:blocking)
+        _asking_result_numbers(from) do
+            dispatch(:GET, rendering.url; headers=["HX-Request" => "true", "Accept" => "text/markdown"],
+                     static, operation_policy=:blocking)
+        end
     end
     body = String(_response_bytes(resp))
     # A fault answers the fragment with its article (`X-HTMXO-Error-Id`), as the
@@ -86,7 +119,7 @@ function _result_rendering_markdown(rendering::_ResultRendering, static)
             _report_state_name(state), " is refused at ", rendering.url, " (", resp.status, ")",
             isempty(strip(body)) ? "" : string(":\n", body))))
     end
-    push!(parts, strip(body, '\n'))
+    push!(parts, strip(isnothing(state) ? body : _state_copy_ids(body, n), '\n'))
     parts
 end
 
