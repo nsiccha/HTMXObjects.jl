@@ -33886,7 +33886,9 @@ carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
 
 `presentation=:tabs` makes it an app page: the inputs several operations
 read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
-the one it opens on), and results that follow their inputs. Its page address
+the one it opens on), and results that follow their inputs. It is as tall as
+its inputs and results, so it can be one part of a longer page, between
+paragraphs of an article or a report. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
 reopens the same page; `url_state=false` keeps only the tab. Its Reset button
@@ -38312,8 +38314,13 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
 .u-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .u-grid-auto { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
 /* Sidebar + main page layout. Stacks on phone-sized viewports (<768px);
-   becomes a 2-col grid above. Pair with `app_layout(sidebar, content)`. */
+   becomes a 2-col grid above. Pair with `app_layout(sidebar, content)`.
+   As the page's shell it is at least as tall as the window, so the sidebar's
+   divider reaches the window's bottom. A semantic app's layout
+   (`semantic_app(…; presentation=:tabs)`) is one part of a page, under its
+   title or between paragraphs, and is as tall as its inputs and results. */
 .htmxo-app-layout { display: block; min-height: 100vh; }
+.htmxo-semantic-app .htmxo-app-layout { min-height: auto; }
 .htmxo-app-layout > aside { padding: 1rem 0; }
 .htmxo-app-layout > main { min-width: 0; padding: 1rem 0; }
 @media (min-width: 768px) {
@@ -41094,9 +41101,15 @@ end
 
 Two-column app shell — sidebar `<aside>` next to a main content column. Inspired
 by Pico's docs layout (CSS Grid with named areas, sticky inner nav, stacks on
-mobile <1024px). `sidebar` is rendered as-is (typically [`nav_sidebar`](@ref));
-`content` is wrapped in `<div class="htmxo-app-content" id=content_id>` so HTMX
+viewports narrower than 768px). `sidebar` is rendered as-is (typically
+[`nav_sidebar`](@ref)); `content` is wrapped in `<main id=content_id>` so HTMX
 swaps targeting `#content` work out of the box.
+
+As the page's shell the layout is at least as tall as the window, so the
+sidebar's divider reaches the window's bottom on a short page. Inside a
+[`semantic_app`](@ref) (`presentation=:tabs` with shared inputs) it is one part
+of a page and only as tall as its inputs and results, so the page's next
+paragraph follows it.
 
 Sidebar width defaults to `12rem` via the `--htmxo-sidebar-width` CSS variable;
 apps can override it in their own scoped style:
