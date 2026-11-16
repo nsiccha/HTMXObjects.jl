@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.157
+
+- `pdf_report` keeps tall pictures and their full captions
+  inside the page body, clear of the footer. Image widths are resolved before
+  scaling, including wide intrinsic and percentage widths. A caption longer
+  than a page keeps its measured wrapping width
+  when the whole figure is scaled. Ordinary captions retain their text size.
+
 ## 0.1.156
 
 - A `semantic_app(…; presentation=:tabs)` page's result taller than its bound
