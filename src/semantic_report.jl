@@ -274,7 +274,7 @@ function _tab_result_markdown(obj, route, current, target, sent, shown_names, st
         any(in(reads), keys(state.values)) || continue
         values = copy(current)
         # An input the state names no longer follows its computed default.
-        values[_SEMANTIC_FOLLOWS] = setdiff(Set{Symbol}(_semantic_follows(current)), keys(state.values))
+        _semantic_unfollow!(values, keys(state.values))
         for (name, value) in state.values
             name in sent && (values[name] = value)
         end

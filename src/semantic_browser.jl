@@ -499,6 +499,10 @@ function _browser_region(page::_BrowserPage, spec, route, current, target, sent,
         for (n, v) in zip(names, combo)
             values[n] = v
         end
+        # A finite input that follows its computed default would not be sent,
+        # and every view would show the default's result: a view at another
+        # value sends that value.
+        _semantic_unfollow!(values, (n for n in names if !isequal(get(current, n, nothing), values[n])))
         at_current = all(n -> isequal(get(current, n, nothing), values[n]), names)
         rendered = _browser_render(_semantic_follow_url(target, obj, route, values, sent);
                                    static=page.static)
@@ -833,6 +837,7 @@ function _browser_check!(page::_BrowserPage, obj, route, current, target, sent, 
         for probe in _browser_probes(value)
             changed = copy(current)
             changed[name] = probe
+            _semantic_unfollow!(changed, (name,))
             rendered = render(changed)
             if rendered.status != 200 || !isempty(rendered.error)
                 push!(tried, string(repr(probe), " → HTTP ", rendered.status))
