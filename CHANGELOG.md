@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.140
+## 0.1.143
 
 - `pdf_report` keeps a captioned figure's pictures and caption on one page
   with or without an id. Quarto makes a figure only of a div whose id starts
@@ -23,6 +23,59 @@
   outside a report. Regenerate saved report Markdown to get the marks. A
   figure Quarto numbers (`fig-…`) prints as before unless it is taller than a
   page.
+
+## 0.1.142
+
+- A computed default that reads no input stays static on an input that has a
+  `@relevant` condition or declared `@options`. With
+  `settings::Any = (; start = 1.0)`, `@param limit::Float64 = Float64(settings.start)`
+  and `@relevant(limit) = has_limit`, the inputs the condition reads were
+  taken as inputs the default reads, because both are arguments of the one
+  call that extracts `limit`. The struct's first `@options` declaration was
+  taken the same way for every input with a declared domain. Such an input now
+  behaves as it already did without them: `export_site` writes a page with a
+  browser result (`@browser`) instead of refusing it with "the server draws
+  the control of `limit` again when other inputs change (its default reads
+  other inputs)", a live page no longer asks the server to draw the controls
+  again when `has_limit` changes, and the page address default of `limit` is
+  its value, not `null`. A default that does read an input (`= median / 2`,
+  `= has_limit ? 1.0 : 2.0`) is unchanged.
+- That refusal names the inputs the default reads: "(its default reads
+  `median`)" (snag `export-site-rele-5a6fd953`).
+
+## 0.1.141
+
+- A private `pdf_report` keeps the "not public" label ("nicht öffentlich")
+  of a block of private content on the page where that content starts. The
+  label is the first paragraph of the block's `::: {.htmxo-private}` div,
+  `*not public*`, and nothing held it to the next block, so a private section
+  starting near a page end left the label alone at the bottom of one page and
+  the section's heading at the top of the next (snag
+  `pdf-report-priva-c25e0698`). `pdf-report-labels.lua` now makes that
+  paragraph sticky, as it does a disclosure's `::: {.htmxo-label}`; the
+  private content itself can still continue across pages, paragraph spacing
+  is unchanged, and the Markdown is the same as before.
+
+## 0.1.140
+
+- In a `numbered(…)` document, the captioned figures and tables of a
+  `semantic_app(…; presentation=:tabs)` result computed in the browser
+  (`@browser`) take the document's next numbers ("Figure 1:", "Table 1:"), in
+  reading order, on the page and in its Markdown and PDF alike, and `ref(id)`
+  cites them. Since 0.1.135 they took none. The views the browser switches
+  between for a finite input read the same numbers as the view shown. The
+  page fetches each view with its captions' numbers left as markers, which the
+  document fills in when it renders; the Markdown asks the result with the
+  counts the document had reached at the view, and the result numbers its own
+  captions from there in the page's reading order. A report's further states
+  (`report_states`) are only in the report and take no number, so every number
+  in the report reads as on the page; a state's copy renames its element ids
+  (`fig-curve` becomes `fig-curve-state-1`), since a PDF refuses a cited id it
+  finds twice, so `ref` cites the copy at the page's inputs. A result the
+  server computes, which the page loads later, still takes none, as
+  `numbered` documents for lazily loaded content; sections inside a result
+  take none either. Outside a `numbered` document nothing changes (snag
+  `semantic-app-tab-c64170a6`, user decision `1gxfoo7`).
 
 ## 0.1.139
 

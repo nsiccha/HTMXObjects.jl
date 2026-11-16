@@ -6460,7 +6460,8 @@ class itself where a wrapper would break the markup (a table row or cell, a
 list item, a `summary`); the outline and the label, in the language of the
 element's `lang`, come from [`htmxo_utility_styles`](@ref), which every
 [`htmx`](@ref) page carries. In Markdown a block is a fenced div
-`::: {.htmxo-private}` that opens with the label, `*not public*`, and inline
+`::: {.htmxo-private}` that opens with the label, `*not public*`, which a
+[`pdf_report`](@ref) keeps on the page where the content starts, and inline
 content a span `[*not public:* …]{.htmxo-private}`. The label is in the
 language of `HTMXObjects.page_lang()`: a route's `__lang__`, or the `lang` of
 `to_markdown_string(x; lang)`, of `dispatch(…; lang)` and of a
@@ -14785,7 +14786,10 @@ If the route returns an `HTTP.Response` directly, it passes through unchanged.
 # page, and refuses private markup rendered before it.
 function _record_public(f, record_dir, save_path, val)
     (isnothing(record_dir) || isnothing(save_path) || _private_page(val)) && return
-    _with_audience(f, :public)
+    # A recording is the answer itself, never a page's marked copy of it.
+    ScopedValues.with(_CAPTION_MARKS => false) do
+        _with_audience(f, :public)
+    end
 end
 _save_recording(record_dir, path, resp; kwargs...) =
     save_response(record_dir, path, _check_public(resp, "the recording of $path"); kwargs...)
@@ -14848,7 +14852,7 @@ function _resolve_response(obj, req, val; record_dir=nothing, save_path=nothing,
         if hasproperty(obj, :to_markdown)
             return to_response(getproperty(obj, :to_markdown)(val))
         else
-            return markdown_response(to_markdown_string(val))
+            return markdown_response(to_markdown_string(_numbered_from(req, val)))
         end
     end
 
@@ -17900,15 +17904,21 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
             # describe the mount signature, not the values parsed from this URL.
             save_path = isnothing(record_dir) ? nothing : _record_save_path(req)
 
+            # A result a numbered document fetched renders as it asked
+            # (`_with_result_numbers`).
             if is_included
                 page_chain = _collect_page_chain(root, chain, req, root_segs)
                 return _stamp_operation_headers(req, _with_page_meta(page_meta) do
-                        _resolve_response_nested(page_chain, req, val;
-                                                 root, record_dir, save_path, record_base)
+                        _with_result_numbers(req) do
+                            _resolve_response_nested(page_chain, req, val;
+                                                     root, record_dir, save_path, record_base)
+                        end
                     end, running)
             else
                 return _stamp_operation_headers(req, _with_page_meta(page_meta) do
-                        _resolve_response(leaf, req, val; record_dir, save_path, record_base)
+                        _with_result_numbers(req) do
+                            _resolve_response(leaf, req, val; record_dir, save_path, record_base)
+                        end
                     end, running)
             end
         catch err
@@ -18756,7 +18766,7 @@ function _resolve_response_nested(page_chain, req, val; root=nothing,
         if !isnothing(obj) && hasproperty(obj, :to_markdown)
             return to_response(getproperty(obj, :to_markdown)(val))
         else
-            return markdown_response(to_markdown_string(val))
+            return markdown_response(to_markdown_string(_numbered_from(req, val)))
         end
     end
     # Which wrappers this response owes — the whole chain for a direct visit,
@@ -20635,7 +20645,10 @@ function dispatch(method, url::AbstractString; headers=[], body=UInt8[],
     lang !== nothing && (req.context[:htmxo_lang] = lang)
     req.context[:htmxo_audience] = audience
     report && (req.context[:htmxo_report] = true)
-    resp = _with_dispatch_parent(() -> _service_dispatch(req), parent)
+    # A numbered document's ask of the result it fetches (`_RESULT_NUMBERS`).
+    resp = _dispatch_result_numbers(req) do
+        _with_dispatch_parent(() -> _service_dispatch(req), parent)
+    end
     audience === :public ? _check_public(resp, "the answer to $(req.method) $(req.target)") : resp
 end
 
@@ -21225,8 +21238,9 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 # to Typst as written.
 const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
 
-# A semantic disclosure's label must travel with the start of its body, not
-# stand alone at a page bottom. Only the label is sticky; the body can break.
+# A semantic disclosure's label, and the "not public" label opening a block of
+# private content, must travel with the start of its body, not stand alone at
+# a page bottom. Only the label is sticky; the body can break.
 const _PDF_REPORT_LABELS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-labels.lua")
 
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
@@ -21621,8 +21635,10 @@ own, and PAC (PDF Accessibility Checker) warned about the empty and
 whitespace-only ones. Semantic disclosure labels (including eager tabs and
 master-detail labels) stay with the start of their body. Their Markdown marks
 the label alone with `::: {.htmxo-label}`; the body can continue across pages.
-Regenerate saved Markdown to get these markers. Ordinary bold prose keeps its
-own pagination.
+Regenerate saved Markdown to get these markers. The "not public" label that
+opens a block of [`private`](@ref) content in a private report stays with the
+start of that content the same way. Ordinary bold or emphasised prose keeps
+its own pagination.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region
@@ -30814,9 +30830,33 @@ function _computed_default_value(obj, param)
     end
 end
 
+# The names an expression writes: its symbols, those of a property access
+# (`settings.start`, `__self__.start`) included.
+_expression_names!(names, x::Symbol) = push!(names, x)
+_expression_names!(names, x::QuoteNode) = _expression_names!(names, x.value)
+_expression_names!(names, x::Expr) = (foreach(arg -> _expression_names!(names, arg), x.args); names)
+_expression_names!(names, _) = names
+
+# The dependency closure of the default of `T`'s `@param` `name`. The default
+# is one argument of the parameter's extractor call, which reads more than the
+# default does: its `@relevant` condition, its declared domain, the request.
+# So this is the closure of what that call reads directly and the default
+# expression names. Where DynamicObjects gives no direct reads for the
+# parameter, it is the parameter's own closure, which holds every such read.
+function _default_closure(T::Type, name::Symbol, default)
+    info = isdefined(DynamicObjects, :metafirst) ?
+        Base.invokelatest(getproperty(DynamicObjects, :metafirst), T, name) : nothing
+    direct = info === nothing ? nothing : get(info, :dependson, nothing)
+    direct === nothing && return _dependency_closure(T, name)
+    named = _expression_names!(Set{Symbol}(), default)
+    _dependency_closure(T, Symbol[n for n in direct if n isa Symbol && n in named])
+end
+
 # A computed default is drawn again when an input it reads changes
 # (`_semantic_param_dependencies`), so a control that follows it shows the
-# value the server computes for the inputs the page sends.
+# value the server computes for the inputs the page sends. An input that only
+# the parameter's `@relevant` condition or declared domain reads is none: the
+# default is the same for each of its values (`_default_closure`).
 function _with_default_reads(obj, param)
     _computed_default(param) || return param
     source = _param_declaring_object(obj, param.name)
@@ -30828,7 +30868,7 @@ function _with_default_reads(obj, param)
         declared = _reflect_local_param(T, param.name; unquote_default=false)
         declared.default isa QuoteNode && return merge(param, (; literal_default=true))
     end
-    closure = _dependency_closure(T, param.name)
+    closure = _default_closure(T, param.name, param.default)
     isnothing(closure) && return param
     params = Set{Symbol}(Base.invokelatest(_param_names, T))
     reads = Symbol[name for name in closure if name in params && name !== param.name]
@@ -31787,15 +31827,18 @@ end
 # 0.5.21 (`878dd48`) removed its private `_semantic_dependency_closure`, which
 # this used to call, so the closure is walked here from that metadata, as it was
 # there; an older DynamicObjects keeps answering through its own helper.
-function _dependency_closure(T::Type, name::Symbol)
+_dependency_closure(T::Type, name::Symbol) = _dependency_closure(T, (name,))
+
+# The same closure of several properties together.
+function _dependency_closure(T::Type, names)
     isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
-        getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,))
+        getproperty(DynamicObjects, :_semantic_dependency_closure), T, Tuple(names))
     isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
     metafirst = getproperty(DynamicObjects, :metafirst)
     meta = getproperty(DynamicObjects, :meta)
     Base.invokelatest(applicable, meta, T) || return nothing
     closure = Set{Symbol}()
-    pending = Symbol[name]
+    pending = collect(Symbol, names)
     while !isempty(pending)
         current = pop!(pending)
         current in closure && continue
@@ -33855,14 +33898,21 @@ view in a report, and for a result computed in the browser what the server
 draws of it. A line before it names the inputs the result reads and their
 values as their controls show them, `Shown at: Slope (per day) 0.20;
 Intercept 80 units` (`__error_texts__`'s `shown_at`, and `shown_yes` or
-`shown_no` for a checkbox). A result takes no number in a [`numbered`](@ref)
-document, as it takes none on the page. The HTML page asks no result it does
-not show; a Markdown read asks each tab's result once.
+`shown_no` for a checkbox). In a [`numbered`](@ref) document, the captioned
+figures and tables of a result computed in the browser take the document's
+next numbers, on the page (every view the browser switches between reads the
+same ones) and in its Markdown alike, and `ref` cites them; a result the
+server computes, which the page loads later, takes none. The HTML page asks no
+result it does not show; a Markdown read asks each tab's result once.
 `report_states = ["Steep" => (a = 0.5,), (b = 20.0,)]` writes, in a report
 only, each tab again for each state that names an input it reads: with the
 state's values in place of the page's, its own line, and its caption first
-when it has one. A state names inputs of the page, or the call throws an
-`ArgumentError`; a value an input refuses makes the report throw.
+when it has one. A state's copy takes no number in a `numbered` document, so
+every number in the report reads as on the page, and its element ids take the
+state's place (`fig-curve-state-1`), so an id `ref` cites is in the report
+once. A state names inputs of the
+page, or the call throws an `ArgumentError`; a value an input refuses makes
+the report throw.
 
 A single choice among at most `radio_max` options (default 8) is a row of
 pills; among more, it is a searchable drop-down ([`choice_list`](@ref)). The
