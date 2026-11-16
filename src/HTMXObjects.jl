@@ -4794,6 +4794,13 @@ _markdown_plain_text(text::AbstractString) =
 # Appended to a heading line: the heading carries its element's anchor.
 _markdown_heading_anchor(anchor::AbstractString) =
     isempty(anchor) ? "" : " " * _markdown_anchor_attr(anchor)
+# A heading the report's contents list lists also carries this class
+# (`_contents_entry_class`), inside the same braces as its anchor.
+function _markdown_heading_anchor(anchor::AbstractString, class::AbstractString)
+    isempty(class) && return _markdown_heading_anchor(anchor)
+    isempty(anchor) && return " {." * class * "}"
+    " " * chop(_markdown_anchor_attr(anchor)) * " ." * class * "}"
+end
 
 _semantic_metric_text(metric::SemanticMetric) = isempty(metric.unit) ?
     string(metric.value) : string(metric.value, " ", metric.unit)
@@ -5940,7 +5947,8 @@ Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_opening_level(section)) do level
         _numbered_section(section, level) do number, anchor
             print(io, _semantic_heading_sigil(level), " ", _section_number_text(number),
-                _markdown_plain_text(section.title), _markdown_heading_anchor(anchor))
+                _markdown_plain_text(section.title),
+                _markdown_heading_anchor(anchor, _contents_entry_class(number, level)))
             _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
             _semantic_show_children(io, mime, section.children, "\n\n")
         end
@@ -14025,9 +14033,10 @@ that a running request will replace (`loading`, `loading_named`; see
 list (`choice_search`, its placeholder, and `choice_no_match`, shown when no
 option matches; see [`choice_list`](@ref)), and the button of a
 `semantic_app(…; presentation=:tabs)` page that returns every input to its
-default (`reset_inputs`), and the line of that page's Markdown that names the
-inputs a result is shown at (`shown_at`, "Shown at"; a checkbox's value in it
-is `shown_yes` or `shown_no`). Build one with
+default (`reset_inputs`), and the statement of that page's Markdown that names
+the inputs a result is shown at (`shown_at`, "Shown at", followed by a colon
+and a `Label: value` line for each input; a checkbox's value in it is
+`shown_yes` or `shown_no`). Build one with
 [`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
@@ -33902,10 +33911,11 @@ In the page's Markdown (`?plain`, `Accept: text/markdown`,
 [`pdf_report`](@ref)) each tab is its label followed by its result, as the
 result's own address answers it as Markdown at the page's inputs: the report
 view in a report, and for a result computed in the browser what the server
-draws of it. A line before it names the inputs the result reads and their
-values as their controls show them, `Shown at: Slope (per day) 0.20;
-Intercept 80 units` (`__error_texts__`'s `shown_at`, and `shown_yes` or
-`shown_no` for a checkbox). In a [`numbered`](@ref) document, the captioned
+draws of it. A statement before it names the inputs the result reads and
+their values as their controls show them, one input per line: `Shown at:`,
+then `Slope (per day): 0.20` and `Intercept: 80 units` on lines of their own
+(`__error_texts__`'s `shown_at`, and `shown_yes` or `shown_no` for a
+checkbox). In a [`numbered`](@ref) document, the captioned
 figures and tables of a result computed in the browser take the document's
 next numbers, on the page (every view the browser switches between reads the
 same ones) and in its Markdown alike, and `ref` cites them; a result the
@@ -33913,7 +33923,7 @@ server computes, which the page loads later, takes none. The HTML page asks no
 result it does not show; a Markdown read asks each tab's result once.
 `report_states = ["Steep" => (a = 0.5,), (b = 20.0,)]` writes, in a report
 only, each tab again for each state that names an input it reads: with the
-state's values in place of the page's, its own line, and its caption first
+state's values in place of the page's, its own statement, and its caption first
 when it has one. A state's copy takes no number in a `numbered` document, so
 every number in the report reads as on the page, and its element ids take the
 state's place (`fig-curve-state-1`), so an id `ref` cites is in the report

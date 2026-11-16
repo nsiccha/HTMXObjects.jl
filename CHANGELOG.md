@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.144
+## 0.1.147
 
 - A number input with a range (`number_domain`, `ninput(…; domain)`) stays
   inside a column narrower than its row. The slider (at least 5rem), the 7rem
@@ -19,6 +19,55 @@
   that selected `.htmxo-number > input[type="number"]` or
   `.htmxo-number > .htmxo-number-unit` selects them under
   `.htmxo-number-entry` now.
+
+## 0.1.146
+
+- The "Shown at" statement before each result of a
+  `semantic_app(…; presentation=:tabs)` page's Markdown and PDF (`?plain`, a
+  report, `pdf_report`) puts a colon after each input's label and each input
+  on a line of its own: "Shown at:", then "Slope (per day): 0.20" and
+  "Intercept: 80 units" below it, as one paragraph of lines. Since 0.1.135 it
+  was one line, "Shown at: Slope (per day) 0.20; Intercept 80 units", in which
+  a label that is a phrase with a comma ran into its value. A German page
+  writes "Dargestellt bei:" and "Bezeichnung: Wert"; a label that ends in a
+  colon keeps its own; a list of records writes its fields the same way,
+  "Scenario (Dose (mg): 5)". The HTML page is unchanged (snag
+  `shown-at-line-ru-25ece17f`, user decision `0xxd4et`).
+
+## 0.1.145
+
+- A numbered report's PDF contents list lists the sections `contents()`
+  lists, and no other heading. Typst's outline used to list every heading of
+  the PDF: an article's header and a plain `h.h2` in a view, once per state a
+  `semantic_app` report shows, so BRR's snow report listed 12 entries where
+  its page lists 2 (snag `pdf-contents-lis-087ca53a`). A report's Markdown
+  (`to_markdown_string(…; report=true)`, `pdf_report(value, …)`) now marks the
+  heading of each listed section with the class `htmxo-contents-entry`
+  (`## 1 Results {#section-1 .htmxo-contents-entry}`), and `pdf_report`
+  points the outline at those headings alone. Listed: each numbered section,
+  and a `SemanticSection` written outside any numbered document, such as a
+  closing "About this document" a report appends to its numbered body. Not
+  listed: the document's title (`level=1`), a section inside the numbered
+  document that took no number, and every heading that is not a
+  `SemanticSection`'s. Those stay headings of the body and bookmarks of the
+  PDF. Ordinary Markdown (`?plain`) is unchanged, and report Markdown that
+  marks no heading keeps the outline of every heading.
+
+## 0.1.144
+
+- A static export no longer refuses a browser result (`@browser`) for markup
+  that differs between two renders of the same inputs. Under a root with
+  `__glossary__`, a result whose text used a term was refused with one "shows
+  `a` outside `bound`" line per continuous input, although every input was
+  shown through `bound(...)`: a linked term's definition carries an id that is
+  new in every answer, and the export took that difference for the input's
+  (snag `browser-result-u-88fa1fae`). When a view rendered with an input
+  changed differs, the export now renders the unchanged inputs once more and
+  names the input only if the view differs in more than those two renders do.
+  A view that writes an id or a time of its own exports the same way. A
+  refusal quotes what changed (`… for slope 2.0` becomes `… for slope 2.2…`),
+  and a result whose renders of the same inputs do not line up, because it
+  holds more or less markup each time, is named once, saying so.
 
 ## 0.1.143
 

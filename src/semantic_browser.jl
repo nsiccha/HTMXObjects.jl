@@ -649,13 +649,120 @@ _browser_probes(x::Integer) = (x + 1, x - 1, x + 2)
 _browser_probes(x::AbstractString) = (string(x, "x"), "")
 _browser_probes(_) = ()
 
+# Two renderings of one address can differ with no input changed: the
+# definition of a linked glossary term carries an id that is new in every
+# answer (`_TermWalk`), and a view may write an id or a time of its own. So a
+# rendering with an input changed is compared piece by piece, leaving out the
+# pieces that two renderings of the unchanged inputs differ in. A piece keeps
+# such a value whole: a run between spaces, quotes, `<`, `>` and `=`, or one of
+# those characters; the pieces joined are the skeleton again.
+const _BROWSER_PIECE = r"[^\s\"'<>=]+|[\s\"'<>=]"
+_browser_pieces(skeleton::String) =
+    SubString{String}[m.match for m in eachmatch(_BROWSER_PIECE, skeleton)]
+
+# The renderings of a result at its unchanged inputs: the pieces of the first
+# and, for each, whether a later one differed there. Two that hold different
+# numbers of pieces do not line up, so nothing compares with them: `unlike`
+# is then the later one's pieces.
+mutable struct _BrowserControl
+    pieces::Vector{SubString{String}}
+    varies::BitVector
+    unlike::Union{Nothing,Vector{SubString{String}}}
+end
+_BrowserControl(skeleton::String) =
+    (pieces = _browser_pieces(skeleton); _BrowserControl(pieces, falses(length(pieces)), nothing))
+
+# One more rendering of the unchanged inputs; `nothing` (it did not render)
+# teaches nothing.
+_browser_learn!(control::_BrowserControl, ::Nothing) = control
+function _browser_learn!(control::_BrowserControl, skeleton::String)
+    pieces = _browser_pieces(skeleton)
+    if length(pieces) != length(control.pieces)
+        control.unlike = pieces
+    else
+        for i in eachindex(pieces)
+            pieces[i] == control.pieces[i] || (control.varies[i] = true)
+        end
+    end
+    control
+end
+
+# Whether `pieces` are the control's wherever its own renderings agree.
+_browser_same(control::_BrowserControl, pieces) = length(pieces) == length(control.pieces) &&
+    all(i -> control.varies[i] || pieces[i] == control.pieces[i], eachindex(pieces))
+
+# How `changed`, the skeleton rendered with an input changed, compares with
+# `skeleton`, the one of the unchanged inputs: `:same` when it differs only
+# where two renderings of the unchanged inputs do (`again()` renders one more
+# skeleton of them), `:changed` when it differs elsewhere, and `:unlike` when
+# those renderings do not line up with each other. `ref` keeps the control for
+# the result's other inputs.
+function _browser_compare!(ref::Base.RefValue, skeleton::String, changed::String, again)
+    made = ref[] === nothing
+    made && (ref[] = _browser_learn!(_BrowserControl(skeleton), again()))
+    control = ref[]::_BrowserControl
+    pieces = _browser_pieces(changed)
+    control.unlike === nothing || return :unlike
+    _browser_same(control, pieces) && return :same
+    # A place may differ only later (a clock): look once more before saying
+    # the input changed it, unless the control was rendered just now.
+    made && return :changed
+    _browser_learn!(control, again())
+    control.unlike === nothing || return :unlike
+    _browser_same(control, pieces) ? :same : :changed
+end
+
+# For a message: the text of a skeleton from where its piece `i` and `other`'s
+# first differ, with a little of what precedes it; `…` where the view goes on.
+function _browser_excerpt(pieces, other, i)
+    i > length(pieces) && return "the end of the view"
+    piece = pieces[i]
+    s = piece.string
+    at = piece.offset + 1
+    if i <= length(other)
+        for (x, y) in zip(piece, other[i])
+            x == y || break
+            at += ncodeunits(x)
+        end
+    end
+    at = thisind(s, min(at, lastindex(s)))
+    lo, hi = at, at
+    for _ in 1:40
+        lo > firstindex(s) || break
+        lo = prevind(s, lo)
+    end
+    for _ in 1:40
+        hi < lastindex(s) || break
+        hi = nextind(s, hi)
+    end
+    string(lo > firstindex(s) ? "…" : "", replace(s[lo:hi], r"\s+" => " "), hi < lastindex(s) ? "…" : "")
+end
+
+# Where `pieces` and `other` differ, as the text of each around that place:
+# the first place where `varies` does not say that renderings differ anyway.
+# Two that do not line up (`varies === nothing`) may differ in a value (an id)
+# well ahead of where they part, so there the first place where one of the
+# two is markup (a space, a quote, `<`, `>` or `=`) is preferred.
+function _browser_difference(pieces, other, varies)
+    n = min(length(pieces), length(other))
+    differs(k) = pieces[k] != other[k]
+    mark(p) = (c = first(p); isspace(c) || c in ('"', '\'', '<', '>', '='))
+    i = varies === nothing ?
+        something(findfirst(k -> differs(k) && (mark(pieces[k]) || mark(other[k])), 1:n),
+                  findfirst(differs, 1:n), n + 1) :
+        something(findfirst(k -> !varies[k] && differs(k), 1:n), n + 1)
+    _browser_excerpt(pieces, other, i), _browser_excerpt(other, pieces, i)
+end
+
 # Under a static export, what in the view of `operation` changes with an input
 # outside its bound values, which a static page would show stale. Each
 # continuous input it is sent is changed in turn; finite inputs are views of
 # their own.
 function _browser_check!(page::_BrowserPage, obj, route, current, target, sent, operation, finite)
-    base = _browser_render(_semantic_follow_url(target, obj, route, current, sent))
-    skeleton = _browser_skeleton(base.body)
+    render(values) = _browser_render(_semantic_follow_url(target, obj, route, values, sent))
+    skeleton = _browser_skeleton(render(current).body)
+    again() = (r = render(current); r.status == 200 && isempty(r.error) ? _browser_skeleton(r.body) : nothing)
+    control = Ref{Union{Nothing,_BrowserControl}}(nothing)
     for param in route.params
         param.source === :path && continue
         name = param.name
@@ -666,15 +773,31 @@ function _browser_check!(page::_BrowserPage, obj, route, current, target, sent, 
         for probe in _browser_probes(value)
             changed = copy(current)
             changed[name] = probe
-            rendered = _browser_render(_semantic_follow_url(target, obj, route, changed, sent))
+            rendered = render(changed)
             if rendered.status != 200 || !isempty(rendered.error)
                 push!(tried, string(repr(probe), " → HTTP ", rendered.status))
                 continue
             end
             checked = true
-            _browser_skeleton(rendered.body) == skeleton || push!(page.problems, string(
+            changed_skeleton = _browser_skeleton(rendered.body)
+            changed_skeleton == skeleton && break
+            verdict = _browser_compare!(control, skeleton, changed_skeleton, again)
+            verdict === :same && break
+            if verdict === :unlike
+                once, later = _browser_difference(control[].pieces, control[].unlike, nothing)
+                push!(page.problems, string(
+                    "the export could not check the result `", operation, "`: with the same inputs ",
+                    "its view reads `", once, "` one time and `", later, "` the next, which do not ",
+                    "line up, so neither compares with the view of a changed input; write the same ",
+                    "markup for the same inputs or leave `", operation,
+                    "` out with `semantic_app(…; select=…)`"))
+                return nothing
+            end
+            before, after = _browser_difference(control[].pieces, _browser_pieces(changed_skeleton), control[].varies)
+            push!(page.problems, string(
                 "the result `", operation, "` shows `", name, "` outside `bound`: its view ",
-                "changes when `", name, "` does, so a static page would show it stale; ",
+                "changes when `", name, "` does (`", before, "` becomes `", after, "` with `", name, "` = ",
+                repr(probe), "), so a static page would show it stale; ",
                 "show the value with `bound(...)` or leave `", operation,
                 "` out with `semantic_app(…; select=…)`"))
             break
