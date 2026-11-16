@@ -331,7 +331,8 @@ end
     # Labels come from the parameters' docstrings; few options are radios.
     @test contains(sidebar, "<legend>Prediction basis</legend>")
     @test contains(sidebar, "<input type=\"radio\" name=\"basis\" value=\"typical\" checked=\"true\">")
-    @test contains(sidebar, "<input type=\"checkbox\" name=\"male\" value=\"true\">")
+    # The sidebar applies a change at once, so its `Bool` is a switch.
+    @test contains(sidebar, "<input type=\"checkbox\" name=\"male\" role=\"switch\" value=\"true\">")
 
     # An input that does not apply starts hidden; its condition rides along
     # for the browser, or, when the browser cannot evaluate it, the control
