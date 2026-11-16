@@ -106,3 +106,56 @@ end
     kept = repr("text/html", operation_form(mounted, :result; values=(pick="b2",)))
     @test contains(kept, "value=\"b2\" checked=\"true\">")
 end
+
+@testitem "a range or default reads a typed input declared after it as the value it shows" tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    # A `:tabs` page draws its controls again when `b` changes. That request
+    # sends each input as text, and an input with a range keeps its text until
+    # its range is drawn. `a`'s range and `c`'s default read `b`, declared
+    # after both, so they read `b` once it is drawn: before, `2b` was
+    # `2 * "0.9"` and the reply was an error (snag `options-param-re-3392079f`).
+    @htmx struct LaterRange
+        "A"
+        @param a::Float64 = 1.0
+        @options(a) = number_domain(0.0, 2b; digits=3)
+        "B"
+        @param b::Float64 = 0.5
+        @options(b) = number_domain(0.0, 1.0; digits=3)
+        "Result"
+        @get result() = h.p(a + b)
+        @get index() = semantic_app(__self__; presentation=:tabs,
+                                    select=entry -> entry.name !== :index)
+    end
+    @htmx struct LaterDefault
+        "C"
+        @param c::Float64 = 2b
+        @options(c) = number_domain(0.0, 2.0; digits=3)
+        "B"
+        @param b::Float64 = 0.5
+        @options(b) = number_domain(0.0, 1.0; digits=3)
+        "Result"
+        @get result() = h.p(b + c)
+        @get index() = semantic_app(__self__; presentation=:tabs,
+                                    select=entry -> entry.name !== :index)
+    end
+    # The controls the page asks for when `b` changes, sent with `query`.
+    function redrawn(app, query)
+        route!(app; operation_policy=:blocking)
+        page = String(dispatch(:GET, "/").body)
+        m = match(r"<div[^>]*hx-get=\"([^\"]*__htmxo_controls=1[^\"]*)\"[^>]*hx-trigger=\"change\"[^>]*>(?:(?!</div>).)*?name=\"b\""s, page)
+        @test m !== nothing
+        url = replace(m.captures[1], "&amp;" => "&") * "&" * query
+        reply = String(dispatch(:GET, url; headers=["HX-Request" => "true"]).body)
+        @test !contains(reply, "aria-invalid=\"true\"><header>Error")
+        reply
+    end
+
+    # `a`'s range is drawn for the `b` the page sends.
+    @test contains(redrawn(LaterRange(), "a=1.0&b=0.9"),
+                   r"<input type=\"number\" name=\"a\" value=\"1\" min=\"0\" max=\"1\.8\"")
+    # `c = 5.0` is outside its range, so `c` takes its default for that `b`,
+    # and follows it.
+    @test contains(redrawn(LaterDefault(), "c=5.0&b=0.9"),
+                   r"<input type=\"number\" name=\"c\" value=\"1\.8\"[^>]*data-htmxo-follows=\"\"")
+end

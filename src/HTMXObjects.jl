@@ -31039,6 +31039,7 @@ end
 const _SEMANTIC_FOLLOWS = :__htmxo_follows__
 const _SEMANTIC_DOMAINS = :__htmxo_domains__
 const _SEMANTIC_CHOICE_DEFAULTS = :__htmxo_choice_defaults__
+const _SEMANTIC_PENDING = :__htmxo_pending_choices__
 const _FOLLOWS_ATTR = Symbol("data-htmxo-follows")
 
 _semantic_follows(values) = get(values, _SEMANTIC_FOLLOWS, ())
@@ -31046,8 +31047,17 @@ _semantic_follows(values) = get(values, _SEMANTIC_FOLLOWS, ())
 # An unselected control has value `nothing`, but its parameter still has its
 # declared default (e.g. an empty String when no options exist). Dependencies
 # read that value, never the control's absence of a selection.
-_semantic_dependency_value(values, name) =
+#
+# A dependency that is itself a choice not yet resolved is resolved first
+# (`_semantic_resolve_pending!`), so a domain or default that reads it reads the
+# value its control shows, whichever input was declared first: until then it
+# holds the wire string the request sent (`_semantic_lookup_value`), and
+# `@options(a) = number_domain(0.0, 2b)` with `b::Float64` declared after `a`
+# would compute `2 * "0.9"`.
+function _semantic_dependency_value(values, name)
+    _semantic_resolve_pending!(values, name)
     get(get(values, _SEMANTIC_CHOICE_DEFAULTS, (;)), name, values[name])
+end
 
 # Expressions and bare identifiers need the declaring struct's property to
 # evaluate them. Runtime descriptors mark quoted Symbol defaults as literal
@@ -31148,8 +31158,10 @@ function _semantic_choice_default(obj, param, values)
     view = _record_view(source, Dict(param.name => _NO_DEFAULT))
     closure = _dependency_closure(typeof(source), param.name)
     if closure !== nothing
+        # A snapshot of the names: reading a dependency can resolve it, which
+        # writes its value into `values`.
         overrides = Pair{Symbol,Any}[name => _semantic_dependency_value(values, name)
-            for name in keys(values) if name !== param.name && name in closure &&
+            for name in collect(keys(values)) if name !== param.name && name in closure &&
             hasproperty(source, name) && _semantic_dependency_value(values, name) !== _NO_DEFAULT]
         isempty(overrides) || (view = Base.invokelatest(DynamicObjects.remake, view; overrides...))
     end
@@ -31196,30 +31208,53 @@ end
 
 # Resolve once before controls, hidden inputs and initial result URLs consume
 # the values. A recovered computed default follows its dependencies again.
+#
+# A choice's domain or default can read another choice, declared before or
+# after it, so each is resolved when first read (`_semantic_dependency_value`)
+# or else in declaration order. The choices still waiting are kept under
+# `_SEMANTIC_PENDING` while this runs, and only then.
 function _semantic_normalize_choices!(obj, route, values)
-    follows = get!(values, _SEMANTIC_FOLLOWS, Set{Symbol}())
-    domains = Dict{Symbol,Any}()
-    values[_SEMANTIC_DOMAINS] = domains
-    defaults = Dict{Symbol,Any}()
-    values[_SEMANTIC_CHOICE_DEFAULTS] = defaults
-    for param in route.params
-        _semantic_single_choice(param) || continue
-        owner, OwnerT = _semantic_control_owner(obj, typeof(obj), param)
-        domain = _resolved_input_domain(owner, OwnerT, param, values)
-        domains[param.name] = domain
-        domain === nothing && continue
-        selected = _semantic_choice_value(domain, get(values, param.name, _NO_DEFAULT), param)
-        if selected === _NO_DEFAULT
-            default = _semantic_choice_default(obj, param, values)
-            selected = _semantic_choice_value(domain, default, param)
-            selected === _NO_DEFAULT && (defaults[param.name] = default)
-            if selected !== _NO_DEFAULT && _computed_default(param)
-                push!(follows, param.name)
-            end
-        end
-        values[param.name] = selected === _NO_DEFAULT ? nothing : selected
+    get!(values, _SEMANTIC_FOLLOWS, Set{Symbol}())
+    values[_SEMANTIC_DOMAINS] = Dict{Symbol,Any}()
+    values[_SEMANTIC_CHOICE_DEFAULTS] = Dict{Symbol,Any}()
+    choices = [param for param in route.params if _semantic_single_choice(param)]
+    values[_SEMANTIC_PENDING] = (; obj,
+        params=Dict{Symbol,Any}(param.name => param for param in choices))
+    try
+        foreach(param -> _semantic_resolve_pending!(values, param.name), choices)
+    finally
+        delete!(values, _SEMANTIC_PENDING)
     end
     values
+end
+
+# Resolve `name`'s choice if it is still waiting; a choice being resolved is no
+# longer waiting, so one that reads itself back through another reads its
+# submitted value.
+function _semantic_resolve_pending!(values, name)
+    pending = get(values, _SEMANTIC_PENDING, nothing)
+    pending === nothing && return nothing
+    param = pop!(pending.params, name, nothing)
+    param === nothing || _semantic_normalize_choice!(pending.obj, param, values)
+    nothing
+end
+
+function _semantic_normalize_choice!(obj, param, values)
+    owner, OwnerT = _semantic_control_owner(obj, typeof(obj), param)
+    domain = _resolved_input_domain(owner, OwnerT, param, values)
+    values[_SEMANTIC_DOMAINS][param.name] = domain
+    domain === nothing && return nothing
+    selected = _semantic_choice_value(domain, get(values, param.name, _NO_DEFAULT), param)
+    if selected === _NO_DEFAULT
+        default = _semantic_choice_default(obj, param, values)
+        selected = _semantic_choice_value(domain, default, param)
+        selected === _NO_DEFAULT && (values[_SEMANTIC_CHOICE_DEFAULTS][param.name] = default)
+        if selected !== _NO_DEFAULT && _computed_default(param)
+            push!(values[_SEMANTIC_FOLLOWS], param.name)
+        end
+    end
+    values[param.name] = selected === _NO_DEFAULT ? nothing : selected
+    nothing
 end
 
 function _semantic_form_values(obj, route, provided)
