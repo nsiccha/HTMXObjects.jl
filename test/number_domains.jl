@@ -154,7 +154,15 @@ end
     # The field comes before the slider: the label names the field.
     @test findfirst("type=\"number\"", attenuation)[1] < findfirst("type=\"range\"", attenuation)[1]
     density = number_label(page, "density")
-    @test contains(density, "step=\"10\"") && contains(density, "<span class=\"htmxo-number-unit\">kg/m³</span>")
+    @test contains(density, "<span class=\"htmxo-number-unit\">kg/m³</span>")
+    # The step is the slider's grid (the record), not the field's: the field
+    # takes any number in the interval, as the server does, so a number typed
+    # between grid values is valid in the browser (snag use-number-domai-f74b4f09).
+    @test contains(density, "<input type=\"number\" name=\"density\" value=\"300\" min=\"50\" max=\"600\" step=\"any\"")
+    @test contains(density, "&quot;step&quot;:10") && !contains(density, "step=\"10\"")
+    between = GET("/curve?density=273")
+    @test between.status == 200 && contains(body(between), "0.004:273.0:")
+    @test contains(number_label(body(GET("/?density=273")), "density"), "value=\"273\"")
     # Without `digits` the field stands alone and shows its value as it is.
     @test !contains(density, "htmxo-number-value") && !contains(density, "htmxo-number-shown")
     # Its help text describes the field and the slider.
@@ -190,6 +198,10 @@ end
     hand = repr("text/html", ninput((; x=2.5); domain=number_domain(1, 10; unit="s"), label="Time"))
     @test contains(hand, "name=\"x\" value=\"2.5\" min=\"1\" max=\"10\" step=\"any\"")
     @test contains(hand, "<span class=\"htmxo-number-unit\">s</span>")
+    # A whole-number input with a coarser grid: the field takes whole numbers,
+    # the slider and the arrow keys the grid.
+    whole = repr("text/html", HTMXObjects._number_control(:n, "N", number_domain(0, 100; step=5), 20; integer=true))
+    @test contains(whole, "step=\"1\" data-htmxo-number-field") && contains(whole, "&quot;step&quot;:5")
     @test_throws ArgumentError ninput((; x=2.5); domain=[1, 2])
     @test_throws ArgumentError ninput((; x=2.5); domain=number_domain(1, 10), max=5)
     # A fitted default keeps every digit in the field and shows `digits` of
@@ -252,6 +264,31 @@ end
             out.sent = String(sent === 'attenuation,density,share');
             out.labelled = String(field('attenuation').labels[0].control === field('attenuation'));
             out.valid = String(form.checkValidity());
+            // A number typed between the grid's values is valid and kept as
+            // typed (snag use-number-domai-f74b4f09: as the field's own step
+            // the grid made it `stepMismatch`, so results kept the last
+            // valid values).
+            field('density').value = '273';
+            field('density').dispatchEvent(new Event('input', {bubbles: true}));
+            out.between = String(form.checkValidity() && field('density').value === '273' &&
+              slider('density').value === String(Math.round((273 - 50) / 550 * 500)));
+            // The arrow keys step along the grid: to the next grid value above
+            // or below, announced as `input` then `change`; none past an end.
+            function press(n, key) {
+              seen.length = 0;
+              const sent = field(n).dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true, cancelable: true}));
+              return [field(n).value, sent, seen.join()].join('|');
+            }
+            out.arrows = String(press('density', 'ArrowUp') === '280|false|input:density,change:density' &&
+              slider('density').value === String(Math.round((280 - 50) / 550 * 500)) &&
+              press('density', 'ArrowUp') === '290|false|input:density,change:density');
+            field('density').value = '273';
+            out.down = String(press('density', 'ArrowDown') === '270|false|input:density,change:density');
+            field('density').value = '600';
+            out.end = String(press('density', 'ArrowUp') === '600|false|' &&
+              field('density').getAttribute('step') === 'any');
+            // A domain without a step leaves the keys to the browser.
+            out.free = String(press('attenuation', 'ArrowUp') === '0.0123|true|');
           } catch (error) { out.error = String(error); }
           out.done = '1';
         });
@@ -268,7 +305,8 @@ end
             dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=3000 --dump-dom --user-data-dir=$(joinpath(directory, "profile")) file://$fixture`)
         end
         @test contains(dom, "data-done=\"1\"") && !contains(dom, "data-error=")
-        for marker in ("lower", "upper", "middle", "events", "step", "digits", "typed", "sent", "labelled", "valid")
+        for marker in ("lower", "upper", "middle", "events", "step", "digits", "typed", "sent", "labelled", "valid",
+                       "between", "arrows", "down", "end", "free")
             @test contains(dom, "data-$marker=\"true\"")
         end
     end
@@ -484,8 +522,9 @@ end
           const slider = n => field(n).closest('[data-htmxo-number]').querySelector('input[type="range"]');
           try {
             if (sessionStorage.getItem('reloaded')) {
-              await until(() => shown() === '0.015:300.0:0.5:3:1.0', 'result after reload');
+              await until(() => shown() === '0.015:273.0:0.5:3:1.0', 'result after reload');
               check(field('attenuation').value === '0.015' && slider('attenuation').value === '500', 'controls after reload');
+              check(field('density').value === '273', 'typed density after reload');
               await fetch('/complete?status=passed'); return;
             }
             await until(() => shown() === '0.004:300.0:0.5:3:1.0', 'initial result');
@@ -495,6 +534,14 @@ end
             s.dispatchEvent(new Event('change', {bubbles: true}));
             await until(() => shown() === '0.015:300.0:0.5:3:1.0', 'result follows the slider');
             await until(() => new URL(location.href).searchParams.get('attenuation') === '0.015', 'address keeps the value');
+            // A density typed between the slider's grid values (`step=10`)
+            // refreshes the result and the address with the typed number
+            // (snag use-number-domai-f74b4f09).
+            field('density').value = '273';
+            field('density').dispatchEvent(new Event('input', {bubbles: true}));
+            field('density').dispatchEvent(new Event('change', {bubbles: true}));
+            await until(() => shown() === '0.015:273.0:0.5:3:1.0', 'result follows a number between grid values');
+            await until(() => new URL(location.href).searchParams.get('density') === '273', 'address keeps the typed number');
             sessionStorage.setItem('reloaded', '1'); location.reload();
           } catch (error) {
             await fetch('/complete?status=' + encodeURIComponent(String(error)));

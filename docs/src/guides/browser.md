@@ -48,7 +48,11 @@ println(String(response.body))
   Julia types in order. The page passes each by name: a `@param` from its
   control (numbers, `Bool`, text and vectors of them), any other from the
   property of that name, which must not read an input (`grid` above); its value
-  goes into the page, non-finite numbers and `-0.0` included. A named tuple comes back as an object of named outputs.
+  goes into the page, non-finite numbers and `-0.0` included. Such data is a
+  number, a `Bool`, text, or a vector or matrix of them. A matrix arrives as
+  the array of its rows (`m[i][j]` is Julia's `m[i+1, j+1]`), as
+  `ReactiveKernels.js_source` modules take it; one without rows is an empty
+  array whose `cols` is its column count. A named tuple comes back as an object of named outputs.
 - **`bound`** marks where a view shows a browser value: the property, one of its
   outputs (`bound(fit.total)`), an element of one (`bound(fit.y[2])`, the index
   an integer literal) or a `@param` (`bound(a)`). The server writes a number as

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.136
+## 0.1.139
 
 - `pdf_report` sizes a table's columns by their content, as a browser sizes an
   HTML table: each column is at least as wide as its longest word, and the
@@ -20,6 +20,62 @@
   `export-the-caesi-d781d110`, which also covers todo `0cjfnl2`). A
   600-row × 7-column table compiles in about 4.2 s and 990 MB instead of
   2.3 s and 610 MB (and on 47 pages instead of 124).
+
+## 0.1.138
+
+- A `@browser` module's data argument may be a matrix. The page passes a
+  `Matrix` (any `AbstractMatrix`) property as the array of its rows, `m[i][j]`
+  holding Julia's `m[i+1, j+1]`, which is the shape `ReactiveKernels.js_source`
+  modules take (RK 0.1.264, RK decision `1r7ufgm`); one without rows arrives
+  as an empty array whose `cols` is its column count
+  (`Object.assign([], { cols: 3 })` for `zeros(0, 3)`), and `[]` is 0×0.
+  Entries travel as vector entries do: `Inf`, `NaN` and `-0.0` intact, `Bool`s
+  as booleans. Such a page answered HTTP 500 before, an `ArgumentError` that
+  the argument is a `Matrix{Float64}` (snag `browser-module-m-1d4c9b53`).
+  Arrays of three or more dimensions stay refused.
+
+## 0.1.137
+
+- A number field drawn from a `number_domain` with a `step` takes any number
+  in the interval, as the server does: the step is the grid of the slider and
+  of the field's arrow keys, no longer the field's own `step` attribute.
+  Before, a number typed between grid values (273 on `50 .. 400` with
+  `step=10`, 12.34 on `5 .. 20` with `step=0.5`) was invalid in the browser
+  (`stepMismatch`), so native submission refused it and a result that
+  follows its inputs, `@browser` ones included, silently kept the last
+  valid values. The field's `step` is now `any`, or `1` for a whole-number
+  input; `number_control_script` keeps the arrow keys on the grid (273 steps
+  up to 280 and down to 270) and announces each step as `input` then
+  `change`, as the browser does. The slider, `number_record` and
+  `data-htmxo-number` are unchanged (snag `use-number-domai-f74b4f09`).
+
+## 0.1.136
+
+- A `semantic_app(…; presentation=:tabs)` page's Markdown (`?plain`,
+  `Accept: text/markdown`, `to_markdown_string`, and a report:
+  `dispatch(…; report=true)`, `pdf_report`) writes each tab's **result**: its
+  label, then what the result's own address answers as Markdown at the page's
+  inputs (the report view in a report), as `/result` read alone answers it.
+  A result computed in the browser (`@browser`) is drawn by the server, so a
+  PDF gets its figures as pictures and its facts and tables as text, without
+  its buttons. Before, such a tab wrote the view's HTML as one line of raw
+  HTML, which a PDF drops, and a result the server computes wrote nothing
+  but its label (snag semantic-app-tab-91e9c1d6). A result takes no number in
+  a `numbered` document, as on the page. The HTML page is unchanged and asks
+  no result it does not show; a Markdown read asks each tab's result once.
+- Each tab's result there starts with a line naming the inputs it reads and
+  their values as their controls show them: "Shown at: Slope (per day) 0.20;
+  Intercept 80 units" (a number range's `digits` and `unit`, an option's
+  label, yes/no for a checkbox, each switched-on record of a `Records` list).
+  New `ErrorTexts` texts `shown_at` ("Shown at", German "Dargestellt bei"),
+  `shown_yes` and `shown_no` ("yes"/"no", "ja"/"nein").
+- `semantic_app(…; presentation=:tabs, report_states=["Steep" => (a = 0.5,),
+  (b = 20.0,)])`: in a report only, each tab is written again for each
+  declared state that names an input it reads, with that state's values in
+  place of the page's, its own "Shown at" line and, before it, its caption
+  when it has one. A state names inputs of the page (else an
+  `ArgumentError`), and a value an input refuses makes the report throw.
+  The page and an ordinary Markdown read are unchanged.
 
 ## 0.1.135
 
