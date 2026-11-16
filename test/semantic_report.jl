@@ -1,12 +1,12 @@
 using TestItemRunner
 
 # A `semantic_app(…; presentation=:tabs)` page's Markdown and report: each tab
-# writes its result as the result's address answers it, after a line naming
+# writes its result as the result's address answers it, after a statement naming
 # the inputs it is shown at, and a report writes it again at each declared
 # state (snag semantic-app-tab-91e9c1d6).
 @testmodule ReportFixtures begin
     using HTMXObjects
-    export Picture, PictureDe, Cohorts, NumberedPicture, TWICE_CALLS, markdown, html
+    export Picture, PictureDe, Cohorts, Snow, NumberedPicture, TWICE_CALLS, markdown, html, shown_at
 
     const TOY_JS = """
     export class JuliaError extends Error {
@@ -77,6 +77,22 @@ using TestItemRunner
         @get doses() = h.p("doses ", join([string(s.dose) for s in scenarios], ", "))
     end
 
+    # Labels that are phrases with a comma, and one that ends in its own colon
+    # (snag shown-at-line-ru-25ece17f).
+    @htmx struct Snow
+        "Attenuation per mm of snow water, for radiation crossing straight up"
+        @param k::Float64 = 0.003
+        @options(k) = number_domain(0.001, 0.01; digits = 4)
+        "Density of the snow, to read water as depth"
+        @param rho::Float64 = 250.0
+        @options(rho) = number_domain(50, 500; step = 10, unit = "kg/m³")
+        "Depth:"
+        @param depth::Float64 = 0.5
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Shielding"
+        @get shielding() = h.p("shielded by ", string(round(Int, log(2) / k * rho / 250)), " mm at ", string(depth))
+    end
+
     # A numbered report around a tab the browser computes: a cited figure and
     # table in the tab, a finite input the browser switches views for, a
     # declared state, and a figure after the app (snag semantic-app-tab-c64170a6).
@@ -111,6 +127,9 @@ using TestItemRunner
     markdown(url; kwargs...) = String(HTMXObjects._response_bytes(
         dispatch(:GET, url; headers = ["Accept" => "text/markdown"], kwargs...)))
     html(url) = String(HTMXObjects._response_bytes(dispatch(:GET, url; headers = ["HX-Request" => "true"])))
+    # The Markdown of a "Shown at" statement: its heading word, then one
+    # `Label: value` line for each input, each line ending in Markdown's line break.
+    shown_at(lines...; head = "Shown at") = string(head, ":", join(("\\\n" * l for l in lines)))
 end
 
 @testitem "a tabs page's Markdown writes each tab's result as its address answers it" setup=[ReportFixtures] tags=[:unit, :semantic] begin
@@ -147,22 +166,22 @@ end
     @test TWICE_CALLS[] == before + 1
 end
 
-@testitem "the Shown at line names the inputs a tab's result reads, as its controls show them" setup=[ReportFixtures] tags=[:unit, :semantic] begin
+@testitem "the Shown at statement names the inputs a tab's result reads, one per line, as its controls show them" setup=[ReportFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects
     route!(Picture(); operation_policy = :blocking)
     md = markdown("/")
     # Digits and unit of a number range, an option's label, a checkbox's value;
     # only the inputs the result reads (the result reads neither `mode` nor `doubled`).
-    @test occursin("Shown at: Slope (per day) 0.20; Intercept 80 units\n\nTotal", md)
-    @test occursin("Shown at: Slope (per day) 0.20; Intercept 80 units; Mode A line; Doubled no\n\ntwice 160.4", md)
+    @test occursin(shown_at("Slope (per day): 0.20", "Intercept: 80 units") * "\n\nTotal", md)
+    @test occursin(shown_at("Slope (per day): 0.20", "Intercept: 80 units", "Mode: A line", "Doubled: no") * "\n\ntwice 160.4", md)
     # The page's address sets the inputs, and the line follows them.
     md = markdown("/?a=0.5&mode=total&doubled=true")
-    @test occursin("Shown at: Slope (per day) 0.50; Intercept 80 units\n\nTotal\n\n80.50", md)
-    @test occursin("Shown at: Slope (per day) 0.50; Intercept 80 units; Mode The total; Doubled yes\n\ntwice 322.0 in mode total", md)
+    @test occursin(shown_at("Slope (per day): 0.50", "Intercept: 80 units") * "\n\nTotal\n\n80.50", md)
+    @test occursin(shown_at("Slope (per day): 0.50", "Intercept: 80 units", "Mode: The total", "Doubled: yes") * "\n\ntwice 322.0 in mode total", md)
     # A German page's words.
     route!(PictureDe(); operation_policy = :blocking)
     md = markdown("/")
-    @test occursin("Dargestellt bei: Steigung 0.20; Verdoppelt ja\n\nWert 0.4", md)
+    @test occursin(shown_at("Steigung: 0.20", "Verdoppelt: ja"; head = "Dargestellt bei") * "\n\nWert 0.4", md)
     @test error_texts().shown_at == "Shown at" && error_texts(:de).shown_at == "Dargestellt bei"
     @test (error_texts().shown_yes, error_texts().shown_no) == ("yes", "no")
     @test (error_texts(:de).shown_yes, error_texts(:de).shown_no) == ("ja", "nein")
@@ -170,21 +189,29 @@ end
     route!(Cohorts(); operation_policy = :blocking)
     md = markdown("/")
     @test occursin("doses 5.0", md)
-    @test occursin(r"Shown at: Scenarios Scenario[^\n]*\(Dose \(mg\) 5\)", md)
+    @test occursin(r"Shown at:\\\nScenarios: Scenario[^\n]*\(Dose \(mg\): 5\)", md)
+    # A label that holds a comma stays apart from its value, each on its own
+    # line; a label that ends in a colon keeps its own.
+    route!(Snow(); operation_policy = :blocking)
+    md = markdown("/")
+    @test occursin(shown_at("Attenuation per mm of snow water, for radiation crossing straight up: 0.0030",
+                            "Density of the snow, to read water as depth: 250 kg/m³",
+                            "Depth: 0.5") * "\n\nshielded by 231 mm at 0.5", md)
+    @test !occursin("Depth::", md)
 end
 
 @testitem "report_states writes a tab's result again at each declared state, in a report only" setup=[ReportFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects
     route!(Picture(); operation_policy = :blocking)
     report = markdown("/"; report = true)
-    # The page's inputs first, then each state with its caption and its own line.
-    steep = findfirst("**Steep**\n\nShown at: Slope (per day) 0.50; Intercept 80 units\n\nTotal\n\n80.50", report)
+    # The page's inputs first, then each state with its caption and its own statement.
+    steep = findfirst("**Steep**\n\n" * shown_at("Slope (per day): 0.50", "Intercept: 80 units") * "\n\nTotal\n\n80.50", report)
     @test steep !== nothing
-    @test findfirst("Shown at: Slope (per day) 0.20; Intercept 80 units\n\nTotal\n\n80.20", report)[1] < steep[1]
-    @test occursin("Shown at: Slope (per day) 0.20; Intercept 20 units\n\nTotal\n\n20.20", report)
+    @test findfirst(shown_at("Slope (per day): 0.20", "Intercept: 80 units") * "\n\nTotal\n\n80.20", report)[1] < steep[1]
+    @test occursin(shown_at("Slope (per day): 0.20", "Intercept: 20 units") * "\n\nTotal\n\n20.20", report)
     # Each tab whose inputs a state names writes it, with the state's values only for what it names.
-    @test occursin("**Steep**\n\nShown at: Slope (per day) 0.50; Intercept 80 units; Mode A line; Doubled no\n\ntwice 161.0", report)
-    @test occursin("Shown at: Slope (per day) 0.20; Intercept 20 units; Mode A line; Doubled yes\n\ntwice 80.8", report)
+    @test occursin("**Steep**\n\n" * shown_at("Slope (per day): 0.50", "Intercept: 80 units", "Mode: A line", "Doubled: no") * "\n\ntwice 161.0", report)
+    @test occursin(shown_at("Slope (per day): 0.20", "Intercept: 20 units", "Mode: A line", "Doubled: yes") * "\n\ntwice 80.8", report)
     @test count("Shown at:", report) == 6
     # An ordinary read and the page show the page's inputs only.
     plain = markdown("/")
