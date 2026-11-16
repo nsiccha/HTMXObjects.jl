@@ -61,9 +61,16 @@ println(String(response.body))
   significant digits, `percent=true` the share 0.45 as `45%`, and
   `texts=table_texts(:de)` German marks (`0,120`, `45 %`). Without them a
   number keeps its digits (`4`, `3.81·10⁻⁵`). The value itself is not rounded.
+- **Days and missing values.** A module returns numbers, so it gives a day as
+  milliseconds since 1970 (UTC), the unit of JavaScript dates and of a plot's
+  temporal axis. `bound(fit.peak; date = :long)` writes it as `format_date`
+  does, `16 November 2019` (`:short` `16 Nov 2019`, `:month` `Nov 2019`, in
+  the language of `texts`), and `ColumnSpec("Day"; date = :short)` a table
+  column of them, sorted by the number and exported to CSV as `2019-11-16`.
+  A `NaN` is no value: `–`, an empty cell in a table.
 - **A table of outputs:** `bound(fit; columns=(:x, :y))`. Given to
   `render_table` (`points` above), it is written again after each change, each
-  column as its `ColumnSpec(label; digits, sigdigits, percent)` says, sorted
+  column as its `ColumnSpec(label; digits, sigdigits, percent, date)` says, sorted
   and exported to CSV by the unrounded values, with the reader's sort kept and
   rows hover-linked by `link_key = :x`. For a plot's `data(...)`, give the
   element that draws it `bound_columns_attrs(...)`, and the browser hands it the
