@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.147
+## 0.1.149
 
 - A page that shows several `semantic_app(…; presentation=:tabs)` apps keeps
   each app's inputs and open tab in the page address under the app's address
@@ -26,6 +26,36 @@
   that shows apps of more than one name it keeps its tab as `?first.tab=`,
   else as `?tab=`. A custom `semantic_app` `layout(parts)` passes
   `url_scope=parts.url_scope`.
+
+## 0.1.148
+
+- A `semantic_app(…; presentation=:tabs)` page with a sidebar is as tall as
+  its inputs and results. Its layout took the window's height as its least
+  height, which suits `app_layout` as a page's shell but not a part of a page:
+  shown between two paragraphs of an article, the surface stayed one window
+  tall and left the window's height less its content empty before the next
+  paragraph (462 px in a 700 px window, 962 px in a 1200 px one), and a page
+  holding only the surface scrolled although its content fitted (snag
+  `tabs-surface-wit-b2cf6818`). An `app_layout` that is the page's shell still
+  fills the window, its sidebar's divider reaching the window's bottom.
+
+## 0.1.147
+
+- A number input with a range (`number_domain`, `ninput(…; domain)`) stays
+  inside a column narrower than its row. The slider (at least 5rem), the 7rem
+  field and the unit kept one row that never wrapped, about 230 px wide, so in
+  the 12rem sidebar of a `semantic_app(…; presentation=:tabs, shared=…)` page
+  (176 px inside its padding) the unit was drawn up to 41 px into the result
+  column, over the result's own text, and even a field without a unit crossed
+  the divider (snag `number-control-u-68445236`). The row now wraps: in such a
+  column the slider takes a line of its own, as wide as the column, above the
+  field and its unit; a unit too long to fit beside its field goes under it.
+  A column wide enough keeps the one row as before. The field and its unit
+  are one `span.htmxo-number-entry` inside `.htmxo-number`, the slider after
+  it; the field still comes first, so the label names it. An app stylesheet
+  that selected `.htmxo-number > input[type="number"]` or
+  `.htmxo-number > .htmxo-number-unit` selects them under
+  `.htmxo-number-entry` now.
 
 ## 0.1.146
 

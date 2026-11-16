@@ -1271,3 +1271,88 @@ end
         end
     end
 end
+
+@testitem "a tabs page is as tall as its inputs and results, inside a longer page or alone" setup=[ChromeDump] tags=[:browser, :semantic] begin
+    # A `presentation=:tabs` surface is one part of a page: between paragraphs
+    # of an article, or under the page's title. It took the window's height as
+    # its minimum, leaving the window's height less its content empty before
+    # the next paragraph, and a page alone scrolled although its content fitted
+    # (snag tabs-surface-wit-b2cf6818). An `app_layout` that is the page's
+    # shell still fills the window, its sidebar's divider to the bottom.
+    using HTMXObjects
+    @htmx struct EmbeddedDose
+        "Dose"
+        @param dose::Float64 = 200.0
+        @options(dose) = number_domain(50, 400; step=10, digits=0)
+        "Clearance"
+        @param clearance::Float64 = 10.0
+        @options(clearance) = number_domain(5, 20; step=0.5, digits=1)
+        "Exposure"
+        @get exposure() = h.p("Exposure ", string(dose / clearance), ".")
+    end
+    driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const out = document.body.dataset;
+            try {
+                const layout = document.querySelector('.htmxo-app-layout'), box = layout.getBoundingClientRect();
+                // Where the sidebar's and the main column's content ends.
+                const end = Math.max(...Array.from(layout.children).flatMap(column => Array.from(column.children))
+                    .map(part => part.getBoundingClientRect().bottom));
+                // No more below its content than a column's padding and its last
+                // element's margin (1rem each): not the window less the content.
+                out.fits = String(box.bottom - end <= 48);
+                const after = document.getElementById('after');
+                if (after) out.follows = String(after.getBoundingClientRect().top - end <= 64);
+                out.scrolls = String(document.documentElement.scrollHeight > innerHeight);
+                out.fills = String(Math.abs(box.height - innerHeight) <= 1);
+                out.measured = [Math.round(box.height), Math.round(end - box.top), innerHeight].join(' ');
+            } catch (error) {
+                out.error = String(error);
+            }
+            out.done = '1';
+        });
+        """))
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        surface(; kws...) = semantic_app(EmbeddedDose(); presentation=:tabs,
+            shared=[:dose, :clearance], url_state=false, kws...)
+        pages = [
+            "embedded" => h.main(; class="container")(h.article(
+                h.p("Text before the picture."), surface(), h.p("Text after the picture."; id="after"))),
+            "alone" => h.main(; class="container")(surface(; title="A dose picture")),
+            "shell" => app_layout(nav_sidebar(["Table" => "/", "Gallery" => "/gallery"]),
+                h.p("One paragraph.")),
+        ]
+        for (name, content) in pages, width in (1400, 600)
+            dom = mktempdir() do directory
+                copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+                fixture = joinpath(directory, "page.html")
+                write(fixture, repr("text/html", htmx(content; assets="vendor",
+                    pico_version=HTMXObjects._PICO_VERSION, htmx_version=nothing,
+                    hyperscript_version=nothing, preload_version=nothing, extra_head=(driver,))))
+                profile = joinpath(directory, "profile")
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=$width,1000 --virtual-time-budget=4000 --dump-dom --user-data-dir=$profile file://$fixture`)
+            end
+            # The driver's marks on <body>, so a failure names them, not the page.
+            body = match(r"<body([^>]*)>", dom)
+            marks = Dict(m[1] => m[2] for m in eachmatch(r"data-(\w+)=\"([^\"]*)\"",
+                isnothing(body) ? "" : body[1]))
+            # layout height, where its content ends, window height
+            @info "tabs page height" name width measured = get(marks, "measured", nothing)
+            @test get(marks, "done", nothing) == "1"
+            @test get(marks, "error", nothing) === nothing
+            if name == "shell"
+                @test (name, width, get(marks, "fills", nothing)) == (name, width, "true")
+                @test (name, width, get(marks, "scrolls", nothing)) == (name, width, "false")
+            else
+                @test (name, width, get(marks, "fits", nothing)) == (name, width, "true")
+                @test (name, width, get(marks, "fills", nothing)) == (name, width, "false")
+                name == "embedded" && @test (name, width, get(marks, "follows", nothing)) == (name, width, "true")
+                name == "alone" && @test (name, width, get(marks, "scrolls", nothing)) == (name, width, "false")
+            end
+        end
+    end
+end

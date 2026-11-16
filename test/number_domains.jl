@@ -155,6 +155,12 @@ end
     @test findfirst("type=\"number\"", attenuation)[1] < findfirst("type=\"range\"", attenuation)[1]
     density = number_label(page, "density")
     @test contains(density, "<span class=\"htmxo-number-unit\">kg/m³</span>")
+    # The field and its unit are one entry, the slider after it: a column too
+    # narrow for the row wraps the slider, never the unit alone (snag
+    # number-control-u-68445236).
+    @test contains(density, "<span class=\"htmxo-number\"><span class=\"htmxo-number-entry\"><input type=\"number\" name=\"density\"")
+    @test contains(density, "kg/m³</span></span><input type=\"range\"")
+    @test contains(attenuation, "<span class=\"htmxo-number-entry\"><span class=\"htmxo-number-value\"")
     # The step is the slider's grid (the record), not the field's: the field
     # takes any number in the interval, as the server does, so a number typed
     # between grid values is valid in the browser (snag use-number-domai-f74b4f09).
@@ -398,6 +404,112 @@ end
         for marker in ("marked", "initial", "over", "aligned", "untouched", "slider", "lower", "typed", "focused",
                        "blurred", "empty", "changed", "restored", "unmarked", "valid")
             @test contains(dom, "data-$marker=\"true\"")
+        end
+    end
+end
+
+@testitem "a number control stays inside a column narrower than its row" setup=[ChromeDump] tags=[:unit, :browser] begin
+    # Snag number-control-u-68445236 (Portfolio's dose picture): in the 12rem
+    # sidebar of a :tabs page the slider (at least 5rem), the 7rem field and
+    # the unit stayed on one row 230 px wide in a 176 px column, so the unit
+    # was drawn up to 41 px into the result column and the field 8 px past
+    # the divider.
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # One line per control: its column, its index there, whether every
+        # part lies inside the column's content box, whether the slider has a
+        # line of its own, whether the unit shares the field's line, and
+        # whether the whole control is one line.
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', function() {
+            const out = [];
+            const overlap = (a, b) => a.top < b.bottom && a.bottom > b.top;
+            for (const column of document.querySelectorAll('aside, [data-probe]')) {
+                const name = column.dataset.probe || 'sidebar', cs = getComputedStyle(column);
+                const c = column.getBoundingClientRect();
+                const left = c.left + parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth);
+                const right = c.right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth);
+                column.querySelectorAll('.htmxo-number').forEach((row, i) => {
+                    const field = row.querySelector('input[data-htmxo-number-field]');
+                    const parts = [field.closest('.htmxo-number-value') || field,
+                        row.querySelector('input[data-htmxo-number-slider]'),
+                        row.querySelector('.htmxo-number-unit')].map(el => el && el.getBoundingClientRect());
+                    const [f, s, u] = parts;
+                    const inside = parts.every(r => !r || (r.left >= left - 0.5 && r.right <= right + 0.5));
+                    out.push(name + ' ' + i + ': ' + [inside, s ? !overlap(s, f) : '-', u ? overlap(u, f) : '-',
+                        parts.every(r => !r || overlap(r, f))].join(' '));
+                });
+            }
+            const result = document.createElement('pre'); result.id = 'checks';
+            result.textContent = out.join('\n');
+            document.body.appendChild(result);
+        });
+        """))
+        controls() = (
+            ninput((; dose=200.0); domain=number_domain(50, 400; step=10, digits=0, unit="mg"), label="Oral dose"),
+            ninput((; clearance=10.0); domain=number_domain(5, 20; step=0.5, digits=1, unit="L/h"), label="Typical clearance"),
+            ninput((; noise=0.2); domain=number_domain(0.05, 0.5; step=0.05, digits=2), label="Log-scale measurement SD"),
+            ninput((; per_kg=2.0); domain=number_domain(1, 10; unit="mg·h/L per kg body weight"), label="Exposure per kilogram"),
+            ninput((; depth=1.0); domain=number_domain(0, Inf; unit="mm"), label="Sampling depth"))
+        content = h.div(
+            app_layout(h.aside(controls()...), h.p("Result")),
+            h.div(; class="probe-narrow", data_probe="narrow")(controls()...),
+            h.div(; class="probe-wide", data_probe="wide")(controls()...))
+        app_css = h.style(Raw(".probe-narrow { width: 8rem; } .probe-wide { width: 36rem; }"))
+        page = repr("text/html", htmx(content, driver; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION,
+            htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false,
+            extra_head=(app_css,)))
+        # The control is the page whose rows neither wrap nor shrink, as
+        # before the fix: the probe must see the overflow there, or it cannot
+        # tell the two apart.
+        rules = r"\.htmxo-number \{.*?\.htmxo-number-entry > \.htmxo-number-value \{[^}]*\}"s
+        @test occursin(rules, page)
+        control = replace(page, rules => r -> replace(r, "flex-wrap: wrap; " => "", "min-width: 0; " => ""))
+        @test control != page
+        pages = Dict("/" => page, "/control" => control,
+                     "/vendor/pico.min.css" => read(HTMXObjects._vendor_file(:pico), String))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            haskey(pages, path) || return HTTP.Response(404)
+            HTTP.Response(200, ["Content-Type" => endswith(path, ".css") ? "text/css" : "text/html"], pages[path])
+        end
+        measure(path) = mktempdir() do profile
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --hide-scrollbars --window-size=1600,900 --virtual-time-budget=5000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port$path`)
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            isnothing(checks) ? Dict{String,Vector{String}}() :
+                Dict(String(k) => split(v) for (k, v) in (split(l, ": "; limit=2) for l in split(checks[1], '\n')))
+        end
+        try
+            m = measure("/")
+            # "<inside> <slider on its own line> <unit beside the field> <one line>"
+            @test length(m) == 15
+            for column in ("sidebar", "narrow", "wide"), i in 0:4
+                @test m["$column $i"][1] == "true"
+            end
+            # In the sidebar the slider spans the column above the field, and a
+            # short unit stays beside its field; a long one goes under it.
+            for i in 0:3
+                @test m["sidebar $i"][2] == "true"
+            end
+            @test m["sidebar 0"][3] == "true" && m["sidebar 1"][3] == "true"
+            @test m["sidebar 3"][3] == "false"
+            # A control without a slider keeps its unit beside the field.
+            @test m["sidebar 4"][2:4] == ["-", "true", "true"]
+            # A column wide enough keeps every control on one line.
+            for i in 0:4
+                @test m["wide $i"][4] == "true"
+            end
+            # Without the wrap, the sidebar's rows pass the column.
+            c = measure("/control")
+            @test length(c) == 15
+            @test count(i -> c["sidebar $i"][1] == "false", 0:4) >= 4
+        finally
+            close(server)
         end
     end
 end
