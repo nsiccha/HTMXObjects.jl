@@ -217,14 +217,11 @@ println(number_record(number_domain(0.001, 0.015; log=true, digits=4)))
 ```
 
 The generated form draws each as a slider with a number field beside it,
-followed by the unit. In a column too narrow for that row, such as the sidebar
-of a `presentation=:tabs` page, the slider takes a line of its own above the
-field and its unit, and a unit too long to fit beside the field goes under it,
-so no part of the control leaves its column. A `log` domain spaces the slider
-evenly in ratio, for a positive quantity spanning orders of magnitude. A
-slider value, like the field's arrow keys, lies on the `step` grid counted
-from the lower bound; without a step it keeps three significant digits. A
-typed number need only lie in the interval, and moves the slider.
+followed by the unit. A `log` domain spaces the slider evenly in ratio, for a
+positive quantity spanning orders of magnitude. A slider value, like the
+field's arrow keys, lies on the `step` grid counted from the lower bound;
+without a step it keeps three significant digits. A typed number need only
+lie in the interval, and moves the slider.
 
 `digits` sets how many decimals the field shows while not being edited, as
 `format_number(x; digits)` writes them: a fitted 0.003035586062774531 shows as
