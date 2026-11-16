@@ -331,7 +331,8 @@ end
     # Labels come from the parameters' docstrings; few options are radios.
     @test contains(sidebar, "<legend>Prediction basis</legend>")
     @test contains(sidebar, "<input type=\"radio\" name=\"basis\" value=\"typical\" checked=\"true\">")
-    @test contains(sidebar, "<input type=\"checkbox\" name=\"male\" value=\"true\">")
+    # The sidebar applies a change at once, so its `Bool` is a switch.
+    @test contains(sidebar, "<input type=\"checkbox\" name=\"male\" role=\"switch\" value=\"true\">")
 
     # An input that does not apply starts hidden; its condition rides along
     # for the browser, or, when the browser cannot evaluate it, the control
@@ -1353,6 +1354,220 @@ end
                 name == "embedded" && @test (name, width, get(marks, "follows", nothing)) == (name, width, "true")
                 name == "alone" && @test (name, width, get(marks, "scrolls", nothing)) == (name, width, "false")
             end
+        end
+    end
+end
+
+@testitem "a tabs page bounds each result: result_height" tags=[:unit, :semantic] begin
+    # A result taller than its bound scrolls inside itself instead of
+    # lengthening the page: a 201-row table in a picture embedded in an
+    # article made the page 15,072 px tall (snag keep-the-caesium-ac035f3b).
+    using HTMXObjects
+    @htmx struct BoundedRows
+        "Rows"
+        @param rows::Int = 3
+        "Table"
+        @get numbers() = render_table((; row = collect(1:rows)))
+        "Note"
+        @post note(; text::String = "") = h.p(text)
+    end
+    page(; kws...) = repr("text/html", semantic_app(BoundedRows(); presentation=:tabs,
+        url_state=false, kws...))
+    regions(html) = [m.match for m in eachmatch(
+        r"<div [^>]*class=\"htmxo-semantic-operation-result\"[^>]*>", html)]
+    # Every result carries its bound: the following read and the mutation's.
+    window = regions(page())
+    @test length(window) == 2
+    @test all(r -> contains(r, "data-htmxo-result-height=\"window\"") && !contains(r, "style="), window)
+    rem = regions(page(; result_height="32rem"))
+    @test length(rem) == 2
+    @test all(r -> contains(r, "data-htmxo-result-height=\"32rem\"") &&
+                   contains(r, "style=\"--htmxo-result-height: 32rem\""), rem)
+    @test contains(page(; result_height=" min(32rem, 80vh) "), "style=\"--htmxo-result-height: min(32rem, 80vh)\"")
+    @test contains(page(; result_height="calc(100dvh - 4rem)"), "data-htmxo-result-height=\"calc(100dvh - 4rem)\"")
+    # `nothing` keeps the results growing with the page, as before.
+    unbounded = regions(page(; result_height=nothing))
+    @test length(unbounded) == 2
+    @test !any(r -> contains(r, "data-htmxo-result-height"), unbounded)
+    # The length goes into a `style` attribute: only a length passes.
+    for bad in ("32rem; color: red", "", "red", "32rem\" onclick=\"x", "url(x)", 512, :tall)
+        @test_throws ArgumentError page(; result_height=bad)
+    end
+    @test_throws "CSS length such as \"32rem\"" page(; result_height="red")
+    # A :tabs option, like the sidebar's.
+    @test_throws "bounds the results of presentation=:tabs" repr("text/html",
+        semantic_app(BoundedRows(); result_height="32rem"))
+    @test contains(repr("text/html", semantic_app(BoundedRows())), "htmxo-semantic-operation-result")
+    # The bound is CSS; the page runtime keeps a result that fits in the page.
+    css = repr("text/html", HTMXObjects.htmxo_utility_styles())
+    @test contains(css, "[data-htmxo-result-height] { --htmxo-frame-height: var(--htmxo-result-height, calc(100dvh - var(--htmxo-sticky-top, 0px))); max-height: var(--htmxo-frame-height); overflow: auto; }")
+    @test contains(css, "[data-htmxo-result-height][data-htmxo-result-fits] { overflow: visible; }")
+    @test contains(css, "[data-htmxo-result-height]:not([data-htmxo-result-fits]) > * { --htmxo-sticky-top: 0px; }")
+    @test contains(css, ".table-wrap[data-htmxo-width=\"wide\"] { overflow: auto; max-height: calc(var(--htmxo-frame-height, 100vh - var(--htmxo-sticky-top, 0px)) - var(--htmxo-table-toolbar-h, 0px));")
+    script = repr("text/html", semantic_follow_script())
+    @test contains(script, "window.__htmxoResultBounds")
+    @test contains(script, "data-htmxo-result-fits")
+end
+
+@testitem "a tabs page's long result scrolls inside its bound in a browser" tags=[:browser, :semantic] begin
+    # The caesium pictures' Table tab: three tables (201, 1 and 151 rows) of
+    # one result beside a sidebar, which the original picture held in one
+    # 32rem box with each header at its top (snag keep-the-caesium-ac035f3b).
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets, JSON
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        @htmx struct LongPicture
+            "Rows"
+            @param rows::Int = 201
+            "Table"
+            @get numbers() = h.div(
+                render_table((; year = collect(1:rows), value = collect(0.5:1:rows)); id="trend"),
+                render_table((; chosen = [1.0]); id="chosen"),
+                render_table((; grid = collect(1:min(rows, 150)),
+                    density = collect(0.25:1:min(rows, 150))); id="prior"))
+            "Picture"
+            @get picture() = h.p("Rows: ", string(rows); class="short")
+            @get index() = semantic_app(__self__; presentation=:tabs, url_state=false,
+                select=entry -> entry.name in (:numbers, :picture))
+            @get rem() = semantic_app(__self__; presentation=:tabs, url_state=false,
+                result_height="32rem", select=entry -> entry.name in (:numbers, :picture))
+            @get unbounded() = semantic_app(__self__; presentation=:tabs, url_state=false,
+                result_height=nothing, select=entry -> entry.name in (:numbers, :picture))
+        end
+        route!(LongPicture(); operation_policy=:blocking)
+        assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
+            "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
+        receipts = Channel{String}(1)
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function until(check, label) {
+            const end = Date.now() + 15000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error('timeout: ' + label);
+              await sleep(25);
+            }
+          }
+          const region = name => document.querySelector('[id$="-get-' + name + '-result"]');
+          // `render_table(…; id)` names the table's body.
+          const rows = id => document.querySelectorAll('#' + id + ' > tr').length;
+          const head = id => document.getElementById(id).closest('table').tHead;
+          const tab = name => document.querySelector('a[data-tab-name="' + name + '"]').click();
+          const out = {};
+          try {
+            const table = region('numbers');
+            await until(() => rows('trend') === 201, 'trend rows');
+            await until(() => rows('prior') === 150, 'prior rows');
+            await sleep(400);
+            const box = table.getBoundingClientRect();
+            out.page = document.documentElement.scrollHeight;
+            out.window = innerHeight;
+            out.box = Math.round(box.height);
+            out.overflow = getComputedStyle(table).overflowY;
+            out.fits = table.hasAttribute('data-htmxo-result-fits');
+            // The trend table's header at the box top once its rows scroll,
+            // with no row showing above it.
+            table.scrollTop = 2500;
+            await sleep(200);
+            const top = table.getBoundingClientRect().top;
+            const trend = head('trend').getBoundingClientRect();
+            out.headOffset = Math.round(trend.top - top);
+            const hit = document.elementFromPoint(trend.left + 20, top + 2);
+            out.topIsHead = !!(hit && hit.closest('thead') === head('trend'));
+            // The last table's header at the box top too, further down.
+            table.scrollTop = table.scrollHeight;
+            await sleep(200);
+            out.priorOffset = Math.round(head('prior').getBoundingClientRect().top -
+                                         table.getBoundingClientRect().top);
+            table.scrollTop = 0;
+            // A short result stays in the page.
+            tab('picture');
+            const picture = region('picture');
+            await until(() => picture.querySelector('.short'), 'picture');
+            await sleep(400);
+            out.shortFits = picture.hasAttribute('data-htmxo-result-fits');
+            out.shortOverflow = getComputedStyle(picture).overflowY;
+            // The table shrinks below its bound: it leaves its box.
+            const input = document.querySelector('input[name="rows"]');
+            input.value = '5';
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+            await until(() => picture.textContent.includes('Rows: 5'), 'picture rows');
+            tab('numbers');
+            await until(() => rows('trend') === 5, 'five rows');
+            await sleep(400);
+            out.shrunkFits = table.hasAttribute('data-htmxo-result-fits');
+            out.shrunkOverflow = getComputedStyle(table).overflowY;
+            out.status = 'passed';
+          } catch (error) {
+            out.status = String(error);
+          }
+          await fetch('/complete', {method: 'POST', body: JSON.stringify(out)});
+        }, {once: true});
+        """))
+        function measured(path)
+            page = repr("text/html", htmx(Raw(String(dispatch(:GET, path;
+                    headers=["HX-Request" => "true"]).body)), driver;
+                assets="/test-assets", sse_version=nothing, ws_version=nothing,
+                preload_version=nothing, pico_version=nothing,
+                feedback=false, compose=false, overlay=false))
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+                target = HTTP.URI(req.target).path
+                target == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
+                haskey(assets, target) &&
+                    return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[target])
+                target == "/favicon.ico" && return HTTP.Response(204)
+                if target == "/complete"
+                    isready(receipts) || put!(receipts, String(req.body))
+                    return HTTP.Response(204)
+                end
+                dispatch(req.method, req.target; headers=collect(req.headers),
+                         body=HTMXObjects._request_body_bytes(req))
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1600,1100 --user-data-dir=$profile http://127.0.0.1:$port/`
+                    log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout=devnull, stderr=log); wait=false)
+                    try
+                        @test timedwait(() -> isready(receipts) || process_exited(process), 90; pollint=0.05) === :ok
+                        isready(receipts) ? JSON.parse(take!(receipts)) : Dict("status" => read(log, String))
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
+        end
+        for (path, bound) in ("/" => :window, "/rem" => 512, "/unbounded" => nothing)
+            out = measured(path)
+            @info "bounded tabs result" path out
+            @test (path, get(out, "status", nothing)) == (path, "passed")
+            get(out, "status", nothing) == "passed" || continue
+            # A short result and a shrunk one stay in the page.
+            @test (path, out["shortOverflow"]) == (path, "visible")
+            @test (path, out["shrunkOverflow"]) == (path, "visible")
+            if isnothing(bound)
+                # Positive control: unbounded, the page is the tables' length.
+                @test out["page"] > 3 * out["window"]
+                @test out["overflow"] == "visible"
+                continue
+            end
+            @test (path, out["overflow"], out["fits"]) == (path, "auto", false)
+            @test (path, out["shortFits"], out["shrunkFits"]) == (path, true, true)
+            # The box is the bound: the window's height, or 32rem.
+            @test (path, out["box"]) == (path, bound === :window ? out["window"] : bound)
+            @test out["page"] < 2 * out["window"]
+            # Each table's header sticks at the box top, nothing above it.
+            @test (path, out["headOffset"], out["topIsHead"]) == (path, 0, true)
+            @test (path, out["priorOffset"]) == (path, 0)
         end
     end
 end

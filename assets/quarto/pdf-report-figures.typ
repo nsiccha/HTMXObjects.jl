@@ -8,7 +8,20 @@
 // `layout` gives the size of the whole text area wherever the figure sits, so
 // a figure that would fit on a fresh page keeps its size and moves there.
 #let pdf-report-fit(it) = layout(size => {
-  let height(f) = measure({ show image: im => scale(f * 100%, reflow: true, im); it }, width: size.width).height
+  let scaled(f) = {
+    show image: im => {
+      let dims = measure(im, width: size.width)
+      // Resolve relative widths in the original room. Reflowing scale gives
+      // its body more room, so a percentage-width image would grow again and
+      // cancel the shrink. Keep that room fixed and reserve its scaled size.
+      box(width: f * dims.width, height: f * dims.height, baseline: bottom, {
+        set align(top + left)
+        scale(f * 100%, origin: top + left, box(width: size.width, height: dims.height, im))
+      })
+    }
+    it
+  }
+  let height(f) = measure(scaled(f), width: size.width).height
   let whole = height(1)
   if whole <= size.height { return it }
   // A picture's height is its scale times its size, so the figure's height is
@@ -16,10 +29,10 @@
   let pictures = 2 * (whole - height(0.5))
   let f = if pictures > 0pt { (size.height - (whole - pictures)) / pictures } else { 0 }
   if f > 0 {
-    show image: im => scale(f * 100%, reflow: true, im)
-    it
+    scaled(f)
   } else {
-    scale(size.height / whole * 100%, reflow: true, it)
+    // The caption must wrap at the width at which we measured it, too.
+    scale(size.height / whole * 100%, reflow: true, box(width: size.width, it))
   }
 })
 #show figure.where(kind: image): pdf-report-fit
