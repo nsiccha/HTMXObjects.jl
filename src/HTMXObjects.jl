@@ -6460,7 +6460,8 @@ class itself where a wrapper would break the markup (a table row or cell, a
 list item, a `summary`); the outline and the label, in the language of the
 element's `lang`, come from [`htmxo_utility_styles`](@ref), which every
 [`htmx`](@ref) page carries. In Markdown a block is a fenced div
-`::: {.htmxo-private}` that opens with the label, `*not public*`, and inline
+`::: {.htmxo-private}` that opens with the label, `*not public*`, which a
+[`pdf_report`](@ref) keeps on the page where the content starts, and inline
 content a span `[*not public:* …]{.htmxo-private}`. The label is in the
 language of `HTMXObjects.page_lang()`: a route's `__lang__`, or the `lang` of
 `to_markdown_string(x; lang)`, of `dispatch(…; lang)` and of a
@@ -21214,8 +21215,9 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 # to Typst as written.
 const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
 
-# A semantic disclosure's label must travel with the start of its body, not
-# stand alone at a page bottom. Only the label is sticky; the body can break.
+# A semantic disclosure's label, and the "not public" label opening a block of
+# private content, must travel with the start of its body, not stand alone at
+# a page bottom. Only the label is sticky; the body can break.
 const _PDF_REPORT_LABELS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-labels.lua")
 
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
@@ -21591,8 +21593,10 @@ own, and PAC (PDF Accessibility Checker) warned about the empty and
 whitespace-only ones. Semantic disclosure labels (including eager tabs and
 master-detail labels) stay with the start of their body. Their Markdown marks
 the label alone with `::: {.htmxo-label}`; the body can continue across pages.
-Regenerate saved Markdown to get these markers. Ordinary bold prose keeps its
-own pagination.
+Regenerate saved Markdown to get these markers. The "not public" label that
+opens a block of [`private`](@ref) content in a private report stays with the
+start of that content the same way. Ordinary bold or emphasised prose keeps
+its own pagination.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region
