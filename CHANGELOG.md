@@ -11,7 +11,8 @@
   number, never a label or `–`. Thus a halving time can read `12.3 years` or
   `No finite halving time`, on the server, in Markdown/PDF and after offline
   browser recomputation. Label cells sort by their value and expose their
-  text to search and CSV; other numbers retain their exact CSV value.
+  text to search and CSV; other numbers retain their exact CSV value. A bound
+  table sizes its label columns again when its results change into words.
 
 ## 0.1.154
 

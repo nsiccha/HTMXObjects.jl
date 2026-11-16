@@ -1162,6 +1162,10 @@ semantic_browser_script() = h.script(Raw(raw"""
     }
     var body = table.tBodies[0];
     body.replaceChildren.apply(body, rows);
+    // A numeric result can become words: size label columns for their new
+    // text before holding their widths through sorting and searching again.
+    if (spec.columns.some(function(c) { return c.labels; }) && typeof htmxoColumnsMeasure === 'function')
+      htmxoColumnsMeasure(table, true);
     if (typeof htmxoResort === 'function') htmxoResort(table);
     if (typeof htmxoFilterTable === 'function' && table.closest('.htmxo-searchable-table')) htmxoFilterTable(table);
     if (typeof htmxoLinkApply === 'function' && table.dataset.htmxoLink) htmxoLinkApply(table, false);

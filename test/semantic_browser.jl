@@ -1745,6 +1745,9 @@ end
               typed(slope);
               await until(() => facts() === en + '|' + de && cell(rows()[0].cells[0]) === expectedCell,
                 () => facts() + ' / ' + snapshot());
+              const words = document.createRange();
+              words.selectNodeContents(rows()[0].cells[0]);
+              if (words.getClientRects().length !== 1) throw new Error('label broken across lines: ' + en);
               if (rows()[1].cells[0].getAttribute('data-htmxo-number') !== '2.125') throw new Error('numeric CSV');
               if (cell(rows()[2].cells[0]) !== 'None~0.0~') throw new Error('zero label: ' + snapshot());
             }
