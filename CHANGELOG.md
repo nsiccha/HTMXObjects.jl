@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.146
+
+- The "Shown at" statement before each result of a
+  `semantic_app(…; presentation=:tabs)` page's Markdown and PDF (`?plain`, a
+  report, `pdf_report`) puts a colon after each input's label and each input
+  on a line of its own: "Shown at:", then "Slope (per day): 0.20" and
+  "Intercept: 80 units" below it, as one paragraph of lines. Since 0.1.135 it
+  was one line, "Shown at: Slope (per day) 0.20; Intercept 80 units", in which
+  a label that is a phrase with a comma ran into its value. A German page
+  writes "Dargestellt bei:" and "Bezeichnung: Wert"; a label that ends in a
+  colon keeps its own; a list of records writes its fields the same way,
+  "Scenario (Dose (mg): 5)". The HTML page is unchanged (snag
+  `shown-at-line-ru-25ece17f`, user decision `0xxd4et`).
+
 ## 0.1.145
 
 - A numbered report's PDF contents list lists the sections `contents()`
