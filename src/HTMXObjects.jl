@@ -6172,16 +6172,16 @@ _plain_node!(w::_PlainText, node::Node, ::Val{:hr}) = _plain_break!(w, 2)
 # The summary is text the reader reads, so it stays, as its own paragraph before
 # the body (snag `in-the-kb-lane-c-bacb9ce6`). A body that writes nothing (only
 # buttons or scripts, say) has nothing to open, so its label goes with it, as a
-# `SemanticDisclosure`'s does. The body is written once, into a string, so
-# nested disclosures cost what their text costs.
+# `SemanticDisclosure`'s does. Render the body once. Only the first summary is
+# the label; later summaries stay in the body, as in HTML and HTMX's Markdown.
 _plain_is_summary(c) = c isa Node && HTMX.tag(c) === :summary
 function _plain_node!(w::_PlainText, node::Node, ::Val{:details})
-    body = _plain_string(filter(!_plain_is_summary, HTMX.children(node)))
+    kids = HTMX.children(node)
+    i = findfirst(_plain_is_summary, kids)
+    body = _plain_string([c for (j, c) in enumerate(kids) if j != i])
     all(isspace, body) && return nothing
     _plain_block!(w) do
-        for c in HTMX.children(node)
-            _plain_is_summary(c) && _plain_block!(() -> _plain_children!(w, c), w)
-        end
+        isnothing(i) || _plain_block!(() -> _plain_children!(w, kids[i]), w)
         _plain_block!(() -> _plain_text!(w, body), w)
     end
 end

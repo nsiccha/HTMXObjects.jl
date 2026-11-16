@@ -117,18 +117,18 @@ deps = ["Random"]
 uuid = "9fa8497b-333b-5362-9e8d-4d0656e87820"
 
 [[deps.HTMX]]
-deps = ["Markdown", "OrderedCollections"]
-git-tree-sha1 = "c14e0176df5e89037acffebc175327f5bda6152f"
-repo-rev = "4ae6cd023b1db2a692d8c0612e989d7a02a0f661"
+deps = ["Markdown", "OrderedCollections", "PrecompileTools", "ScopedValues"]
+git-tree-sha1 = "a3c7283f8e2a017ae7169cf5f365feadba47a91a"
+repo-rev = "384b5968886c95458fb1d6c10aa525ef5ed8fcb6"
 repo-url = "https://github.com/nsiccha/HTMX.jl.git"
 uuid = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
-version = "1.1.0"
+version = "1.4.1"
 
 [[deps.HTMXObjects]]
 deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "IntervalSets", "JSON", "LazyArtifacts", "LibGit2", "MIMEs", "Markdown", "PrecompileTools", "REPL", "Random", "ScopedValues", "Sockets", "Tables"]
 path = ".."
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
-version = "0.1.115"
+version = "0.1.156"
 weakdeps = ["Treebars"]
 
     [deps.HTMXObjects.extensions]

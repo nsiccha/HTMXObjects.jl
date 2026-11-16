@@ -116,6 +116,10 @@ end
     # a button, or nothing) writes nothing, its label included, as a
     # `SemanticDisclosure` does.
     @test plain(h.details(h.summary("See ", h.code("x")), h.p("y"))) == "See x\n\ny"
+    @test plain(h.details(h.summary(h.h2("Heading")), h.p("body"))) == "Heading\n\nbody"
+    @test plain(h.details(h.summary("Label"), h.p("body"), h.summary("Later"))) ==
+        "Label\n\nbody\n\nLater"
+    @test plain(h.details(h.p("body"))) == "body"
     @test plain(h.div(h.p("a"), h.details(h.summary("Edit"), h.button("Save")), h.p("b"))) == "a\n\nb"
     @test plain(h.div(h.p("a"), h.details(h.summary("Empty")), h.p("b"))) == "a\n\nb"
     # Nested disclosures each write their summary before their body.
