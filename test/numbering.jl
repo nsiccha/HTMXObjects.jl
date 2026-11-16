@@ -187,7 +187,9 @@ end
     @test occursin("\n## 1 Results {#section-1}\n", m) && occursin("\n## 2 Model {#model}\n", m) &&
         occursin("\n### 2.1 Priors {#section-2-1}\n", m)
     @test occursin("See [Section 2](#model), [Section 2.1](#section-2-1) and [Figure 1](#fig-x).", m)
-    @test md(doc; lang="en-GB", report=true) == m
+    # A report's Markdown is the same but for the class of the headings its
+    # contents list lists (`htmxo-contents-entry`, for the PDF's outline).
+    @test replace(md(doc; lang="en-GB", report=true), " .htmxo-contents-entry}" => "}") == m
 
     # One section placed twice takes its next number each time, in both forms.
     again = SemanticSection("Again", "x")
@@ -205,6 +207,43 @@ end
                      SemanticSection("Next", with_caption("F", "f"; id="fig-b")))
     @test headings(md(built; audience=:private)) == ["## 1 Built", "## 2 Next"]
     @test headings(md(built; audience=:public)) == ["## 1 Next"]
+end
+
+@testitem "a report's Markdown marks the headings its contents list lists" tags=[:unit, :semantic] setup=[NumberedFixture] begin
+    using HTMXObjects
+    using .NumberedFixture: md, report
+
+    # Typst's outline lists every heading of a PDF, so in a report's PDF it
+    # listed an article's header and a view's plain `h2` too, once per state of
+    # a `semantic_app` (snag pdf-contents-lis-087ca53a, reporter
+    # BayesianRegressionReports:pdf). A report's Markdown marks the headings the
+    # contents list lists, and `pdf_report`'s outline lists those alone.
+    entries(text) = [m.captures[1] for m in eachmatch(r"(?m)^#+ (.*?) \{[^}]*\.htmxo-contents-entry\}$", text)]
+    card(t) = h.article(h.header(t), h.p("text"))
+    doc = numbered(contents(), h.div(card("A card")),
+        SemanticSection("Results", h.section(h.h2("A plain heading"), h.p("x")),
+            SemanticSection("Detail", "d")),
+        SemanticSection("Model", "m"; anchor="model"), SemanticCard("A semantic card", "c"))
+    r = md(doc; report=true)
+    @test entries(r) == ["1 Results", "1.1 Detail", "2 Model"]
+    @test occursin("\n## 1 Results {#section-1 .htmxo-contents-entry}\n", r) &&
+        occursin("\n## 2 Model {#model .htmxo-contents-entry}\n", r)
+    # The other headings stay headings, unmarked.
+    @test occursin(r"(?m)^#+ A card$", r) && occursin(r"(?m)^#+ A plain heading$", r) &&
+        occursin(r"(?m)^#+ A semantic card$", r)
+    # An ordinary read has no outline to mark.
+    @test !occursin("htmxo-contents-entry", md(doc)) && !occursin("htmxo-contents-entry", md(report()))
+
+    # A section written outside a numbered document (a report's closing
+    # section, appended to its numbered body) is listed too, with or without
+    # an anchor; a section inside one that took no number is not, nor is the
+    # document's title (`level=1`).
+    @test md(SemanticSection("About this document", "a"); report=true) ==
+        "## About this document {.htmxo-contents-entry}\n\na"
+    @test md(SemanticSection("S", "y"; anchor="a/b"); report=true) == "## S {id=\"a/b\" .htmxo-contents-entry}\n\ny"
+    @test md(SemanticSection("Report", "t"; level=1); report=true) == "# Report\n\nt"
+    @test entries(md(numbered(SemanticSection("Report", SemanticSection("A", "a"); level=1)); report=true)) == ["1 A"]
+    @test !occursin("htmxo-contents-entry", md(numbered(SemanticSection("A", "a"); sections=false); report=true))
 end
 
 @testitem "outside a numbered document sections and captions render as before" tags=[:unit, :semantic] begin
@@ -305,6 +344,39 @@ end
             pdf_report(h.article(report()), de; title="Bericht", lang="de-DE")
             td = text(de)
             @test occursin("Inhalt", td) && count("Abbildung 1:", td) == 1 && count("Tabelle 1:", td) == 1
+        end
+    end
+end
+
+@testitem "pdf_report's contents list lists the sections, not every heading" tags=[:quarto] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1" || isnothing(Sys.which("pdftotext"))
+        @test_skip true
+    else
+        using HTMXObjects
+        # A report like BRR's: a view's fact cards (an article's header) and a
+        # plain `h2` inside the numbered document, which Typst's outline listed
+        # beside the sections, and a closing section appended outside it (snag
+        # pdf-contents-lis-087ca53a).
+        card(t) = h.article(h.header(t), h.p("A fact card's text."))
+        body = numbered(contents(), h.div(card("Fact card one"), card("Fact card two")),
+            SemanticSection("Starting estimate", h.p("Text."),
+                h.section(h.h2("Values at each day"), h.p("A plain heading in a section's content."))),
+            SemanticSection("About these results", h.p("More."), SemanticSection("A subsection", h.p("Nested."))))
+        about = SemanticSection("About this document", h.p("Made by a test."))
+        markdown = HTMXObjects.to_markdown_string(body; lang="en-GB", report=true) * "\n\n" *
+                   HTMXObjects.to_markdown_string(about; lang="en-GB", report=true)
+        mktempdir() do dir
+            out = joinpath(dir, "report.pdf")
+            pdf_report(markdown, out; title="Outline", lang="en-GB")
+            t = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+            listed = let lines = split(t, '\n'), i = findfirst(==("Contents"), strip.(lines))
+                [strip(replace(l, r"[ .]+\S*\d+$" => "")) for l in lines[i+1:end-1] if !isempty(strip(l))][1:4]
+            end
+            @test listed == ["1 Starting estimate", "2 About these results", "2.1 A subsection", "About this document"]
+            outline = t[1:something(findfirst("Fact card one", t), 1:length(t)).start-1]
+            @test !occursin("Values at each day", outline) && count("Fact card", t) == 2
+            # The other headings are still in the body.
+            @test occursin("Values at each day", t) && occursin("Fact card two", t)
         end
     end
 end
