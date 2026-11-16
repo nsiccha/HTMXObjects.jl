@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.1.164
+
+- An app is mounted where `route!` put it, outside requests too.
+  `route!(app; prefix="api")` now gives `app` and its `@include`d children
+  the prefix request roots have: `app.__prefix__ == "/api"`, so `app / "x"`,
+  `string(app)` and the result addresses of a `semantic_app` built from
+  `app` or a child outside a request (a report, `to_markdown_string`,
+  `pdf_report`) name the registered routes. Before, they named `/x`, no
+  route answered, and each tab's Markdown result was silently empty.
+- `route!` reads `prefix="/api"` and `"/api/"` as `"api"`; a leading slash
+  used to produce `//api/…` addresses, which a browser reads as another host.
+- A `semantic_app` tab whose result address no route answers raises an
+  `ArgumentError` naming the address and the object's `__prefix__`, both
+  when the page draws a browser-computed result and when its Markdown is
+  written, instead of showing the tab empty. A route that fails still shows
+  its error article, as before.
+
 ## 0.1.163
 
 - Tables accept independent `density=:compact` and `header_align=:left`
