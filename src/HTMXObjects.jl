@@ -1673,6 +1673,22 @@ function _mounted_prefix(parent, step)
     string(getproperty(parent, :__prefix__)) * step
 end
 
+# A root of type `T` (no parent, no mount step) is mounted where `route!` put
+# its type: `route!(app; prefix="api")` mounts `app`, and every object built
+# from it outside a request, at `/api`, as a request's root is. Before `route!`,
+# and for a type never routed, that is `""`.
+_mounted_prefix(parent, step, ::Type{T}) where {T} =
+    step === nothing && parent === nothing ? _route_mount_prefix(T) : _mounted_prefix(parent, step)
+_mounted_prefix(parent, step, T) = _mounted_prefix(parent, step)
+
+# The absolute mount path `route!` registered for a root type: one leading
+# slash, none trailing; `""` at the site root or when it is not routed.
+function _route_mount_prefix(T)
+    registration = get(_registered_types, T, nothing)
+    isnothing(registration) ? "" : _mount_prefix(registration.prefix)
+end
+_mount_prefix(prefix::AbstractString) = isempty(prefix) ? "" : "/" * prefix
+
 """
     _inject_dunder_props!(struct_expr)
 
@@ -1693,8 +1709,9 @@ Defaults:
   interpolated index arguments). `nothing` means "not mounted through an
   `@include`" (a root, or a standalone construction). `_inject_include_prefix!`
   supplies it at the mount site.
-- `__prefix__ = _mounted_prefix(__parent__, __mount_step__)` — the absolute
-  mount path (no trailing `/`; `""` at the root). It is DERIVED from the parent
+- `__prefix__ = _mounted_prefix(__parent__, __mount_step__, T)` — the absolute
+  mount path (no trailing `/`; at a root, where `route!` mounted its type `T`,
+  `""` at the site root or before `route!`). It is DERIVED from the parent
   rather than baked in at construction so that it stays correct when the object
   is re-parented — `DynamicObjects.remount` deliberately masks a retained
   `__prefix__` and recomputes it, which a construction-time constant cannot
@@ -1760,8 +1777,10 @@ function _inject_dunder_props!(struct_expr)
     prepend = Any[]
     has_parent   || push!(prepend, :(__parent__ = nothing))
     has_mount_step || push!(prepend, :(__mount_step__ = nothing))
+    # A root's prefix is where `route!` mounted its type (`_route_mount_prefix`).
     has_prefix   || push!(prepend, :(__prefix__ =
-        $(GlobalRef(@__MODULE__, :_mounted_prefix))(__parent__, __mount_step__)))
+        $(GlobalRef(@__MODULE__, :_mounted_prefix))(__parent__, __mount_step__,
+            $(_struct_type_name(struct_expr)))))
     has_req      || push!(prepend, :(__req__      = isnothing(__parent__) ? nothing : __parent__.__req__))
     has_param_request || push!(prepend, :(__param_request__ = isnothing(__parent__) ?
         nothing : __parent__.__param_request__))
@@ -18280,7 +18299,7 @@ end
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
         parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
         operation_policy=get(_operation_policies, T, OperationPolicy()), selection=nothing)
-    mount_prefix = isempty(prefix) ? "" : "/" * prefix
+    mount_prefix = _mount_prefix(prefix)
     _with_route_registration_pass() do
         _walk_route_meta(T,
             (name, info, nested_type) -> begin
@@ -20349,7 +20368,12 @@ and the submitted arguments are identical. GET/WS/SSE routes and any child
 properties a mutation reads keep their own DynamicObjects cache semantics.
 
 - `prefix` — mount the entire app under a URL prefix (e.g. `prefix="api"` puts
-  the root route at `/api/`). Default: root (`""`).
+  the root route at `/api/`; `"/api"` and `"/api/"` mean the same). Default:
+  root (`""`). `app` and the objects built from it outside a request are
+  mounted there too: `app.__prefix__` reads `"/api"` once `route!` has run, and
+  so a page built from `app`, or from an `@include`d child of it, outside a
+  request (a `pdf_report` of it, a `to_markdown_string`) addresses the routes
+  `route!` registered.
 - `record_dir` — if set, every served response is also persisted to disk via
   [`save_response`](@ref) under that directory; intended for static export.
 - `record_base` — URL prefix to strip from saved file paths when `record_dir`
@@ -20377,6 +20401,10 @@ properties a mutation reads keep their own DynamicObjects cache semantics.
 function route!(obj; prefix="", record_dir=nothing, record_base="",
         root_provider=nothing, operation_policy=OperationPolicy())
     T = typeof(obj)
+    # `prefix="api"`, `"/api"` and `"/api/"` all mount at `/api`; a kept
+    # leading slash made every address `//api/…`, which a browser reads as
+    # another host.
+    prefix = String(strip(prefix, '/'))
     (; provider, policy) = _configure_route_root!(obj; root_provider, operation_policy)
     _registered_types[T] = (; prefix, record_dir)
     _record_bases[T] = record_base

@@ -516,8 +516,12 @@ function _browser_region(page::_BrowserPage, spec, route, current, target, sent,
         # value sends that value.
         _semantic_unfollow!(values, (n for n in names if !isequal(get(current, n, nothing), values[n])))
         at_current = all(n -> isequal(get(current, n, nothing), values[n]), names)
-        rendered = _browser_render(_semantic_follow_url(target, obj, route, values, sent);
-                                   static=page.static)
+        url = _semantic_follow_url(target, obj, route, values, sent)
+        rendered = _browser_render(url; static=page.static)
+        # A fault shows its article as the page would; an address no route
+        # answers would leave the view empty without a word.
+        rendered.status == 200 || !isempty(rendered.error) ||
+            throw(_unserved_result_error(obj, url, rendered.status))
         push!(views, (_browser_json(_browser_variant_key(names, values)), rendered.body, at_current))
     end
     # The current values may be none of the finite ones (a value the address
