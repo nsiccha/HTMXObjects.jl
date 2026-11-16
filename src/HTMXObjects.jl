@@ -2182,7 +2182,7 @@ end
 _param_names(::Type) = ()
 
 """
-    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets, browser)
+    _convert_params!(struct_expr; parent_params=()) -> (names, relevance, resets, browser, controls)
 
 Find `@param name::T = default` lines in a `@htmx` struct body and rewrite them
 to plain derived-property assignments that call
@@ -2216,15 +2216,20 @@ a default.
 A `@browser(name) = browser_module(file, entry)` line becomes the property
 `__browser_<name>__`: the module a static page computes `name` with.
 
+A `@control(name) = :switch` (or `:checkbox`) line chooses how a generated form
+draws the `Bool` `@param` `name`, whatever its form; without one, a form whose
+changes apply at once draws a switch and a form sent with a button a checkbox.
+
 Returns the ordered list of declared param names for later `_param_names`
-emission, the `@relevant` conditions, each `@resets` target's source names, and
-the `@browser` property names.
+emission, the `@relevant` conditions, each `@resets` target's source names, the
+`@browser` property names, and each `@control` input's control.
 """
 function _convert_params!(struct_expr; parent_params=())
     body = struct_expr.args[3]
     option_names = Set{Symbol}()
     relevance = Pair{Symbol,Any}[]
     resets = Pair{Symbol,Tuple}[]
+    controls = Pair{Symbol,Symbol}[]
     for arg in body.args
         name = _option_parameter_name(arg)
         name === nothing || push!(option_names, name)
@@ -2232,7 +2237,12 @@ function _convert_params!(struct_expr; parent_params=())
         declared === nothing || push!(relevance, declared)
         reset = _reset_declaration(arg)
         reset === nothing || push!(resets, reset)
+        control = _control_declaration(arg)
+        control === nothing || push!(controls, control)
     end
+    allunique(first.(controls)) || throw(ArgumentError(string(
+        "@htmx: a `@param` has two `@control` declarations: ",
+        join(unique(n for n in first.(controls) if count(==(n), first.(controls)) > 1), ", "))))
     relevant_names = Set{Symbol}(first.(relevance))
     length(relevant_names) == length(relevance) || throw(ArgumentError(string(
         "@htmx: a `@param` has two `@relevant` declarations: ",
@@ -2275,6 +2285,7 @@ function _convert_params!(struct_expr; parent_params=())
     end
     for arg in body.args
         _reset_declaration(arg) === nothing || continue
+        _control_declaration(arg) === nothing || continue
         declared = _relevance_declaration(arg)
         if declared !== nothing
             # The condition, as a property of its own: DynamicObjects reads its
@@ -2367,7 +2378,12 @@ function _convert_params!(struct_expr; parent_params=())
                 "@htmx: `@resets($name)` source `$source` names no `@param` of this struct or its parent"))
         end
     end
-    names, relevance, resets, browser
+    for (name, _) in controls
+        name in names || throw(ArgumentError(string(
+            "@htmx: `@control($name)` names no `@param` of this struct; ",
+            "declare `@param $name::Bool = <default>` next to it")))
+    end
+    names, relevance, resets, browser, controls
 end
 
 # Companion declarations share the two Julia parser shapes, including
@@ -2478,6 +2494,20 @@ function _reset_declaration(arg)
     !isempty(sources) && all(source -> source isa Symbol, sources) ||
         throw(ArgumentError("@htmx: `@resets($name)` needs a source input name or a tuple of names"))
     name => Tuple(unique(sources))
+end
+
+# How a generated form draws a `Bool` `@param`, per `@control(name) = :switch`
+# or `:checkbox`; absent, by its form (`_bool_switch`).
+const _BOOL_CONTROLS = (:switch, :checkbox)
+_param_controls(::Type) = (;)
+function _control_declaration(arg)
+    declared = _param_declaration(arg, Symbol("@control"), ":switch")
+    declared === nothing && return nothing
+    name, rhs = declared
+    rhs isa QuoteNode && rhs.value in _BOOL_CONTROLS || throw(ArgumentError(string(
+        "@htmx: `@control($name)` takes `:switch` or `:checkbox`, the control a ",
+        "generated form draws for a `Bool`: got `", rhs, "`")))
+    name => rhs.value
 end
 
 # Read the parameter name from either supported declaration spelling before
@@ -2689,7 +2719,7 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
     reroute && _warn_hardcoded_url_in_attrs!(struct_expr)
     reroute && _inject_dunder_props!(struct_expr)
     _rewrite_bound!(struct_expr)
-    own_params, own_relevance, own_resets, own_browser = _convert_params!(struct_expr; parent_params)
+    own_params, own_relevance, own_resets, own_browser, own_controls = _convert_params!(struct_expr; parent_params)
     own_headers = _convert_headers!(struct_expr)
     # Merge: parent params/headers first (preserve order), then own, deduplicated.
     param_names = Symbol[]
@@ -2762,6 +2792,13 @@ function _htmx_transform(struct_expr; reroute=true, parent_params=Symbol[], pare
             Expr(:call, _reset_fname, :(::Type{$type_name})),
             Expr(:tuple, Expr(:parameters,
                 (Expr(:kw, name, QuoteNode(sources)) for (name, sources) in own_resets)...))))
+    end
+    # Emit `_param_controls`: the control each `@control` line chooses.
+    if !isempty(own_controls)
+        push!(block.args[1].args, Expr(:(=),
+            Expr(:call, GlobalRef(@__MODULE__, :_param_controls), :(::Type{$type_name})),
+            Expr(:tuple, Expr(:parameters,
+                (Expr(:kw, name, QuoteNode(control)) for (name, control) in own_controls)...))))
     end
     # Emit `_browser_properties`: the properties a page computes in the browser.
     if !isempty(own_browser)
@@ -30737,7 +30774,11 @@ end
     cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=nothing, kwargs...)
 
 A labeled checkbox `<input type="checkbox">`. Set `switch=true` to use Pico CSS's
-toggle-switch style (`role="switch"`). Extra `kwargs` go on the `<input>`.
+toggle-switch style (`role="switch"`); the `htmx()` shell draws its "on" track
+in the text colour, never Pico's azure. A generated form draws a `Bool` input
+with it: a switch where a change applies at once, a checkbox in a form a button
+sends, or as the input's `@control` line says ([`semantic_app`](@ref)). Extra
+`kwargs` go on the `<input>`.
 """
 cinput(nv; label=Long(nv), checked=_avalue(nv, false), switch=false, show_when=nothing, kwargs...) = begin
     name = _aname(nv)
@@ -31089,6 +31130,15 @@ function _with_resets(obj, param)
     source === nothing && return param
     sources = get(Base.invokelatest(_param_resets, typeof(source)), param.name, ())
     isempty(sources) ? param : merge(param, (; resets=sources))
+end
+
+# `param` with the control its `@control` line chooses (`:switch`/`:checkbox`).
+function _with_control(obj, param)
+    param.source === :path && return param
+    source = _param_declaring_object(obj, param.name)
+    source === nothing && return param
+    control = get(Base.invokelatest(_param_controls, typeof(source)), param.name, nothing)
+    control === nothing ? param : merge(param, (; control))
 end
 
 # The value a computed default takes for the request `obj` answers, or
@@ -31456,7 +31506,8 @@ field's label; each card's field names it in `aria-describedby`. The page
 runtime (`semantic_follow_script`) adds, duplicates and removes cards and
 numbers them again, and folds a card to its head with a summary of its values.
 """
-function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX)
+function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX,
+        live::Bool=false)
     records = value isa Records ? value : getproperty(obj, param.name)
     name = string(param.name)
     texts = _error_texts(obj)
@@ -31467,7 +31518,7 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
     shared = _records_shared_help(fields)
     help_ids = Dict{Symbol,String}(help.name => help.id for help in shared)
     cards = Any[_record_card(T, name, records, fields, i, entry, views[i], values[i], texts;
-                             radio_max, help_ids)
+                             radio_max, help_ids, live)
                 for (i, entry) in enumerate(records.entries)]
     h.fieldset(h.legend(label), cards...,
         h.button(_fill_text(texts.record_add; label=records.label); type="button",
@@ -31519,11 +31570,12 @@ function _record_field_param(obj, T, field::Symbol)
     param = promoted === nothing ?
         merge(base, (; kind=:context, context_source=(type=T, property=field),
                        context_scope=:request)) : promoted
-    _with_help(obj, _with_relevance(obj, param))
+    _with_control(obj, _with_help(obj, _with_relevance(obj, param)))
 end
 
 function _record_card(T, name, records, fields, i, entry, view, values, texts;
-                      radio_max::Int=_RADIO_MAX, help_ids=Dict{Symbol,String}())
+                      radio_max::Int=_RADIO_MAX, help_ids=Dict{Symbol,String}(),
+                      live::Bool=false)
     prefix = string(name, ".", i, ".")
     kept = Set{String}(Base.values(help_ids))
     # The fold control names the fields it shows and hides; the id carries
@@ -31550,7 +31602,7 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
     # Its fields are laid out as a section's are: short ones share a row. A
     # help text the list shows once is named, not repeated.
     controls = Any[h.div(_record_scoped(_semantic_control(view, T, field, values; radio_max,
-                                                          help_id=get(help_ids, field.name, nothing)),
+                                                          help_id=get(help_ids, field.name, nothing), live),
                                         name, i, records.fields, kept);
                          class="htmxo-input-field",
                          (_semantic_short_field(view, T, field, values; radio_max) ?
@@ -31747,17 +31799,19 @@ function _semantic_control_owner(obj, owner, param)
 end
 
 # `help_id` names a help text shown elsewhere (once under a list's cards): the
-# control is described by it instead of carrying the text.
+# control is described by it instead of carrying the text. `live` says the
+# control's form applies a change at once, with no button to send it: the
+# sidebar and a following tab's inputs of a `presentation=:tabs` page.
 function _semantic_control(obj, owner, param, values;
         radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto, help_id=nothing,
-        heading=nothing)
+        heading=nothing, live::Bool=false)
     value = get(values, param.name, nothing)
     doc_label, doc_help = _doc_label_help(param.doc)
     label = isnothing(doc_label) ? Long(param.name) : doc_label
     help = _param_help(obj, param, doc_help)
     control_obj, ControlT = _semantic_control_owner(obj, owner, param)
     default = _semantic_default_control(control_obj, ControlT, param, label, value, values;
-                                        radio_max, presentation)
+                                        radio_max, presentation, live)
     default = help_id === nothing ? _with_help_text(default, help) : _with_help_ref(default, help_id)
     # Alone in an input section whose heading already says its label.
     isnothing(heading) || (default = _heading_named(default, heading))
@@ -31872,15 +31926,25 @@ function _described_field(child::Node, id)
 end
 
 function _semantic_default_control(control_obj, ControlT, param, label, value, values;
-        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto)
+        radio_max::Int=_RADIO_MAX, presentation::Symbol=:auto, live::Bool=false)
     param.type isa Type && param.type <: Records &&
-        return _records_control(control_obj, ControlT, param, label, value; radio_max)
+        return _records_control(control_obj, ControlT, param, label, value; radio_max, live)
     input = (name=param.name, domain=get(param, :domain, nothing))
     # Keep the resolved domain's actual option objects alongside its selected
     # value: evaluating a rebuilt source again may create fresh option objects.
     domains = get(values, _SEMANTIC_DOMAINS, (;))
     domain = haskey(domains, param.name) ? domains[param.name] :
         _resolved_input_domain(control_obj, ControlT, input, values)
+    # `@control` draws a `Bool` the type gives a box to; on anything else it
+    # would be ignored, so it is refused.
+    haskey(param, :control) && !(param.type === Bool &&
+        (domain === nothing || get(domain, :kind, :unrestricted) === :unrestricted)) &&
+        throw(ArgumentError(string(
+            "@control(", param.name, ") = ", repr(param.control), " chooses how a `Bool` ",
+            "input is drawn, but `", param.name, "` is ",
+            param.type === Bool ? "a `Bool` with `@options`, drawn as its choices" :
+                string("declared as `", something(param.type, Any), "`"),
+            "; declare it `@param ", param.name, "::Bool = <default>`")))
 
     # A range of numbers: a slider with a number field (a vector of numbers
     # keeps its typed control; each element is still checked against it).
@@ -31912,9 +31976,16 @@ function _semantic_default_control(control_obj, ControlT, param, label, value, v
         end
     end
 
-    _typed_control(param.type, string(param.name), label, value,
-                   param.required ? (; required="true") : (;))
+    required_attrs = param.required ? (; required="true") : (;)
+    param.type === Bool && return _typed_control(Bool, string(param.name), label, value,
+        required_attrs; switch=_bool_switch(param, live))
+    _typed_control(param.type, string(param.name), label, value, required_attrs)
 end
+
+# Whether a `Bool` input is drawn as a switch: as its `@control` line says,
+# else when its form applies a change at once (a switch's promise), not when
+# a button sends the form (a checkbox's).
+_bool_switch(param, live::Bool) = get(param, :control, live ? :switch : :checkbox) === :switch
 
 # Whether the generated control of `param` is a short field: a number, a
 # checkbox, or a choice between two pills. In an input section short fields
@@ -32261,9 +32332,10 @@ end
 _typed_control(T, name, label, value, required_attrs) =
     linput(name; label, value=something(value, ""), required_attrs...)
 # A checked box submits "true", which a `Bool` input parses; the browser's
-# default "on" does not.
-_typed_control(::Type{Bool}, name, label, value, required_attrs) =
-    cinput(name; label, checked=something(value, false), value="true", required_attrs...)
+# default "on" does not. A switch is the same box, drawn as Pico's switch.
+_typed_control(::Type{Bool}, name, label, value, required_attrs; switch::Bool=false) =
+    cinput(name; label, checked=something(value, false), value="true", switch,
+           required_attrs...)
 _typed_control(::Type{T}, name, label, value, required_attrs) where {T<:Number} =
     ninput(name; label, value=something(value, 0), step=_number_step(T), required_attrs...)
 
@@ -32383,8 +32455,8 @@ function _semantic_runtime_route(obj, route)
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
     merge(route, (params=NamedTuple[
-        _with_domain_reads(obj, _with_resets(obj,
-            _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param)))))
+        _with_domain_reads(obj, _with_control(obj, _with_resets(obj,
+            _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param))))))
         for param in params],))
 end
 
@@ -32565,8 +32637,8 @@ whole group, and the operation's hidden request context rides the URL, so the
 domain is evaluated exactly as the operation's own form would evaluate it.
 """
 function _semantic_context_control(obj, route, param, current, action, shared_names;
-        radio_max::Int=_RADIO_MAX, placed=nothing, heading=nothing)
-    control = _semantic_control(obj, route.owner, param, current; radio_max, heading)
+        radio_max::Int=_RADIO_MAX, placed=nothing, heading=nothing, live::Bool=false)
+    control = _semantic_control(obj, route.owner, param, current; radio_max, heading, live)
     # A control placed outside the group's form (`semantic_app(…; place)`)
     # still belongs to it: its fields name the form (`form=`).
     isnothing(placed) || (control = _with_form_owner(control, placed, param.name))
@@ -32578,6 +32650,8 @@ function _semantic_context_control(obj, route, param, current, action, shared_na
         __htmxo_shared_context=_semantic_names_attr(shared_names, ','),
         (isnothing(lifted) ? (;) : (; __htmxo_lifted=_semantic_names_attr(lifted, ',')))...,
         (radio_max == _RADIO_MAX ? (;) : (; __htmxo_radio_max=radio_max))...,
+        # The refreshed control is drawn for a form that applies at once again.
+        (live ? (; __htmxo_live=1) : (;))...,
         (isnothing(placed) ? (;) : (; __htmxo_placed=placed))...,
         # The refreshed control is drawn under its section's heading again.
         (isnothing(heading) ? (;) : (; __htmxo_heading=heading))...,
@@ -32676,6 +32750,7 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     radio_max = parse(Int, _operation_form_setting(req, :__htmxo_radio_max, string(_RADIO_MAX)))
     navigate = _operation_form_setting(req, :__htmxo_navigate, "false") == "true"
     presentation = Symbol(_operation_form_setting(req, :__htmxo_presentation, "auto"))
+    live = _operation_form_setting(req, :__htmxo_live, "0") == "1"
     context_selector = _operation_form_setting(req, :__htmxo_context_selector)
     sections = _input_sections_unwire(_operation_form_setting(req, :__htmxo_sections))
     controls_only = _operation_poll_marker(get(queryparams(req), "__htmxo_controls", nothing))
@@ -32690,14 +32765,14 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
             "$(LeafT).$(name) carries no shared context input $(repr(name)) to refresh"))
         current = _semantic_form_values(target.leaf, route, extracted.values)
         _semantic_context_control(target.leaf, route, route.params[index], current,
-                                  request_path, shared_context; radio_max,
+                                  request_path, shared_context; radio_max, live,
                                   placed=_operation_form_setting(req, :__htmxo_placed),
                                   heading=_operation_form_setting(req, :__htmxo_heading))
     elseif controls_only
         current = _semantic_form_values(target.leaf, route, extracted.values)
         only(_operation_form_controls(target.leaf, route, current, request_path;
             radio_max, presentation, shared_names=shared_context, context_selector,
-            fragment=true, lifted, sections))
+            fragment=true, lifted, sections, live))
     else
         # Accept full-form refresh requests from pages rendered before the
         # controls-only protocol; new pages keep the form and button in place.
@@ -32751,7 +32826,7 @@ _operation_control_params(route, shared_names) = [param for param in route.param
 function _operation_form_controls(obj, route, current, action;
         radio_max=_RADIO_MAX, presentation=:auto, shared_names=Set{Symbol}(),
         context_selector=nothing, fragment=false, lifted=nothing,
-        sections=InputSection[])
+        sections=InputSection[], live::Bool=false)
     presentation in (:auto, :cards) || throw(ArgumentError(
         "operation_form presentation must be :auto or :cards, got $(repr(presentation))"))
     refresh_dependencies = _semantic_refresh_dependencies(route)
@@ -32762,6 +32837,8 @@ function _operation_form_controls(obj, route, current, action;
     settings = (; __htmxo_controls=1)
     radio_max == _RADIO_MAX || (settings = merge(settings, (; __htmxo_radio_max=radio_max)))
     presentation === :auto || (settings = merge(settings, (; __htmxo_presentation=presentation)))
+    # A form that applies a change at once (`live`) is drawn so on refresh too.
+    live && (settings = merge(settings, (; __htmxo_live=1)))
     isempty(shared_names) || (settings = merge(settings, (;
         __htmxo_shared_context=join(string.(sort!(collect(shared_names))), ','))))
     # A `:tabs` page's form names the `@param`s it lifted, possibly none, so
@@ -32788,7 +32865,7 @@ function _operation_form_controls(obj, route, current, action;
     headings = _input_section_headings(sections, sectioned)
     for param in control_params
         control = _semantic_control(obj, route.owner, param, current; radio_max, presentation,
-                                    heading=get(headings, param.name, nothing))
+                                    heading=get(headings, param.name, nothing), live)
         if param.name in refresh_dependencies
             control = h.div(control;
                 _semantic_refresh_attrs(route, action, settings; context_selector)...)
@@ -33554,18 +33631,18 @@ function _semantic_context_entries(items; names=nothing)
 end
 
 _semantic_context_controls(entries, shared_context; radio_max::Int=_RADIO_MAX,
-        headings=Dict{Symbol,String}()) = Any[
-    _semantic_entry_control(entry, shared_context; radio_max,
+        headings=Dict{Symbol,String}(), live::Bool=false) = Any[
+    _semantic_entry_control(entry, shared_context; radio_max, live,
                             heading=get(headings, entry.param.name, nothing))
     for entry in entries]
 _semantic_entry_control(entry, shared_context; radio_max::Int=_RADIO_MAX, placed=nothing,
-        heading=nothing) =
+        heading=nothing, live::Bool=false) =
     _semantic_context_control(entry.object, entry.route, entry.param, entry.current,
         _semantic_context_refreshable(entry.route, entry.param) ?
             _operation_form_action(entry.route, entry.current,
                 _operation_form_target(entry.object, entry.route)) :
             nothing,
-        shared_context; radio_max, placed, heading)
+        shared_context; radio_max, placed, heading, live)
 
 # --- Input sections (`semantic_app(…; presentation=:tabs, sections)`) ---
 
@@ -34075,8 +34152,10 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     sidebar_entries = [entry for entry in context_entries if !haskey(placements, entry.param.name)]
     sidebar_names = Set{Symbol}(entry.param.name for entry in sidebar_entries)
     sidebar_sections = _input_sections_for(sections, sidebar_names)
+    # The sidebar, the shared inputs placed in tabs and a following tab's own
+    # inputs apply a change at once (`live`): no button sends them.
     sidebar_controls = _semantic_context_controls(sidebar_entries, shared_names; radio_max,
-        headings=_input_section_headings(sidebar_sections, sidebar_names))
+        headings=_input_section_headings(sidebar_sections, sidebar_names), live=true)
     sidebar_fields = [(; name=entry.param.name, control,
                          short=!isempty(sidebar_sections) && _semantic_short_field(
                              entry.object, entry.route.owner, entry.param, entry.current;
@@ -34085,7 +34164,8 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     placed_controls = Dict{String,Vector{Any}}()
     for entry in placed_entries
         push!(get!(placed_controls, placements[entry.param.name], Any[]),
-              _semantic_entry_control(entry, shared_names; radio_max, placed=context_id))
+              _semantic_entry_control(entry, shared_names; radio_max, placed=context_id,
+                                      live=true))
     end
     sidebar_defaults = _semantic_address_attrs(defaults,
         [entry.param for entry in context_entries]; key=defaults_key, scope=url_scope)
@@ -34110,7 +34190,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
             target = _operation_form_target(spec.mounted, spec.local_route)
             controls = _operation_form_controls(spec.mounted, route, current,
                 string(target); shared_names, context_selector=selector, lifted=own[i],
-                radio_max, sections)
+                radio_max, sections, live=true)
             inputs_id = base.target_id * "-inputs"
             own_params = _operation_control_params(route, shared_names)
             own_defaults = _semantic_address_attrs(defaults, own_params; key=defaults_key,
@@ -34341,6 +34421,16 @@ cutoff applies to every control of the surface, the shared ones included, and
 survives their refreshes. Vector choices use checkbox pills up to the cutoff
 and a searchable checkbox list above it; its closed field shows the selected
 count and every selected label.
+
+A `Bool` input is a switch where a change applies at once, with no button to
+send it (the sidebar of a `presentation=:tabs` page, the shared inputs `place`
+puts in its tabs, and a following tab's own inputs), and a checkbox in a form a
+button sends (an operation card, [`operation_form`](@ref), a `:tabs` mutation).
+Either is the same `<input type="checkbox" value="true">`, so submission,
+Reset, the address and the Markdown's `shown_yes`/`shown_no` are the same; the
+switch adds `role="switch"`, which Pico draws as a switch, its "on" track in
+the text colour. A `@control(name) = :switch` (or `:checkbox`) line next to the
+`@param name::Bool` chooses it for every generated form instead.
 
 `values` may be one `NamedTuple`/dictionary shared by every form, or a function
 of an operation entry. `submit` and `submit_attrs` may likewise be values or
@@ -39138,6 +39228,20 @@ fieldset:not([role]) > label:has(> input[type="radio"]:disabled),
 fieldset[data-htmxo-checkbox-group] > label:has(> input:disabled) {
     opacity: .5;
     cursor: not-allowed;
+}
+/* A switch (`cinput(…; switch=true)`, and the `Bool` control of a form that
+   applies a change at once): Pico draws the box as a switch, and its "on"
+   track takes the text colour with a knob in the page colour, as a chosen
+   pill is filled, never Pico's azure; its focus ring is the text colour's
+   too. UNLAYERED, like the pills. Without Pico it stays a box, ticked in the
+   text colour. */
+input[type="checkbox"][role="switch"] {
+    --pico-switch-checked-background-color: var(--pico-contrast-background, CanvasText);
+    --pico-form-element-focus-color: var(--pico-contrast-focus, color-mix(in srgb, currentColor 25%, transparent));
+    accent-color: currentColor;
+}
+input[type="checkbox"][role="switch"]:checked {
+    --pico-switch-color: var(--pico-contrast-inverse, Canvas);
 }
 /* In a card of a list of records (`Records`) the pills are smaller and
    closer, so a choice among a few options takes fewer rows. */

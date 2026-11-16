@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.1.154
+
+- A generated `Bool` input is a switch where a change applies at once: the
+  sidebar of a `semantic_app(…; presentation=:tabs)` page, the shared inputs
+  `place=` puts in its tabs, and a following tab's own inputs, live and in a
+  static export. In a form a button sends (an operation card, `operation_form`,
+  a `:tabs` mutation) it stays a checkbox. A switch is the same
+  `<input type="checkbox" value="true">` with `role="switch"`, which Pico draws
+  as a switch, so submission, Reset, the page address, Copy link, `?plain`
+  (☑/☐) and browser-computed results are unchanged, and a refresh of its
+  controls draws it again. `@control(name) = :switch` or `:checkbox` beside the
+  `@param name::Bool` chooses it for every generated form; on any other input
+  the page refuses it with an `ArgumentError` naming the input. The `htmx()`
+  shell draws a switch's "on" track in the text colour with a knob in the page
+  colour, as a chosen pill is filled, never Pico's azure, also for a
+  hand-placed `cinput(…; switch=true)` (snag `preserve-the-exi-b16bdeb1`).
+
 ## 0.1.153
 
 - A `semantic_app(…; presentation=:tabs)` page draws its controls again for
