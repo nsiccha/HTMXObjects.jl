@@ -108,6 +108,7 @@ browser_module(; source::AbstractString, entry) = BrowserModule(source, entry)
     bound(x.field)
     bound(x.field[i])
     bound(x; digits=nothing, sigdigits=nothing, percent=false, texts=table_texts())
+    bound(x; date=:long, texts=table_texts())
     bound(x; columns=(:a, :b, …))
 
 Inside an `@htmx` struct, marks where a route's view shows a value the browser
@@ -123,6 +124,18 @@ writes exactly three decimals (`0.120`), `digits=0` a whole number (`45`),
 float keeps every digit, `2.0` writes `2` and `3.81e-5` writes `3.81·10⁻⁵`, and
 an integer takes the thousands separator (`1,234`). The value in the graph is
 never rounded. A `Bool` writes `true` or `false`, and text is shown as it is.
+
+A module that returns numbers only says "no value" with `NaN`, so a `NaN`
+writes `–`, as `missing` and `nothing` do (`format_number` itself writes
+`NaN`); `Inf` writes `∞`.
+
+`date = :long`, `:short` or `:month` writes a day, as [`format_date`](@ref)
+writes it in the language of `texts`: `16 November 2019`, `16 Nov 2019` or
+`Nov 2019` (`16. November 2019` with `table_texts(:de)`). The value is a
+number of milliseconds since 1 January 1970, UTC, as JavaScript dates and a
+plot's temporal axis count them, or a `Dates.Date`; its day is the UTC
+calendar day of that instant. No day (`NaN`, `±Inf`, `missing`, `nothing`)
+writes `–`. A table's days are its `ColumnSpec(label; date)`.
 
 With `columns` it is the property's equal-length vector outputs as a Tables.jl
 table, or its single-value outputs (a number, a Boolean, text) as a table of
@@ -147,7 +160,8 @@ bound(_x...; _kw...) = throw(ArgumentError(string(
 
 What `bound(x)` is on the server: the value, shown as text, the path that
 tells a browser page where its value comes from, and how a number is written
-(`format_number`'s rounding, `percent` and language).
+(`format_number`'s rounding, `percent` and language) or, with `date`, the
+day it names (`format_date`'s style).
 """
 struct BoundValue{T}
     path::Vector{Any}
@@ -155,6 +169,7 @@ struct BoundValue{T}
     rounding::Union{Nothing,_FixedDigits,_SigDigits}
     percent::Bool
     texts::TableTexts
+    date::Union{Nothing,Symbol}
 end
 
 """
@@ -176,18 +191,23 @@ struct BoundColumns{T}
 end
 
 function _bound(path::Tuple, value; digits=nothing, sigdigits=nothing, percent::Bool=false,
-                texts::TableTexts=_EN_TABLE_TEXTS, columns=nothing)
+                texts::TableTexts=_EN_TABLE_TEXTS, columns=nothing, date=nothing)
     if columns !== nothing
-        digits === sigdigits === nothing && !percent && texts === _EN_TABLE_TEXTS || throw(ArgumentError(string(
-            "bound(…; columns) is a table; say how a column's numbers are written in the ",
-            "`ColumnSpec` of `render_table`'s `columns` (`ColumnSpec(label; digits, sigdigits, percent)`) ",
-            "and its language with `render_table(…; texts)`")))
+        digits === sigdigits === date === nothing && !percent && texts === _EN_TABLE_TEXTS || throw(ArgumentError(string(
+            "bound(…; columns) is a table; say how a column's numbers or days are written in the ",
+            "`ColumnSpec` of `render_table`'s `columns` (`ColumnSpec(label; digits, sigdigits, percent)`, ",
+            "`ColumnSpec(label; date)`) and its language with `render_table(…; texts)`")))
         return _bound_columns(Any[path...], value, columns)
     end
     for (name, k) in (("digits", digits), ("sigdigits", sigdigits))
         k === nothing || k isa Integer || throw(ArgumentError("bound: `$name` must be an integer, got $(repr(k))"))
     end
-    BoundValue(Any[path...], value, _number_rounding(digits, sigdigits, "bound"), percent, texts)
+    date === nothing || date isa Symbol || throw(ArgumentError(
+        "bound: `date` is :long, :short or :month (the styles of format_date); got $(repr(date))"))
+    _date_style(date, "bound", digits, sigdigits, percent)
+    b = BoundValue(Any[path...], value, _number_rounding(digits, sigdigits, "bound"), percent, texts, date)
+    isnothing(date) || _bound_text(b)  # a value that is no day is refused here, not in the page
+    b
 end
 
 # An output a table shows as its one row: what the browser's module returns as
@@ -288,7 +308,9 @@ function _bound_table_attrs(b::BoundColumns, cols, headers, formats, empty_align
         column = Dict{String,Any}("name" => string(c),
             "kind" => isnothing(known) ? "float" : _bound_kind(values[known]))
         format = formats[j]
-        if !isnothing(format)
+        if format isa _DateColumn
+            column["date"] = _date_words(get(kwargs, :texts, _EN_TABLE_TEXTS), format.style)
+        elseif !isnothing(format)
             isnothing(format.digits) || (column["digits"] = format.digits)
             isnothing(format.sigdigits) || (column["sigdigits"] = format.sigdigits)
             format.percent && (column["percent"] = true)
@@ -302,22 +324,33 @@ function _bound_table_attrs(b::BoundColumns, cols, headers, formats, empty_align
         "link_key" => isnothing(link_key) ? nothing : string(link_key))))
 end
 
+# A table of browser outputs writes a NaN as no value, `–`, as the page does
+# after each computation (`boundCell`): a module that returns numbers only
+# says "none" with it.
+_render_value(::BoundColumns, value::AbstractFloat) = isnan(value) ? nothing : value
+
 _bound_kind(::Bool) = "bool"
 _bound_kind(::Integer) = "int"
 _bound_kind(::Real) = "float"
 _bound_kind(_) = "text"
-# A number as `format_number` writes it; a Bool and text as `string` does.
-_bound_text(b::BoundValue) = _bound_text(b.value, b)
+# A number as `format_number` writes it, NaN as no value (`–`: a module that
+# returns numbers only says "none" with it); a day as `format_date` writes
+# it; a Bool and text as `string` does.
+_bound_text(b::BoundValue) = isnothing(b.date) ? _bound_text(b.value, b) :
+    _format_date(_date_day(b.value), b.texts, _date_layout(b.texts, b.date))
 _bound_text(x::Bool, b) = string(x)
-_bound_text(x::Real, b) = _format_number(_number_value(x), b.texts, b.rounding, b.percent)
+_bound_text(x::Real, b) = x isa AbstractFloat && isnan(x) ? _format_number(nothing, b.texts, b.rounding, b.percent) :
+    _format_number(_number_value(x), b.texts, b.rounding, b.percent)
 _bound_text(x::Union{Nothing,Missing}, b) = _format_number(nothing, b.texts, b.rounding, b.percent)
 _bound_text(x, b) = string(x)
 
 # How the browser writes the value again: the rounding, `percent` and the
 # language's number texts (`htmxoNumberText`), left out where they are the
-# defaults (no rounding, English).
+# defaults (no rounding, English); or, for a day, the layout and month names
+# of its style (`htmxoDateText`).
 function _bound_format(b::BoundValue)
     fields = Dict{String,Any}()
+    isnothing(b.date) || return (; data_htmxo_format=JSON.json(Dict("date" => _date_words(b.texts, b.date))))
     b.rounding === nothing || merge!(fields, Dict(string(k) => v for (k, v) in pairs(_summary_rounding_fields(b.rounding))))
     b.percent && (fields["percent"] = true)
     b.texts === _EN_TABLE_TEXTS || b.texts == _EN_TABLE_TEXTS ||
@@ -964,12 +997,18 @@ semantic_browser_script() = h.script(Raw(raw"""
     return typeof value === 'number' ? value : has(NONFINITE, value) ? NONFINITE[value] : Number(value);
   }
   // A bound value as the server wrote it (`_bound_text`): a number as
-  // `format_number` writes it, with the span's rounding, percent and language.
+  // `format_number` writes it, with the span's rounding, percent and language,
+  // NaN as no value (`–`); with `date`, the day as `format_date` writes it.
   function text(value, kind, format) {
     var numeric = kind === 'float' || kind === 'int';
-    if (value === undefined || (value === null && !numeric)) return null;
+    if (value === undefined) return null;
+    if (format.date) return htmxoDateText(value === null ? null : number(value), format.date);
+    if (value === null && !numeric) return null;
     if (kind === 'bool') return String(value === true || value === 'true');
-    if (numeric) return htmxoNumberText(value === null ? null : number(value), format, kind === 'int');
+    if (numeric) {
+      var x = value === null ? null : number(value);
+      return htmxoNumberText(x !== x ? null : x, format, kind === 'int');
+    }
     return String(value);
   }
   function formatOf(el) {
@@ -978,14 +1017,22 @@ semantic_browser_script() = h.script(Raw(raw"""
   // A cell of a bound table as `render_table` writes it (`_render_table_cell`):
   // a number cell (its value the sort value and the ⬇ CSV's) for a float, or
   // for any number of a column whose `ColumnSpec` says how its numbers are
-  // written; an empty number cell for no value; else the value's text.
+  // written; in a column of days (`ColumnSpec(…; date)`, `_date_cell`) the
+  // day, sorted by its number, its ISO day the ⬇ CSV's; an empty number cell
+  // for no value (NaN too, and no day); else the value's text.
   function boundCell(v, c, texts) {
     var td = document.createElement('td'), integer = c.kind === 'int';
     var formatted = c.digits !== undefined || c.sigdigits !== undefined || c.percent;
-    if (v === null || v === undefined) {
+    var x = c.date && v !== null && v !== undefined ? number(v) : v;
+    var day = c.date ? htmxoDateKey(x) : null;
+    if (v === null || v === undefined || (typeof v === 'number' && v !== v) || (c.date && day === null)) {
       td.setAttribute('data-htmxo-number', '');
       if (c.empty) td.setAttribute('data-htmxo-align', c.empty);
       td.textContent = '–';
+    } else if (c.date) {
+      td.setAttribute('data-sort-value', numberKey(x, integer));
+      td.setAttribute('data-htmxo-number', day);
+      td.textContent = htmxoDateText(x, c.date);
     } else if (typeof v === 'number' && (c.kind === 'float' || (integer && formatted))) {
       var key = numberKey(v, integer);
       td.setAttribute('data-sort-value', key);

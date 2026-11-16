@@ -3,7 +3,7 @@ using TestItemRunner
 # `format_date` writes a day in a table's language, the date counterpart of
 # `format_number` (snag formatting-a-dat-6e544028, design decision 1y3u6pj:
 # `:short` writes the abbreviated month, the words live in `TableTexts`, no
-# browser twin yet).
+# browser twin yet: `htmxoDateText`, 0.1.146, writes days in the browser).
 
 @testitem "format_date writes a day in English and German" tags=[:unit] begin
     using HTMXObjects
@@ -86,4 +86,33 @@ end
     @test html(render_table(rows; texts=american, searchable=true)) == html(render_table(rows; searchable=true))
     # Nor does the runtime's English default.
     @test !occursin("October", HTMXObjects._md_runtime_js()) && occursin("htmxoTableTextsDefault", HTMXObjects._md_runtime_js())
+end
+
+@testitem "render_table writes a ColumnSpec(date) column as days" tags=[:unit] begin
+    using HTMXObjects
+    import Dates
+    html(x) = repr("text/html", x)
+    ms(d) = Dates.value(Dates.DateTime(d)) - Dates.UNIXEPOCH
+    # A Date, the milliseconds of an instant, and no day (missing, NaN, beyond JavaScript's dates).
+    rows = (; day = [Dates.Date(2015, 10, 1), Dates.Date(2016, 2, 29), missing],
+              at = [Float64(ms(Dates.Date(2015, 10, 1))) + 3_600_000, NaN, 8.64e15 + 1])
+    columns = [:day => ColumnSpec("Tag"; date = :long), :at => ColumnSpec("Zeit"; date = :short)]
+    t = html(render_table(rows; columns, texts = table_texts(:de)))
+    @test [m[1] for m in eachmatch(r"<td[^>]*>([^<]*)</td>", t)] ==
+          ["1. Oktober 2015", "1. Okt. 2015", "29. Februar 2016", "–", "–", "–"]
+    # Each sorts by its value and exports its ISO day; no day is an empty number cell.
+    @test occursin("<td data-sort-value=\"1443657600000\" data-htmxo-number=\"2015-10-01\">1. Oktober 2015</td>", t)
+    @test occursin("<td data-sort-value=\"1.4436612e12\" data-htmxo-number=\"2015-10-01\">1. Okt. 2015</td>", t)
+    @test count("<td data-htmxo-number=\"\">–</td>", t) == 3
+    # Both columns are right-aligned like number columns, and the table carries no month names.
+    @test count(r"<th[^>]*data-htmxo-align=\"right\"", t) == 2 && !occursin("Oktober\"", t) && !occursin("months", t)
+    @test [m[1] for m in eachmatch(r"<td[^>]*>([^<]*)</td>", html(render_table((; d = [Dates.Date(2015, 10, 1)]))))] == ["2015-10-01"]
+    # Refused: an unknown style, days with digits, a DateTime or text in a day column, days in a table of built cells.
+    @test_throws ArgumentError ColumnSpec("Day"; date = :weekday)
+    e = try; ColumnSpec("Day"; date = :long, sigdigits = 2); nothing; catch err; err; end
+    @test e isa ArgumentError && occursin("takes no `digits`, `sigdigits` or `percent`", e.msg)
+    @test_throws ArgumentError render_table((; d = [Dates.DateTime(2015, 10, 1)]); columns = [:d => ColumnSpec("D"; date = :long)])
+    @test_throws ArgumentError render_table((; d = ["2015-10-01"]); columns = [:d => ColumnSpec("D"; date = :long)])
+    e = try; sortable_table([ColumnSpec("Day"; date = :long)], []); nothing; catch err; err; end
+    @test e isa ArgumentError && occursin("format_date", e.msg)
 end

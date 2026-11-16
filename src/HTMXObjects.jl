@@ -22124,10 +22124,10 @@ function _sort_dir_token(dir)
 end
 
 """
-    ColumnSpec(label; help=nothing, sort_keys=(), align=nothing, digits=nothing, sigdigits=nothing, percent=false)
+    ColumnSpec(label; help=nothing, sort_keys=(), align=nothing, digits=nothing, sigdigits=nothing, percent=false, date=nothing)
 
 A table column header that carries an explanation, several sort orders, an
-alignment, how its numbers are written, or any of them. Use it among the `headers` of [`sortable_table`](@ref) (and so of
+alignment, how its numbers or days are written, or any of them. Use it among the `headers` of [`sortable_table`](@ref) (and so of
 [`master_detail_table`](@ref)), or as a column of [`render_table`](@ref)
 (`columns=`), wherever a `String` header would go: the column stays auto-wired
 exactly like a `String` — the sort button with keyboard sorting,
@@ -22218,9 +22218,31 @@ render_table(rows; columns = ["share" => ColumnSpec("Share passing"; digits = 3)
                               "water" => ColumnSpec("Snow water (mm)"; digits = 0)])
 ```
 
+# Days: `date`
+
+`date = :long`, `:short` or `:month` writes each value of the column as a
+day, as [`format_date`](@ref) writes it in the table's `texts`: `16 November
+2019`, `16 Nov 2019` or `Nov 2019` (`16. Nov. 2019` with `texts =
+table_texts(:de)`). A value is a `Dates.Date`, or a number of milliseconds
+since 1 January 1970, UTC, as JavaScript dates and a plot's temporal axis
+count them (AlgebraOfVega's `type = "temporal"`): its day is the UTC
+calendar day of that instant, so one output of a browser module can draw a
+plot's date axis and fill the table. Each cell sorts by the value, and the
+⬇ CSV writes the day as ISO `2019-11-16`. `missing`, `nothing`, `NaN` and
+`±Inf` are no day: an empty cell `–`, as a number column writes `missing`.
+A `DateTime` is refused, as `format_date` refuses it.
+
+```julia
+render_table(days; columns = ["t" => ColumnSpec("Day"; date = :short)])
+```
+
+A column is written as numbers or as days, so `date` takes no `digits`,
+`sigdigits` or `percent`.
+
 The tables whose cells you build ([`sortable_table`](@ref),
 [`master_detail_table`](@ref)) refuse these keywords: write those cells with
-`number_cell(x; digits, sigdigits, percent)`.
+`number_cell(x; digits, sigdigits, percent)`, or with `format_date` and a
+`data_sort_value`.
 """
 struct ColumnSpec
     label::String
@@ -22236,20 +22258,45 @@ struct ColumnSpec
     digits::Union{Nothing,Int}
     sigdigits::Union{Nothing,Int}
     percent::Bool
+    # `:long`, `:short` or `:month`: `render_table` writes the column's values
+    # as days (`format_date`); `nothing` for none.
+    date::Union{Nothing,Symbol}
 end
 ColumnSpec(label, help, sort_keys) = ColumnSpec(label, help, sort_keys, nothing)
-ColumnSpec(label, help, sort_keys, align) = ColumnSpec(label, help, sort_keys, align, nothing, nothing, false)
+ColumnSpec(label, help, sort_keys, align) = ColumnSpec(label, help, sort_keys, align, nothing, nothing, false, nothing)
 function ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=(), align=nothing,
-                    digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing, percent::Bool=false)
-    _number_rounding(digits, sigdigits, string("ColumnSpec(", repr(label), ")"))
+                    digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing, percent::Bool=false,
+                    date::Union{Nothing,Symbol}=nothing)
+    what = string("ColumnSpec(", repr(label), ")")
+    _number_rounding(digits, sigdigits, what)
+    _date_style(date, what, digits, sigdigits, percent)
     ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
         _column_sort_keys(label, sort_keys), _column_align(label, align),
-        isnothing(digits) ? nothing : Int(digits), isnothing(sigdigits) ? nothing : Int(sigdigits), percent)
+        isnothing(digits) ? nothing : Int(digits), isnothing(sigdigits) ? nothing : Int(sigdigits), percent, date)
 end
 
-# How `render_table` writes a column's numbers: the `format_number` keywords
-# its `ColumnSpec` gives, or `nothing` when it gives none.
-_column_number_format(col::ColumnSpec) = isnothing(col.digits) && isnothing(col.sigdigits) && !col.percent ? nothing :
+# How a column's or a bound value's days are written: one of `format_date`'s
+# styles, and never as numbers too.
+const _DATE_STYLES = (:long, :short, :month)
+function _date_style(date, what, digits=nothing, sigdigits=nothing, percent=false)
+    isnothing(date) && return nothing
+    date in _DATE_STYLES || throw(ArgumentError(string(what, ": `date` is :long, :short or :month ",
+        "(the styles of format_date); got ", repr(date))))
+    digits === sigdigits === nothing && !percent || throw(ArgumentError(string(what, ": `date = ", repr(date),
+        "` writes days, so it takes no `digits`, `sigdigits` or `percent`")))
+    date
+end
+
+# A column `render_table` writes as days (`ColumnSpec(…; date)`), in a style.
+struct _DateColumn
+    style::Symbol
+end
+
+# How `render_table` writes a column's values: the `format_number` keywords
+# its `ColumnSpec` gives, a `_DateColumn` for days, or `nothing` when it gives
+# none.
+_column_number_format(col::ColumnSpec) = !isnothing(col.date) ? _DateColumn(col.date) :
+    isnothing(col.digits) && isnothing(col.sigdigits) && !col.percent ? nothing :
     (; digits=col.digits, sigdigits=col.sigdigits, percent=col.percent)
 _column_number_format(_) = nothing
 # The header without what `render_table` reads to write the cells (computed
@@ -25361,9 +25408,21 @@ struct TableTexts
     date_month::String          #   `style=:month`: Oct 2015
 end
 
-# The texts only `format_date` reads. The browser runtime writes no date, so
-# they stay out of the texts a table carries (`_table_browser_texts`).
+# The texts only `format_date` reads. They stay out of the texts a table
+# carries (`_table_browser_texts`) and out of the browser runtime, so a page
+# without days is the same with them or without; a bound mark or a bound
+# table column that writes days in the browser carries the words of its
+# style itself (`_date_words`).
 const _TABLE_DATE_TEXTS = (:months, :months_short, :date_long, :date_short, :date_month)
+# The words `htmxoDateText` writes a day of `style` with: its layout, and the
+# month names the layout names.
+function _date_words(texts::TableTexts, style::Symbol)
+    layout = _date_layout(texts, style)
+    words = Dict{String,Any}("layout" => layout)
+    occursin("{month}", layout) && (words["months"] = texts.months)
+    occursin("{month_short}", layout) && (words["months_short"] = texts.months_short)
+    words
+end
 
 # What a date layout may name: the day of the month and the year (digits
 # alone, without a thousands mark), the month's name and its abbreviation.
@@ -25652,9 +25711,12 @@ server writes its first rows as for any table. On a `semantic_app` page that
 computes `p` in the browser, the page writes the rows again from each new value,
 offline and in a static `export_site` page too: every cell as the server would
 write it (the column's `ColumnSpec` rounding, a sort value and ⬇ CSV value
-that are the unrounded number), the sort the reader chose, the search, the
-row count and the hover-link keys (`link_key = :water`) follow, and the number
-of rows may change. The browser runs no Julia, so such a table refuses `cell`,
+that are the unrounded number, or its days with `ColumnSpec(label; date)`),
+the sort the reader chose, the search, the row count and the hover-link keys
+(`link_key = :water`) follow, and the number of rows may change. A module
+that returns numbers only says "no value" with `NaN`, so in such a table a
+`NaN` is the empty cell `–` that `missing` is, with no sort value and an
+empty ⬇ CSV field, on the server's first rows and in the browser's. The browser runs no Julia, so such a table refuses `cell`,
 `search_text`, `selectable`, a function `link_key` and sort keys computed by
 functions.
 
@@ -25689,7 +25751,7 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     bound = _bound_table_attrs(table, cols, headers, formats, empty_aligns; cell, search_text, link_key, kwargs)
 
     body_rows = [
-        h.tr([_render_sort_values(headers[j], _render_table_cell(cell, Tables.getcolumn(row, c), c, ri, texts, empty_aligns[j], formats[j]), row)
+        h.tr([_render_sort_values(headers[j], _render_cell(cell, _render_value(table, Tables.getcolumn(row, c)), c, ri, texts, empty_aligns[j], formats[j]), row)
               for (j, c) in enumerate(cols)]...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
              (isnothing(row_key) ? (;) : (; data_htmxo_link_key=string(row_key(row))))...)
@@ -25775,6 +25837,49 @@ _render_number_cell(value::Bool, texts, format) = h.td(string(value))
 _render_number_cell(value::Real, texts, format) = value isa AbstractFloat || !isnothing(format) ?
     number_cell(value; texts, something(format, (;))...) : h.td(string(value))
 
+# A cell of a column `ColumnSpec(…; date)` writes as days (`_date_cell`); any
+# other as `_render_table_cell` writes it.
+_render_cell(cell, value, c, ri, texts, empty_align, format) = _render_table_cell(cell, value, c, ri, texts, empty_align, format)
+_render_cell(::Nothing, value, c, ri, texts, empty_align, format::_DateColumn) = _date_cell(value, texts, format.style, empty_align)
+# The value a cell writes; a table of browser outputs (`bound(x; columns)`)
+# writes a NaN as no value (`_render_value` in semantic_browser.jl).
+_render_value(table, value) = value
+
+# A day in a table cell (`ColumnSpec(…; date)`): `format_date`'s text, sorted
+# by the value (a number of milliseconds as `number_cell` keys it, a `Date` by
+# its milliseconds since 1970), with the ISO day for the ⬇ CSV; no day is the
+# empty cell `–`, as a number column writes `missing`. The browser runtime's
+# `boundCell` writes the same cells.
+function _date_cell(value, texts, style, empty_align)
+    day = _date_day(value)
+    isnothing(day) && return isnothing(empty_align) ? number_cell(nothing; texts) :
+        number_cell(nothing; texts, data_htmxo_align=empty_align)
+    h.td(; data_sort_value=_date_sort_key(value), data_htmxo_number=string(day))(
+        _format_date(day, texts, _date_layout(texts, style)))
+end
+_date_sort_key(x::Real) = _number_key(_number_value(x))
+_date_sort_key(d::Dates.Date) = string(Dates.value(Dates.DateTime(d)) - Dates.UNIXEPOCH)
+
+# The day a value names, for `ColumnSpec(…; date)` and `bound(x; date)`: a
+# `Date` as it is; a number as the UTC calendar day of that many milliseconds
+# since 1970, which is the day JavaScript's `new Date(ms)` gives (`htmxoDateText`):
+# it drops the fraction toward zero and has no day beyond ±8.64e15 ms. No day
+# (`nothing`): `missing`, `nothing`, `NaN`, `±Inf` and those beyond.
+_date_day(::Union{Nothing,Missing}) = nothing
+_date_day(d::Dates.Date) = d
+_date_day(d::Dates.DateTime) = throw(ArgumentError(string(
+    "a day column or `bound(x; date)` got the DateTime ", d, "; it writes a day, so pass Date(x) ",
+    "(its time of day is not written) or the milliseconds since 1970")))
+_date_day(x::Bool) = throw(ArgumentError(string(
+    "a day column or `bound(x; date)` got the Bool ", x, "; it takes a Date or the milliseconds since 1970")))
+function _date_day(x::Real)
+    isfinite(x) && -8.64e15 <= x <= 8.64e15 || return nothing
+    Dates.Date(Dates.DateTime(Dates.UTM(Dates.UNIXEPOCH + trunc(Int64, x))))
+end
+_date_day(x) = throw(ArgumentError(string(
+    "a day column or `bound(x; date)` takes a Date or the milliseconds since 1970 ",
+    "(missing, nothing and NaN for no day); got ", repr(x))))
+
 # Where a column's empty cells sit: at the right, as a number cell does
 # (`nothing`: no alignment of their own), in a column of numbers (floats,
 # `IntervalEstimate`s) or of no values at all; in a column that shows text
@@ -25785,6 +25890,8 @@ _render_empty_align(values, hdr, format=nothing) =
     any(v -> _render_shows_text(v, format), values) ? String(something(_header_align(hdr), :left)) : nothing
 _render_shows_text(x, format) = _render_shows_text(x)
 _render_shows_text(x::Real, ::NamedTuple) = x isa Bool
+# A day cell is a value cell, at the right like a number cell (`_date_cell`).
+_render_shows_text(x, ::_DateColumn) = false
 _render_shows_text(_) = true
 _render_shows_text(::Union{Nothing,Missing,AbstractFloat}) = false
 
@@ -26369,9 +26476,10 @@ function sortable_table(headers, rows;
     # each cell carries the values (`sort_values`).
     for (i, hdr) in enumerate(headers)
         isnothing(_column_number_format(hdr)) || throw(ArgumentError(string("sortable_table: column ",
-            repr(_header_label(hdr)), " says how its numbers are written (`ColumnSpec(…; digits, sigdigits, ",
-            "percent)`), which render_table reads when it writes the cells; this table's cells are built ",
-            "already, so write them with `number_cell(x; digits, sigdigits, percent)`")))
+            repr(_header_label(hdr)), " says how its numbers or days are written (`ColumnSpec(…; digits, ",
+            "sigdigits, percent, date)`), which render_table reads when it writes the cells; this table's cells ",
+            "are built already, so write them with `number_cell(x; digits, sigdigits, percent)`, or a day with ",
+            "`format_date` and its `data_sort_value`")))
         _computed_sort_keys(hdr) && throw(ArgumentError(string("sortable_table: column ",
             repr(_header_label(hdr)), " gives its sort keys functions, but sortable_table's rows are ",
             "built already. Name the keys (`sort_keys = [\"Estimate\", …]`) and give each cell its ",
@@ -26797,6 +26905,30 @@ function htmxoNumberText(x, f, integer) {
         s = htmxoDigitsText(negative, ds, point, t.decimal, t.thousands, !integer && (point <= -4 || point >= 16), minus);
     }
     return f.percent ? t.percent.replace('{number}', s) : s;
+}
+// `_date_day`: the UTC day of `ms` milliseconds since 1970 (a `Date`), or
+// null for no day (no number, NaN, ±Inf, beyond ±8.64e15 ms).
+function htmxoDay(ms) {
+    if (typeof ms !== 'number') return null;
+    const t = new Date(ms);
+    return isNaN(t.getTime()) ? null : t;
+}
+// `string(day)`: the ISO day (`2019-11-16`), which a day cell's ⬇ CSV field holds.
+function htmxoDateKey(ms) {
+    const t = htmxoDay(ms);
+    if (!t) return null;
+    const y = t.getUTCFullYear(), pad = (n, w) => String(n).padStart(w, '0');
+    return (y < 0 ? '-' + pad(-y, 4) : pad(y, 4)) + '-' + pad(t.getUTCMonth() + 1, 2) + '-' + pad(t.getUTCDate(), 2);
+}
+// `format_date`: the day of `ms` in the words `d` gives (`_date_words`: its
+// `layout`, and the `months` or `months_short` it names); `–` for no day.
+function htmxoDateText(ms, d) {
+    const t = htmxoDay(ms);
+    if (!t) return '–';
+    const m = t.getUTCMonth();
+    return d.layout.replace(/[{](day|month_short|month|year)[}]/g, (x, k) =>
+        k === 'day' ? String(t.getUTCDate()) : k === 'year' ? String(t.getUTCFullYear()) :
+        k === 'month' ? d.months[m] : d.months_short[m]);
 }
 """
 
@@ -28431,6 +28563,11 @@ format_date(Date(2015, 10, 1); texts = table_texts(:de; date_month = "{month} {y
 `missing` and `nothing` write `–`, as in [`format_number`](@ref). A
 `DateTime` is refused rather than written without its time of day: pass
 `Date(x)` to write its day.
+
+A table column writes its days this way with `ColumnSpec(label; date = style)`,
+and a value a page computes in the browser with `bound(x; date = style)`;
+both also take a number of milliseconds since 1970, UTC, and the browser
+writes the same text.
 """
 format_date(d; texts::TableTexts=_EN_TABLE_TEXTS, style::Symbol=:long) =
     _format_date(d, texts, _date_layout(texts, style))
