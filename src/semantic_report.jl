@@ -5,7 +5,7 @@
 # browser) and kept beside the inputs it reads. Its Markdown (`?plain`, a
 # report, `pdf_report`) has no browser to ask and no controls to read, so each
 # tab writes what its result's address answers as Markdown at the page's
-# inputs, after a line that states those inputs (`shown_at`), and in a report
+# inputs, after a statement of those inputs (`shown_at`), and in a report
 # once more for each state the app declares (`report_states`).
 
 # The inputs a result is shown at, as the page's controls show them: the
@@ -129,17 +129,24 @@ _report_state_name(state::_ReportState) = isnothing(state.caption) ?
     string("(", join((string(k, " = ", repr(v)) for (k, v) in sort!(collect(state.values); by=first)), ", "), ")") :
     repr(state.caption)
 
-# The line stating a result's inputs, "Shown at: Slope 0.20; Intercept 80
-# units", or `nothing` for a result that reads none.
+# The statement of a result's inputs, one paragraph of lines: "Shown at:",
+# then "Slope: 0.20", "Intercept: 80 units", one line each; `nothing` for a
+# result that reads none.
 function _shown_at_node(shown::_ShownAt)
-    pairs = String[]
+    parts = Any[string(_error_texts(shown.object).shown_at, ":")]
     for param in shown.params
         text = _shown_value_text(shown.object, shown.route, param, shown.values)
         isnothing(text) && continue
-        push!(pairs, string(_shown_label(param), " ", text))
+        push!(parts, h.br(), _shown_pair(param, text))
     end
-    isempty(pairs) && return nothing
-    h.p(string(_error_texts(shown.object).shown_at, ": ", join(pairs, "; ")))
+    length(parts) == 1 && return nothing
+    h.p(parts...)
+end
+
+# "Label: value"; a label that ends in a colon keeps its own.
+function _shown_pair(param, text)
+    label = _shown_label(param)
+    string(label, endswith(label, ':') ? " " : ": ", text)
 end
 
 # An input's label, as its control writes it: its docstring's first paragraph,
@@ -212,7 +219,7 @@ function _shown_records_text(obj, route, records::Records, values)
             isnothing(param) && continue
             record_values = merge(Dict{Symbol,Any}(values), Dict{Symbol,Any}(field => getfield(entry, field)))
             text = _shown_value_text(obj, route, param, record_values)
-            isnothing(text) || push!(fields, string(_shown_label(param), " ", text))
+            isnothing(text) || push!(fields, _shown_pair(param, text))
         end
         isempty(fields) ? entry.label : string(entry.label, " (", join(fields, ", "), ")")
     end, ", ")

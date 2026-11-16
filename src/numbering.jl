@@ -573,9 +573,15 @@ linking to the section, under the title "Contents" ("Inhalt" in German; see
 On the page it is a bordered box where it stands: the numbers in a column of
 their own, deeper levels indented, no list markers. In a [`pdf_report`](@ref)
 it becomes Typst's contents list at the same place, which shows the same
-numbered headings with their page numbers (do not also pass
-`metadata=(toc=true,)`, which `pdf_report` then refuses). Its Markdown is a
-list of links in a `::: {.htmxo-contents}` block.
+numbered sections with their page numbers (do not also pass
+`metadata=(toc=true,)`, which `pdf_report` then refuses). It lists no other
+heading: an article's header or a plain `h.h2` in the content stays a heading
+of the PDF's body, out of its contents list. A [`SemanticSection`](@ref)
+written outside the numbered document, such as a closing section a report
+appends after it, is listed too, without a number. Its Markdown is a list of
+links in a `::: {.htmxo-contents}` block; in a report's Markdown each listed
+section's heading also carries the class `htmxo-contents-entry`, which the
+PDF's contents list follows.
 """
 contents(; depth::Integer=3) = depth >= 1 ? _Contents(Int(depth)) :
     throw(ArgumentError("contents: depth must be at least 1, not $depth"))
@@ -653,6 +659,21 @@ _static_walk(c::_Contents, rules::_StaticRules) = let node = _contents_node(c)
 end
 _static_walk_child(c::_Contents, rules) = _static_walk(c, rules)
 _tabset_key(c::_Contents, h::UInt) = hash(c.depth, hash("contents", h))
+
+# Typst's outline would list every heading of the PDF: an article's header, a
+# plain `h.h2` in a view, once per state of a `semantic_app`'s report (snag
+# pdf-contents-lis-087ca53a). So a report's Markdown marks the headings it
+# lists with this class, and `pdf-report-contents.lua` points the outline at
+# them alone: the sections `contents()` lists, which have a number, and a
+# section written outside any numbered document, such as a closing "About this
+# document" a report appends to its numbered body. Not marked: the document's
+# title (`level=1`), and a section inside a numbered document that took no
+# number, such as one in a view the document's numbering never met. Only a
+# report's Markdown carries the class; a `?plain` reader has no outline.
+const _CONTENTS_ENTRY_CLASS = "htmxo-contents-entry"
+_contents_entry_class(number, level::Integer) =
+    page_report() && level >= 2 && (!isnothing(number) || isnothing(_NUMBERING[])) ?
+        _CONTENTS_ENTRY_CLASS : ""
 
 # A Pandoc attribute value in double quotes.
 _markdown_attr_value(s) = replace(s, '\\' => "\\\\", '"' => "\\\"")

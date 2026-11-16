@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.145
+## 0.1.148
 
 - A `semantic_app(…; presentation=:tabs)` page with a sidebar is as tall as
   its inputs and results. Its layout took the window's height as its least
@@ -13,6 +13,57 @@
   holding only the surface scrolled although its content fitted (snag
   `tabs-surface-wit-b2cf6818`). An `app_layout` that is the page's shell still
   fills the window, its sidebar's divider reaching the window's bottom.
+
+## 0.1.147
+
+- A number input with a range (`number_domain`, `ninput(…; domain)`) stays
+  inside a column narrower than its row. The slider (at least 5rem), the 7rem
+  field and the unit kept one row that never wrapped, about 230 px wide, so in
+  the 12rem sidebar of a `semantic_app(…; presentation=:tabs, shared=…)` page
+  (176 px inside its padding) the unit was drawn up to 41 px into the result
+  column, over the result's own text, and even a field without a unit crossed
+  the divider (snag `number-control-u-68445236`). The row now wraps: in such a
+  column the slider takes a line of its own, as wide as the column, above the
+  field and its unit; a unit too long to fit beside its field goes under it.
+  A column wide enough keeps the one row as before. The field and its unit
+  are one `span.htmxo-number-entry` inside `.htmxo-number`, the slider after
+  it; the field still comes first, so the label names it. An app stylesheet
+  that selected `.htmxo-number > input[type="number"]` or
+  `.htmxo-number > .htmxo-number-unit` selects them under
+  `.htmxo-number-entry` now.
+
+## 0.1.146
+
+- The "Shown at" statement before each result of a
+  `semantic_app(…; presentation=:tabs)` page's Markdown and PDF (`?plain`, a
+  report, `pdf_report`) puts a colon after each input's label and each input
+  on a line of its own: "Shown at:", then "Slope (per day): 0.20" and
+  "Intercept: 80 units" below it, as one paragraph of lines. Since 0.1.135 it
+  was one line, "Shown at: Slope (per day) 0.20; Intercept 80 units", in which
+  a label that is a phrase with a comma ran into its value. A German page
+  writes "Dargestellt bei:" and "Bezeichnung: Wert"; a label that ends in a
+  colon keeps its own; a list of records writes its fields the same way,
+  "Scenario (Dose (mg): 5)". The HTML page is unchanged (snag
+  `shown-at-line-ru-25ece17f`, user decision `0xxd4et`).
+
+## 0.1.145
+
+- A numbered report's PDF contents list lists the sections `contents()`
+  lists, and no other heading. Typst's outline used to list every heading of
+  the PDF: an article's header and a plain `h.h2` in a view, once per state a
+  `semantic_app` report shows, so BRR's snow report listed 12 entries where
+  its page lists 2 (snag `pdf-contents-lis-087ca53a`). A report's Markdown
+  (`to_markdown_string(…; report=true)`, `pdf_report(value, …)`) now marks the
+  heading of each listed section with the class `htmxo-contents-entry`
+  (`## 1 Results {#section-1 .htmxo-contents-entry}`), and `pdf_report`
+  points the outline at those headings alone. Listed: each numbered section,
+  and a `SemanticSection` written outside any numbered document, such as a
+  closing "About this document" a report appends to its numbered body. Not
+  listed: the document's title (`level=1`), a section inside the numbered
+  document that took no number, and every heading that is not a
+  `SemanticSection`'s. Those stay headings of the body and bookmarks of the
+  PDF. Ordinary Markdown (`?plain`) is unchanged, and report Markdown that
+  marks no heading keeps the outline of every heading.
 
 ## 0.1.144
 

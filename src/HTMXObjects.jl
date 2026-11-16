@@ -4794,6 +4794,13 @@ _markdown_plain_text(text::AbstractString) =
 # Appended to a heading line: the heading carries its element's anchor.
 _markdown_heading_anchor(anchor::AbstractString) =
     isempty(anchor) ? "" : " " * _markdown_anchor_attr(anchor)
+# A heading the report's contents list lists also carries this class
+# (`_contents_entry_class`), inside the same braces as its anchor.
+function _markdown_heading_anchor(anchor::AbstractString, class::AbstractString)
+    isempty(class) && return _markdown_heading_anchor(anchor)
+    isempty(anchor) && return " {." * class * "}"
+    " " * chop(_markdown_anchor_attr(anchor)) * " ." * class * "}"
+end
 
 _semantic_metric_text(metric::SemanticMetric) = isempty(metric.unit) ?
     string(metric.value) : string(metric.value, " ", metric.unit)
@@ -5940,7 +5947,8 @@ Base.show(io::IO, mime::MIME"text/markdown", section::SemanticSection) =
     _semantic_heading(_semantic_opening_level(section)) do level
         _numbered_section(section, level) do number, anchor
             print(io, _semantic_heading_sigil(level), " ", _section_number_text(number),
-                _markdown_plain_text(section.title), _markdown_heading_anchor(anchor))
+                _markdown_plain_text(section.title),
+                _markdown_heading_anchor(anchor, _contents_entry_class(number, level)))
             _shows_nothing(section.children, _ambient_audience()) || print(io, "\n\n")
             _semantic_show_children(io, mime, section.children, "\n\n")
         end
@@ -14025,9 +14033,10 @@ that a running request will replace (`loading`, `loading_named`; see
 list (`choice_search`, its placeholder, and `choice_no_match`, shown when no
 option matches; see [`choice_list`](@ref)), and the button of a
 `semantic_app(…; presentation=:tabs)` page that returns every input to its
-default (`reset_inputs`), and the line of that page's Markdown that names the
-inputs a result is shown at (`shown_at`, "Shown at"; a checkbox's value in it
-is `shown_yes` or `shown_no`). Build one with
+default (`reset_inputs`), and the statement of that page's Markdown that names
+the inputs a result is shown at (`shown_at`, "Shown at", followed by a colon
+and a `Label: value` line for each input; a checkbox's value in it is
+`shown_yes` or `shown_no`). Build one with
 [`error_texts`](@ref).
 
 Set it once on the root `@htmx` struct, `__error_texts__ = error_texts(:de)`:
@@ -30285,7 +30294,10 @@ The interval is any IntervalSets interval of real numbers (`a .. b`, or one
 with an open end such as `Interval{:open,:closed}(0, 1)`); `lower, upper` is the
 closed interval.
 [`semantic_app`](@ref) and [`operation_form`](@ref) then draw the input as a
-slider with a number field beside it, followed by the unit. A submitted number
+slider with a number field beside it, followed by the unit. In a column too
+narrow for that row, such as the sidebar of a `presentation=:tabs` page, the
+slider takes a line of its own above the field and its unit, and a unit too
+long to fit beside the field goes under it. A submitted number
 outside the interval is refused with a 400 at that field, as a value outside a
 finite `@options` list is. A bare interval, `@options(x) = 0 .. 1`, is the same
 domain with no other settings. The label and help text stay where they are
@@ -30411,9 +30423,12 @@ function _number_slider_position(domain::NumberDomain, value)
 end
 
 # The control of a number input with a `NumberDomain`: a `<label>` holding the
-# number field (named, so it is what the form submits and validates), the
+# number field (named, so it is what the form submits and validates) with its
 # unit, and an unnamed slider the page's `number_control_script` keeps on the
-# field's value. The label carries `number_record` as `data-htmxo-number`.
+# field's value. The label carries `number_record` as `data-htmxo-number`. The
+# field and its unit are one `.htmxo-number-entry`, so a column too narrow for
+# the whole row puts the slider on a line of its own above them and never
+# leaves the unit alone on a line (snag number-control-u-68445236).
 function _number_control(name, label, domain::NumberDomain, value;
         integer::Bool=false, required::Bool=false, show_when=nothing, kwargs...)
     lower, upper = IntervalSets.endpoints(domain.interval)
@@ -30448,7 +30463,8 @@ function _number_control(name, label, domain::NumberDomain, value;
         ()
     end
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
-    h.label(label, h.span(field, unit..., slider...; class="htmxo-number");
+    entry = h.span(field, unit...; class="htmxo-number-entry")
+    h.label(label, h.span(entry, slider...; class="htmxo-number");
             data_htmxo_number=JSON.json(record), show_attrs...)
 end
 
@@ -33897,10 +33913,11 @@ In the page's Markdown (`?plain`, `Accept: text/markdown`,
 [`pdf_report`](@ref)) each tab is its label followed by its result, as the
 result's own address answers it as Markdown at the page's inputs: the report
 view in a report, and for a result computed in the browser what the server
-draws of it. A line before it names the inputs the result reads and their
-values as their controls show them, `Shown at: Slope (per day) 0.20;
-Intercept 80 units` (`__error_texts__`'s `shown_at`, and `shown_yes` or
-`shown_no` for a checkbox). In a [`numbered`](@ref) document, the captioned
+draws of it. A statement before it names the inputs the result reads and
+their values as their controls show them, one input per line: `Shown at:`,
+then `Slope (per day): 0.20` and `Intercept: 80 units` on lines of their own
+(`__error_texts__`'s `shown_at`, and `shown_yes` or `shown_no` for a
+checkbox). In a [`numbered`](@ref) document, the captioned
 figures and tables of a result computed in the browser take the document's
 next numbers, on the page (every view the browser switches between reads the
 same ones) and in its Markdown alike, and `ref` cites them; a result the
@@ -33908,7 +33925,7 @@ server computes, which the page loads later, takes none. The HTML page asks no
 result it does not show; a Markdown read asks each tab's result once.
 `report_states = ["Steep" => (a = 0.5,), (b = 20.0,)]` writes, in a report
 only, each tab again for each state that names an input it reads: with the
-state's values in place of the page's, its own line, and its caption first
+state's values in place of the page's, its own statement, and its caption first
 when it has one. A state's copy takes no number in a `numbered` document, so
 every number in the report reads as on the page, and its element ids take the
 state's place (`fig-curve-state-1`), so an id `ref` cites is in the report
@@ -34777,8 +34794,9 @@ Keep the slider of a number input with a range ([`number_domain`](@ref), or
 `ninput(…; domain)`) and its number field on one value.
 
 The control is a `<label data-htmxo-number>` holding the number field, which
-is the named input the form submits, the unit, and an unnamed slider over
-positions 0…500. Moving the slider writes its value into the field, spaced
+is the named input the form submits, with its unit (together a
+`.htmxo-number-entry`), and an unnamed slider over positions 0…500. Moving the
+slider writes its value into the field, spaced
 evenly in ratio for a `log` domain, on the `step` grid from the lower bound,
 else to three significant digits (as the explainer pictures pick slider
 values). Typing a number in the field moves the slider; the field takes any
@@ -38873,19 +38891,27 @@ table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; 
 tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
 
 /* A number input with a range (`number_domain`): the slider, then the number
-   field and its unit, on one row under the label, spaced as a field is. The
-   field comes first in the document, so the label names it and Tab reaches
-   it first. UNLAYERED: Pico styles `input` unlayered. */
-.htmxo-number { display: flex; align-items: center; gap: .5rem; margin: calc(var(--pico-spacing, 1rem) * .25) 0 var(--pico-spacing, 1rem); }
-.htmxo-number > input { margin: 0; }
-.htmxo-number > input[type="range"] { order: 0; flex: 1 1 6rem; width: auto; min-width: 5rem; }
-.htmxo-number > input[type="number"] { order: 1; flex: 0 0 7rem; width: 7rem; }
-.htmxo-number > .htmxo-number-unit { order: 2; white-space: nowrap; }
+   field and its unit (`.htmxo-number-entry`), on one row under the label,
+   spaced as a field is. In a column narrower than that row (a :tabs page's
+   sidebar, a narrow card) the slider takes a line of its own, as wide as the
+   column, above the field and its unit, which stay together; a unit wider
+   than the room beside its field goes under the field. No part leaves the
+   column (snag number-control-u-68445236). The slider's basis is its least
+   width, so the row wraps only when it cannot fit at all: a row that fits
+   keeps the one line it had. The field comes first in the document, so the
+   label names it and Tab reaches it first. UNLAYERED: Pico styles `input`
+   unlayered. */
+.htmxo-number { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; margin: calc(var(--pico-spacing, 1rem) * .25) 0 var(--pico-spacing, 1rem); }
+.htmxo-number input { margin: 0; }
+.htmxo-number > input[type="range"] { order: 0; flex: 1 1 5rem; width: auto; min-width: min(5rem, 100%); }
+.htmxo-number > .htmxo-number-entry { order: 1; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; }
+.htmxo-number-entry > input[type="number"] { flex: 0 1 7rem; width: 7rem; min-width: 0; }
+.htmxo-number-entry > .htmxo-number-unit { overflow-wrap: anywhere; }
 /* A field with `digits` (`.htmxo-number-value`): while the reader is not
    editing it, its value rounded to them is drawn over it and the field's own
    text is hidden; the field keeps the exact value. Only on a page that
    `number_control_script` marked, which keeps the text on the field. */
-.htmxo-number > .htmxo-number-value { order: 1; flex: 0 0 7rem; width: 7rem; position: relative; display: flex; }
+.htmxo-number-entry > .htmxo-number-value { flex: 0 1 7rem; width: 7rem; min-width: 0; position: relative; display: flex; }
 /* No colour transition (Pico fades `color`): editing shows the value at once. */
 .htmxo-number-value > input[type="number"] { width: 100%; margin: 0;
   transition: background-color var(--pico-transition), border-color var(--pico-transition), box-shadow var(--pico-transition); }
