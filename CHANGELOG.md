@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.145
+
+- A `semantic_app(…; presentation=:tabs)` page with a sidebar is as tall as
+  its inputs and results. Its layout took the window's height as its least
+  height, which suits `app_layout` as a page's shell but not a part of a page:
+  shown between two paragraphs of an article, the surface stayed one window
+  tall and left the window's height less its content empty before the next
+  paragraph (462 px in a 700 px window, 962 px in a 1200 px one), and a page
+  holding only the surface scrolled although its content fitted (snag
+  `tabs-surface-wit-b2cf6818`). An `app_layout` that is the page's shell still
+  fills the window, its sidebar's divider reaching the window's bottom.
+
 ## 0.1.144
 
 - A static export no longer refuses a browser result (`@browser`) for markup
