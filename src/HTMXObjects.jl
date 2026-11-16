@@ -6460,7 +6460,8 @@ class itself where a wrapper would break the markup (a table row or cell, a
 list item, a `summary`); the outline and the label, in the language of the
 element's `lang`, come from [`htmxo_utility_styles`](@ref), which every
 [`htmx`](@ref) page carries. In Markdown a block is a fenced div
-`::: {.htmxo-private}` that opens with the label, `*not public*`, and inline
+`::: {.htmxo-private}` that opens with the label, `*not public*`, which a
+[`pdf_report`](@ref) keeps on the page where the content starts, and inline
 content a span `[*not public:* …]{.htmxo-private}`. The label is in the
 language of `HTMXObjects.page_lang()`: a route's `__lang__`, or the `lang` of
 `to_markdown_string(x; lang)`, of `dispatch(…; lang)` and of a
@@ -21198,8 +21199,31 @@ function _strip_md_chrome(node::Node)
         kept = _strip_md_chrome_child(child)
         isnothing(kept) || push!(new_children, kept)
     end
+    _md_marks_caption(node, new_children) && push!(new_children, markdown_only(_MD_CAPTION_MARK))
     Node(HTMX.tag(node), copy(HTMX.attrs(node)), new_children)
 end
+
+# HTMX.jl writes a figure as a fenced div with its caption as the last
+# paragraph. Quarto makes it a figure or a table, with its caption, only when
+# its id starts with `fig-` or `tbl-`; any other figure stays a plain div whose
+# picture and caption a page break could separate, and Pandoc reads an id-less
+# figure's `::: {}` exactly as a `<div>`. So in a report a figure Quarto does not
+# float writes this line after its content: HTMX.jl writes the caption after
+# every other child, so the marker is the line just before the caption, and
+# `pdf_report` sets what follows it as the caption of one Typst figure
+# (`pdf-report-captions.lua`).
+const _MD_CAPTION_MARK = "<!-- htmxo:caption -->"
+const _MD_FLOAT_ID = r"^(fig|tbl|lst)-"
+_md_marks_caption(node, children) = page_report() && _md_tag(node) === :figure &&
+    !occursin(_MD_FLOAT_ID, string(something(get(HTMX.attrs(node), :id, nothing), ""))) &&
+    any(c -> c isa Node && _md_tag(c) === :figcaption && _md_has_text(c), children)
+# Whether stripped content writes any text: the caption of `render_table`'s
+# download button alone has none once the button is gone.
+_md_has_text(s::AbstractString) = !all(isspace, s)
+_md_has_text(n::Node) = any(_md_has_text, HTMX.children(n))
+_md_has_text(m::MarkdownOnly) = _md_has_text(m.text)
+_md_has_text(::HtmlOnly) = false
+_md_has_text(x) = true  # a caption number, a semantic value: they write their own text
 
 """
     markdown_response(text) -> HTTP.Response
@@ -21215,8 +21239,9 @@ markdown_response(text) = HTTP.Response(200, ["Content-Type" => "text/markdown; 
 # to Typst as written.
 const _PDF_REPORT_QUOTES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-quotes.lua")
 
-# A semantic disclosure's label must travel with the start of its body, not
-# stand alone at a page bottom. Only the label is sticky; the body can break.
+# A semantic disclosure's label, and the "not public" label opening a block of
+# private content, must travel with the start of its body, not stand alone at
+# a page bottom. Only the label is sticky; the body can break.
 const _PDF_REPORT_LABELS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-labels.lua")
 
 # Pandoc's Typst writer gives equations no alt text, which PDF/UA-1 requires;
@@ -21291,6 +21316,16 @@ const _PDF_REPORT_URL_MAP_KEY = "htmxobjects-url-map"
 # image alone in its paragraph or figure was tagged as a Figure inside a P, and
 # PAC warns about each one; this filter sets such an image in a Typst block.
 const _PDF_REPORT_FIGURES_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-figures.lua")
+
+# Quarto makes a figure only of a div whose id starts with `fig-` (`tbl-`), so
+# the picture and caption of any other captioned figure were two blocks a page
+# break could separate. A report marks such a caption (`_MD_CAPTION_MARK`); this
+# filter sets a figure of pictures, or of a table, with it as one Typst figure.
+const _PDF_REPORT_CAPTIONS_FILTER = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-captions.lua")
+
+# A figure does not break across pages, so one taller than a page printed its
+# caption over the page bottom; this rule scales its pictures down to fit.
+const _PDF_REPORT_FIGURES_TYPST = joinpath(dirname(@__DIR__), "assets", "quarto", "pdf-report-figures.typ")
 
 # A table cell's line break is an inline `<br>` in the Markdown (a pipe table
 # row is one line), and Pandoc's Typst writer drops raw HTML, so the two lines of
@@ -21537,7 +21572,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
     numbered = _markdown_numbered(markdown)
     has_contents = _markdown_contents(markdown)
     _pdf_report_numbering_metadata(metadata, numbered, has_contents)
-    headers = [_PDF_REPORT_TABLES_TYPST, _PDF_REPORT_CODE_TYPST]
+    headers = [_PDF_REPORT_TABLES_TYPST, _PDF_REPORT_FIGURES_TYPST, _PDF_REPORT_CODE_TYPST]
     numbered && push!(headers, _PDF_REPORT_NUMBERED_TYPST)
     """
     ---
@@ -21563,6 +21598,7 @@ function _pdf_report_qmd(markdown; title, lang, metadata=(;), base_url=nothing, 
       - $(_yaml_string(_PDF_REPORT_DATE_FILTER))
       - $(_yaml_string(_PDF_REPORT_LINKS_FILTER))
       - $(_yaml_string(_PDF_REPORT_BREAKS_FILTER))
+      - $(_yaml_string(_PDF_REPORT_CAPTIONS_FILTER))
     $(has_contents ? "  - " * _yaml_string(_PDF_REPORT_CONTENTS_FILTER) * "\n" : "")---
 
     """ * markdown
@@ -21584,7 +21620,15 @@ text would otherwise wrap, so a long label gets the width that short numbers do
 not need; a table that fits keeps its natural widths. A table
 longer than the rest of its page continues on the next, its header row
 repeated, and a caption above it moves along with its first rows; a row that
-fits on a page is not split between two (a taller one still is). A code block
+fits on a page is not split between two (a taller one still is). A figure's
+pictures and its caption stay on one page: a figure that does not fit the rest
+of its page moves to the next one whole, and one taller than a page has its
+pictures scaled down until it fits with its caption. A captioned figure or
+table without an id, or with one Quarto does not number (`fig-…`, `tbl-…`),
+holds together only in a report's Markdown, which marks its caption with a
+`<!-- htmxo:caption -->` line: a value is written as one, and Markdown is
+fetched with `report=true`. A figure of other content than pictures or a table
+(prose, code) is set as it was, and can break across pages. A code block
 is one tagged Code element with a paragraph per line, in the colours of
 Quarto's `arrow` theme; a blank line in it is kept on the page and left out of
 the tags. Quarto's own highlighting tagged each token as a Code element of its
@@ -21592,8 +21636,10 @@ own, and PAC (PDF Accessibility Checker) warned about the empty and
 whitespace-only ones. Semantic disclosure labels (including eager tabs and
 master-detail labels) stay with the start of their body. Their Markdown marks
 the label alone with `::: {.htmxo-label}`; the body can continue across pages.
-Regenerate saved Markdown to get these markers. Ordinary bold prose keeps its
-own pagination.
+Regenerate saved Markdown to get these markers. The "not public" label that
+opens a block of [`private`](@ref) content in a private report stays with the
+start of that content the same way. Ordinary bold or emphasised prose keeps
+its own pagination.
 
 `title` is the document title, which PDF/UA requires; Quarto also prints it as
 the title block above the content. `lang` is a language tag with its region
@@ -30785,9 +30831,33 @@ function _computed_default_value(obj, param)
     end
 end
 
+# The names an expression writes: its symbols, those of a property access
+# (`settings.start`, `__self__.start`) included.
+_expression_names!(names, x::Symbol) = push!(names, x)
+_expression_names!(names, x::QuoteNode) = _expression_names!(names, x.value)
+_expression_names!(names, x::Expr) = (foreach(arg -> _expression_names!(names, arg), x.args); names)
+_expression_names!(names, _) = names
+
+# The dependency closure of the default of `T`'s `@param` `name`. The default
+# is one argument of the parameter's extractor call, which reads more than the
+# default does: its `@relevant` condition, its declared domain, the request.
+# So this is the closure of what that call reads directly and the default
+# expression names. Where DynamicObjects gives no direct reads for the
+# parameter, it is the parameter's own closure, which holds every such read.
+function _default_closure(T::Type, name::Symbol, default)
+    info = isdefined(DynamicObjects, :metafirst) ?
+        Base.invokelatest(getproperty(DynamicObjects, :metafirst), T, name) : nothing
+    direct = info === nothing ? nothing : get(info, :dependson, nothing)
+    direct === nothing && return _dependency_closure(T, name)
+    named = _expression_names!(Set{Symbol}(), default)
+    _dependency_closure(T, Symbol[n for n in direct if n isa Symbol && n in named])
+end
+
 # A computed default is drawn again when an input it reads changes
 # (`_semantic_param_dependencies`), so a control that follows it shows the
-# value the server computes for the inputs the page sends.
+# value the server computes for the inputs the page sends. An input that only
+# the parameter's `@relevant` condition or declared domain reads is none: the
+# default is the same for each of its values (`_default_closure`).
 function _with_default_reads(obj, param)
     _computed_default(param) || return param
     source = _param_declaring_object(obj, param.name)
@@ -30799,7 +30869,7 @@ function _with_default_reads(obj, param)
         declared = _reflect_local_param(T, param.name; unquote_default=false)
         declared.default isa QuoteNode && return merge(param, (; literal_default=true))
     end
-    closure = _dependency_closure(T, param.name)
+    closure = _default_closure(T, param.name, param.default)
     isnothing(closure) && return param
     params = Set{Symbol}(Base.invokelatest(_param_names, T))
     reads = Symbol[name for name in closure if name in params && name !== param.name]
@@ -31758,15 +31828,18 @@ end
 # 0.5.21 (`878dd48`) removed its private `_semantic_dependency_closure`, which
 # this used to call, so the closure is walked here from that metadata, as it was
 # there; an older DynamicObjects keeps answering through its own helper.
-function _dependency_closure(T::Type, name::Symbol)
+_dependency_closure(T::Type, name::Symbol) = _dependency_closure(T, (name,))
+
+# The same closure of several properties together.
+function _dependency_closure(T::Type, names)
     isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
-        getproperty(DynamicObjects, :_semantic_dependency_closure), T, (name,))
+        getproperty(DynamicObjects, :_semantic_dependency_closure), T, Tuple(names))
     isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
     metafirst = getproperty(DynamicObjects, :metafirst)
     meta = getproperty(DynamicObjects, :meta)
     Base.invokelatest(applicable, meta, T) || return nothing
     closure = Set{Symbol}()
-    pending = Symbol[name]
+    pending = collect(Symbol, names)
     while !isempty(pending)
         current = pop!(pending)
         current in closure && continue

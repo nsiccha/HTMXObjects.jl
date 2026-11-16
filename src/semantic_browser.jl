@@ -715,7 +715,8 @@ function _browser_server_parts!(page::_BrowserPage, specs, routes, follows, brow
         help = get(param, :help, nothing)
         isnothing(help) || isempty(help.dependencies) || push!(reasons, "its `@help` text reads other inputs")
         defaulted = get(param, :default_reads, nothing)
-        isnothing(defaulted) || isempty(defaulted) || push!(reasons, "its default reads other inputs")
+        isnothing(defaulted) || isempty(defaulted) || push!(reasons, string(
+            "its default reads ", join((string("`", n, "`") for n in defaulted), ", ")))
         isempty(reasons) && continue
         push!(page.problems, string("the server draws the control of `", param.name,
             "` again when other inputs change (", join(reasons, "; "),

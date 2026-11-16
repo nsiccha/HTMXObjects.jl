@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.141
+## 0.1.144
 
 - The "Shown at" statement before each result of a
   `semantic_app(…; presentation=:tabs)` page's Markdown and PDF (`?plain`, a
@@ -15,6 +15,59 @@
   colon keeps its own; a list of records writes its fields the same way,
   "Scenario (Dose (mg): 5)". The HTML page is unchanged (snag
   `shown-at-line-ru-25ece17f`, user decision `0xxd4et`).
+## 0.1.143
+
+- `pdf_report` keeps a captioned figure's pictures and caption on one page
+  with or without an id. Quarto makes a figure only of a div whose id starts
+  with `fig-` (a table with `tbl-`), so an id-less `with_caption` figure, such
+  as AoV's `with_plot_caption` without `id=`, was a picture and a separate
+  paragraph: the picture could end one page and its caption start the next,
+  untagged as a caption (snag `pdf-report-id-le-8a1607df`). A report's
+  Markdown (`report=true`, and every `pdf_report(value, …)`) now writes a
+  `<!-- htmxo:caption -->` line just before the caption of each captioned
+  figure Quarto does not float, and `pdf_report` sets a figure of pictures
+  marked so as one Typst figure, its caption tagged `Caption`, that moves to
+  the next page whole. An id-less captioned `render_table` becomes a captioned
+  table the same way: its caption above it and tagged, the table still
+  breaking across pages (HTMXObjects todo `0ikz55q`). A figure taller than
+  the page's text area, with an id or without, has its pictures scaled down
+  until it fits with its caption, where its caption ran over the page bottom.
+  Figures of other content (prose, code) are unchanged, and so is Markdown
+  outside a report. Regenerate saved report Markdown to get the marks. A
+  figure Quarto numbers (`fig-…`) prints as before unless it is taller than a
+  page.
+
+## 0.1.142
+
+- A computed default that reads no input stays static on an input that has a
+  `@relevant` condition or declared `@options`. With
+  `settings::Any = (; start = 1.0)`, `@param limit::Float64 = Float64(settings.start)`
+  and `@relevant(limit) = has_limit`, the inputs the condition reads were
+  taken as inputs the default reads, because both are arguments of the one
+  call that extracts `limit`. The struct's first `@options` declaration was
+  taken the same way for every input with a declared domain. Such an input now
+  behaves as it already did without them: `export_site` writes a page with a
+  browser result (`@browser`) instead of refusing it with "the server draws
+  the control of `limit` again when other inputs change (its default reads
+  other inputs)", a live page no longer asks the server to draw the controls
+  again when `has_limit` changes, and the page address default of `limit` is
+  its value, not `null`. A default that does read an input (`= median / 2`,
+  `= has_limit ? 1.0 : 2.0`) is unchanged.
+- That refusal names the inputs the default reads: "(its default reads
+  `median`)" (snag `export-site-rele-5a6fd953`).
+
+## 0.1.141
+
+- A private `pdf_report` keeps the "not public" label ("nicht öffentlich")
+  of a block of private content on the page where that content starts. The
+  label is the first paragraph of the block's `::: {.htmxo-private}` div,
+  `*not public*`, and nothing held it to the next block, so a private section
+  starting near a page end left the label alone at the bottom of one page and
+  the section's heading at the top of the next (snag
+  `pdf-report-priva-c25e0698`). `pdf-report-labels.lua` now makes that
+  paragraph sticky, as it does a disclosure's `::: {.htmxo-label}`; the
+  private content itself can still continue across pages, paragraph spacing
+  is unchanged, and the Markdown is the same as before.
 
 ## 0.1.140
 

@@ -2,7 +2,8 @@ using TestItemRunner
 
 @testmodule BrowserFixtures begin
     using HTMXObjects
-    export Lines, StaleCaption, ServerTwin, OpaqueHelp, Shield, Grid, TOY_JS, browser_region, bound_texts
+    export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, Shield, Grid, TOY_JS,
+           browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -114,6 +115,53 @@ using TestItemRunner
         @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
         "Result"
         @get result() = h.p("total ", bound(line.total), " ", bound(b))
+    end
+
+    const OFFSET_JS = """
+    export function offset(a, on, b) { return { total: a + (on ? b : 0) }; }
+    export const INPUTS = [{ name: "a", type: "Float64" }, { name: "on", type: "Bool" },
+      { name: "b", type: "Float64" }];
+    """
+
+    # An input a toggle hides, whose default is computed from a fixed field and
+    # so reads no input: only its `@relevant` condition reads `on`, which the
+    # browser evaluates (snag `export-site-rele-5a6fd953`).
+    @htmx struct ToggledDefault
+        settings::Any = (; start = 1.5)
+        "Slope"
+        @param a::Float64 = 2.0
+        "Add an intercept"
+        @param on::Bool = true
+        "Intercept"
+        @param b::Float64 = Float64(settings.start)
+        @options(b) = number_domain(0.0, 10.0)
+        @relevant(b) = on == true
+        line = (; total = a + (on ? b : 0.0))
+        @browser(line) = browser_module(; source = OFFSET_JS, entry = :offset)
+        __page__(content) = HTMXObjects.htmx(content; title = "Toggled", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Result"
+        @get result() = h.p("total ", bound(line.total))
+    end
+
+    # The same input with a default the server computes from another input.
+    @htmx struct FollowingDefault
+        "Slope"
+        @param a::Float64 = 2.0
+        "Add an intercept"
+        @param on::Bool = true
+        "Intercept"
+        @param b::Float64 = a / 2
+        @options(b) = number_domain(0.0, 10.0)
+        @relevant(b) = on == true
+        line = (; total = a + (on ? b : 0.0))
+        @browser(line) = browser_module(; source = OFFSET_JS, entry = :offset)
+        __page__(content) = HTMXObjects.htmx(content; title = "Following", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name != :index))
+        "Result"
+        @get result() = h.p("total ", bound(line.total))
     end
 
     # The snow-shielding picture's facts and table (Portfolio's client
@@ -435,6 +483,35 @@ end
             @test e isa HTMXObjects.StaticSiteIncomplete
             @test e !== nothing && any(((a, why),) -> a == "/" && occursin(phrase, why), e.failed)
         end
+    end
+end
+
+@testitem "export_site writes a toggled input whose default reads no input, and names the inputs a default reads" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    HTMXObjects.vendorfiles("assets/vendor")
+    # The default of `b` reads a fixed field. What its `@relevant` condition
+    # reads (`on`) is no input of the default, so no server draws `b` again.
+    route!(ToggledDefault(); operation_policy = :blocking)
+    mktempdir() do dir
+        out = export_site(joinpath(dir, "site"); pages = ["/"])
+        @test out.files > 0
+        index = read(joinpath(dir, "site", "index.html"), String)
+        @test occursin("data-htmxo-browser=", index)
+        @test occursin("data-htmxo-relevant=\"b\"", index)
+    end
+    # A default that does read an input is still refused, and the refusal
+    # names that input and not the one the condition reads.
+    route!(FollowingDefault(); operation_policy = :blocking)
+    mktempdir() do dir
+        e = try
+            export_site(joinpath(dir, "site"); pages = ["/"])
+            nothing
+        catch err
+            err
+        end
+        @test e isa HTMXObjects.StaticSiteIncomplete
+        @test e !== nothing && any(((a, why),) -> a == "/" && occursin(
+            "the server draws the control of `b` again when other inputs change (its default reads `a`)", why), e.failed)
     end
 end
 
