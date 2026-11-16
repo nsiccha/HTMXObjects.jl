@@ -32,7 +32,8 @@ using TestItemRunner
         "Transmission"
         @get curve() = h.p(join(string.((attenuation, density, share, layers, depth)), ":"); class="result")
         @post set_share() = string("share:", share)
-        @get index() = semantic_app(__self__; presentation=:tabs, select=entry -> entry.name === :curve)
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            shared=(:attenuation, :density, :share, :layers, :depth), select=entry -> entry.name === :curve)
     end
 
     @htmx struct Scaling
@@ -54,7 +55,8 @@ using TestItemRunner
         @options(attenuation) = number_domain(0.001 .. 0.015; log=true, digits=4)
         "Transmission"
         @get curve() = h.p(string(attenuation); class="result")
-        @get index() = semantic_app(__self__; presentation=:tabs, select=entry -> entry.name === :curve)
+        @get index() = semantic_app(__self__; presentation=:tabs,
+            shared=(:attenuation,), select=entry -> entry.name === :curve)
     end
 
     # The generated control (`<label data-htmxo-number>`) whose field is `name`.
@@ -408,7 +410,7 @@ end
     end
 end
 
-@testitem "a number control stays inside a column narrower than its row" setup=[ChromeDump] tags=[:unit, :browser] begin
+@testitem "a number control stays inside its column and semantic sidebar sliders fill it" setup=[ChromeDump, NumberDomainFixtures] tags=[:unit, :browser] begin
     # Snag number-control-u-68445236 (Portfolio's dose picture): in the 12rem
     # sidebar of a :tabs page the slider (at least 5rem), the 7rem field and
     # the unit stayed on one row 230 px wide in a 176 px column, so the unit
@@ -422,13 +424,15 @@ end
         # One line per control: its column, its index there, whether every
         # part lies inside the column's content box, whether the slider has a
         # line of its own, whether the unit shares the field's line, and
-        # whether the whole control is one line.
+        # whether the whole control is one line, whether the slider fills the
+        # column, and its width in pixels.
         driver = h.script(Raw(raw"""
         window.addEventListener('load', function() {
             const out = [];
             const overlap = (a, b) => a.top < b.bottom && a.bottom > b.top;
             for (const column of document.querySelectorAll('aside, [data-probe]')) {
-                const name = column.dataset.probe || 'sidebar', cs = getComputedStyle(column);
+                const name = column.closest('[data-case]')?.dataset.case || column.dataset.probe || 'sidebar';
+                const cs = getComputedStyle(column);
                 const c = column.getBoundingClientRect();
                 const left = c.left + parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth);
                 const right = c.right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth);
@@ -440,7 +444,9 @@ end
                     const [f, s, u] = parts;
                     const inside = parts.every(r => !r || (r.left >= left - 0.5 && r.right <= right + 0.5));
                     out.push(name + ' ' + i + ': ' + [inside, s ? !overlap(s, f) : '-', u ? overlap(u, f) : '-',
-                        parts.every(r => !r || overlap(r, f))].join(' '));
+                        parts.every(r => !r || overlap(r, f)),
+                        s ? Math.abs(s.left - left) < 0.5 && Math.abs(s.right - right) < 0.5 : '-',
+                        s ? s.width : '-'].join(' '));
                 });
             }
             const result = document.createElement('pre'); result.id = 'checks';
@@ -457,7 +463,14 @@ end
         content = h.div(
             app_layout(h.aside(controls()...), h.p("Result")),
             h.div(; class="probe-narrow", data_probe="narrow")(controls()...),
-            h.div(; class="probe-wide", data_probe="wide")(controls()...))
+            h.div(; class="probe-wide", data_probe="wide")(controls()...),
+            (h.div(; data_case=name, style="--htmxo-sidebar-width: $width")(
+                semantic_app(Shielding(); presentation=:tabs,
+                    shared=(:attenuation, :density, :share, :layers, :depth),
+                    select=entry -> entry.name === :curve))
+                for (name, width) in ("semantic-narrow" => "8rem", "semantic-default" => "12rem",
+                    "semantic-picture" => "19rem", "semantic-exact" => "calc(20rem + 1px)",
+                    "semantic-wide" => "36rem"))...)
         app_css = h.style(Raw(".probe-narrow { width: 8rem; } .probe-wide { width: 36rem; }"))
         page = repr("text/html", htmx(content, driver; assets=:vendor, pico_version=HTMXObjects._PICO_VERSION,
             htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false,
@@ -469,7 +482,14 @@ end
         @test occursin(rules, page)
         control = replace(page, rules => r -> replace(r, "flex-wrap: wrap; " => "", "min-width: 0; " => ""))
         @test control != page
+        # Before the sidebar rule, fitting rows stole most of the slider's
+        # drag width. Merely staying inside the column cannot catch this.
+        sidebar_rule = r"\.htmxo-semantic-sidebar \.htmxo-number > input\[type=\"range\"\] \{[^}]*\}"
+        inline = replace(page, sidebar_rule => "")
+        @test inline != page
         pages = Dict("/" => page, "/control" => control,
+                     "/inline" => inline,
+                     "/dark" => replace(page, "<html" => "<html data-theme=\"dark\""; count=1),
                      "/vendor/pico.min.css" => read(HTMXObjects._vendor_file(:pico), String))
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2]); close(socket)
@@ -487,7 +507,7 @@ end
         try
             m = measure("/")
             # "<inside> <slider on its own line> <unit beside the field> <one line>"
-            @test length(m) == 15
+            @test length(m) == 40
             for column in ("sidebar", "narrow", "wide"), i in 0:4
                 @test m["$column $i"][1] == "true"
             end
@@ -504,9 +524,27 @@ end
             for i in 0:4
                 @test m["wide $i"][4] == "true"
             end
+            for measurements in (m, measure("/dark"))
+                @test length(measurements) == 40
+                for column in ("narrow", "default", "picture", "exact", "wide"), i in 0:4
+                    row = measurements["semantic-$column $i"]
+                    @test row[1] == "true"
+                    # Depth is unbounded: its field still has no slider.
+                    @test row[2] == (i == 4 ? "-" : "true")
+                    @test row[5] == (i == 4 ? "-" : "true")
+                end
+                for i in 0:3
+                    @test parse(Float64, measurements["semantic-picture $i"][6]) ≈ 287 atol=0.5
+                    @test parse(Float64, measurements["semantic-exact $i"][6]) ≈ 304 atol=0.5
+                end
+                @test measurements["semantic-picture 1"][3] == "true"
+            end
+            old = measure("/inline")
+            @test length(old) == 40
+            @test all(i -> old["semantic-picture $i"][5] == "false", 0:3)
             # Without the wrap, the sidebar's rows pass the column.
             c = measure("/control")
-            @test length(c) == 15
+            @test length(c) == 40
             @test count(i -> c["sidebar $i"][1] == "false", 0:4) >= 4
         finally
             close(server)
