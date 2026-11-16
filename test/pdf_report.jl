@@ -34,6 +34,8 @@ end
             at: post-render
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_LABELS_FILTER))
             at: post-render
+          - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_FILTER))
+            at: post-render
           - $(HTMXObjects._yaml_string(filter))
           - $(HTMXObjects._yaml_string(images))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
@@ -46,7 +48,8 @@ end
     @test isfile(HTMXObjects._PDF_REPORT_QUOTES_FILTER) && isfile(HTMXObjects._PDF_REPORT_TABLES_TYPST) &&
           isfile(HTMXObjects._PDF_REPORT_CODE_TYPST) && isfile(HTMXObjects._PDF_REPORT_LABELS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
-          isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER)
+          isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER) &&
+          isfile(HTMXObjects._PDF_REPORT_TABLES_FILTER)
 
     # PDF/A-2a besides PDF/UA-1 by default; `archival` picks another PDF/A level,
     # `nothing` PDF/UA-1 alone (snag pdf-report-pdfa-d81a2646, user design
@@ -507,7 +510,12 @@ end
                 @test occursin("Verhältniswahr\u00ad", text)
                 cells = text[findfirst("Studienarm", text).start:end]
                 pieces = [m[1] for m in eachmatch(r"(\p{L}+)\u00ad", cells)]
-                @test "Kontami" in pieces && "kon" in pieces
+                # Where a word breaks depends on its column's width, which
+                # `pdf-report-table` sizes by content; the longest words of the
+                # second table are together wider than the page, so these two
+                # still do not fit their columns.
+                @test any(p -> startswith("Kontaminationswahrscheinlichkeit", p), pieces) &&
+                      any(p -> startswith("kontaminiert", p), pieces)
                 too_wide = "Kontaminationswahrscheinlichkeit kontaminiert Messstellenvergleich"
                 @test all(p -> occursin(p, too_wide), pieces)
                 @test occursin("verylongidentifiername", cells)
@@ -593,9 +601,13 @@ end
                 header_line = findfirst(l -> occursin("quantity", l) && occursin("role", l), lines)
                 role_column = findfirst("role", lines[header_line]).start
                 # Both Poppler and xpdf support -layout. Read the quantity
-                # column in isolation, so an overflowing word cannot pass.
+                # column in isolation, so an overflowing word cannot pass. The
+                # table ends at the last row's "inferred"; the page number
+                # below it can fall left of the role column, which now starts
+                # past the middle of the page.
+                table_end = findlast(l -> occursin("inferred", l), lines)
                 quantities = join(strip(join(first(collect(l), min(length(l), role_column - 1))))
-                                  for l in lines[header_line+1:end])
+                                  for l in lines[header_line+1:table_end])
                 @test quantities == identifier * code * unicode * "short_name"
                 if PDFTextGeometry.has_bbox()
                     # Use actual glyph bounds, not just substring presence: all
@@ -606,7 +618,8 @@ end
                         read(`pdftotext -enc UTF-8 -bbox $out -`, String))]
                     header = only(filter(b -> b.word == "quantity", boxes))
                     role = only(filter(b -> b.word == "role", boxes))
-                    quantities = filter(b -> b.top > header.top + 1 && b.left < role.left - 1, boxes)
+                    table_end = maximum(b.top for b in boxes if b.word == "inferred")
+                    quantities = filter(b -> header.top + 1 < b.top < table_end + 1 && b.left < role.left - 1, boxes)
                     @test !isempty(quantities)
                     @test all(b -> b.right < role.left, quantities)
                     @test join(b.word for b in quantities) == identifier * code * unicode * "short_name"
@@ -829,6 +842,105 @@ end
                 table_pages = unique(vcat(row.(1:n)...))
                 @test length(table_pages) >= 2
                 @test onpage(r"Land\s+Wert") == table_pages
+            end
+        end
+    end
+end
+
+@testitem "pdf_report sizes table columns by their content and keeps a row on one page" tags=[:quarto] setup=[PDFTextGeometry] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+
+        quarto = Sys.which("quarto")
+        rules = read(HTMXObjects._PDF_REPORT_TABLES_TYPST, String)
+        # A table as Pandoc writes a wide pipe table (equal shares from HTMX's
+        # equal `---` separators): 12 rows of a long label and two numbers, a
+        # label taller than a page, and one more row, on short pages after a
+        # lead. `wrapped` hands it to `pdf-report-table` as
+        # `pdf-report-tables.lua` does. Each header cell marks where its text
+        # starts; each label marks the page of its first and last line.
+        function placed(wrapped)
+            mktempdir() do dir
+                doc = joinpath(dir, "t.typ")
+                mark(label) = "#context [#metadata((here().page(), here().position().x)) <$label>]"
+                rows = join(("[$(mark("first"))Row $i has a label long enough to wrap onto several lines$(mark("last"))], [$i], [0.5]," for i in 1:12), "\n")
+                tall = join(("tall line $j \\ " for j in 1:30))
+                write(doc, rules, """
+                    #set page(width: 300pt, height: 200pt, margin: 20pt)
+                    #set table(inset: 6pt, stroke: none)
+                    #v(60pt)
+                    $(wrapped ? "#pdf-report-table" : "#")[
+                    #figure(align(center)[#table(columns: (33.33%, 33.33%, 33.33%), align: left,
+                      table.header([$(mark("head"))Label], [$(mark("head"))Count], [$(mark("head"))Share]), table.hline(),
+                      $rows
+                      [$(mark("tall"))$tall$(mark("tall"))], [99], [1],
+                      [$(mark("after"))after], [100], [0])], kind: table)
+                    ]
+                    """)
+                query(label) = let out = IOBuffer()
+                    run(pipeline(`$quarto typst eval "query(<$label>).map(it => it.value)" --in $doc`; stdout=out, stderr=out))
+                    [(; page=parse(Int, m[1]), x=parse(Float64, m[2])) for m in eachmatch(r"\[(\d+),\"([\d.]+)pt\"\]", String(take!(out)))]
+                end
+                (; head=query("head"), first=query("first"), last=query("last"), tall=query("tall"), after=only(query("after")))
+            end
+        end
+        widths(p) = diff([h.x for h in p.head])  # the label and count columns
+
+        # The control: equal columns, and rows that start at a page bottom and
+        # end on the next page.
+        plain = placed(false)
+        @test length(plain.first) == length(plain.last) == 12
+        @test isapprox(widths(plain)[1], widths(plain)[2]; atol=1)
+        @test any(r -> r[1].page != r[2].page, zip(plain.first, plain.last))
+        # Sized: the label takes the room the numbers do not need, and each row
+        # that fits on a page is on one page.
+        sized = placed(true)
+        @test widths(sized)[1] > 3 * widths(sized)[2]
+        @test length(sized.first) == length(sized.last) == 12
+        @test all(r -> r[1].page == r[2].page, zip(sized.first, sized.last))
+        # A row taller than a page still breaks, so none of it runs past the
+        # page bottom, and the next row follows on its last page.
+        @test last(sized.tall).page >= first(sized.tall).page + 2
+        @test sized.after.page == last(sized.tall).page
+
+        # A whole report: a captioned render_table of long labels and six counts.
+        mktempdir() do dir
+            n = 30
+            label(i) = "R$(i)a the share of monitoring networks whose planted trend was recovered within its interval R$(i)z"
+            counts = (; quantity=label.(1:n), (Symbol("c$k") => collect(1:n) for k in 1:6)...)
+            heads = [:quantity => "Quantity", :c1 => "Attempted", :c2 => "Evaluable", :c3 => "Unavailable",
+                     :c4 => "Failed screen", :c5 => "Undefined", :c6 => "Infinite"]
+            page = h.article(h.p("Before the table."),
+                render_table(counts; columns=heads, caption=CaptionSpec(; title="Counts", short="Every network."), id="counts"))
+            out = joinpath(dir, "counts.pdf")
+            @test pdf_report(page, out; title="Counts", lang="en-GB") == out
+            bytes = read(out, String)
+            @test occursin("<pdfuaid:part>1</pdfuaid:part>", bytes)
+            tags = [m[1] for m in eachmatch(r"/Type/StructElem/S/(\w+)/", bytes)]
+            @test count(==("Table"), tags) == 1
+            @test count(==("TH"), tags) == 7
+            @test count(==("TD"), tags) == 7n
+            if !PDFTextGeometry.has_bbox()
+                @test_skip "Poppler -bbox reads where each word of each page is"
+            else
+                words = [(; page, left=parse(Float64, m[1]), top=parse(Float64, m[2]), right=parse(Float64, m[3]), word=m[4])
+                         for (page, text) in enumerate(split(read(`pdftotext -enc UTF-8 -bbox $out -`, String), "<page ")[2:end])
+                         for m in eachmatch(r"<word xMin=\"([\d.]+)\" yMin=\"([\d.]+)\" xMax=\"([\d.]+)\"[^>]*>([^<]*)</word>", text)]
+                at(word) = only(filter(w -> w.word == word, words))
+                # Each label whole, on one page, left of the first count column.
+                @test all(i -> at("R$(i)a").page == at("R$(i)z").page, 1:n)
+                counts_left = minimum(w.left for w in words if w.word == "Attempted")
+                labels = filter(w -> w.top > first(filter(x -> x.word == "Attempted", words)).top + 1 &&
+                                     w.right < counts_left && w.word != "Quantity", words)
+                @test all(w -> w.right < counts_left, labels)
+                # The widest label line is far wider than the 47 pt of text that
+                # equal shares left in the column (1/7 of the 415 pt text width,
+                # less 2 × 6 pt inset).
+                lines = Dict{Tuple{Int,Float64},Vector{eltype(words)}}()
+                foreach(w -> push!(get!(lines, (w.page, round(w.top)), eltype(words)[]), w), labels)
+                @test maximum(ws -> maximum(w.right for w in ws) - minimum(w.left for w in ws), values(lines)) > 1.25 * (415.28 / 7 - 12)
             end
         end
     end
