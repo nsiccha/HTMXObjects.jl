@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.159
+
+- A `<details>` among semantic content keeps its `<summary>` in plain text
+  (`repr("text/plain", …)`): the summary is a paragraph of its own before the
+  body, as a `SemanticDisclosure` writes its label, instead of being dropped as
+  a toggle label. A `<details>` whose body writes nothing (only buttons, or
+  nothing at all) writes nothing, its summary included, as a
+  `SemanticDisclosure` with nothing to open does.
+- Markdown reads (`to_markdown_string`, `?plain`, and the input to `pdf_report`)
+  keep the first summary as a bold label before the body; a heading summary
+  stays a heading. HTMX 1.4.1 supplies this Markdown rule and is now the
+  minimum supported HTMX version. A later summary stays in the body in both
+  text projections (snag `in-the-kb-lane-c-bacb9ce6`).
+- The web and web app environments pin HTMX 1.4.1 with this rendering fix.
+
 ## 0.1.158
 
 - `bound(x; labels)` and `ColumnSpec(label; labels)` accept `Inf` and `-Inf`

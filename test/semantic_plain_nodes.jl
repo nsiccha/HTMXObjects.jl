@@ -98,11 +98,33 @@ end
     @test plain(h.table(h.thead(h.tr(h.th("a"), h.th("b"), h.th("c"))),
                         h.tbody(h.tr(h.td("1"; colspan=2), h.td("2")), h.tr(h.td("x"), h.td("y\nz"), h.td(""))))) ==
         "a\tb\tc\n1\t\t2\nx\ty z\t"
-    # What Markdown leaves out, plain text leaves out: scripts, styles, buttons
-    # and a details' toggle label. An image is its `alt`.
+    # What Markdown leaves out, plain text leaves out: scripts, styles and
+    # buttons. An image is its `alt`.
     @test plain(h.div(h.script(HTMX.Raw("alert(1)")), h.style("p{}"), h.button("Click"),
-                      h.details(h.summary("More"), h.p("body")), h.img(; src="/x.png", alt="A plot"))) ==
-        "body\n\nA plot"
+                      h.img(; src="/x.png", alt="A plot"))) == "A plot"
+    # A details' summary is text the reader reads: a paragraph before the body,
+    # as a `SemanticDisclosure` writes its label (snag in-the-kb-lane-c-bacb9ce6,
+    # the KB usage panel's "Claude resets: …" summary over its table).
+    @test plain(h.div(h.details(h.summary("More"), h.p("body")), h.img(; src="/x.png", alt="A plot"))) ==
+        "More\n\nbody\n\nA plot"
+    @test plain(h.details(; class="group")(h.summary("Claude resets: 1 held"),
+                h.div(h.table(h.tr(h.td("a"), h.td("1")))), h.small("Times are local."))) ==
+        "Claude resets: 1 held\n\na\t1\n\nTimes are local."
+    @test repr("text/plain", SemanticDisclosure("More", h.p("body"))) ==
+        plain(h.details(h.summary("More"), h.p("body")))
+    # A summary keeps its inline markup's text; one with nothing to open (only
+    # a button, or nothing) writes nothing, its label included, as a
+    # `SemanticDisclosure` does.
+    @test plain(h.details(h.summary("See ", h.code("x")), h.p("y"))) == "See x\n\ny"
+    @test plain(h.details(h.summary(h.h2("Heading")), h.p("body"))) == "Heading\n\nbody"
+    @test plain(h.details(h.summary("Label"), h.p("body"), h.summary("Later"))) ==
+        "Label\n\nbody\n\nLater"
+    @test plain(h.details(h.p("body"))) == "body"
+    @test plain(h.div(h.p("a"), h.details(h.summary("Edit"), h.button("Save")), h.p("b"))) == "a\n\nb"
+    @test plain(h.div(h.p("a"), h.details(h.summary("Empty")), h.p("b"))) == "a\n\nb"
+    # Nested disclosures each write their summary before their body.
+    @test plain(h.details(h.summary("Outer"), h.details(h.summary("Inner"), h.p("deep")))) ==
+        "Outer\n\nInner\n\ndeep"
     # Semantic elements inside nodes write their own plain peers.
     @test plain(h.div(SemanticMetric("draws", 4000), h.p(SemanticLink("docs", "/docs")))) ==
         "draws: 4000\n\ndocs (/docs)"
