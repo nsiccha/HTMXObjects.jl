@@ -2,11 +2,8 @@
 
 Render tabular values with captions, numeric formatting, sorting and linked detail views.
 
-For compact plain rows with left-aligned headers and right-aligned numbers:
-
-```julia
-render_table(data; density=:compact, header_align=:left, class="")
-```
+For compact plain rows with left-aligned headers and right-aligned numbers,
+use `render_table(data; density=:compact, header_align=:left, class="")`.
 
 These options are independent and also work with `sortable_table`,
 `master_detail_table`, and browser-computed `bound` tables. Compact density
