@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.1.140
+
+- `pdf_report` keeps a captioned figure's pictures and caption on one page
+  with or without an id. Quarto makes a figure only of a div whose id starts
+  with `fig-` (a table with `tbl-`), so an id-less `with_caption` figure, such
+  as AoV's `with_plot_caption` without `id=`, was a picture and a separate
+  paragraph: the picture could end one page and its caption start the next,
+  untagged as a caption (snag `pdf-report-id-le-8a1607df`). A report's
+  Markdown (`report=true`, and every `pdf_report(value, …)`) now writes a
+  `<!-- htmxo:caption -->` line just before the caption of each captioned
+  figure Quarto does not float, and `pdf_report` sets a figure of pictures
+  marked so as one Typst figure, its caption tagged `Caption`, that moves to
+  the next page whole. An id-less captioned `render_table` becomes a captioned
+  table the same way: its caption above it and tagged, the table still
+  breaking across pages (HTMXObjects todo `0ikz55q`). A figure taller than
+  the page's text area, with an id or without, has its pictures scaled down
+  until it fits with its caption, where its caption ran over the page bottom.
+  Figures of other content (prose, code) are unchanged, and so is Markdown
+  outside a report. Regenerate saved report Markdown to get the marks. A
+  figure Quarto numbers (`fig-…`) prints as before unless it is taller than a
+  page.
+
 ## 0.1.139
 
 - `pdf_report` sizes a table's columns by their content, as a browser sizes an

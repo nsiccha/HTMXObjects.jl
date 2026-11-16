@@ -26,7 +26,7 @@ end
             from: markdown+autolink_bare_uris+tex_math_single_backslash-raw_tex
             pdf-standard: [ua-1, a-2a]
             syntax-highlighting: idiomatic
-            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST)), $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_CODE_TYPST))]
+            include-in-header: [$(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_TABLES_TYPST)), $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_FIGURES_TYPST)), $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_CODE_TYPST))]
         filters:
           - path: $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_QUOTES_FILTER))
             at: post-render
@@ -41,6 +41,7 @@ end
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_DATE_FILTER))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_LINKS_FILTER))
           - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_BREAKS_FILTER))
+          - $(HTMXObjects._yaml_string(HTMXObjects._PDF_REPORT_CAPTIONS_FILTER))
         ---
 
         # Ergebnisse
@@ -49,7 +50,8 @@ end
           isfile(HTMXObjects._PDF_REPORT_CODE_TYPST) && isfile(HTMXObjects._PDF_REPORT_LABELS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_DATE_FILTER) && isfile(HTMXObjects._PDF_REPORT_LINKS_FILTER) &&
           isfile(HTMXObjects._PDF_REPORT_FIGURES_FILTER) && isfile(HTMXObjects._PDF_REPORT_BREAKS_FILTER) &&
-          isfile(HTMXObjects._PDF_REPORT_TABLES_FILTER)
+          isfile(HTMXObjects._PDF_REPORT_TABLES_FILTER) &&
+          isfile(HTMXObjects._PDF_REPORT_CAPTIONS_FILTER) && isfile(HTMXObjects._PDF_REPORT_FIGURES_TYPST)
 
     # PDF/A-2a besides PDF/UA-1 by default; `archival` picks another PDF/A level,
     # `nothing` PDF/UA-1 alone (snag pdf-report-pdfa-d81a2646, user design
@@ -942,6 +944,133 @@ end
                 foreach(w -> push!(get!(lines, (w.page, round(w.top)), eltype(words)[]), w), labels)
                 @test maximum(ws -> maximum(w.right for w in ws) - minimum(w.left for w in ws), values(lines)) > 1.25 * (415.28 / 7 - 12)
             end
+        end
+    end
+end
+
+@testitem "A report marks the caption of a figure Quarto does not float" tags=[:unit] begin
+    using HTMXObjects
+
+    # Pandoc reads an id-less figure's `::: {}` exactly as a `<div>`, so a report
+    # marks the caption of each figure Quarto does not make a figure itself (snag
+    # pdf-report-id-le-8a1607df): on its own line, just before the caption.
+    mark = HTMXObjects._MD_CAPTION_MARK
+    fig(; kw...) = with_caption(CaptionSpec(; title="Balken"), h.img(; src="bars.svg", alt="Zwei Balken."); kw...)
+    md(x; report=true) = HTMXObjects.to_markdown_string(h.div(x); report)
+    @test md(fig()) == "\n\n::: {}\n\n![](bars.svg){alt=\"Zwei Balken.\"}\n\n$mark\n\n**Balken**\n:::\n\n"
+    @test occursin("::: {#balken}\n\n![](bars.svg){alt=\"Zwei Balken.\"}\n\n$mark\n\n**Balken**\n:::",
+                   md(fig(; id="balken")))
+    tab = (a=[1, 2],)
+    @test occursin("\n\n$mark\n\n**Werte**\n:::", md(render_table(tab; caption=CaptionSpec(; title="Werte"))))
+    # Outside a report the Markdown is as before.
+    @test md(fig(); report=false) == "\n\n::: {}\n\n![](bars.svg){alt=\"Zwei Balken.\"}\n\n**Balken**\n:::\n\n"
+    # Quarto makes a figure of a `fig-` div and a table of a `tbl-` one itself;
+    # a figure without a caption, or whose caption is only `render_table`'s
+    # download button, has nothing to keep with it.
+    @test !occursin(mark, md(fig(; id="fig-balken")))
+    @test !occursin(mark, md(render_table(tab; caption=CaptionSpec(; title="Werte"), id="werte")))
+    @test !occursin(mark, md(render_table(tab)))
+    @test !occursin(mark, md(h.figure(h.img(; src="bars.svg", alt="Zwei Balken."))))
+end
+
+@testitem "pdf_report keeps a figure's pictures and caption on one page" tags=[:quarto] setup=[PDFTextGeometry] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, Base64
+
+        quarto = Sys.which("quarto")
+        mark = HTMXObjects._MD_CAPTION_MARK
+        picture(word, height) = h.img(; alt="A picture.", src="data:image/svg+xml;base64," * base64encode(
+            """<svg xmlns="http://www.w3.org/2000/svg" width="400" height="$height"><rect width="400" height="$height" fill="#cde"/><text x="20" y="40" font-size="30">$word</text></svg>"""))
+        caption(word) = CaptionSpec(; title="", short="$word " * repeat("A caption that runs over two lines of the page. ", 2))
+        pagebreak = "\n\n```{=typst}\n#pagebreak()\n```\n\n"
+        filler(n) = [h.p("Filler $i. " * repeat("Lorem ipsum dolor sit amet, consectetur adipiscing elit. ", 6)) for i in 1:n]
+        pages(pdf) = split(read(`pdftotext -enc UTF-8 -layout $pdf -`, String), '\f'; keepempty=false)
+        onpage(texts, word) = findall(t -> occursin(word, t), texts)
+        structure(pdf) = Set(m[1] for m in eachmatch(r"/Type/StructElem/S/(\w+)", read(pdf, String)))
+
+        # The Typst rule alone: a figure taller than the page has its picture
+        # scaled down to fit with its caption; one that fits keeps its size.
+        function fitted(rules, height)
+            mktempdir() do dir
+                write(joinpath(dir, "p.svg"), """<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>""")
+                doc = joinpath(dir, "f.typ")
+                write(doc, rules, """
+                    #set page(width: 300pt, height: 300pt, margin: 20pt)
+                    #figure(kind: image, numbering: none,
+                      caption: figure.caption[Cap #context [#metadata((here().page(), here().position().y / 1pt)) <cap>]])[
+                      #box(image("p.svg", height: $(height)pt, alt: "A picture."))]
+                    """)
+                out = IOBuffer()
+                run(pipeline(`$quarto typst eval "query(<cap>).map(it => it.value)" --in $doc`; stdout=out, stderr=out))
+                page, y = parse.(Float64, split(match(r"\[\[([\d.,\s]*)\]\]", String(take!(out))).captures[1], ','))
+                (; page, y)
+            end
+        end
+        rules = read(HTMXObjects._PDF_REPORT_FIGURES_TYPST, String)
+        # The control: without the rule the caption runs over the page bottom (y = 280).
+        @test fitted("", 300).y > 280
+        tall = fitted(rules, 300)
+        @test tall.page == 1 && 260 < tall.y < 280.01
+        @test fitted(rules, 100) == fitted("", 100)
+
+        mktempdir() do dir
+            # The reporter's sweep: five paragraphs and k short lines before an
+            # id-less figure, each on a page of its own. Without the marks some k
+            # leaves the picture at a page bottom and its caption alone on the next.
+            md = join((HTMXObjects.to_markdown_string(h.div(numbered(SemanticSection("Probe $k", filler(5)...,
+                           (h.p("Short line $j.") for j in 1:k)...,
+                           with_caption(caption("CAP$k"), picture("PIC$k", 300)), h.p("After $k.")))); lang="en-GB", report=true)
+                       for k in 0:9), pagebreak)
+            @test count(mark, md) == 10
+            out, unmarked = joinpath(dir, "sweep.pdf"), joinpath(dir, "unmarked.pdf")
+            @test pdf_report(md, out; title="Probe", lang="en-GB") == out
+            pdf_report(replace(md, "\n$mark\n" => "\n"), unmarked; title="Probe", lang="en-GB")
+            split_at(pdf) = [k for k in 0:9 if onpage(pages(pdf), "PIC$k") != onpage(pages(pdf), "CAP$k")]
+            @test !isempty(split_at(unmarked))
+            @test isempty(split_at(out))
+            # Its caption is tagged as the figure's caption.
+            @test "Caption" in structure(out) && !("Caption" in structure(unmarked))
+
+            # A picture taller than the page is scaled down to fit with its
+            # caption, with or without an id Quarto floats.
+            for id in (nothing, "fig-hoch", "hoch")
+                fig = with_caption(caption("TALLCAP"), picture("TALLPIC", 1400); (isnothing(id) ? (;) : (; id))...)
+                tallpdf = joinpath(dir, "tall-$(something(id, "none")).pdf")
+                pdf_report(h.article(h.p("Before."), fig, h.p("After.")), tallpdf; title="Probe", lang="en-GB")
+                texts = pages(tallpdf)
+                @test only(onpage(texts, "TALLPIC")) == only(onpage(texts, "TALLCAP")) <= only(onpage(texts, "After."))
+                if PDFTextGeometry.has_bbox()
+                    # The caption's last line ends inside the text area: A4 is 842pt
+                    # high, its bottom margin 1.25in (90pt), and a word's box ends at
+                    # its descenders, below the baseline the text area bounds.
+                    bottoms = [parse(Float64, m[1]) for m in eachmatch(r"yMax=\"([\d.]+)\"[^>]*>page\.</word>",
+                                                                      read(`pdftotext -bbox $tallpdf -`, String))]
+                    @test !isempty(bottoms) && maximum(bottoms) < 842 - 90 + 5
+                end
+            end
+
+            # An id-less captioned table is a table with its caption above it,
+            # on the page of its first rows, and still breaks across pages.
+            n = 60
+            tabpdf = joinpath(dir, "table.pdf")
+            pdf_report(h.article(h.p("Zeile."), render_table((Land=["Land $i" for i in 1:n], Wert=collect(1:n));
+                           caption=CaptionSpec(; title="TABCAP")), h.p("Nach der Tabelle.")), tabpdf; title="Bericht", lang="de-DE")
+            texts = pages(tabpdf)
+            row(i) = onpage(texts, Regex("Land $i\\s+$i\\s*\\n"))
+            @test onpage(texts, "TABCAP") == row(1) == [1]
+            @test findfirst("TABCAP", texts[1]).start < findfirst("Land 1 ", texts[1]).start
+            @test length(unique(vcat(row.(1:n)...))) >= 2
+            @test "Caption" in structure(tabpdf)
+
+            # A figure of prose is no picture: it stays the block it was.
+            prosepdf = joinpath(dir, "prose.pdf")
+            pdf_report(h.article(with_caption(CaptionSpec(; title="PROSECAP"), h.p("PROSEBODY."))), prosepdf;
+                       title="Bericht", lang="de-DE")
+            @test !("Caption" in structure(prosepdf))
+            prose = join(pages(prosepdf))
+            @test findfirst("PROSEBODY", prose).start < findfirst("PROSECAP", prose).start
         end
     end
 end
