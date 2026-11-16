@@ -30294,7 +30294,10 @@ The interval is any IntervalSets interval of real numbers (`a .. b`, or one
 with an open end such as `Interval{:open,:closed}(0, 1)`); `lower, upper` is the
 closed interval.
 [`semantic_app`](@ref) and [`operation_form`](@ref) then draw the input as a
-slider with a number field beside it, followed by the unit. A submitted number
+slider with a number field beside it, followed by the unit. In a column too
+narrow for that row, such as the sidebar of a `presentation=:tabs` page, the
+slider takes a line of its own above the field and its unit, and a unit too
+long to fit beside the field goes under it. A submitted number
 outside the interval is refused with a 400 at that field, as a value outside a
 finite `@options` list is. A bare interval, `@options(x) = 0 .. 1`, is the same
 domain with no other settings. The label and help text stay where they are
@@ -30420,9 +30423,12 @@ function _number_slider_position(domain::NumberDomain, value)
 end
 
 # The control of a number input with a `NumberDomain`: a `<label>` holding the
-# number field (named, so it is what the form submits and validates), the
+# number field (named, so it is what the form submits and validates) with its
 # unit, and an unnamed slider the page's `number_control_script` keeps on the
-# field's value. The label carries `number_record` as `data-htmxo-number`.
+# field's value. The label carries `number_record` as `data-htmxo-number`. The
+# field and its unit are one `.htmxo-number-entry`, so a column too narrow for
+# the whole row puts the slider on a line of its own above them and never
+# leaves the unit alone on a line (snag number-control-u-68445236).
 function _number_control(name, label, domain::NumberDomain, value;
         integer::Bool=false, required::Bool=false, show_when=nothing, kwargs...)
     lower, upper = IntervalSets.endpoints(domain.interval)
@@ -30457,7 +30463,8 @@ function _number_control(name, label, domain::NumberDomain, value;
         ()
     end
     show_attrs = isnothing(show_when) ? (;) : _show_when_attrs(show_when)
-    h.label(label, h.span(field, unit..., slider...; class="htmxo-number");
+    entry = h.span(field, unit...; class="htmxo-number-entry")
+    h.label(label, h.span(entry, slider...; class="htmxo-number");
             data_htmxo_number=JSON.json(record), show_attrs...)
 end
 
@@ -34785,8 +34792,9 @@ Keep the slider of a number input with a range ([`number_domain`](@ref), or
 `ninput(…; domain)`) and its number field on one value.
 
 The control is a `<label data-htmxo-number>` holding the number field, which
-is the named input the form submits, the unit, and an unnamed slider over
-positions 0…500. Moving the slider writes its value into the field, spaced
+is the named input the form submits, with its unit (together a
+`.htmxo-number-entry`), and an unnamed slider over positions 0…500. Moving the
+slider writes its value into the field, spaced
 evenly in ratio for a `log` domain, on the `step` grid from the lower bound,
 else to three significant digits (as the explainer pictures pick slider
 values). Typing a number in the field moves the slider; the field takes any
@@ -38876,19 +38884,27 @@ table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; 
 tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
 
 /* A number input with a range (`number_domain`): the slider, then the number
-   field and its unit, on one row under the label, spaced as a field is. The
-   field comes first in the document, so the label names it and Tab reaches
-   it first. UNLAYERED: Pico styles `input` unlayered. */
-.htmxo-number { display: flex; align-items: center; gap: .5rem; margin: calc(var(--pico-spacing, 1rem) * .25) 0 var(--pico-spacing, 1rem); }
-.htmxo-number > input { margin: 0; }
-.htmxo-number > input[type="range"] { order: 0; flex: 1 1 6rem; width: auto; min-width: 5rem; }
-.htmxo-number > input[type="number"] { order: 1; flex: 0 0 7rem; width: 7rem; }
-.htmxo-number > .htmxo-number-unit { order: 2; white-space: nowrap; }
+   field and its unit (`.htmxo-number-entry`), on one row under the label,
+   spaced as a field is. In a column narrower than that row (a :tabs page's
+   sidebar, a narrow card) the slider takes a line of its own, as wide as the
+   column, above the field and its unit, which stay together; a unit wider
+   than the room beside its field goes under the field. No part leaves the
+   column (snag number-control-u-68445236). The slider's basis is its least
+   width, so the row wraps only when it cannot fit at all: a row that fits
+   keeps the one line it had. The field comes first in the document, so the
+   label names it and Tab reaches it first. UNLAYERED: Pico styles `input`
+   unlayered. */
+.htmxo-number { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; margin: calc(var(--pico-spacing, 1rem) * .25) 0 var(--pico-spacing, 1rem); }
+.htmxo-number input { margin: 0; }
+.htmxo-number > input[type="range"] { order: 0; flex: 1 1 5rem; width: auto; min-width: min(5rem, 100%); }
+.htmxo-number > .htmxo-number-entry { order: 1; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; }
+.htmxo-number-entry > input[type="number"] { flex: 0 1 7rem; width: 7rem; min-width: 0; }
+.htmxo-number-entry > .htmxo-number-unit { overflow-wrap: anywhere; }
 /* A field with `digits` (`.htmxo-number-value`): while the reader is not
    editing it, its value rounded to them is drawn over it and the field's own
    text is hidden; the field keeps the exact value. Only on a page that
    `number_control_script` marked, which keeps the text on the field. */
-.htmxo-number > .htmxo-number-value { order: 1; flex: 0 0 7rem; width: 7rem; position: relative; display: flex; }
+.htmxo-number-entry > .htmxo-number-value { flex: 0 1 7rem; width: 7rem; min-width: 0; position: relative; display: flex; }
 /* No colour transition (Pico fades `color`): editing shows the value at once. */
 .htmxo-number-value > input[type="number"] { width: 100%; margin: 0;
   transition: background-color var(--pico-transition), border-color var(--pico-transition), box-shadow var(--pico-transition); }
