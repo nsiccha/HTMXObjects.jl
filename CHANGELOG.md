@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.155
+
+- `bound(x; labels)` and `ColumnSpec(label; labels)` accept `Inf` and `-Inf`
+  as distinct keys. Beside `digits`, `sigdigits` or `percent`, labels name
+  exceptions and other numbers use that format; labels alone remain exhaustive.
+  `bound(x; unit = "years")` appends a no-break space and the unit only to a
+  number, never a label or `–`. Thus a halving time can read `12.3 years` or
+  `No finite halving time`, on the server, in Markdown/PDF and after offline
+  browser recomputation. Label cells sort by their value and expose their
+  text to search and CSV; other numbers retain their exact CSV value.
+
 ## 0.1.154
 
 - A result that computes in the browser (`@browser`) and reads a finite input

@@ -75,6 +75,13 @@ println(String(response.body))
   table column of them, each cell sorted by its value and exported to CSV as
   its label. A value the table does not name shows as an `ArgumentError` in
   the result, and no value as `–`.
+- **Exceptions among numbers:** `bound(fit.half; digits = 1, unit = "years",
+  labels = [Inf => "No finite halving time"])` writes `12.3 years` or
+  `No finite halving time`. With `digits`, `sigdigits` or `percent`, labels
+  name exceptions; other numbers use the number format. `Inf` and `-Inf`
+  are distinct keys, and `NaN` still writes `–`. `unit` follows a number
+  with a no-break space, never words or `–`. A `ColumnSpec` takes the same
+  labels and number format. Labels alone remain exhaustive.
 - **A table of outputs:** `bound(fit; columns=(:x, :y))`. Given to
   `render_table` (`points` above), it is written again after each change, each
   column as its `ColumnSpec(label; digits, sigdigits, percent, date, labels)` says, sorted

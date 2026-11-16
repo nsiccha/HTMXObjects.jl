@@ -22125,16 +22125,17 @@ function _sort_dir_token(dir)
 end
 
 # A table from values to the texts that name them (`bound(x; labels)`,
-# `ColumnSpec(…; labels)`): each key a finite number, a `Bool` or text, in
+# `ColumnSpec(…; labels)`): each key a number, a `Bool` or text, in
 # the order given (a `Dict`'s sorted), and `what` the call that gave it, for
 # its errors. The browser runtime's `labelText` reads the same table.
 struct _Labels
     keys::Vector{Any}
     texts::Vector{String}
     what::String
+    format::Union{Nothing,NamedTuple}
 end
 
-function _labels(table, what::AbstractString)
+function _labels(table, what::AbstractString, format=nothing)
     entries = table isa AbstractDict ? sort!(collect(pairs(table)); by=_label_order) :
         table isa Union{AbstractVector,Tuple} ? collect(table) :
         throw(ArgumentError(string(what, ": `labels` is a list of `value => text` pairs or a Dict; got ", typeof(table))))
@@ -22150,12 +22151,12 @@ function _labels(table, what::AbstractString)
         push!(keys, key)
         push!(texts, String(text))
     end
-    _Labels(keys, texts, String(what))
+    _Labels(keys, texts, String(what), format)
 end
 _label_key(k::Bool, what) = k
 _label_key(k::Integer, what) = k
-_label_key(k::Real, what) = isfinite(k) ? Float64(k) : throw(ArgumentError(string(what, ": `labels` cannot name ", k,
-    "; a key is a finite number, a Bool or text, and no value (NaN, missing, nothing) writes `–`")))
+_label_key(k::Real, what) = !isnan(k) ? Float64(k) : throw(ArgumentError(string(what, ": `labels` cannot name ", k,
+    "; a key is a number, a Bool or text, and no value (NaN, missing, nothing) writes `–`")))
 _label_key(k::Union{AbstractString,Symbol}, what) = String(k)
 _label_key(k, what) = throw(ArgumentError(string(what, ": a key of `labels` is a number, a Bool or text; got ",
     repr(k), " (a ", typeof(k), ")")))
@@ -22169,26 +22170,36 @@ _label_same(a, b) = a isa Bool || b isa Bool ? (a isa Bool && b isa Bool && a ==
 
 # The label of `value`; `nothing` for no value (`missing`, `nothing`, NaN),
 # which is written `–` as every other no value is. A value the table does not
-# name is an error, never a silent fallback.
+# name is an error unless a number format was given: then an unnamed number
+# stays a number for the caller to format. Booleans and text still need a label.
 function _label_text(l::_Labels, value)
     (value === nothing || value === missing || (value isa AbstractFloat && isnan(value))) && return nothing
     v = value isa Symbol ? String(value) : value
     i = findfirst(k -> _label_same(k, v), l.keys)
+    isnothing(i) && !isnothing(l.format) && v isa Real && !(v isa Bool) && return v
     isnothing(i) && throw(ArgumentError(string(l.what, ": ", repr(value), " is not a value its labels name (",
         _label_named(l), ")")))
     l.texts[i]
 end
 _label_named(l::_Labels) = join((repr(k) for k in l.keys), ", ")
 # What the page carries to write the labels again in the browser.
-_labels_wire(l::_Labels) = Dict{String,Any}("pairs" => Any[Any[k, t] for (k, t) in zip(l.keys, l.texts)],
-    "named" => _label_named(l), "what" => l.what)
+function _labels_wire(l::_Labels)
+    wire = Dict{String,Any}("pairs" => Any[Any[_label_wire_key(k), t] for (k, t) in zip(l.keys, l.texts)],
+        "named" => _label_named(l), "what" => l.what)
+    isnothing(l.format) || (wire["numeric"] = true)
+    wire
+end
+# JSON has no infinity. A tagged key preserves its sign without conflating
+# the number Inf with a text key such as "Inf" or "Infinity".
+_label_wire_key(k) = k
+_label_wire_key(k::Real) = isinf(k) ? Dict("infinite" => (k > 0 ? 1 : -1)) : k
 
-# A value or a column written by its labels: never as numbers or days too.
-function _labels_alone(labels, what, digits, sigdigits, percent, date)
+# Labels alone are exhaustive; beside a number format they name exceptions.
+function _labels_format(labels, what, digits, sigdigits, percent, date)
     isnothing(labels) && return nothing
-    digits === sigdigits === date === nothing && !percent || throw(ArgumentError(string(what,
-        ": `labels` writes each value as the text it names, so it takes no `digits`, `sigdigits`, `percent` or `date`")))
-    _labels(labels, what)
+    isnothing(date) || throw(ArgumentError(string(what, ": `labels` takes no `date`")))
+    format = digits === sigdigits === nothing && !percent ? nothing : (; digits, sigdigits, percent)
+    _labels(labels, what, format)
 end
 
 """
@@ -22324,9 +22335,12 @@ Each cell shows its label and sorts by its value, so levels keep their order
 while the cells read as words; the table's search and its ⬇ CSV read the
 label. A value the table does not name is an error, an `ArgumentError` naming
 the value and the keys, never a silent fallback; `missing`, `nothing` and
-`NaN` are no value, the empty cell `–`. A column is written by its labels or
-as numbers or days, so `labels` takes no `digits`, `sigdigits`, `percent` or
-`date`. A single value is `bound(x; labels)` (see [`bound`](@ref)).
+`NaN` are no value, the empty cell `–`. With `digits`, `sigdigits` or
+`percent`, labels name exceptions and other numbers use that number format:
+`ColumnSpec("Years"; digits = 1, labels = [Inf => "No finite halving time"])`.
+`Inf` and `-Inf` are distinct keys. Without a number format labels must name
+every value; `labels` takes no `date`. A single value is `bound(x; labels)`
+(see [`bound`](@ref)).
 
 The tables whose cells you build ([`sortable_table`](@ref),
 [`master_detail_table`](@ref)) refuse these keywords: write those cells with
@@ -22362,7 +22376,7 @@ function ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=n
     what = string("ColumnSpec(", repr(label), ")")
     _number_rounding(digits, sigdigits, what)
     _date_style(date, what, digits, sigdigits, percent)
-    table = _labels_alone(labels, string("ColumnSpec(", repr(label), "; labels)"), digits, sigdigits, percent, date)
+    table = _labels_format(labels, string("ColumnSpec(", repr(label), "; labels)"), digits, sigdigits, percent, date)
     ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
         _column_sort_keys(label, sort_keys), _column_align(label, align),
         isnothing(digits) ? nothing : Int(digits), isnothing(sigdigits) ? nothing : Int(sigdigits), percent, date, table)
@@ -25944,6 +25958,7 @@ _render_cell(::Nothing, value, c, ri, texts, empty_align, format::_Labels) = _la
 # The browser runtime's `boundCell` writes the same cells.
 function _label_cell(value, labels, texts, empty_align)
     text = _label_text(labels, value)
+    text isa Real && return _render_number_cell(text, texts, labels.format)
     isnothing(text) && return isnothing(empty_align) ? number_cell(nothing; texts) :
         number_cell(nothing; texts, data_htmxo_align=empty_align)
     h.td(text; data_sort_value=_label_sort_key(value))
