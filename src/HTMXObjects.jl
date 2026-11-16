@@ -22124,11 +22124,79 @@ function _sort_dir_token(dir)
     error("sortable_table: default_sort direction must be :asc or :desc, got $(repr(dir))")
 end
 
+# A table from values to the texts that name them (`bound(x; labels)`,
+# `ColumnSpec(…; labels)`): each key a finite number, a `Bool` or text, in
+# the order given (a `Dict`'s sorted), and `what` the call that gave it, for
+# its errors. The browser runtime's `labelText` reads the same table.
+struct _Labels
+    keys::Vector{Any}
+    texts::Vector{String}
+    what::String
+end
+
+function _labels(table, what::AbstractString)
+    entries = table isa AbstractDict ? sort!(collect(pairs(table)); by=_label_order) :
+        table isa Union{AbstractVector,Tuple} ? collect(table) :
+        throw(ArgumentError(string(what, ": `labels` is a list of `value => text` pairs or a Dict; got ", typeof(table))))
+    isempty(entries) && throw(ArgumentError(string(what, ": `labels` names no value; give it `value => text` pairs")))
+    keys, texts = Any[], String[]
+    for entry in entries
+        entry isa Pair || throw(ArgumentError(string(what, ": each entry of `labels` is a `value => text` pair; got ", repr(entry))))
+        key = _label_key(first(entry), what)
+        text = last(entry)
+        text isa AbstractString || throw(ArgumentError(string(what, ": the label of ", repr(key), " is a ",
+            typeof(text), "; a label is text")))
+        any(k -> _label_same(k, key), keys) && throw(ArgumentError(string(what, ": `labels` names ", repr(key), " twice")))
+        push!(keys, key)
+        push!(texts, String(text))
+    end
+    _Labels(keys, texts, String(what))
+end
+_label_key(k::Bool, what) = k
+_label_key(k::Integer, what) = k
+_label_key(k::Real, what) = isfinite(k) ? Float64(k) : throw(ArgumentError(string(what, ": `labels` cannot name ", k,
+    "; a key is a finite number, a Bool or text, and no value (NaN, missing, nothing) writes `–`")))
+_label_key(k::Union{AbstractString,Symbol}, what) = String(k)
+_label_key(k, what) = throw(ArgumentError(string(what, ": a key of `labels` is a number, a Bool or text; got ",
+    repr(k), " (a ", typeof(k), ")")))
+# A Dict's entries in order: Booleans, then numbers, then text.
+_label_order(entry) = (k = first(entry); k isa Bool ? (0, Float64(k), "") : k isa Real ? (1, Float64(k), "") :
+    k isa Union{AbstractString,Symbol} ? (2, 0.0, String(k)) : (3, 0.0, repr(k)))
+# A number key names the same number (`3` the module's `3.0`), a Bool key
+# only a Bool, a text key the same text.
+_label_same(a, b) = a isa Bool || b isa Bool ? (a isa Bool && b isa Bool && a == b) :
+    a isa Real && b isa Real ? a == b : a isa AbstractString && b isa AbstractString && a == b
+
+# The label of `value`; `nothing` for no value (`missing`, `nothing`, NaN),
+# which is written `–` as every other no value is. A value the table does not
+# name is an error, never a silent fallback.
+function _label_text(l::_Labels, value)
+    (value === nothing || value === missing || (value isa AbstractFloat && isnan(value))) && return nothing
+    v = value isa Symbol ? String(value) : value
+    i = findfirst(k -> _label_same(k, v), l.keys)
+    isnothing(i) && throw(ArgumentError(string(l.what, ": ", repr(value), " is not a value its labels name (",
+        _label_named(l), ")")))
+    l.texts[i]
+end
+_label_named(l::_Labels) = join((repr(k) for k in l.keys), ", ")
+# What the page carries to write the labels again in the browser.
+_labels_wire(l::_Labels) = Dict{String,Any}("pairs" => Any[Any[k, t] for (k, t) in zip(l.keys, l.texts)],
+    "named" => _label_named(l), "what" => l.what)
+
+# A value or a column written by its labels: never as numbers or days too.
+function _labels_alone(labels, what, digits, sigdigits, percent, date)
+    isnothing(labels) && return nothing
+    digits === sigdigits === date === nothing && !percent || throw(ArgumentError(string(what,
+        ": `labels` writes each value as the text it names, so it takes no `digits`, `sigdigits`, `percent` or `date`")))
+    _labels(labels, what)
+end
+
 """
-    ColumnSpec(label; help=nothing, sort_keys=(), align=nothing, digits=nothing, sigdigits=nothing, percent=false, date=nothing)
+    ColumnSpec(label; help=nothing, sort_keys=(), align=nothing, digits=nothing, sigdigits=nothing, percent=false, date=nothing, labels=nothing)
 
 A table column header that carries an explanation, several sort orders, an
-alignment, how its numbers or days are written, or any of them. Use it among the `headers` of [`sortable_table`](@ref) (and so of
+alignment, how its numbers or days are written or the texts its values stand
+for, or any of them. Use it among the `headers` of [`sortable_table`](@ref) (and so of
 [`master_detail_table`](@ref)), or as a column of [`render_table`](@ref)
 (`columns=`), wherever a `String` header would go: the column stays auto-wired
 exactly like a `String` — the sort button with keyboard sorting,
@@ -22240,10 +22308,30 @@ render_table(days; columns = ["t" => ColumnSpec("Day"; date = :short)])
 A column is written as numbers or as days, so `date` takes no `digits`,
 `sigdigits` or `percent`.
 
+# Texts its values stand for: `labels`
+
+`labels` writes each value of the column as the text a table names for it, a
+list of `value => text` pairs or a `Dict`: a level, a category code or a
+`Bool` written as words. A key is a number, which names the same number (`3`
+also names a browser module's `3.0`), a `Bool`, or text.
+
+```julia
+const DOSES = [0 => "No dose", 1 => "50 mg (level 1)", 3 => "200 mg (level 3)"]
+render_table(rules; columns = ["level" => ColumnSpec("Recommended dose"; labels = DOSES)])
+```
+
+Each cell shows its label and sorts by its value, so levels keep their order
+while the cells read as words; the table's search and its ⬇ CSV read the
+label. A value the table does not name is an error, an `ArgumentError` naming
+the value and the keys, never a silent fallback; `missing`, `nothing` and
+`NaN` are no value, the empty cell `–`. A column is written by its labels or
+as numbers or days, so `labels` takes no `digits`, `sigdigits`, `percent` or
+`date`. A single value is `bound(x; labels)` (see [`bound`](@ref)).
+
 The tables whose cells you build ([`sortable_table`](@ref),
 [`master_detail_table`](@ref)) refuse these keywords: write those cells with
-`number_cell(x; digits, sigdigits, percent)`, or with `format_date` and a
-`data_sort_value`.
+`number_cell(x; digits, sigdigits, percent)`, with `format_date` and a
+`data_sort_value`, or with the label and a `data_sort_value`.
 """
 struct ColumnSpec
     label::String
@@ -22262,18 +22350,22 @@ struct ColumnSpec
     # `:long`, `:short` or `:month`: `render_table` writes the column's values
     # as days (`format_date`); `nothing` for none.
     date::Union{Nothing,Symbol}
+    # The texts `render_table` writes for the column's values
+    # (`ColumnSpec(…; labels)`); `nothing` for none.
+    labels::Union{Nothing,_Labels}
 end
 ColumnSpec(label, help, sort_keys) = ColumnSpec(label, help, sort_keys, nothing)
-ColumnSpec(label, help, sort_keys, align) = ColumnSpec(label, help, sort_keys, align, nothing, nothing, false, nothing)
+ColumnSpec(label, help, sort_keys, align) = ColumnSpec(label, help, sort_keys, align, nothing, nothing, false, nothing, nothing)
 function ColumnSpec(label::AbstractString; help::Union{Nothing,AbstractString}=nothing, sort_keys=(), align=nothing,
                     digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing, percent::Bool=false,
-                    date::Union{Nothing,Symbol}=nothing)
+                    date::Union{Nothing,Symbol}=nothing, labels=nothing)
     what = string("ColumnSpec(", repr(label), ")")
     _number_rounding(digits, sigdigits, what)
     _date_style(date, what, digits, sigdigits, percent)
+    table = _labels_alone(labels, string("ColumnSpec(", repr(label), "; labels)"), digits, sigdigits, percent, date)
     ColumnSpec(String(label), isnothing(help) || isempty(strip(help)) ? nothing : String(help),
         _column_sort_keys(label, sort_keys), _column_align(label, align),
-        isnothing(digits) ? nothing : Int(digits), isnothing(sigdigits) ? nothing : Int(sigdigits), percent, date)
+        isnothing(digits) ? nothing : Int(digits), isnothing(sigdigits) ? nothing : Int(sigdigits), percent, date, table)
 end
 
 # How a column's or a bound value's days are written: one of `format_date`'s
@@ -22294,9 +22386,9 @@ struct _DateColumn
 end
 
 # How `render_table` writes a column's values: the `format_number` keywords
-# its `ColumnSpec` gives, a `_DateColumn` for days, or `nothing` when it gives
-# none.
-_column_number_format(col::ColumnSpec) = !isnothing(col.date) ? _DateColumn(col.date) :
+# its `ColumnSpec` gives, a `_DateColumn` for days, its `_Labels`, or
+# `nothing` when it gives none.
+_column_number_format(col::ColumnSpec) = !isnothing(col.labels) ? col.labels : !isnothing(col.date) ? _DateColumn(col.date) :
     isnothing(col.digits) && isnothing(col.sigdigits) && !col.percent ? nothing :
     (; digits=col.digits, sigdigits=col.sigdigits, percent=col.percent)
 _column_number_format(_) = nothing
@@ -25712,7 +25804,8 @@ server writes its first rows as for any table. On a `semantic_app` page that
 computes `p` in the browser, the page writes the rows again from each new value,
 offline and in a static `export_site` page too: every cell as the server would
 write it (the column's `ColumnSpec` rounding, a sort value and ⬇ CSV value
-that are the unrounded number, or its days with `ColumnSpec(label; date)`),
+that are the unrounded number, its days with `ColumnSpec(label; date)`, or
+its labels with `ColumnSpec(label; labels)`),
 the sort the reader chose, the search, the row count and the hover-link keys
 (`link_key = :water`) follow, and the number of rows may change. A module
 that returns numbers only says "no value" with `NaN`, so in such a table a
@@ -25838,10 +25931,26 @@ _render_number_cell(value::Bool, texts, format) = h.td(string(value))
 _render_number_cell(value::Real, texts, format) = value isa AbstractFloat || !isnothing(format) ?
     number_cell(value; texts, something(format, (;))...) : h.td(string(value))
 
-# A cell of a column `ColumnSpec(…; date)` writes as days (`_date_cell`); any
+# A cell of a column `ColumnSpec(…; date)` writes as days (`_date_cell`), of
+# a column `ColumnSpec(…; labels)` as its value's label (`_label_cell`); any
 # other as `_render_table_cell` writes it.
 _render_cell(cell, value, c, ri, texts, empty_align, format) = _render_table_cell(cell, value, c, ri, texts, empty_align, format)
 _render_cell(::Nothing, value, c, ri, texts, empty_align, format::_DateColumn) = _date_cell(value, texts, format.style, empty_align)
+_render_cell(::Nothing, value, c, ri, texts, empty_align, format::_Labels) = _label_cell(value, format, texts, empty_align)
+
+# A value in a table cell written as its label (`ColumnSpec(…; labels)`): the
+# label's text, which search and the ⬇ CSV read, sorted by the value (a number
+# as `number_cell` keys it, a Bool as 0 or 1); no value is the empty cell `–`.
+# The browser runtime's `boundCell` writes the same cells.
+function _label_cell(value, labels, texts, empty_align)
+    text = _label_text(labels, value)
+    isnothing(text) && return isnothing(empty_align) ? number_cell(nothing; texts) :
+        number_cell(nothing; texts, data_htmxo_align=empty_align)
+    h.td(text; data_sort_value=_label_sort_key(value))
+end
+_label_sort_key(x::Bool) = x ? "1" : "0"
+_label_sort_key(x::Real) = _number_key(_number_value(x))
+_label_sort_key(x) = string(x)
 # The value a cell writes; a table of browser outputs (`bound(x; columns)`)
 # writes a NaN as no value (`_render_value` in semantic_browser.jl).
 _render_value(table, value) = value
@@ -25893,6 +26002,8 @@ _render_shows_text(x, format) = _render_shows_text(x)
 _render_shows_text(x::Real, ::NamedTuple) = x isa Bool
 # A day cell is a value cell, at the right like a number cell (`_date_cell`).
 _render_shows_text(x, ::_DateColumn) = false
+# A label is text (`_label_cell`).
+_render_shows_text(x, ::_Labels) = true
 _render_shows_text(_) = true
 _render_shows_text(::Union{Nothing,Missing,AbstractFloat}) = false
 
@@ -26477,10 +26588,10 @@ function sortable_table(headers, rows;
     # each cell carries the values (`sort_values`).
     for (i, hdr) in enumerate(headers)
         isnothing(_column_number_format(hdr)) || throw(ArgumentError(string("sortable_table: column ",
-            repr(_header_label(hdr)), " says how its numbers or days are written (`ColumnSpec(…; digits, ",
-            "sigdigits, percent, date)`), which render_table reads when it writes the cells; this table's cells ",
-            "are built already, so write them with `number_cell(x; digits, sigdigits, percent)`, or a day with ",
-            "`format_date` and its `data_sort_value`")))
+            repr(_header_label(hdr)), " says how its numbers, days or labels are written (`ColumnSpec(…; digits, ",
+            "sigdigits, percent, date, labels)`), which render_table reads when it writes the cells; this table's cells ",
+            "are built already, so write them with `number_cell(x; digits, sigdigits, percent)`, a day with ",
+            "`format_date` and its `data_sort_value`, or a label as its text with the value's `data_sort_value`")))
         _computed_sort_keys(hdr) && throw(ArgumentError(string("sortable_table: column ",
             repr(_header_label(hdr)), " gives its sort keys functions, but sortable_table's rows are ",
             "built already. Name the keys (`sort_keys = [\"Estimate\", …]`) and give each cell its ",

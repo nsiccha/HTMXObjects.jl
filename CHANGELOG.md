@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.1.152
+
+- `bound(x; labels = [0 => "No dose", 3 => "200 mg (level 3)", …])` writes a
+  value as the text a table names for it, so a level or category a browser
+  module computes reads as words: on the server, in the page's Markdown
+  (which a PDF report reads), and in the browser after each computation.
+  The table is a list of `value => text` pairs or a `Dict`; a key is a
+  number (`3` also names a module's `3.0`), a `Bool` or text. A value the
+  table does not name is an `ArgumentError` naming the value and the keys,
+  thrown by the server and shown by the browser in the result as a module's
+  error is, never a silent fallback; no value (`NaN`, `missing`, `nothing`)
+  writes `–`. `labels` takes no `digits`, `sigdigits`, `percent` or `date`.
+- `ColumnSpec(label; labels)` does the same for a table column, in any
+  `render_table` and in a bound table the browser writes again: each cell
+  shows its label and sorts by its value, and search and the ⬇ CSV read the
+  label. `sortable_table` and `master_detail_table` refuse it, as they refuse
+  the number and day keywords (snag `bound-cannot-sho-5a0dbf64`, user
+  decision `07gq4zu`).
+
 ## 0.1.151
 
 - `export_site` writes a page with a browser result (`@browser`) whose

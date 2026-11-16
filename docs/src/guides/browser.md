@@ -68,9 +68,16 @@ println(String(response.body))
   the language of `texts`), and `ColumnSpec("Day"; date = :short)` a table
   column of them, sorted by the number and exported to CSV as `2019-11-16`.
   A `NaN` is no value: `–`, an empty cell in a table.
+- **Values that name a category**, such as a recommended level:
+  `bound(fit.level; labels = [0 => "No dose", 3 => "200 mg (level 3)"])`
+  writes the text its table names for the value (a number key also names the
+  module's `3.0`, a `Bool` key a `Bool`), and `ColumnSpec("Dose"; labels)` a
+  table column of them, each cell sorted by its value and exported to CSV as
+  its label. A value the table does not name shows as an `ArgumentError` in
+  the result, and no value as `–`.
 - **A table of outputs:** `bound(fit; columns=(:x, :y))`. Given to
   `render_table` (`points` above), it is written again after each change, each
-  column as its `ColumnSpec(label; digits, sigdigits, percent, date)` says, sorted
+  column as its `ColumnSpec(label; digits, sigdigits, percent, date, labels)` says, sorted
   and exported to CSV by the unrounded values, with the reader's sort kept and
   rows hover-linked by `link_key = :x`. For a plot's `data(...)`, give the
   element that draws it `bound_columns_attrs(...)`, and the browser hands it the
