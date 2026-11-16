@@ -6,7 +6,7 @@ using TestItemRunner
 # state (snag semantic-app-tab-91e9c1d6).
 @testmodule ReportFixtures begin
     using HTMXObjects
-    export Picture, PictureDe, Cohorts, TWICE_CALLS, markdown, html
+    export Picture, PictureDe, Cohorts, NumberedPicture, TWICE_CALLS, markdown, html
 
     const TOY_JS = """
     export class JuliaError extends Error {
@@ -77,6 +77,37 @@ using TestItemRunner
         @get doses() = h.p("doses ", join([string(s.dose) for s in scenarios], ", "))
     end
 
+    # A numbered report around a tab the browser computes: a cited figure and
+    # table in the tab, a finite input the browser switches views for, a
+    # declared state, and a figure after the app (snag semantic-app-tab-c64170a6).
+    const CURVE_JS = """
+    export const INPUTS = [{ name: "grid", type: "Vector{Float64}" }, { name: "a", type: "Float64" }];
+    export const OUTPUTS = [{ name: "x" }, { name: "y" }];
+    export function curve(grid, a) {
+      return { x: grid.slice(), y: grid.map(g => a * g) };
+    }
+    """
+
+    @htmx struct NumberedPicture
+        "Slope"
+        @param a::Float64 = 0.2
+        @options(a) = number_domain(0.05, 0.8; digits = 2)
+        "Wide"
+        @param wide::Bool = false
+        grid = [0.0, 1.0]
+        line = (; x = grid, y = a .* grid)
+        @browser(line) = browser_module(; source = CURVE_JS, entry = :curve)
+        @get index() = h.main(numbered(h.h1("Report"),
+            h.p("See ", ref("fig-curve"), " and ", ref("tbl-values"), "."),
+            semantic_app(__self__; presentation = :tabs, select = e -> e.name == :picture,
+                         report_states = ["Steep" => (a = 0.5,)]),
+            with_caption("After", h.p("after"))))
+        "Picture"
+        @get picture() = h.div(
+            with_caption("Curve", h.p(wide ? "drawn wide" : "drawn"); id = "fig-curve"),
+            render_table(bound(line; columns = (:x, :y)); caption = "Values", id = "values"))
+    end
+
     markdown(url; kwargs...) = String(HTMXObjects._response_bytes(
         dispatch(:GET, url; headers = ["Accept" => "text/markdown"], kwargs...)))
     html(url) = String(HTMXObjects._response_bytes(dispatch(:GET, url; headers = ["HX-Request" => "true"])))
@@ -91,7 +122,8 @@ end
         own = strip(String(HTMXObjects._response_bytes(dispatch(:GET, "/result"; report,
             headers = ["HX-Request" => "true", "Accept" => "text/markdown"]))))
         @test occursin("Total\n\n80.20", own) && occursin("| 1 | 80.2 |", own)
-        @test occursin(own, md)
+        # In the numbered page its caption continues the page's count.
+        @test occursin(replace(own, "**In the tab**" => "**Figure 2: In the tab**"), md)
         @test !occursin("<div", md) && !occursin("<button", md) && !occursin("data-htmxo", md)
         @test !occursin("Copy link", md)
         # The result the server computes, which the page loads into its tab.
@@ -99,9 +131,12 @@ end
         # Each tab: its label, then its result.
         @test findfirst("**Result**", md)[1] < findfirst("Total", md)[1] < findfirst("**Twice**", md)[1] <
               findfirst("twice 160.4", md)[1]
-        # A result takes no number in a numbered document, as on the page.
+        # A result the page draws takes the document's next number, as on the
+        # page; a declared state's copy (a report's) takes none.
         @test occursin("Figure 1: A figure before", md)
-        @test occursin("**In the tab**", md) && !occursin("Figure 2", md)
+        @test count("**Figure 2: In the tab**", md) == 1 && !occursin("Figure 3", md)
+        @test count("**In the tab**", md) == (report ? 2 : 0)
+        @test !occursin("htmxo:caption-number", md)
     end
     # The HTML page does not ask for the tab it does not show, and holds none of it.
     before = TWICE_CALLS[]
@@ -170,4 +205,77 @@ end
                         report_states = ["Too steep" => (a = 5.0,)])
     @test_throws "the state \"Too steep\" is refused at /result?a=5.0" HTMXObjects.to_markdown_string(page; report = true)
     @test !occursin("Too steep", HTMXObjects.to_markdown_string(page))
+end
+
+@testitem "in a numbered document a tab's result the browser computes takes the document's numbers, the same in page and Markdown" setup=[ReportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    route!(NumberedPicture(); operation_policy = :blocking)
+    cap(words, title) = string("<strong><span><span class=\"htmxo-caption-number\">", words,
+                               ":</span> </span>", title, "</strong>")
+    page = html("/")
+    # The tab's figure and table continue the document's count, and the figure
+    # after the app takes the next number; `ref` cites the tab's.
+    @test occursin(cap("Figure 1", "Curve"), page) && occursin(cap("Table 1", "Values"), page)
+    @test occursin(cap("Figure 2", "After"), page)
+    @test occursin("""<a href="#fig-curve" class="htmxo-ref">Figure 1</a>""", page)
+    @test occursin("""<a href="#tbl-values" class="htmxo-ref">Table 1</a>""", page)
+    # The view the browser shows for the other value of `wide` reads the same numbers.
+    @test occursin("drawn wide", page)
+    @test count("Curve</strong>", page) == count(cap("Figure 1", "Curve"), page) > 1
+    @test !occursin("Figure 3", page) && !occursin("Table 2", page)
+    @test !occursin("htmxo:caption-number", page)
+    for report in (false, true)
+        md = markdown("/"; report)
+        @test occursin("See [Figure 1](#fig-curve) and [Table 1](#tbl-values).", md)
+        @test count("**Figure 1: Curve**", md) == 1 && count("**Table 1: Values**", md) == 1
+        @test occursin("**Figure 2: After**", md)
+        @test !occursin("Figure 3", md) && !occursin("Table 2", md)
+        @test !occursin("htmxo:caption-number", md)
+        # A report's further state is only in the report, and takes no number.
+        @test occursin("**Steep**", md) == report
+        @test count("**Curve**", md) == (report ? 1 : 0) && count("**Values**", md) == (report ? 1 : 0)
+        report && @test findfirst("**Figure 1: Curve**", md)[1] < findfirst("**Steep**", md)[1] <
+                         findfirst("**Curve**", md)[1] < findfirst("**Figure 2: After**", md)[1]
+        # The state's copy renames its ids, so each id a `ref` cites is in the report once.
+        @test count(r"\{#fig-curve[\s}]", md) == 1 && count(r"\{#tbl-values[\s}]", md) == 1
+        @test occursin("{#fig-curve-state-1", md) == report && occursin("{#tbl-values-state-1", md) == report
+    end
+    # The result's own address, and a page outside a numbered document, number nothing.
+    for text in (html("/picture"), markdown("/picture"))
+        @test occursin("Curve", text) && !occursin("Figure", text) && !occursin("htmxo:caption-number", text)
+    end
+    app = semantic_app(NumberedPicture(); presentation = :tabs, select = e -> e.name == :picture)
+    for text in (repr(MIME"text/html"(), app), HTMXObjects.to_markdown_string(app))
+        @test occursin("Curve", text) && !occursin("Figure", text) && !occursin("htmxo:caption-number", text)
+    end
+    # A static export numbers the page as the server does.
+    HTMXObjects.vendorfiles("assets/vendor")
+    mktempdir() do dir
+        export_site(joinpath(dir, "site"); pages = ["/"])
+        index = read(joinpath(dir, "site", "index.html"), String)
+        @test occursin(cap("Figure 1", "Curve"), index) && occursin(cap("Table 1", "Values"), index)
+        @test occursin(cap("Figure 2", "After"), index)
+        @test !occursin("htmxo:caption-number", index)
+    end
+end
+
+@testitem "a numbered report's PDF numbers a tab's result as the page does" tags=[:quarto] setup=[ReportFixtures] begin
+    if get(ENV, "HTMXO_QUARTO_TESTS", "") != "1" || isnothing(Sys.which("pdftotext"))
+        @test_skip true
+    else
+        using HTMXObjects
+        route!(NumberedPicture(); operation_policy = :blocking)
+        mktempdir() do dir
+            out = joinpath(dir, "report.pdf")
+            @test pdf_report(markdown("/"; report = true), out; title = "Report", lang = "en-GB") == out
+            t = read(`pdftotext -enc UTF-8 -layout $out -`, String)
+            # The tab's figure and table, the figure after the app, and the
+            # citations read as on the page; the state's copy has no number.
+            @test count("Figure 1: Curve", t) == 1 && count("Table 1: Values", t) == 1
+            @test count("Figure 2: After", t) == 1
+            @test !occursin("Figure 3", t) && !occursin("Table 2", t)
+            @test occursin("See Figure 1 and Table 1.", t)
+            @test occursin("Steep", t) && count("Curve", t) == 2
+        end
+    end
 end
