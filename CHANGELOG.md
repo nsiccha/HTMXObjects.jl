@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.1.144
+
+- A number input with a range (`number_domain`, `ninput(…; domain)`) stays
+  inside a column narrower than its row. The slider (at least 5rem), the 7rem
+  field and the unit kept one row that never wrapped, about 230 px wide, so in
+  the 12rem sidebar of a `semantic_app(…; presentation=:tabs, shared=…)` page
+  (176 px inside its padding) the unit was drawn up to 41 px into the result
+  column, over the result's own text, and even a field without a unit crossed
+  the divider (snag `number-control-u-68445236`). The row now wraps: in such a
+  column the slider takes a line of its own, as wide as the column, above the
+  field and its unit; a unit too long to fit beside its field goes under it.
+  A column wide enough keeps the one row as before. The field and its unit
+  are one `span.htmxo-number-entry` inside `.htmxo-number`, the slider after
+  it; the field still comes first, so the label names it. An app stylesheet
+  that selected `.htmxo-number > input[type="number"]` or
+  `.htmxo-number > .htmxo-number-unit` selects them under
+  `.htmxo-number-entry` now.
+
 ## 0.1.143
 
 - `pdf_report` keeps a captioned figure's pictures and caption on one page
