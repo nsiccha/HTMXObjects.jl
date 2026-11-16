@@ -727,6 +727,25 @@ end
         @test pages[1:3] == [2, 2, 2]
         @test issorted(pages) && last(pages) > 3
 
+        # A block of private content opens with its "not public" label, the
+        # emphasised first paragraph of the fenced div `private` writes. It
+        # travels with the content's start the same way (snag
+        # pdf-report-priva-c25e0698); emphasised prose elsewhere does not.
+        secret = HTMXObjects.to_markdown_string(private([h.h3("Definition"), h.p("First paragraph")]); audience=:private)
+        @test startswith(secret, "::: {.htmxo-private}\n\n*not public*\n\n")
+        privately = replace(secret, "*not public*" => "*not public $(marker("label"))*",
+                            "### Definition" => "### Definition $(marker("heading"))",
+                            "First paragraph" => "First paragraph $(marker("body"))")
+        @test placement(privately, 95) == [1, 1, 1]
+        @test placement(privately, 120; filtered=false) == [1, 2, 2]
+        @test placement(privately, 120) == [2, 2, 2]
+        emphasis = "*Short label* $(marker("label"))\n\n" * body
+        @test placement(emphasis, 120) == placement(emphasis, 120; filtered=false)
+        long_secret = replace(privately, "\n\n:::" => join("\n\nParagraph $i $(marker("row"))" for i in 1:40) * "\n\n:::")
+        pages = placement(long_secret, 120)
+        @test pages[1:3] == [2, 2, 2]
+        @test issorted(pages) && last(pages) > 3
+
         # Keep the label's paragraph spacing, including a document's smaller
         # spacing. The block default otherwise adds gaps and even extra pages.
         pos = "`#context [#metadata(here().position().y / 1pt)]`{=typst}"
@@ -734,6 +753,9 @@ end
         marked_label = "::: {.htmxo-label}\n**Label** $pos\n:::\n\n"
         @test last(placement("Before\n\n" * marked_label * "After $pos", 0; paragraph_spacing="0.55em")) ≈
               last(placement("Before\n\n" * plain_label * "After $pos", 0; paragraph_spacing="0.55em"))
+        private_label = "Before\n\n::: {.htmxo-private}\n\n*not public $pos*\n\nAfter $pos\n\n:::\n"
+        @test placement(private_label, 0; paragraph_spacing="0.55em") ≈
+              placement(private_label, 0; paragraph_spacing="0.55em", filtered=false)
 
         # Exercise the actual Markdown producer and Quarto's post-render
         # filter stage, including the PDF structure and all of a long body.
@@ -753,6 +775,27 @@ end
                 @test all(i -> length(onpage("Paragraph $i.")) == 1, 1:70)
                 @test only(onpage("Paragraph 70.")) > only(onpage("Paragraph 1."))
                 @test !occursin("htmxo-label", join(texts))
+            end
+        end
+        # A private section that starts at the foot of a page: its "not
+        # public" label stayed behind there while its heading moved on (after
+        # 28 short lines on Quarto 1.10.18's A4 page; snag
+        # pdf-report-priva-c25e0698).
+        mktempdir() do dir
+            filler = (h.p("Filler paragraph $i. " * repeat("Lorem ipsum dolor sit amet, consectetur adipiscing elit. ", 6)) for i in 1:9)
+            content = h.div(HTMXObjects.numbered(
+                SemanticSection("Public part", filler..., (h.p("Short line $j.") for j in 1:28)...),
+                SemanticSection("Sources", h.ul(h.li("A source entry."))),
+                private(SemanticSection("Internal status", h.p("Private body of the section.")))); lang="en-GB")
+            out = joinpath(dir, "private.pdf")
+            @test pdf_report(content, out; title="Private label", lang="en-GB", audience=:private) == out
+            if isnothing(Sys.which("pdftotext"))
+                @test_skip "pdftotext (poppler-utils) reads the text of each page"
+            else
+                texts = split(read(`pdftotext -enc UTF-8 -layout $out -`, String), '\f'; keepempty=false)
+                onpage(pattern) = findall(t -> occursin(pattern, t), texts)
+                @test onpage("not public") == onpage("Internal status") == onpage("Private body")
+                @test !occursin("htmxo-private", join(texts))
             end
         end
     end

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.139
+
+- A private `pdf_report` keeps the "not public" label ("nicht öffentlich")
+  of a block of private content on the page where that content starts. The
+  label is the first paragraph of the block's `::: {.htmxo-private}` div,
+  `*not public*`, and nothing held it to the next block, so a private section
+  starting near a page end left the label alone at the bottom of one page and
+  the section's heading at the top of the next (snag
+  `pdf-report-priva-c25e0698`). `pdf-report-labels.lua` now makes that
+  paragraph sticky, as it does a disclosure's `::: {.htmxo-label}`; the
+  private content itself can still continue across pages, paragraph spacing
+  is unchanged, and the Markdown is the same as before.
+
 ## 0.1.138
 
 - A `@browser` module's data argument may be a matrix. The page passes a
