@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.1.166
+
+- A word longer than a table column can be (an identifier, a URL, a long
+  `code` span) no longer makes a `sortable_table`, `render_table` or
+  `master_detail_table` wider than its room. When the columns would not fit,
+  a column whose widest word is longer than 16rem, or 40% of the room if that
+  is less, narrows until the table fits, never below that bound nor below text
+  kept on one line, and the word breaks inside it; a `code` span shrinks with
+  it. Other columns keep their widths, so a table that is wide for its number
+  of columns still scrolls in its own box. Apps can drop `overflow-wrap:
+  anywhere` rules added to cells for this (snag table-wider-than-be5313e7).
+- A `SemanticStatus` keeps its glyph on the line of its label's first word:
+  the HTML and HXML join them with a no-break space, so a narrow column no
+  longer leaves "•" above "Unknown". Markdown and plain text are unchanged;
+  search and the CSV read it as a space. A `white-space: nowrap` on a status
+  cell added only to keep the glyph with its label can go.
+
 ## 0.1.165
 
 - An app is mounted where `route!` put it, outside requests too.

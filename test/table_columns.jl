@@ -46,10 +46,15 @@ using TestItemRunner
             master_detail_table(headers, items; key=t -> p * "s-" * t.id, master=cells, detail,
                 searchable=true, id=p * "search"))
         unheld(x) = replace(repr("text/html", x), "data-htmxo-columns" => "data-control-columns")
-        wide = [(; t..., desc=t.id == "t3" ? repeat("Verwendungszweck", 12) : t.desc) for t in items]
+        # Wider than its room for text kept on one line, which no column
+        # narrows below (an over-long word alone no longer makes a table wider
+        # than its room: snag table-wider-than-be5313e7).
+        wide = [(; t..., desc=t.id == "t3" ? repeat("Verwendungszweck ", 12) : t.desc) for t in items]
+        widecells(t) = (h.td(t.date), h.td(t.party),
+            t.id == "t3" ? h.td(h.span(t.desc; style="white-space: nowrap")) : h.td(t.desc), h.td(t.amount), h.td(t.status))
         zoomable(p) = (
             master_detail_table(headers, items; key=t -> p * "zf-" * t.id, master=cells, detail, id=p * "zfill"),
-            master_detail_table(headers, wide; key=t -> p * "zw-" * t.id, master=cells, detail, id=p * "zwide"))
+            master_detail_table(headers, wide; key=t -> p * "zw-" * t.id, master=widecells, detail, id=p * "zwide"))
         tile(p, scale) = h.div(; id=p * "tile", style="transform: scale($scale); transform-origin: 0 0")(zoomable(p)...)
         driver = h.script(Raw(raw"""
         const pause = ms => new Promise(r => setTimeout(r, ms));
@@ -216,6 +221,150 @@ using TestItemRunner
         for p in ("half-", "tiny-", "rezoomed-"), t in ("zfill", "zwide")
             @test moved[p * t] <= 0.011
         end
+    end
+end
+
+# Snag table-wider-than-be5313e7 (Dogfood): one word longer than a column can
+# be (a 79-character symbol name, also in a `code` span, which Pico draws as an
+# inline block, in a title or alone in a cell) held its column at that word's
+# width, so the table was held
+# wider than its room and became the window-tall scroll box with its last
+# header cut off; and a status's glyph wrapped away from its label. On the base
+# runtime `token`, `code` and `status` fail. Controls that must not change: a
+# table wide for its number of columns keeps every number whole in pixels, and
+# text kept on one line keeps its width.
+@testitem "an over-long word breaks inside its column instead of widening the table" tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        symbol = "_RNvCsbpInmopFggX_7___rustc19___rust_alloc_zeroed(__rustc::__rust_alloc_zeroed)"
+        rows = [(; id="r$i", title=i == 2 ? "Regression: No augmented forward pass found for " * symbol :
+                     "Issue $i: a gradient of a closure over a mutable struct is zero in reverse mode",
+                  report="Enzyme.jl#23$i open · @contributor-$i",
+                  fix="repair record · test/reverse_over_forward_collect.jl",
+                  a=SemanticStatus(:pending; label="Unknown"), b=SemanticStatus(:available; label="Claimed fixed"))
+                for i in 1:6]
+        headers = ["Problem", "Upstream report", "Fix", "Upstream", "Fork"]
+        rest(r) = (h.td(r.report), h.td(r.fix), h.td(r.a), h.td(r.b))
+        md(id, master, items=rows; kw...) = master_detail_table(headers, items; key=r -> id * "-" * r.id, master,
+            detail=r -> h.p(r.title), density=:compact, class="", id, kw...)
+        token = md("token", r -> (h.td(r.title), rest(r)...))
+        # As in a title written with backticks, and alone in a later column.
+        code = md("code", r -> (h.td(r.id == "r2" ? ("Regression: No augmented forward pass found for ", h.code(symbol)) : r.title),
+            h.td(r.report), h.td(r.id == "r4" ? h.code(symbol) : r.fix), h.td(r.a), h.td(r.b)))
+        # The same word in a column already wide enough for it: nothing narrows.
+        roomy = md("roomy", r -> (h.td(r.title), h.td(r.id), h.td("–"), h.td(r.a), h.td(r.b)))
+        nowrap = md("nowrap", r -> (h.td(r.title), h.td(h.span(r.fix * " · " * r.report; style="white-space: nowrap")),
+            h.td(r.report), h.td(r.a), h.td(r.b)))
+        nums = [(; id="n$i", v=[round(1000 * i * j / 7; digits=3) for j in 1:24]) for i in 1:4]
+        numbers = master_detail_table(["Row"; ["Value $j" for j in 1:24]], nums; key=r -> "numbers-" * r.id,
+            master=r -> (h.td(r.id), (h.td(string(x)) for x in r.v)...), detail=r -> h.p(r.id), id="numbers")
+        driver = h.script(Raw(raw"""
+        const pause = ms => new Promise(r => setTimeout(r, ms));
+        const report = body => fetch('/complete', {method: 'POST', body});
+        window.addEventListener('error', e => report('error ' + e.message));
+        const table = id => document.getElementById(id).closest('table');
+        const cells = id => Array.from(table(id).querySelectorAll(':scope > tbody > tr[id^="row-"] > td'));
+        // How far the table reaches past its room, a cell's content past the
+        // cell, and an inline block (`code`) past its cell (<= 0: inside).
+        const over = id => { const t = table(id); return t.getBoundingClientRect().width - t.parentElement.clientWidth; };
+        const spill = id => Math.max(0, ...cells(id).map(td => td.scrollWidth - td.clientWidth));
+        const poke = id => Math.max(0, ...cells(id).flatMap(td => Array.from(td.querySelectorAll('code')).map(c =>
+          c.getBoundingClientRect().right - td.getBoundingClientRect().right)));
+        // Lines a cell's text takes: a number broken over two lines takes two.
+        const lines = td => { const r = document.createRange(); r.selectNodeContents(td);
+          return new Set(Array.from(r.getClientRects()).map(x => Math.round(x.top))).size; };
+        const widths = id => Array.from(table(id).querySelectorAll(':scope > colgroup > col')).map(c => c.style.width);
+        window.addEventListener('load', async () => {
+          await pause(500);
+          const out = {};
+          for (const id of ['token', 'code', 'roomy', 'nowrap']) {
+            out[id + '-over'] = over(id);
+            out[id + '-spill'] = spill(id);
+            out[id + '-poke'] = poke(id);
+            out[id + '-fills'] = table(id).style.width === '100%' ? 1 : 0;
+            out[id + '-wide'] = table(id).parentElement.dataset.htmxoWidth === 'wide' ? 1 : 0;
+          }
+          // The column kept on one line holds its text's width.
+          const kept = document.querySelector('#row-nowrap-r1 > td:nth-child(2)');
+          out['nowrap-kept'] = kept.scrollWidth - kept.clientWidth;
+          // A table wide for its number of columns: pixels, numbers whole.
+          out['numbers-px'] = table('numbers').style.width.endsWith('px') ? 1 : 0;
+          out['numbers-broken'] = cells('numbers').filter(td => td.cellIndex > 0 && lines(td) > 1).length;
+          // Every status keeps its glyph on its label's first line.
+          let split = 0, seen = 0;
+          document.querySelectorAll('.htmxo-semantic-status > strong').forEach(s => {
+            const r = document.createRange(), n = s.firstChild;
+            r.setStart(n, 0); r.setEnd(n, 1); const g = r.getBoundingClientRect().top;
+            r.setStart(n, 2); r.setEnd(n, 3); const l = r.getBoundingClientRect().top;
+            seen++; if (Math.abs(g - l) > 2) split++;
+          });
+          out['status-seen'] = seen; out['status-split'] = split;
+          // Sized again (a regroup, fonts loading), the same widths.
+          const before = widths('token').join(' ');
+          htmxoColumnsMeasure(table('token'), true);
+          out['token-again'] = widths('token').join(' ') === before ? 1 : 0;
+          report(Object.entries(out).map(([k, v]) => k + ' ' + v).join('\n'));
+        });
+        """))
+        # A room the reported table's columns do not fit, the word aside.
+        style = h.style(Raw("main { width: 1000px; margin: 0 auto; }"))
+        content = h.main(style, token, code, roomy, nowrap, numbers, driver)
+        vendor = Dict(HTMXObjects._vendor_files(:htmx)..., HTMXObjects._vendor_files(:pico)...)
+        page = repr("text/html", htmx(content; assets="/vendor", pico_version=HTMXObjects._PICO_VERSION,
+            sse_version=nothing, ws_version=nothing, hyperscript_version=nothing, preload_version=nothing,
+            katex_version=nothing))
+        result = Channel{String}(1)
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2])
+        close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            path = HTTP.URI(req.target).path
+            path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page)
+            if startswith(path, "/vendor/") && haskey(vendor, path[9:end])
+                type = endswith(path, ".css") ? "text/css" : "application/javascript"
+                return HTTP.Response(200, ["Content-Type" => type], read(vendor[path[9:end]]))
+            end
+            path == "/complete" && (isready(result) || put!(result, String(req.body)); return HTTP.Response(204))
+            HTTP.Response(404)
+        end
+        out = try
+            mktempdir() do profile
+                browser = run(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,1000 --user-data-dir=$profile http://127.0.0.1:$port/`;
+                    stdout=devnull, stderr=devnull); wait=false)
+                try
+                    timedwait(() -> isready(result) || process_exited(browser), 60; pollint=0.1)
+                    isready(result) || error("the page reported nothing")
+                    body = take!(result)
+                    startswith(body, "error ") && error("the page failed: " * body[7:end])
+                    Dict(first(kv) => parse(Float64, last(kv)) for kv in split.(split(body, '\n')))
+                finally
+                    process_exited(browser) || kill(browser)
+                    wait(browser)
+                end
+            end
+        finally
+            close(server)
+        end
+        @info "Over-long words in held columns" sort(collect(out))
+        # The word breaks inside its column; the table fills its room.
+        for id in ("token", "code", "roomy")
+            @test out[id * "-over"] <= 0.5
+            @test out[id * "-spill"] <= 0.5
+            @test out[id * "-poke"] <= 0.5
+            @test out[id * "-fills"] == 1
+            @test out[id * "-wide"] == 0
+        end
+        @test out["token-again"] == 1
+        # Text kept on one line is never squeezed into its neighbours.
+        @test out["nowrap-kept"] <= 0.5
+        @test out["numbers-px"] == 1
+        @test out["numbers-broken"] == 0
+        @test out["status-seen"] == 48
+        @test out["status-split"] == 0
     end
 end
 

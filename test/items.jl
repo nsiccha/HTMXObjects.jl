@@ -8304,7 +8304,7 @@ end
     @test contains(html, "<dt>execution_source</dt><dd>cohort</dd>")
     @test contains(html,
         "<pre><code class=\"language-stan\">response &lt;~&gt; alpha + beta</code></pre>")
-    @test contains(html, "✓ available")
+    @test contains(html, "✓\u00a0available")
     @test contains(html, "Sampling ready")
 
     markdown = repr("text/markdown", card)
@@ -8555,7 +8555,7 @@ end
     # Without `label=` the word is the state's name, byte-identical to before.
     @test repr("text/html", SemanticStatus(:warn; detail="3 Ortsteile")) ==
         "<span class=\"htmxo-semantic-status\" data-status=\"warn\">" *
-        "<strong>! warn</strong><small> 3 Ortsteile</small></span>"
+        "<strong>!\u00a0warn</strong><small> 3 Ortsteile</small></span>"
     @test repr("text/markdown", SemanticStatus(:fail; detail="boom")) == "✗ **fail** — boom"
     @test repr("text/plain", SemanticStatus(:ok)) == "[ok]"
     @test all(repr(m, SemanticStatus(:recorded)) ==
@@ -8567,9 +8567,9 @@ end
     @test status.state === :warn
     @test repr("text/html", status) ==
         "<span class=\"htmxo-semantic-status\" data-status=\"warn\">" *
-        "<strong>! im Projekt zu klären</strong><small> 3 Ortsteile</small></span>"
+        "<strong>!\u00a0im Projekt zu klären</strong><small> 3 Ortsteile</small></span>"
     hxml = repr("application/vnd.hyperview+xml", status)
-    @test contains(hxml, "! im Projekt zu klären") && !contains(hxml, "! warn")
+    @test contains(hxml, "!\u00a0im Projekt zu klären") && !contains(hxml, "!\u00a0warn")
     @test repr("text/markdown", status) == "! **im Projekt zu klären** — 3 Ortsteile"
     @test repr("text/plain", status) == "[im Projekt zu klären] 3 Ortsteile"
     # Two outcomes on one glyph still read differently.
@@ -10372,7 +10372,7 @@ end
     @test contains(cards_html, "<header><strong>Model model_1</strong></header>")
     @test contains(cards_html,
                    "<pre><code class=\"language-stan\">response ~ payload 13</code></pre>")
-    @test contains(cards_html, "! blocked")
+    @test contains(cards_html, "!\u00a0blocked")
     @test contains(cards_html, "Sampling blocked")
     @test occursin(
         r"<div class=\"htmxo-semantic-card\" data-rich=\"true\"><input id=\"([^\"]+)\"[^>]+aria-label=\"Model 1\"[^>]*><label for=\"\1\"[^>]*>.*?</label><article class=\"htmxo-semantic-card-body\">"s,
