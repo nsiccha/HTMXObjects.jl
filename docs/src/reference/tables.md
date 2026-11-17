@@ -11,6 +11,15 @@ reduces cell and CSV/caption spacing; it does not set the scrolling frame's
 height. Use `semantic_app(...; result_height)` for that. Existing defaults
 remain `density=:normal`, `header_align=nothing`, and `class="striped"`.
 
+A table of four or more columns has a *Columns* menu with which readers hide
+and show columns; the first column always shows. Open a table with some
+columns hidden with `hidden_columns=["Kaltmiete", 7]` (labels, `"Group /
+Leaf"` names or 1-based positions), and turn the menu off with
+`column_menu=false`. The reader's choice is kept in their browser per table
+and page. The CSV download writes the shown columns; Markdown and PDF write
+the columns the table opens with. The options work with `render_table`,
+`sortable_table` and `master_detail_table`.
+
 Entries show the signature and opening contract. The source link on each entry
 opens the full docstring; the guides contain executed usage examples.
 

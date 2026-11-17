@@ -22982,11 +22982,14 @@ function htmxoCellAt(row, col) {
     let at = 0;
     for (const cell of row.cells) {
         if (at === col) return cell;
-        at += cell.colSpan;
+        at += htmxoSpan(cell);
         if (at > col) return undefined;
     }
     return undefined;
 }
+// The columns a cell covers: its `colspan`, or while columns it covers are
+// hidden (`column_menu`), the count it keeps in `data-htmxo-span`.
+function htmxoSpan(cell) { return cell.dataset.htmxoSpan ? Number(cell.dataset.htmxoSpan) : cell.colSpan; }
 function sortTable(col, th) {
     // Accept sortTable(th): with a single <th> element, use its leaf-column
     // marker in a grouped header, else its position in the header row. Lets a
@@ -23140,14 +23143,22 @@ function htmxoSortValue(cell, key, n, sortKey) {
     return text === '' ? null : isNaN(number) ? text : number;
 }
 
-// The ▾ beside a multi-key column's label: open or close its menu, a
-// popover placed under the button so no scroll box or sticky header clips
-// it. A click elsewhere, Escape or moving the focus out closes it.
+// The ▾ beside a multi-key column's label: open or close its menu.
 function htmxoSortMenu(button, event) {
     if (event) event.stopPropagation();
     const menu = button.nextElementSibling;
-    if (menu.matches(':popover-open')) { htmxoSortMenuClose(menu, true); return; }
-    document.querySelectorAll('.htmxo-sort-menu:popover-open').forEach(m => htmxoSortMenuClose(m, false));
+    if (menu.matches(':popover-open')) { htmxoMenuClose(menu, true); return; }
+    htmxoMenuOpen(button, menu, () => menu.querySelector('.htmxo-sort-pick[aria-pressed="true"]') ||
+        menu.querySelector('.htmxo-sort-pick'));
+}
+function htmxoSortMenuClose(menu, refocus) { htmxoMenuClose(menu, refocus); }
+// A table's popover menu (a column's sort orders, the *Columns* menu): the
+// button's next sibling, placed under the button so no scroll box or sticky
+// header clips it. A click elsewhere, Escape or moving the focus out closes
+// it; `focus()` names what takes the focus.
+function htmxoMenuOpen(button, menu, focus) {
+    document.querySelectorAll('.htmxo-sort-menu:popover-open, .htmxo-column-menu:popover-open')
+        .forEach(m => htmxoMenuClose(m, false));
     menu.showPopover();
     button.setAttribute('aria-expanded', 'true');
     const place = () => {
@@ -23160,24 +23171,25 @@ function htmxoSortMenu(button, event) {
         if (e.type === 'keydown' ? e.key === 'Escape'
             : e.type === 'focusout' ? e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== button
             : !menu.contains(e.target) && !button.contains(e.target))
-            htmxoSortMenuClose(menu, e.type === 'keydown');
+            htmxoMenuClose(menu, e.type === 'keydown');
     };
     document.addEventListener('pointerdown', close, true);
     document.addEventListener('keydown', close, true);
     menu.addEventListener('focusout', close);
     window.addEventListener('scroll', place, true);
     window.addEventListener('resize', place);
-    menu.htmxoSortMenuDone = () => {
+    menu.htmxoMenuDone = () => {
         document.removeEventListener('pointerdown', close, true);
         document.removeEventListener('keydown', close, true);
         menu.removeEventListener('focusout', close);
         window.removeEventListener('scroll', place, true);
         window.removeEventListener('resize', place);
     };
-    (menu.querySelector('.htmxo-sort-pick[aria-pressed="true"]') || menu.querySelector('.htmxo-sort-pick')).focus();
+    const first = focus();
+    if (first) first.focus();
 }
-function htmxoSortMenuClose(menu, refocus) {
-    if (menu.htmxoSortMenuDone) { menu.htmxoSortMenuDone(); menu.htmxoSortMenuDone = null; }
+function htmxoMenuClose(menu, refocus) {
+    if (menu.htmxoMenuDone) { menu.htmxoMenuDone(); menu.htmxoMenuDone = null; }
     if (menu.matches(':popover-open')) menu.hidePopover();
     const button = menu.previousElementSibling;
     button.setAttribute('aria-expanded', 'false');
@@ -23191,7 +23203,7 @@ function htmxoSortPick(button, key, dir, event) {
     // `sortTable` flips the direction it finds.
     th.dataset.sortDir = dir === 'asc' ? 'desc' : 'asc';
     sortTable(th);
-    if (menu) htmxoSortMenuClose(menu, true);
+    if (menu) htmxoMenuClose(menu, true);
 }
 
 // Pair lookup uses literal ids, so punctuation in a hand-built key cannot
@@ -23504,6 +23516,7 @@ function htmxoLoadRows(row, expand) {
             const wrapper = row.closest('[data-htmxo-group-scope]');
             if (wrapper) htmxoRescope(rows, body.dataset.htmxoGroupScope, wrapper.dataset.htmxoGroupScope);
             row.after(...rows);
+            htmxoColumnsShow(row.closest('table'));
             ['htmxoLazyRows', 'htmxoLazyLeaves', 'htmxoSelectMembers'].forEach(k => delete row.dataset[k]);
             delete row.htmxoMembers;
             row.removeAttribute('aria-busy');
@@ -23782,6 +23795,8 @@ function htmxoUpdateRows(update, origin) {
         if (detail) fresh.push(detail);
     });
     htmxoPreservePlace(held, claimed, parked);
+    // The new rows are written for the columns the table hides.
+    htmxoColumnsShow(table);
     // The new rows are htmx content like any swapped in: processed, then
     // announced with htmx:load (the table's own restore runs once, below).
     if (window.htmx) {
@@ -24112,6 +24127,249 @@ if (!window.htmxoStickyBound) {
 }
 if (document.body) htmxoStickyTrack(document.body);
 
+// --- Columns a reader hides: `column_menu` / `hidden_columns` ---
+// A table opens with the columns its app hides (`data-htmxo-hidden-columns`,
+// 1-based) hidden, and its *Columns* menu hides and shows any column but the
+// first. The reader's choice is kept in this browser (`localStorage`) per
+// table (its body id) and page path, by column name: a column the app adds
+// later follows the app, one it drops is forgotten. A hidden column's cells
+// carry `data-htmxo-column-hidden`; a cell spanning columns spans only its
+// shown ones and keeps the count it covers in `data-htmxo-span` (`htmxoSpan`),
+// which sorting, the ⬇ CSV and the held widths read. The table names the
+// columns its rows are written for (`data-htmxo-columns-applied`) and each
+// body row the ones it was written for (`data-htmxo-cols`), so rows that come
+// later (lazy group rows, row updates, a regroup's rows, a bound table's new
+// rows) are written as they arrive and the rest are left alone.
+window.htmxoColumnsChoices = window.htmxoColumnsChoices || new Map();
+// The positions of the columns the table's rows are written hidden for.
+function htmxoColumnsApplied(table) {
+    const s = table.dataset.htmxoColumnsApplied;
+    return new Set(s ? s.split(',').map(Number) : []);
+}
+// Visit each header cell with its first column (1-based) and the columns it
+// covers, counted across header rows as the browser lays them out; returns
+// the number of columns.
+function htmxoHeadWalk(table, visit) {
+    const taken = [];
+    let n = 0;
+    if (table.tHead) Array.from(table.tHead.rows).forEach((row, r) => {
+        let c = 0;
+        Array.from(row.cells).forEach(cell => {
+            while (taken[r] && taken[r][c]) c++;
+            const span = htmxoSpan(cell);
+            for (let i = 0; i < Math.max(cell.rowSpan, 1); i++)
+                for (let j = 0; j < span; j++) (taken[r + i] = taken[r + i] || [])[c + j] = true;
+            visit(cell, c + 1, span);
+            c += span;
+            n = Math.max(n, c);
+        });
+    });
+    return n;
+}
+// Each column's own header cell (`leaves[col]`, 1-based) and the headings
+// spanning several (`groups`: {cell, col, span}).
+function htmxoColumnHead(table) {
+    const leaves = [], groups = [];
+    const n = htmxoHeadWalk(table, (cell, col, span) => {
+        if (span === 1) leaves[col] = cell; else groups.push({cell, col, span});
+    });
+    return {leaves, groups, n};
+}
+// A header cell's name, without its sort caret, ⓘ and ▾ menu.
+function htmxoColumnLabel(th) {
+    const copy = th.cloneNode(true);
+    copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help, .htmxo-sort-menu-holder').forEach(e => e.remove());
+    return htmxoShownText(copy).replace(/\s+/g, ' ').trim();
+}
+// Every column's name (1-based), "Group / Leaf" under a heading, as the ⬇
+// CSV names it; a name the header repeats is numbered, `Rate #2`.
+function htmxoColumnNames(table) {
+    const head = htmxoColumnHead(table), names = [], seen = new Map();
+    for (let c = 1; c <= head.n; c++) names[c] = head.leaves[c] ? htmxoColumnLabel(head.leaves[c]) : '';
+    head.groups.forEach(g => {
+        const group = htmxoColumnLabel(g.cell);
+        for (let c = g.col; c < g.col + g.span; c++) names[c] = names[c] ? group + ' / ' + names[c] : group;
+    });
+    for (let c = 1; c <= head.n; c++) {
+        const k = (seen.get(names[c]) || 0) + 1;
+        seen.set(names[c], k);
+        if (k > 1) names[c] += ' #' + k;
+    }
+    return names;
+}
+function htmxoColumnsScope(table) {
+    const id = table.tBodies[0] && table.tBodies[0].id;
+    return id ? 'htmxo-columns|' + id + '|' + location.pathname : null;
+}
+// The reader's choice for the table, {hidden: [names], shown: [names]}, or
+// null where they made none. A table without an id keeps it on its element.
+function htmxoColumnsChoice(table) {
+    const scope = htmxoColumnsScope(table);
+    if (!scope) return table.htmxoColumnsChoice || null;
+    if (!window.htmxoColumnsChoices.has(scope)) {
+        let stored = null;
+        try { stored = JSON.parse(localStorage.getItem(scope) || 'null'); } catch (e) {}
+        const valid = stored && Array.isArray(stored.hidden) && Array.isArray(stored.shown);
+        window.htmxoColumnsChoices.set(scope, valid ? stored : null);
+    }
+    return window.htmxoColumnsChoices.get(scope);
+}
+function htmxoColumnsRemember(table, choice) {
+    const scope = htmxoColumnsScope(table);
+    if (!scope) { table.htmxoColumnsChoice = choice; return; }
+    window.htmxoColumnsChoices.set(scope, choice);
+    try {
+        if (choice) localStorage.setItem(scope, JSON.stringify(choice));
+        else localStorage.removeItem(scope);
+    } catch (e) {}
+}
+// The columns to hide: the reader's choice where it names a column, else
+// the app's.
+function htmxoColumnsHidden(table) {
+    const app = new Set(JSON.parse(table.dataset.htmxoHiddenColumns || '[]'));
+    const choice = htmxoColumnsChoice(table);
+    if (!choice) return app;
+    const names = htmxoColumnNames(table), out = new Set();
+    for (let c = 2; c < names.length; c++) {
+        if (choice.hidden.includes(names[c])) out.add(c);
+        else if (!choice.shown.includes(names[c]) && app.has(c)) out.add(c);
+    }
+    return out;
+}
+// Write one cell, starting at column `col`, for the `hidden` columns;
+// returns the columns it covers.
+function htmxoColumnsCell(cell, col, hidden) {
+    const span = htmxoSpan(cell);
+    let shown = 0;
+    for (let c = col; c < col + span; c++) if (!hidden.has(c)) shown++;
+    if (shown) cell.removeAttribute('data-htmxo-column-hidden');
+    else cell.setAttribute('data-htmxo-column-hidden', '');
+    const want = Math.max(shown, 1);
+    if (want !== span) { cell.dataset.htmxoSpan = String(span); cell.colSpan = want; }
+    else if ('htmxoSpan' in cell.dataset) { delete cell.dataset.htmxoSpan; cell.colSpan = span; }
+    return span;
+}
+// Write the table's header and the rows not written yet for the columns it
+// hides; true when those columns changed.
+function htmxoColumnsShow(table) {
+    if (!table || !table.tHead) return false;
+    const chosen = 'htmxoColumnMenu' in table.dataset || 'htmxoHiddenColumns' in table.dataset;
+    if (!chosen && !table.dataset.htmxoColumnsApplied) return false;
+    const hidden = chosen ? htmxoColumnsHidden(table) : new Set();
+    const stamp = Array.from(hidden).sort((a, b) => a - b).join(',');
+    const changed = (table.dataset.htmxoColumnsApplied || '') !== stamp;
+    if (stamp) table.dataset.htmxoColumnsApplied = stamp; else delete table.dataset.htmxoColumnsApplied;
+    htmxoHeadWalk(table, (cell, col) => htmxoColumnsCell(cell, col, hidden));
+    Array.from(table.tBodies).forEach(body => Array.from(body.rows).forEach(row => {
+        if ((row.dataset.htmxoCols || '') === stamp) return;
+        let c = 1;
+        Array.from(row.cells).forEach(cell => { c += htmxoColumnsCell(cell, c, hidden); });
+        if (stamp) row.dataset.htmxoCols = stamp; else delete row.dataset.htmxoCols;
+    }));
+    return changed;
+}
+// The table a *Columns* menu belongs to: the first after its toolbar.
+function htmxoColumnTable(el) {
+    const bar = el.closest('.htmxo-table-toolbar');
+    return bar && bar.parentElement ? bar.parentElement.querySelector('table[data-htmxo-columns]') : null;
+}
+// The *Columns* button: open or close its menu, one checkbox per column (the
+// first shown and fixed); a heading over several columns (`header_groups`)
+// hides and shows them together.
+function htmxoColumnMenu(button, event) {
+    if (event) event.stopPropagation();
+    const menu = button.nextElementSibling;
+    if (menu.matches(':popover-open')) { htmxoMenuClose(menu, true); return; }
+    htmxoColumnMenuFill(menu);
+    htmxoMenuOpen(button, menu, () => menu.querySelector('input:not(:disabled)'));
+}
+function htmxoColumnMenuFill(menu) {
+    const table = htmxoColumnTable(menu);
+    if (!table) return;
+    const head = htmxoColumnHead(table);
+    const box = (cols, text) => {
+        const input = document.createElement('input'), label = document.createElement('label');
+        input.type = 'checkbox';
+        input.dataset.htmxoColumns = cols.join(',');
+        input.disabled = cols.every(c => c === 1);
+        input.addEventListener('change', () => htmxoColumnPick(input));
+        label.append(input, document.createTextNode(text));
+        return label;
+    };
+    const items = [];
+    for (let c = 1; c <= head.n; c++) {
+        const g = head.groups.find(x => x.col === c);
+        if (!g) { items.push(box([c], head.leaves[c] ? htmxoColumnLabel(head.leaves[c]) : '')); continue; }
+        const set = document.createElement('fieldset'), legend = document.createElement('legend'), group = htmxoColumnLabel(g.cell);
+        const cols = Array.from({length: g.span}, (_, i) => g.col + i);
+        legend.append(box(cols, group));
+        set.append(legend, ...cols.map(k => box([k], head.leaves[k] ? htmxoColumnLabel(head.leaves[k]) : group)));
+        items.push(set);
+        c = g.col + g.span - 1;
+    }
+    menu.querySelector('[data-htmxo-column-list]').replaceChildren(...items);
+    htmxoColumnMenuSync(menu, htmxoColumnsApplied(table));
+}
+// A box is ticked when its columns show; a heading's is mixed when only some do.
+function htmxoColumnMenuSync(menu, hidden) {
+    menu.querySelectorAll('input[data-htmxo-columns]').forEach(input => {
+        const cols = input.dataset.htmxoColumns.split(',').map(Number);
+        const off = cols.filter(c => hidden.has(c)).length;
+        input.checked = off === 0;
+        input.indeterminate = off > 0 && off < cols.length;
+    });
+}
+function htmxoColumnPick(input) {
+    const table = htmxoColumnTable(input);
+    if (!table) return;
+    const hidden = htmxoColumnsApplied(table);
+    input.dataset.htmxoColumns.split(',').map(Number).forEach(c => {
+        if (c > 1) { if (input.checked) hidden.delete(c); else hidden.add(c); }
+    });
+    htmxoColumnsChoose(table, hidden);
+}
+// Hide exactly the `hidden` columns, as the reader's choice: kept, written,
+// the widths held again and announced (`htmxo:columns-changed`).
+function htmxoColumnsChoose(table, hidden) {
+    const names = htmxoColumnNames(table), choice = {hidden: [], shown: []};
+    for (let c = 2; c < names.length; c++) (hidden.has(c) ? choice.hidden : choice.shown).push(names[c]);
+    htmxoColumnsRemember(table, choice);
+    htmxoColumnsRefresh(table);
+}
+// The *Columns* menu's reset: the columns the table opens with.
+function htmxoColumnsReset(button) {
+    const table = htmxoColumnTable(button);
+    if (!table) return;
+    htmxoColumnsRemember(table, null);
+    htmxoColumnsRefresh(table);
+}
+function htmxoColumnsRefresh(table) {
+    if (htmxoColumnsShow(table)) htmxoColumnsMeasure(table, true);
+    const hidden = htmxoColumnsApplied(table), n = htmxoColumnHead(table).n, shown = [];
+    for (let c = 1; c <= n; c++) if (!hidden.has(c)) shown.push(c);
+    document.querySelectorAll('.htmxo-column-menu').forEach(m => { if (htmxoColumnTable(m) === table) htmxoColumnMenuSync(m, hidden); });
+    table.dispatchEvent(new CustomEvent('htmxo:columns-changed', {bubbles: true,
+        detail: {shown, hidden: Array.from(hidden).sort((a, b) => a - b)}}));
+}
+// The 1-based columns the table at `target` (the table, its body's id, or an
+// element around it) shows; with `columns`, show exactly those and the first,
+// as the reader's choice.
+function htmxoTableColumns(target, columns) {
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    const table = !el ? null : el.matches('table') ? el : el.matches('thead, tbody, tr, td, th') ? el.closest('table') :
+        el.querySelector('table[data-htmxo-columns]') || el.closest('table');
+    if (!table) throw new Error('htmxoTableColumns: no table at ' + target);
+    const n = htmxoColumnHead(table).n;
+    if (columns !== undefined) {
+        const wanted = new Set(Array.from(columns, Number)), hidden = new Set();
+        for (let c = 2; c <= n; c++) if (!wanted.has(c)) hidden.add(c);
+        htmxoColumnsChoose(table, hidden);
+    }
+    const hidden = htmxoColumnsApplied(table), out = [];
+    for (let c = 1; c <= n; c++) if (!hidden.has(c)) out.push(c);
+    return out;
+}
+
 // --- Columns keep their widths: every sortable_table (`data-htmxo-columns`) ---
 // Auto table layout sizes the columns over the rows that are shown, so a
 // detail opening, a lazy detail or lazy group rows arriving, a group or
@@ -24134,22 +24392,16 @@ window.htmxoColumnsHeld = window.htmxoColumnsHeld || new WeakMap();
 window.htmxoColumnsWatched = window.htmxoColumnsWatched || new Map();
 // Tables whose room had no width when last measured (a closed tab or detail).
 window.htmxoColumnsUnlaid = window.htmxoColumnsUnlaid || new WeakSet();
-// The header cell of each column: the one spanning that column alone (a
-// grouped header's leaf, or a cell spanning both header rows).
+// The header cell of each shown column: the one spanning that column alone
+// (a grouped header's leaf, or a cell spanning both header rows). A hidden
+// column (`column_menu`) has none: its width is not held.
 function htmxoColumnCells(table) {
-    const cells = [], taken = [];
-    if (!table.tHead) return cells;
-    Array.from(table.tHead.rows).forEach((row, r) => {
-        let c = 0;
-        Array.from(row.cells).forEach(cell => {
-            while (taken[r] && taken[r][c]) c++;
-            for (let i = 0; i < Math.max(cell.rowSpan, 1); i++)
-                for (let j = 0; j < cell.colSpan; j++) (taken[r + i] = taken[r + i] || [])[c + j] = true;
-            if (cell.colSpan === 1) cells[c] = cell;
-            c += cell.colSpan;
-        });
-    });
-    return cells;
+    const cells = [], hidden = htmxoColumnsApplied(table);
+    const n = htmxoHeadWalk(table, (cell, col, span) => { if (span === 1) cells[col - 1] = cell; });
+    if (!hidden.size) return cells;
+    const shown = [];
+    for (let c = 1; c <= n; c++) if (!hidden.has(c)) shown.push(cells[c - 1]);
+    return shown;
 }
 function htmxoColumnsApply(table, held) {
     let group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
@@ -24236,6 +24488,9 @@ function htmxoColumnsTrack(elt) {
     if (elt.matches && elt.matches('table[data-htmxo-columns]')) found.unshift(elt);
     found.forEach(t => {
         if (!t.isConnected) return;
+        // Rows the swap brought are written for the hidden columns first; a
+        // table whose hidden columns changed (a re-render) is sized again.
+        if (htmxoColumnsShow(t) && watched.has(t)) { htmxoColumnsMeasure(t, true); return; }
         if (watched.has(t) && ro && (htmxoColumnsRestore(t) || window.htmxoColumnsUnlaid.has(t))) return;
         if (!watched.has(t) && t.parentElement) {
             watched.set(t, t.parentElement);
@@ -24261,7 +24516,7 @@ if (!window.htmxoColumnsBound) {
     document.addEventListener('htmx:load', e => htmxoColumnsTrack(e.target));
     document.addEventListener('htmxo:regrouped', e => {
         const t = e.target.querySelector('table[data-htmxo-columns]');
-        if (t) htmxoColumnsMeasure(t, true);
+        if (t) { htmxoColumnsShow(t); htmxoColumnsMeasure(t, true); }
     });
     document.addEventListener('DOMContentLoaded', () => htmxoColumnsTrack(document.body));
     if (document.fonts && document.fonts.status !== 'loaded')
@@ -25506,13 +25761,19 @@ function downloadTableCsv(btn, filename) {
         copy.querySelectorAll('.htmxo-sort-caret, .htmxo-column-help, .htmxo-sort-menu-holder').forEach(e => e.remove());
         return lines(copy).join(' ');
     };
+    // The columns the reader hid (`column_menu`) are left out. While some
+    // of the columns a cell covers are hidden, it keeps their count in
+    // `data-htmxo-span`.
+    const span = c => c.dataset.htmxoSpan ? Number(c.dataset.htmxoSpan) : c.colSpan;
+    const applied = table.dataset.htmxoColumnsApplied;
+    const hidden = new Set(applied ? applied.split(',').map(Number) : []);
     const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
     const groupNames = [];
     if (grouped) {
         let col = 0;
         for (const th of table.tHead.rows[0].cells) {
-            for (let j = 0; j < th.colSpan; j++)
-                groupNames[col++] = th.colSpan > 1 ? name(th) : '';
+            for (let j = 0; j < span(th); j++)
+                groupNames[col++] = span(th) > 1 ? name(th) : '';
         }
     }
     // A column of interval cells (`interval_cell`) is three columns: the
@@ -25521,6 +25782,7 @@ function downloadTableCsv(btn, filename) {
         .sort((a, b) => grouped ? Number(a.dataset.htmxoSortCol) - Number(b.dataset.htmxoSortCol) : 0);
     const bounds = ths.map(th => th.dataset.htmxoIntervalCsv ? JSON.parse(th.dataset.htmxoIntervalCsv) : null);
     const headers = ths.flatMap((th, i) => {
+        if (hidden.has(i + 1)) return [];
         const group = grouped ? groupNames[Number(th.dataset.htmxoSortCol) - 1] : '';
         const n = group ? group + ' / ' + name(th) : name(th);
         return (bounds[i] ? [n, n + ' / ' + bounds[i][0], n + ' / ' + bounds[i][1]] : [n]).map(esc);
@@ -25537,12 +25799,16 @@ function downloadTableCsv(btn, filename) {
     const rows = Array.from(table.querySelectorAll('tbody tr'))
         .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
         .map(tr => {
-            // A cell spanning columns keeps the others in theirs: what it covers is blank.
+            // A cell spanning columns keeps the others in theirs: what it
+            // covers is blank. Its fields go to the first of its columns shown.
             let col = 0;
             return Array.from(tr.cells).flatMap(td => {
-                const out = fields(td, col).map(esc);
-                for (let i = 1; i < td.colSpan; i++) out.push(...(bounds[col + i] ? ['', '', ''] : ['']));
-                col += td.colSpan;
+                const n = span(td), shown = [];
+                for (let i = 0; i < n; i++) if (!hidden.has(col + i + 1)) shown.push(col + i);
+                col += n;
+                if (!shown.length) return [];
+                const out = fields(td, shown[0]).map(esc);
+                shown.slice(1).forEach(c => out.push(...(bounds[c] ? ['', '', ''] : [''])));
                 return out;
             }).join(',');
         });
@@ -25565,7 +25831,9 @@ end
 
 The words a table's built-in controls show: the search field, its count and
 empty state, the selection bar, *Expand all* / *Collapse all*, the *Group by*
-control, lazy-detail status lines, the CSV button, the toggle of its
+control, lazy-detail status lines, the CSV button, the *Columns* menu
+(`columns`, and `columns_reset` for its button that brings back the columns
+the table opens with), the toggle of its
 caption's long text (`more`, as in [`caption_texts`](@ref)), the marks of
 the numbers the table writes (`decimal`, `thousands` and the sign of a
 negative number, `minus`: `-` in English, the minus sign `−` (U+2212) in
@@ -25635,6 +25903,8 @@ struct TableTexts
     rows_failed::String         # toast: a lazy group's rows failed to load
     rows_missing::String        # toast: a lazy group's response held no rows
     csv::String                 # the CSV download button
+    columns::String             # the Columns menu: its button and accessible name
+    columns_reset::String       # its button bringing back the columns the table opens with
     more::String                # the caption's long-text toggle (`CaptionTexts`)
     decimal::String             # the decimal mark of the numbers the table writes
     thousands::String           # their thousands separator
@@ -25723,6 +25993,8 @@ const _TABLE_TEXT_LOCALES = (
         rows_failed = "Loading rows failed ({status})",
         rows_missing = "Loading rows failed: no rows in the response",
         csv = "⬇ CSV",
+        columns = "Columns",
+        columns_reset = "Reset",
         more = _CAPTION_TEXT_LOCALES.en.more,
         decimal = _SEMANTIC_TEXT_LOCALES.en.decimal,
         thousands = ",",
@@ -25777,6 +26049,8 @@ const _TABLE_TEXT_LOCALES = (
         rows_failed = "Laden der Zeilen fehlgeschlagen ({status})",
         rows_missing = "Laden der Zeilen fehlgeschlagen: keine Zeilen in der Antwort",
         csv = "⬇ CSV",
+        columns = "Spalten",
+        columns_reset = "Zurücksetzen",
         more = _CAPTION_TEXT_LOCALES.de.more,
         decimal = _SEMANTIC_TEXT_LOCALES.de.decimal,
         thousands = ".",
@@ -26424,7 +26698,8 @@ end
                    download=false, download_filename=nothing, caption=nothing,
                    default_sort=nothing, header_groups=nothing,
                    searchable=false, selectable=nothing,
-                   select_form=nothing, link=nothing, sticky=true, texts=table_texts(), kwargs...)
+                   select_form=nothing, link=nothing, sticky=true,
+                   column_menu=nothing, hidden_columns=(), texts=table_texts(), kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -26504,6 +26779,13 @@ that fits its column drops that scroll box so its header can stay in view
 - `sticky`: keep the table's control line and column headers at the top of
   the window while its rows scroll (default `true`; `false` leaves them in the
   flow). See *Controls and headers stay in view* below.
+- `column_menu`: the *Columns* menu, with which a reader hides and shows
+  columns. By default (`nothing`) a table of four or more columns has one, and
+  so does one with `hidden_columns`; `true` gives one to any table of two or
+  more columns, `false` none. See *Columns a reader hides* below.
+- `hidden_columns`: the columns the table opens with hidden, by header label,
+  `"Group / Leaf"` for a leaf under a `header_groups` heading, or 1-based
+  position (`hidden_columns=["Kaltmiete", 7]`). The first column always shows.
 - `texts`: the words of the table's built-in controls (the search label,
   count and empty state, the selection bar, the CSV button, lazy-detail
   status lines), as a [`TableTexts`](@ref) from [`table_texts`](@ref), e.g.
@@ -26571,6 +26853,38 @@ document.addEventListener('htmxo:table-filtered', e => {
     if (n) e.detail.notes.push(n + ' already categorized hidden');
 });
 ```
+
+# Columns a reader hides
+A table of four or more columns has a *Columns* menu (`texts.columns`,
+*Spalten* in German) at the end of its toolbar line, which a table without
+other controls gets for it. It opens a list with a checkbox per column; the
+first column (the row's label and controls) always shows, and a
+`header_groups` heading has a checkbox of its own that hides or shows its
+columns together. The table opens with the `hidden_columns` hidden, written
+so by the server, so the first paint shows them hidden. The reader's choice is
+kept in the browser (`localStorage`) for the table (its body `id`) and the page
+path, by column name, and comes back on a reload, a later visit and a
+re-render of the table; a column the app adds later shows or hides as the app
+says, and *Reset* (`texts.columns_reset`) brings back the columns the table
+opens with. A table without an `id` keeps the choice until it is rendered again.
+
+A hidden column's header and cells leave the table. A cell that spans columns
+spans only those still shown, so an open or lazily loaded detail row spans
+the table's whole width, and a `header_groups` heading narrows with its
+columns and goes with the last of them. Rows that arrive later — lazy group
+rows, row updates, a regroup in the browser, a `bound` table's new rows — are
+written for the hidden columns as they come. The column widths are held again
+over the shown columns (*Columns keep their widths*). Column numbers do not
+change when a column hides: `default_sort`, `htmxoSortState` and a sort by
+a hidden column keep working, and the search
+still matches a hidden column's text. The ⬇ CSV writes the columns shown;
+Markdown (`?plain`) and [`pdf_report`](@ref) write the columns the table opens
+with, without `hidden_columns`. A page script reads the shown columns with
+`htmxoTableColumns('#id')` and shows exactly some with
+`htmxoTableColumns('#id', [1, 2, 5])`, as if the reader had picked them; each
+change fires a bubbling `htmxo:columns-changed` event on the table whose
+`detail` holds `shown` and `hidden`, 1-based. It all runs in the browser, so
+a static bundle ([`record!`](@ref), [`export_site`](@ref)) has the menu too.
 
 # Controls and headers stay in view
 The controls a table draws itself share one line above it (`div.htmxo-table-toolbar`):
@@ -26747,9 +27061,9 @@ function sortable_table(headers, rows;
                         header_groups=nothing,
                         searchable::Bool=false, search_query::AbstractString="",
                         selectable=nothing, select_form=nothing, link=nothing,
-                        sticky::Bool=true,
+                        sticky::Bool=true, column_menu=nothing, hidden_columns=(),
                         texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true,
-                        _presorted::Bool=false, kwargs...)
+                        _presorted::Bool=false, _columns_placed::Bool=false, kwargs...)
     density_attrs = _table_density_attrs(density)
     header_align = _table_header_align(header_align)
     isnothing(link) || link isa Union{AbstractString,Symbol} && !isempty(string(link)) || throw(ArgumentError(
@@ -26807,30 +27121,45 @@ function sortable_table(headers, rows;
     link_attrs = isnothing(link) ? (;) : (; data_htmxo_link=string(link))
     # A `detail-<key>` companion is no row of the Markdown table.
     body_rows = Any[_is_master_row(row) ? row : _MDCompanionRow(row) for row in rows]
+    # The columns a reader can hide (`column_menu`) and those the table opens
+    # with hidden (`hidden_columns`): their cells are written hidden already,
+    # as the runtime writes them, so the first paint shows the table as it
+    # opens (see *Columns a reader hides* above).
+    group_names = isnothing(grouped) ? fill("", length(headers)) : last(grouped)
+    column_label(i) = something(_header_label(headers[i]), strip(repr("text/markdown", th_nodes[i])))
+    hidden = _hidden_column_positions(hidden_columns, length(headers), group_names, column_label)
+    menu_on = _column_menu_on(column_menu, length(headers), hidden)
+    column_attrs = (; (menu_on ? (; data_htmxo_column_menu="") : (;))...,
+        (isempty(hidden) ? (;) : (; data_htmxo_hidden_columns=JSON.json(hidden),
+                                    data_htmxo_columns_applied=join(hidden, ",")))...)
+    shown_rows = isempty(hidden) ? body_rows : Any[r isa _MDCompanionRow ?
+        _MDCompanionRow(_row_columns_hidden(r.row, hidden)) : _row_columns_hidden(r, hidden) for r in body_rows]
     # `data-htmxo-columns`: the table runtime holds the columns' widths
     # (see "Columns keep their widths" above).
     table_node = h.table(; class=table_class, role, density_attrs..., link_attrs..., _sticky_attrs(sticky)...,
-                         data_htmxo_columns="", kwargs...)(
-        thead,
+                         data_htmxo_columns="", column_attrs..., kwargs...)(
+        isempty(hidden) ? thead : _head_columns_hidden(thead, hidden),
         # Keep runtime-sized children as a collection. Splatting heterogeneous
         # master/detail rows creates large tuples with row-count-dependent
         # compilation and allocation costs; HTMX flattens collections directly.
-        h.tbody(body_rows; body_attrs...),
+        h.tbody(shown_rows; body_attrs...),
     )
 
     # Scroll container: a table wider than its column scrolls inside its own
     # wrapper instead of widening the page. `table-wrap` is the class
     # `downloadTableCsv` already seeks, so CSV download keeps working.
-    table_wrap = if isnothing(grouped)
+    # Markdown writes a grouped header as one row of "Group / Leaf" names,
+    # and leaves out the columns the table opens with hidden.
+    table_wrap = if isnothing(grouped) && isempty(hidden)
         h.div(; class="table-wrap")(table_node)
     else
-        group_names = last(grouped)
-        flat_headers = map(eachindex(headers)) do i
-            label = _header_label(headers[i])
-            isnothing(label) && (label = strip(repr("text/markdown", th_nodes[i])))
+        shown = [i for i in eachindex(headers) if !(i in hidden)]
+        flat_headers = isnothing(grouped) ? th_nodes[shown] : map(shown) do i
+            label = column_label(i)
             h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
         end
-        flat_table = h.table(h.thead(h.tr(flat_headers)), h.tbody(body_rows))
+        flat_rows = isempty(hidden) ? body_rows : Any[_row_columns_dropped(r, hidden) for r in body_rows]
+        flat_table = h.table(h.thead(h.tr(flat_headers)), h.tbody(flat_rows))
         h.div(; class="table-wrap")(html_only(table_node),
             markdown_only(repr("text/markdown", flat_table)))
     end
@@ -26857,14 +27186,190 @@ function sortable_table(headers, rows;
     else
         table_wrap
     end
-    # The selection bar joins the search field's toolbar when there is one.
+    # The selection bar joins the search field's toolbar when there is one,
+    # and so does the *Columns* menu; `master_detail_table` places its own.
     bar = isnothing(selectable) || !searchable ? nothing : _selection_bar(rows; texts)
-    searched = searchable ? _searchable_table(framed, rows; query=search_query, texts, sticky, selection=bar) : framed
-    selected = isnothing(selectable) ? searched :
-        _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!searchable)
+    menu = menu_on && !_columns_placed ? _column_menu(texts) : nothing
+    searched = searchable ? _searchable_table(framed, rows; query=search_query, texts, sticky, selection=bar,
+        columns=menu) : framed
+    selected = !isnothing(selectable) ?
+        _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!searchable,
+            columns=searchable ? nothing : menu) :
+        searchable || isnothing(menu) ? searched : _with_column_menu(searched, menu)
     # `master_detail_table` wraps this table and marks its own outermost element.
     _stamp_texts ? _with_table_texts(selected, texts) : selected
 end
+
+# --- Columns a reader hides: `column_menu` and `hidden_columns` ---
+
+# Whether a table of `n` columns gets the *Columns* menu: by default one of
+# four or more columns, or one that opens with columns hidden, which the
+# reader must be able to show; `true` and `false` decide it for any table of
+# two or more.
+function _column_menu_on(column_menu, n::Integer, hidden)
+    column_menu isa Union{Nothing,Bool} || throw(ArgumentError(string("column_menu must be true, false or ",
+        "nothing (a menu on a table of four or more columns); got ", repr(column_menu))))
+    column_menu === false && !isempty(hidden) && throw(ArgumentError(string("hidden_columns needs the ",
+        "Columns menu, the reader's way to show them again; leave out column_menu=false, or leave the ",
+        "columns out of the table")))
+    n >= 2 && something(column_menu, n >= 4 || !isempty(hidden))
+end
+
+# The 1-based columns `hidden_columns` names, in order: positions, header
+# labels, or "Group / Leaf" for a leaf under a `header_groups` heading (the
+# names the ⬇ CSV writes). `label(i)` is column `i`'s label. The first
+# column holds the row's label and controls and always shows.
+function _hidden_column_positions(hidden, n::Integer, group_names, label)
+    entries = hidden isa Union{AbstractString,Symbol,Integer} ? (hidden,) : hidden
+    isempty(entries) && return Int[]
+    leaves = [string(label(i)) for i in 1:n]
+    names = [isempty(group_names[i]) ? leaves[i] : group_names[i] * " / " * leaves[i] for i in 1:n]
+    out = Int[]
+    for x in entries
+        i = if x isa Integer
+            1 <= x <= n || throw(ArgumentError("hidden_columns: the table has columns 1 to $n; got $x"))
+            Int(x)
+        elseif x isa Union{AbstractString,Symbol}
+            name = string(x)
+            found = findall(==(name), names)
+            isempty(found) && (found = findall(==(name), leaves))
+            isempty(found) && throw(ArgumentError(string("hidden_columns: no column is named ", repr(name),
+                "; the columns are ", join(repr.(names), ", "))))
+            length(found) == 1 || throw(ArgumentError(string("hidden_columns: ", length(found),
+                " columns are named ", repr(name), "; name one ",
+                allunique(names[found]) ? string("as ", join(repr.(names[found]), " or "), ", or ") : "",
+                "by its position, ", join(found, " or "))))
+            only(found)
+        else
+            throw(ArgumentError(string("hidden_columns: name a column by its label or its 1-based ",
+                "position; got ", repr(x))))
+        end
+        i == 1 && throw(ArgumentError(string("hidden_columns: the first column, ", repr(names[1]),
+            ", always shows (it holds the row's label and controls)")))
+        push!(out, i)
+    end
+    sort!(unique!(out))
+end
+
+const _COLUMN_HIDDEN = Symbol("data-htmxo-column-hidden")
+const _COLUMN_SPAN = Symbol("data-htmxo-span")
+const _COLUMNS_STAMP = Symbol("data-htmxo-cols")
+
+# A cell at column `col` spanning `span` columns while the `hidden` columns
+# are hidden, as the runtime's `htmxoColumnsCell` writes it: with none of its
+# columns shown it is hidden, else it spans its shown ones and keeps the
+# columns it covers in `data-htmxo-span`.
+function _cell_columns_hidden(cell::Node, col::Int, span::Int, hidden)
+    shown = count(c -> !(c in hidden), col:col + span - 1)
+    shown == span && return cell
+    attrs = copy(HTMX.attrs(cell))
+    shown == 0 && (attrs[_COLUMN_HIDDEN] = "")
+    if max(shown, 1) != span
+        attrs[_COLUMN_SPAN] = string(span)
+        attrs[:colspan] = string(max(shown, 1))
+    end
+    Node(HTMX.tag(cell), attrs, HTMX.children(cell))
+end
+
+# A body row with its cells written for the `hidden` columns, stamped with
+# them (`data-htmxo-cols`) so the runtime leaves it alone until they change.
+function _row_columns_hidden(row, hidden)
+    row isa Node && HTMX.tag(row) === :tr || return row
+    col = 1
+    cells = Any[]
+    for c in HTMX.children(row)
+        if _is_cell(c)
+            span = _cell_span(c)
+            push!(cells, _cell_columns_hidden(c, col, span, hidden))
+            col += span
+        else
+            push!(cells, c)
+        end
+    end
+    attrs = copy(HTMX.attrs(row))
+    attrs[_COLUMNS_STAMP] = join(hidden, ",")
+    Node(:tr, attrs, cells)
+end
+
+# The header, its cells' columns counted across rows as the browser does (a
+# cell spanning two header rows takes its column in both).
+function _head_columns_hidden(thead::Node, hidden)
+    taken = Set{Tuple{Int,Int}}()
+    r = 0
+    rows = Any[]
+    for row in HTMX.children(thead)
+        if !(row isa Node && HTMX.tag(row) === :tr)
+            push!(rows, row)
+            continue
+        end
+        r += 1
+        c = 1
+        cells = Any[]
+        for cell in HTMX.children(row)
+            if !_is_cell(cell)
+                push!(cells, cell)
+                continue
+            end
+            while (r, c) in taken
+                c += 1
+            end
+            span = _cell_span(cell)
+            down = max(something(tryparse(Int, string(get(HTMX.attrs(cell), :rowspan, "1"))), 1), 1)
+            for i in 0:down - 1, j in 0:span - 1
+                push!(taken, (r + i, c + j))
+            end
+            push!(cells, _cell_columns_hidden(cell, c, span, hidden))
+            c += span
+        end
+        push!(rows, Node(:tr, HTMX.attrs(row), cells))
+    end
+    Node(:thead, HTMX.attrs(thead), rows)
+end
+
+# A row as Markdown writes it while the `hidden` columns are left out: their
+# cells are gone, and a cell spanning one of them spans fewer.
+function _row_columns_dropped(row, hidden)
+    row isa Node && HTMX.tag(row) === :tr || return row
+    col = 1
+    cells = Any[]
+    for c in HTMX.children(row)
+        if !_is_cell(c)
+            push!(cells, c)
+            continue
+        end
+        span = _cell_span(c)
+        shown = count(i -> !(i in hidden), col:col + span - 1)
+        col += span
+        shown == 0 && continue
+        if shown != span
+            attrs = copy(HTMX.attrs(c))
+            attrs[:colspan] = string(shown)
+            c = Node(HTMX.tag(c), attrs, HTMX.children(c))
+        end
+        push!(cells, c)
+    end
+    Node(:tr, HTMX.attrs(row), cells)
+end
+
+# The *Columns* menu: a button opening a popover that the runtime fills with
+# one checkbox per column when it opens (`htmxoColumnMenu`), and a button
+# bringing back the columns the table opens with. HTML-only, like the rest of
+# the toolbar. No `role="group"` on the popover: Pico lays one out as a row
+# of joined buttons.
+_column_menu(texts::TableTexts) = h.span(; class="htmxo-column-menu-holder")(
+    h.button(texts.columns; type="button", class="secondary outline htmxo-column-menu-toggle",
+        aria_expanded="false", onclick="htmxoColumnMenu(this,event)"),
+    h.div(; class="htmxo-column-menu", popover="manual")(
+        h.div(; class="htmxo-column-menu-title")(texts.columns),
+        h.div(; data_htmxo_column_list=""),
+        h.button(texts.columns_reset; type="button", class="secondary outline htmxo-column-reset",
+            onclick="htmxoColumnsReset(this)")))
+
+# A table whose only control is the *Columns* menu gets a toolbar of its own.
+# It stays in the flow, so only the header keeps in view while the rows
+# scroll, as for a table without controls.
+_with_column_menu(inner, menu) = h.div(; class="htmxo-column-table")(
+    html_only(_table_toolbar((menu,); sticky=false)), inner)
 
 # A hand-built cell that carries sort values carries one per key of its
 # column; a cell without them sorts by its `data-sort-value` or text.
@@ -26933,13 +27438,14 @@ _selection_bar(rows; texts::TableTexts=_EN_TABLE_TEXTS) = h.p(; class="htmxo-sel
 # submit with (the HTML `form` attribute), so the table need not sit inside
 # it. The bar is client-side only, like the search field.
 function _selectable_table(inner, rows, name; form=nothing, texts::TableTexts=_EN_TABLE_TEXTS,
-                           sticky::Bool=true, toolbar::Bool=true)
+                           sticky::Bool=true, toolbar::Bool=true, columns=nothing)
     name isa AbstractString && !isempty(name) || throw(ArgumentError(
         "selectable must be the non-empty name of the submitted inputs; got $(repr(name))"))
     form_attrs = isnothing(form) ? (;) : (; data_htmxo_select_form=string(form))
+    items = isnothing(columns) ? (_selection_bar(rows; texts),) : (_selection_bar(rows; texts), columns)
     h.div(; class="htmxo-selectable-table", data_htmxo_select=name, form_attrs...)(
         html_only(h.style(Raw(_selection_css()))),
-        (toolbar ? (html_only(_table_toolbar((_selection_bar(rows; texts),); sticky)),) : ())...,
+        (toolbar ? (html_only(_table_toolbar(items; sticky)),) : ())...,
         inner,
         html_only(h.div(; hidden=true, data_htmxo_selection_inputs="")),
     )
@@ -26992,7 +27498,7 @@ end
 # `aria-label` keeps the count out of its name.
 function _searchable_table(table, rows; field::Bool=true, controls=nothing, query::AbstractString="",
                            texts::TableTexts=_EN_TABLE_TEXTS, pending=String[],
-                           sticky::Bool=true, selection=nothing)
+                           sticky::Bool=true, selection=nothing, columns=nothing)
     count_text = _table_count_text(texts, _table_item_counts(rows, pending)...)
     # A prefilled query (e.g. carried across a regroup) is applied by the
     # runtime when the table loads; the server's count is the unfiltered one.
@@ -27001,7 +27507,7 @@ function _searchable_table(table, rows; field::Bool=true, controls=nothing, quer
         h.input(; type="search", aria_label=texts.search, oninput="htmxoFilterTable(this)", value_attrs...),
         h.small(count_text; data_htmxo_table_count="", role="status", aria_live="polite");
         hidden=!field)
-    extras = filter(!isnothing, Any[controls, selection])
+    extras = filter(!isnothing, Any[controls, selection, columns])
     h.div(; class="htmxo-searchable-table")(
         html_only(_table_toolbar((search, extras...); sticky, shown=field || !isempty(extras))),
         table,
@@ -39708,6 +40214,29 @@ fieldset[data-htmxo-checkbox-group] > label > input[type="checkbox"],
     outline: 2px solid var(--htmxo-accent, currentColor); outline-offset: .1em;
 }
 .htmxo-sort-caret .htmxo-sort-key { font-weight: normal; opacity: .8; }
+/* Columns a reader hides (`column_menu`): their cells leave the table's grid.
+   The *Columns* menu sits at the end of the table's toolbar and opens a
+   popover (placed by `htmxoMenuOpen`) of checkboxes, one per column, a
+   heading's columns in a box of their own. Buttons reset as above. */
+table[data-htmxo-columns] > :is(thead, tbody) > tr > [data-htmxo-column-hidden] { display: none !important; }
+.htmxo-table-toolbar > .htmxo-column-menu-holder { margin-inline-start: auto; }
+.htmxo-column-menu-holder > .htmxo-column-menu-toggle,
+.htmxo-column-menu > .htmxo-column-reset { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
+.htmxo-column-menu-holder > .htmxo-column-menu-toggle::after { content: " ▾"; }
+.htmxo-column-menu {
+    position: fixed; inset: auto; margin: 0; padding: .5rem .75rem; min-width: 12em;
+    max-height: min(70vh, 32rem); overflow: auto;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: .375rem;
+    background: var(--pico-background-color, Canvas); color: var(--pico-color, CanvasText);
+    box-shadow: 0 .25rem 1rem rgb(0 0 0 / .2); font-size: .875rem; font-weight: normal; text-align: left;
+}
+.htmxo-column-menu label { display: flex; align-items: center; gap: .45rem; width: auto; margin: .15rem 0; font-size: inherit; cursor: pointer; }
+.htmxo-column-menu input[type="checkbox"] { flex: none; margin: 0; }
+.htmxo-column-menu label:has(> input:disabled) { opacity: .65; cursor: default; }
+.htmxo-column-menu fieldset { margin: .25rem 0; padding: 0 0 0 1.4rem; border: 0; }
+.htmxo-column-menu fieldset > legend { margin: 0 0 0 -1.4rem; padding: 0; font-weight: 600; }
+.htmxo-column-menu > .htmxo-column-reset { margin-top: .5rem; }
+.htmxo-column-menu-title { font-weight: 600; opacity: .75; margin-bottom: .2rem; }
 
 /* A table's own controls (the search field with its count, Group by,
    Expand/Collapse all, the selection bar) share one line, wrapping only when
