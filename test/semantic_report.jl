@@ -7,6 +7,7 @@ using TestItemRunner
 @testmodule ReportFixtures begin
     using HTMXObjects
     export Picture, PictureDe, Cohorts, Snow, NumberedPicture, TWICE_CALLS, markdown, html, shown_at
+    export MountedPicture, MountedArticle, mounted_view, mounted_document
 
     const TOY_JS = """
     export class JuliaError extends Error {
@@ -124,6 +125,45 @@ using TestItemRunner
             render_table(bound(line; columns = (:x, :y)); caption = "Values", id = "values"))
     end
 
+    # Two mounts of one picture in an article routed under a prefix, each shown
+    # by a custom tabs layout, as a report builds the article outside any
+    # request (snag render-the-mount-9fb42ee3).
+    @htmx struct MountedPicture
+        "Slope (per day)"
+        @param a::Float64 = 0.2
+        @options(a) = number_domain(0.05, 0.8; log = true, digits = 2)
+        "Intercept"
+        @param b::Float64 = 80.0
+        @options(b) = number_domain(10, 100; step = 1, unit = "units")
+        grid = [0.0, 1.0, 2.0]
+        line = (; x = grid, y = a .* grid .+ b, total = a + b)
+        @browser(line) = browser_module(; source = TOY_JS, entry = :toy)
+        "Picture"
+        @get mounted_figure() = h.div(h.dl(h.dt("Total"), h.dd(bound(line.total; digits = 2))))
+        "Table"
+        @get mounted_numbers() = h.div(render_table(bound(line; columns = (:x, :y))))
+        "Note"
+        @get mounted_note() = h.p("note ", string(a))
+    end
+
+    function mounted_layout(parts)
+        tabs = tabset(parts.tabs...; id = parts.id * "-tabs", names = parts.tab_names,
+            active = parts.active, url_scope = get(parts, :url_scope, nothing))
+        h.section(app_layout(h.aside(parts.sidebar, h.div(parts.reset)), tabs;
+            content_id = parts.id * "-content"); id = parts.id, class = "htmxo-semantic-app")
+    end
+    mounted_view(picture) = semantic_app(picture; presentation = :tabs, layout = mounted_layout,
+        select = e -> e.name in (:mounted_figure, :mounted_numbers), shared = [:a, :b])
+    mounted_document(app) = numbered(SemanticSection("Pictures",
+        SemanticSection("Gentle", h.p("Before."), h.section(mounted_view(app.gentle))),
+        SemanticSection("Steep", h.p("Between."), h.section(mounted_view(app.steep)))))
+
+    @htmx struct MountedArticle
+        @include gentle = MountedPicture()
+        @include steep = MountedPicture(; a = 0.4)
+        @get index() = h.main(mounted_document(__self__))
+    end
+
     markdown(url; kwargs...) = String(HTMXObjects._response_bytes(
         dispatch(:GET, url; headers = ["Accept" => "text/markdown"], kwargs...)))
     html(url) = String(HTMXObjects._response_bytes(dispatch(:GET, url; headers = ["HX-Request" => "true"])))
@@ -198,6 +238,41 @@ end
                             "Density of the snow, to read water as depth: 250 kg/m³",
                             "Depth: 0.5") * "\n\nshielded by 231 mm at 0.5", md)
     @test !occursin("Depth::", md)
+end
+
+@testitem "a mounted app's tabs write their results when the page is built outside a request" setup=[ReportFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    app = MountedArticle()
+    # A slash around the prefix names the same mount as without one.
+    @test route!(app; prefix = "/article/", operation_policy = :blocking) === app
+    # The object `route!` registered, and its children, are mounted where its routes are.
+    @test app.__prefix__ == "/article" && app.steep.__prefix__ == "/article/steep"
+    @test string(app) == "/article" && app.gentle / "mounted_figure" == "/article/gentle/mounted_figure"
+    # The article's page, then the article built outside a request, as a
+    # report builds it. The page's Markdown is the app's first request: a
+    # later one shows the steep mount at a = 0.2 (snag retained-semanti-865defc0).
+    page_md = markdown("/article/"; report = true)
+    page = html("/article/")
+    outside = mounted_document(app)
+    for text in (repr(MIME"text/html"(), outside), page)
+        @test occursin("data-htmxo-follow=\"/article/gentle/mounted_figure\"", text)
+        @test occursin("data-htmxo-follow=\"/article/steep/mounted_numbers\"", text)
+        @test !occursin("//article", text)
+    end
+    for md in (HTMXObjects.to_markdown_string(outside; report = true), page_md)
+        # Each tab: its label block, the inputs it is shown at, then its result.
+        @test occursin("::: {.htmxo-label}\n**Picture**\n:::\n\n" *
+            shown_at("Slope (per day): 0.20", "Intercept: 80 units") * "\n\nTotal\n\n80.20", md)
+        @test occursin(shown_at("Slope (per day): 0.40", "Intercept: 80 units") * "\n\nTotal\n\n80.40", md)
+        @test occursin("| 2 | 80.4 |", md) && occursin("| 2 | 80.8 |", md)
+        @test count("Shown at:", md) == 4 && count("Total", md) == 2
+    end
+    # A picture no `route!` mounted has no address answering its results: the
+    # page and its Markdown say so rather than show the tab empty.
+    @test_throws "semantic_app: the result address /mounted_figure" mounted_view(MountedPicture())
+    @test_throws "of MountedPicture (mounted at __prefix__ \"\") answers 404 and no route serves it" mounted_view(MountedPicture())
+    note = semantic_app(MountedPicture(); presentation = :tabs, select = e -> e.name == :mounted_note)
+    @test_throws "no route serves it" HTMXObjects.to_markdown_string(note)
 end
 
 @testitem "report_states writes a tab's result again at each declared state, in a report only" setup=[ReportFixtures] tags=[:unit, :semantic] begin

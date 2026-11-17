@@ -112,9 +112,14 @@ function _result_rendering_markdown(rendering::_ResultRendering, static, view=no
         end
     end
     body = String(_response_bytes(resp))
+    fault = !isempty(HTTP.header(resp, "X-HTMXO-Error-Id"))
+    # An address no route answers has no result to write, at the page's inputs
+    # or at a state; writing nothing would drop the result without a word.
+    resp.status == 200 || fault ||
+        throw(_unserved_result_error(rendering.shown.object, rendering.url, resp.status))
     # A fault answers the fragment with its article (`X-HTMXO-Error-Id`), as the
     # page shows it in the tab; a state the app declares must be one its inputs take.
-    if !isnothing(state) && (resp.status != 200 || !isempty(HTTP.header(resp, "X-HTMXO-Error-Id")))
+    if !isnothing(state) && (resp.status != 200 || fault)
         throw(ArgumentError(string("semantic_app report_states: the state ",
             _report_state_name(state), " is refused at ", rendering.url, " (", resp.status, ")",
             isempty(strip(body)) ? "" : string(":\n", body))))
@@ -124,6 +129,19 @@ function _result_rendering_markdown(rendering::_ResultRendering, static, view=no
 end
 
 _markdown_of(node) = strip(sprint(show, MIME"text/markdown"(), node), '\n')
+
+# A tab's result address that no route answers: the page and its Markdown would
+# show no result. The usual cause is an object whose `__prefix__` is not where
+# `route!` mounted it, such as an object never passed to `route!`, or a child of
+# one, rendered outside a request.
+function _unserved_result_error(obj, url, status)
+    prefix = hasproperty(obj, :__prefix__) ? repr(string(getproperty(obj, :__prefix__))) : "none"
+    ArgumentError(string("semantic_app: the result address ", url, " of ", nameof(typeof(obj)),
+        " (mounted at __prefix__ ", prefix, ") answers ", status,
+        " and no route serves it, so the page would show no result there. ",
+        "Build the page from the object `route!` registered, or from one of its ",
+        "`@include`d children, after `route!` has run, or inside a request to the app."))
+end
 
 _report_state_name(state::_ReportState) = isnothing(state.caption) ?
     string("(", join((string(k, " = ", repr(v)) for (k, v) in sort!(collect(state.values); by=first)), ", "), ")") :

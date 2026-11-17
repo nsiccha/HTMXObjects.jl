@@ -3,7 +3,7 @@ using TestItemRunner
 @testmodule BrowserFixtures begin
     using HTMXObjects
     export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, ChosenDefault, ChosenStale,
-           FixedRanges, RangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, Doses, DOSE_TEXTS, TOY_JS,
+           FixedRanges, RangesPage, SharedRangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, Doses, DOSE_TEXTS, TOY_JS,
            Halving, browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
@@ -212,6 +212,18 @@ using TestItemRunner
         __page__(content) = HTMXObjects.htmx(content; title = "Mounted ranges", assets = "assets/vendor",
                                              runtime = :linked)
         @get index() = h.main(semantic_app(view; presentation = :tabs))
+    end
+
+    # The same view with its first input in an explicit shared group: the
+    # group draws that control in a region that redraws it through the server
+    # (its choices read a field), and the input still drives the browser
+    # result (snag keep-enabled-bro-6df018d2, Portfolio's caesium pictures).
+    @htmx struct SharedRangesPage
+        limits::Any = (; a = (0.0, 4.0), b = (0.0, 5.0))
+        @include view = RangesView(; limits)
+        __page__(content) = HTMXObjects.htmx(content; title = "Shared ranges", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(view; presentation = :tabs, shared = [:a]))
     end
 
     # A range that reads an input through a property: the server draws `a`
@@ -827,6 +839,34 @@ end
         @test e isa HTMXObjects.StaticSiteIncomplete
         @test e !== nothing && any(((a, why),) -> a == "/" && occursin(
             "the server draws the control of `a` again when other inputs change (its `@options` read `b`)", why), e.failed)
+    end
+end
+
+@testitem "a static dispatch keeps a shared control that the server would redraw usable" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    # Snag keep-enabled-bro-6df018d2: the region that redraws `a` through the
+    # server had its request stripped and was marked `data-static-disabled`,
+    # whose style dims it to 0.45 and stops the pointer, though `a` still
+    # drives the browser result.
+    route!(SharedRangesPage(); operation_policy = :blocking)
+    live = String(HTMXObjects.dispatch(:GET, "/").body)
+    # Control: the live page redraws `a` through the server.
+    region = match(r"<div class=\"htmxo-semantic-context-control\"[^>]*>", live)
+    @test region !== nothing && occursin("__htmxo_form=", region.match) &&
+          occursin("hx-trigger=\"htmxo-refresh\"", region.match)
+    for controls in (:disable, :remove)
+        page = String(HTMXObjects.dispatch(:GET, "/";
+            static = StaticExport(; controls, runtime = :linked)).body)
+        tag = match(r"<div class=\"htmxo-semantic-context-control\"[^>]*>", page)
+        # The region stays, plain: neither greyed nor removed, and no request
+        # that a static server cannot answer.
+        @test tag !== nothing && !occursin("data-static-disabled", tag.match) &&
+              !occursin(" disabled", tag.match) && !occursin("hx-", tag.match)
+        @test !occursin("__htmxo_form=", page)
+        # Its control and the browser result it drives are both there.
+        after = page[last(findfirst(tag.match, page)):end]
+        @test match(r"name=\"(\w+)\"", after).captures[1] == "a"
+        @test occursin("data-htmxo-browser=", page)
     end
 end
 

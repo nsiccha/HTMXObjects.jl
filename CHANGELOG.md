@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.164
+## 0.1.166
 
 - Readers choose a table's columns. A `sortable_table`, `render_table` or
   `master_detail_table` of four or more columns has a *Columns* menu
@@ -20,6 +20,34 @@
   `htmxoTableColumns(target[, columns])` reads or sets the shown columns, and
   `htmxo:columns-changed` announces a change. New table texts: `columns`,
   `columns_reset`.
+
+## 0.1.165
+
+- An app is mounted where `route!` put it, outside requests too.
+  `route!(app; prefix="api")` now gives `app` and its `@include`d children
+  the prefix request roots have: `app.__prefix__ == "/api"`, so `app / "x"`,
+  `string(app)` and the result addresses of a `semantic_app` built from
+  `app` or a child outside a request (a report, `to_markdown_string`,
+  `pdf_report`) name the registered routes. Before, they named `/x`, no
+  route answered, and each tab's Markdown result was silently empty.
+- `route!` reads `prefix="/api"` and `"/api/"` as `"api"`; a leading slash
+  used to produce `//api/…` addresses, which a browser reads as another host.
+- A `semantic_app` tab whose result address no route answers raises an
+  `ArgumentError` naming the address and the object's `__prefix__`, both
+  when the page draws a browser-computed result and when its Markdown is
+  written, instead of showing the tab empty. A route that fails still shows
+  its error article, as before.
+
+## 0.1.164
+
+- A static export (`StaticExport`, `export_site`) no longer greys or removes
+  a `semantic_app` control whose choices can change. Its refresh region,
+  which only draws the control again through the server, loses that request
+  and stays as it is under both `controls=:disable` and `controls=:remove`,
+  so a browser-computed input keeps its full contrast and takes mouse input
+  (the injected `[data-static-disabled]` style had dimmed it to 0.45 and set
+  `pointer-events: none`). Operations that need the server are still greyed
+  or removed.
 
 ## 0.1.163
 
