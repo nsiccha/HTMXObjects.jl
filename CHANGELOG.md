@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.1.166
+## 0.1.167
 
 - A word longer than a table column can be (an identifier, a URL, a long
   `code` span) no longer makes a `sortable_table`, `render_table` or
@@ -18,6 +18,25 @@
   longer leaves "•" above "Unknown". Markdown and plain text are unchanged;
   search and the CSV read it as a space. A `white-space: nowrap` on a status
   cell added only to keep the glyph with its label can go.
+
+## 0.1.166
+
+- Readers choose a table's columns. A `sortable_table`, `render_table` or
+  `master_detail_table` of four or more columns has a *Columns* menu
+  (`Spalten` with `table_texts(:de)`) in its toolbar line: a checkbox per
+  column, the first column always shown, a `header_groups` heading hiding or
+  showing its columns together. `hidden_columns=["Kaltmiete", 7]` opens the
+  table with columns hidden (labels, `"Group / Leaf"` or 1-based positions),
+  `column_menu=false` leaves the menu out, `column_menu=true` adds it to a
+  smaller table. The reader's choice is kept in the browser per table id and
+  page path, by column name, with a *Reset* button. Hidden columns stay hidden
+  through sorting, search, regrouping, lazy group rows, row updates and bound
+  redraws; detail rows and spanning cells span the shown columns, and the
+  column widths are held over them. The ⬇ CSV writes the shown columns,
+  Markdown and PDF the columns the table opens with.
+  `htmxoTableColumns(target[, columns])` reads or sets the shown columns, and
+  `htmxo:columns-changed` announces a change. New table texts: `columns`,
+  `columns_reset`.
 
 ## 0.1.165
 

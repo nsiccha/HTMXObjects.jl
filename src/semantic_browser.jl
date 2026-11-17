@@ -1166,6 +1166,8 @@ semantic_browser_script() = h.script(Raw(raw"""
     }
     var body = table.tBodies[0];
     body.replaceChildren.apply(body, rows);
+    // Written for the columns the reader hid (`column_menu`).
+    if (typeof htmxoColumnsShow === 'function') htmxoColumnsShow(table);
     // A numeric result can become words: size label columns for their new
     // text before holding their widths through sorting and searching again.
     if (spec.columns.some(function(c) { return c.labels; }) && typeof htmxoColumnsMeasure === 'function')
