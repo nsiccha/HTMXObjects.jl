@@ -38388,9 +38388,12 @@ It also sets the page's text size and width, which Pico ties to the window:
 - Text stays at the browser's default size (16 px) at every window width.
   Pico raises its root font size with the window, to 20 px from 1280 px and
   21 px from 1536 px.
-- From a 1280 px window, `.container` fills the window up to 1600 px, with a
-  2rem margin on each side. Pico caps it at 1200 px, and at 1450 px from
-  1536 px.
+- `.container` fills the window up to 1600 px, with a 2rem margin on each
+  side. Pico widens it in steps instead: 510 px from a 576 px window, 700 px
+  from 768 px, 950 px from 1024 px, 1200 px from 1280 px and 1450 px from
+  1536 px, so a 980 px window (a phone's browser in desktop view) had a 700 px
+  column. Below 576 px Pico already fills the window, with a 1rem padding,
+  and that holds.
 
 The rules are unlayered and plain `:root` / `.container` selectors, so a
 later stylesheet (for example in `extra_head`) overrides them:
@@ -38461,16 +38464,18 @@ $(_STATUS_TONE_CSS)
        earlier in the page, so this value holds at every width. */
     --pico-font-size: 100%;
 }
-/* Pico caps `.container` at 1200 px from 1280 px and 1450 px from 1536 px. */
-@media (min-width: 1280px) {
+/* From 576 px Pico drops the container's padding and caps it in steps (510,
+   700, 950, 1200 and 1450 px), so it left much of a narrower window unused.
+   Below 576 px it fills the window, padded, as this does from there on. */
+@media (min-width: 576px) {
     .container {
         max-width: min(var(--htmxo-container-max-width, 1600px),
                        calc(100% - 2 * var(--htmxo-container-gutter, 2rem)));
     }
 }
-/* Pico keeps a `nav` on one line, and `.container`, which holds the header of
-   `pico_page`, is well narrower than the window below 1280 px. So labels broke
-   and then the last entries ran off the page and widened it. The nav may now
+/* Pico keeps a `nav` on one line, so a header whose entries outgrew
+   `.container`, which holds the header of `pico_page`, broke its labels and
+   then ran its last entries off the page, widening it. The nav may now
    use the window, up to a 1rem margin: `(100vw + 100%) / 2` is the distance from
    a centred container's left edge to the window's right edge. Past that it
    continues on further lines, its entries whole. A nav that fits the container

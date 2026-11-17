@@ -103,7 +103,10 @@ end
                 assets=:vendor, htmx_version=nothing, hyperscript_version=nothing, feedback=false, compose=false, overlay=false,
                 extra_head))
         end
+        # Each entry squeezed until its label must wrap: what a broken label measures as.
+        squeezed = h.style(Raw("body > header nav li a { display: inline-block; width: 2rem; overflow-wrap: anywhere; }"))
         pages = Dict("/" => shell(inventory_nav), "/control" => shell(inventory_nav, (pico_only,)), "/long" => shell(long),
+            "/squeezed" => shell(inventory_nav, (squeezed,)),
             "/long-control" => shell(long, (pico_only,)), "/atlas" => shell(atlas; brand="MaterialienAtlas"),
             "/atlas-control" => shell(atlas, (pico_only,); brand="MaterialienAtlas"),
             "/vendor/pico.min.css" => read(HTMXObjects._vendor_file(:pico), String))
@@ -122,9 +125,8 @@ end
                rows=parse(Int, fields[4]), indent=parse(Int, fields[5]), lefts=fields[6])
         end
         try
-            # Where Pico's header fits the window, whole, nothing moves, also
-            # where it runs past `.container` (the Atlas header at 980 px, a
-            # phone's browser in desktop view).
+            # Where Pico's header fits, whole, nothing moves (the Atlas header at
+            # 980 px, a phone's browser in desktop view).
             for (path, width) in (("", 1400), ("", 1280), ("", 1024),
                     ("atlas", 1400), ("atlas", 1024), ("atlas", 980))
                 framed = measure("/" * path, width)
@@ -133,17 +135,20 @@ end
                 @test (path, width, framed.rows) == (path, width, 1)
                 @test (path, width, framed.lefts) == (path, width, control.lefts)
             end
-            # The control: where the header is too wide Pico's nav breaks labels
-            # and runs off the page, which is what this measures.
-            for (path, width) in (("/control", 700), ("/control", 600), ("/atlas-control", 860), ("/long-control", 1280))
+            # The control: where the header is too wide for `.container` Pico's
+            # nav runs off the page, which is what this measures. `.container`
+            # uses the window (`pico_bridge`), so that takes a narrower window
+            # than under Pico's own caps: the Atlas header fits from 860 px.
+            for (path, width) in (("/control", 700), ("/control", 600), ("/atlas-control", 700), ("/long-control", 1280))
                 pico = measure(path, width)
                 @test (path, width, pico.overflow > 0, pico.outside > 0) == (path, width, true, true)
             end
-            @test measure("/control", 767).broken > 0
-            # The private entry's label takes room Pico's nav does not have below
-            # `.container`, and the window still does: one line down to 900 px.
+            # The labels are single words, which Pico's nav ran off the page
+            # rather than broke, so this proves `broken` counts a broken label.
+            @test measure("/squeezed", 1400).broken > 0
+            # The private entry's label included, `.container` holds the header
+            # on one line down to 900 px.
             for width in (980, 900)
-                @test (width, measure("/control", width).broken > 0) == (width, true)
                 @test (width, measure("/", width).rows) == (width, 1)
             end
             # The header stays in the page, its labels whole, the navigation
