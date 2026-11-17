@@ -112,10 +112,15 @@ end
     @test reads(html) == reads(plain)
     names_in(s) = Set(m.captures[1] for m in eachmatch(r" name=\"(\w+)\"", s))
     @test names_in(html) == names_in(plain)
-    # A form is Markdown chrome: the page's Markdown does not change.
-    @test HTMXObjects.to_markdown_string(semantic_app(SectionPage(); presentation=:tabs,
-        title="Simulator", sections=SECTIONS)) ==
-        HTMXObjects.to_markdown_string(semantic_app(SectionPage(); presentation=:tabs, title="Simulator"))
+    # A form is Markdown chrome: the page's Markdown does not change. The
+    # Markdown writes each tab's result, so it is built from a routed app.
+    routed = SectionPage()
+    route!(routed; operation_policy=:blocking)
+    markdown = HTMXObjects.to_markdown_string(semantic_app(routed; presentation=:tabs,
+        title="Simulator", sections=SECTIONS))
+    @test contains(markdown, "one/typical/100/false/50.0/70.0")
+    @test markdown ==
+        HTMXObjects.to_markdown_string(semantic_app(routed; presentation=:tabs, title="Simulator"))
 
     # `heading => names` is `InputSection(heading, names)`.
     @test InputSection("A", [:x]).settings === false
