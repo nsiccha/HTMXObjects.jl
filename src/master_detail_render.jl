@@ -47,6 +47,8 @@ function _master_detail_table(headers, items;
                              link=nothing,
                              link_key=nothing,
                              sticky::Bool=true,
+                             column_menu=nothing,
+                             hidden_columns=(),
                              _rows_only::Bool=false,
                              _sort_item=identity,
                              _toolbar=(),
@@ -71,7 +73,8 @@ function _master_detail_table(headers, items;
             initially_open, initially_open_detail, outline=tree, branches_collapsible, detail_toggle, searchable,
             search_text, selectable, select_form, select_value, select_submit,
             expand_controls, search_query, groupings, group_by, group_master, group_by_url,
-            group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts, kwargs...)
+            group_rows_url, group_rows, group_summary, group_order, group_masters, update_rows, update_groups, link, link_key, sticky, texts,
+            column_menu, hidden_columns, kwargs...)
     end
     !group_masters && all(isnothing, (group_by, group_master, group_by_url, group_rows_url, group_rows, group_summary, group_order, update_groups,
                     leaf_key, leaf_order)) || throw(ArgumentError(
@@ -303,8 +306,12 @@ function _master_detail_table(headers, items;
         perm = sortperm(detail_rows; by=id -> get(position, id, typemax(Int)), alg=MergeSort)
         permute!(details, perm)
     end
+    # The *Columns* menu joins this table's own toolbar (below), so the
+    # table only writes its columns hidden.
+    menu_on = _column_menu_on(column_menu, length(table_headers),
+        hidden_columns isa Union{AbstractString,Symbol,Integer} ? (hidden_columns,) : hidden_columns)
     table = sortable_table(map(_sort_key_names_only, table_headers), rows; table_attrs..., texts, link, sticky,
-        _stamp_texts=false, _presorted=true, kwargs...)
+        column_menu=menu_on, hidden_columns, _columns_placed=true, _stamp_texts=false, _presorted=true, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries. A narrow first column
@@ -367,12 +374,16 @@ function _master_detail_table(headers, items;
             onclick="htmxoTreeAll(this, false)"))
     controls = isempty(tools) ? nothing : h.p(; class="htmxo-tree-controls")(tools...)
     scaffold = searchable || !isnothing(children) || !isnothing(controls)
-    # The selection bar joins the search toolbar when there is one.
+    # The selection bar joins the search toolbar when there is one, and so
+    # does the *Columns* menu; else the menu joins the selection bar, or
+    # takes a toolbar of its own.
     bar = selecting && scaffold ? _selection_bar(rows; texts) : nothing
+    menu = menu_on ? _column_menu(texts) : nothing
     searched = scaffold ?
         _searchable_table(table, rows; field=searchable, controls, query=search_query, texts, pending,
-            sticky, selection=bar) : table
+            sticky, selection=bar, columns=menu) : table
     _with_table_texts(selecting ?
-        _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!scaffold) :
-        searched, texts)
+        _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!scaffold,
+            columns=scaffold ? nothing : menu) :
+        scaffold || isnothing(menu) ? searched : _with_column_menu(searched, menu), texts)
 end

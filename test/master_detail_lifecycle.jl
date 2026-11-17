@@ -229,7 +229,7 @@ end
           try {
             await until(() => slot('outer').dataset.loaded === '1', 'outer detail');
             await pause(); // Inserted forms must finish htmx initialization before submission.
-            require(document.querySelector('#outer-status [data-status]').textContent === '• recorded', 'initial status');
+            require(document.querySelector('#outer-status [data-status]').textContent === '•\u00a0recorded', 'initial status');
             const outerState = state('outer');
             document.body.addEventListener('htmx:before-request', function(event) {
               if (event.detail.elt !== slot('outer')) descendantEvents.push(state('outer') === outerState);
@@ -252,7 +252,7 @@ end
             function parentIntact() {
               return slot('outer').dataset.loaded === '1' && !slot('outer').dataset.loading &&
                 !slot('outer').dataset.failed &&
-                document.querySelector('#outer-status [data-status]').textContent === '• recorded';
+                document.querySelector('#outer-status [data-status]').textContent === '•\u00a0recorded';
             }
             const nestedEvents = [];
             document.body.addEventListener('htmx:before-request', function(event) {
