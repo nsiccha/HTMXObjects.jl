@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.169
+
+- A retained root keeps the construction keywords of its `@param`s and of its
+  mounted children's: a page that mounts `@include steep = Part(; a=0.4)`, or
+  is routed as `route!(App(; a=0.4))`, shows `a = 0.4` in every request, also
+  when a managed `RootRetention` or the store `semantic_app` switches on
+  serves it. Before, a request served from a retained root read the type
+  default instead, from the first request under a managed `RootRetention`
+  and from the second one under the semantic store (snag
+  retained-semanti-865defc0). The fix is DynamicObjects' `remount`, which now
+  keeps every keyword its retained object was constructed with, so the
+  `[compat]` floor of DynamicObjects rises to 0.5.23.
+
 ## 0.1.168
 
 - A Pico page's `.container` uses the window at every width, not only from a

@@ -491,8 +491,11 @@ end
         @direct @get index() = h.p("root a=$a")
     end
 
+    # Blocking, so that the first `GET /keywords` renders the page itself at
+    # every thread count instead of answering with the progress poller.
     keyword_get(target) = String(HTMXObjects._message_body_bytes(
-        dispatch(:GET, target; headers=["HX-Request" => "true"])))
+        dispatch(:GET, target; headers=["HX-Request" => "true"],
+                 operation_policy=:blocking)))
 end
 
 @testitem "retained roots keep the construction keywords of @param properties" setup=[RetainedKeywordFixtures] tags=[:unit, :semantic] begin
