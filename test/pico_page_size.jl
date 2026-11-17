@@ -2,7 +2,7 @@
     using HTMXObjects
     css = repr("text/html", pico_bridge())
     @test occursin(r":root \{[^}]*--pico-font-size: 100%;"s, css)
-    @test occursin(r"@media \(min-width: 1280px\) \{\s*\.container \{\s*max-width: min\(var\(--htmxo-container-max-width, 1600px\),\s*calc\(100% - 2 \* var\(--htmxo-container-gutter, 2rem\)\)\);"s, css)
+    @test occursin(r"@media \(min-width: 576px\) \{\s*\.container \{\s*max-width: min\(var\(--htmxo-container-max-width, 1600px\),\s*calc\(100% - 2 \* var\(--htmxo-container-gutter, 2rem\)\)\);"s, css)
     # Pico's own rules have the same specificity, so the bridge must follow
     # Pico's stylesheet to win.
     page = repr("text/html", htmx(h.p("x"); pico_version="2"))
@@ -56,10 +56,14 @@ end
         end
         try
             # "<window> <text size> <container width> <left margin>". Pico alone
-            # gives 19 px text at 1100 px, 20 px and a 1200 px container at
-            # 1280 and 1400 px, and 21 px and 1450 px at 1600 and 1920 px.
+            # gives a 510 px container at 600 px, 700 px at 980 px (a phone's
+            # browser in desktop view), 19 px text and 950 px at 1100 px, 20 px
+            # and 1200 px at 1280 and 1400 px, and 21 px and 1450 px at 1600 and
+            # 1920 px. Below 576 px it fills the window, padded, as before.
             @test measure("/", 375) == "375 16px 375 0"
-            @test measure("/", 1100) == "1100 16px 950 75"
+            @test measure("/", 600) == "600 16px 536 32"
+            @test measure("/", 980) == "980 16px 916 32"
+            @test measure("/", 1100) == "1100 16px 1036 32"
             @test measure("/", 1280) == "1280 16px 1216 32"
             @test measure("/", 1400) == "1400 16px 1336 32"
             @test measure("/", 1600) == "1600 16px 1536 32"

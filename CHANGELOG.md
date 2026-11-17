@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.168
+
+- A Pico page's `.container` uses the window at every width, not only from a
+  1280 px window: `pico_bridge()` (loaded by every `htmx(...; pico_version)`
+  and `pico_page` shell) lets it fill the window up to 1600 px with a 2rem
+  margin on each side from 576 px on, where Pico steps it at 510, 700 and
+  950 px. A 980 px window, the width a phone's browser lays out in desktop
+  view, now gets a 916 px column instead of 700 px; a 1100 px window 1036 px
+  instead of 950 px. Below 576 px Pico already fills the window, padded, and
+  that is unchanged. `--htmxo-container-max-width` and
+  `--htmxo-container-gutter` tune it at every width as before.
+
 ## 0.1.167
 
 - A word longer than a table column can be (an identifier, a URL, a long
