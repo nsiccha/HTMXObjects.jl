@@ -4366,6 +4366,11 @@ SemanticStatus(:warn; label="im Projekt zu klären", detail="3 Ortsteile")
 # plain text: [im Projekt zu klären] 3 Ortsteile
 ```
 
+In HTML and HXML a no-break space joins the glyph to the label, so in a
+narrow table column the glyph stays on the line of the label's first word and
+only the rest of the label wraps. A status cell needs no `white-space: nowrap`
+for that.
+
 A blank `label` throws an `ArgumentError`: plain text shows no glyph, so the
 status would say nothing there.
 """
@@ -4803,10 +4808,14 @@ _semantic_code_node(code::SemanticCode) = h.pre(
     h.code(code.text; class="language-$(_is_jldoctest(code.language) ? "julia" : code.language)");
     _semantic_anchor_attrs(code.anchor)...)
 
+# A no-break space keeps the glyph on the line of the label's first word: in a
+# narrow column a status never leaves its glyph alone on a line (snag
+# table-wider-than-be5313e7). The rest of the label still wraps, and search
+# and the ⬇ CSV read it as an ordinary space.
 function _semantic_status_node(status::SemanticStatus)
     detail = isempty(status.detail) ? Any[] : Any[h.small(" $(status.detail)")]
     h.span(
-        h.strong(string(_semantic_status_glyph(status.state), " ", status.label)),
+        h.strong(string(_semantic_status_glyph(status.state), '\u00a0', status.label)),
         detail...;
         class="htmxo-semantic-status", data_status=string(status.state))
 end
@@ -24450,11 +24459,41 @@ function htmxoColumnsMeasure(table, force) {
     table.style.width = own;
     table.dataset.htmxoColumns = 'sizing';
     const box = table.getBoundingClientRect().width, scale = htmxoColumnsScale(table, box);
-    const width = box / scale;
-    const next = {room, own, width, fill: Math.abs(width - room) < 1,
-                  widths: cells.map(c => c.getBoundingClientRect().width / scale)};
+    const widths = cells.map(c => c.getBoundingClientRect().width / scale);
+    let width = box / scale;
+    if (!own && width - room > 1) width -= htmxoColumnsNarrow(table, cells, widths, width - room, room, scale);
+    const next = {room, own, width, fill: Math.abs(width - room) < 1, widths};
     window.htmxoColumnsHeld.set(table, next);
     htmxoColumnsApply(table, next);
+}
+// A word longer than a column can be (an identifier, a URL, a long `code`
+// span) must not make the table wider than its room. A table wider than its
+// room has every column at its narrowest, its widest word, as `widths` holds.
+// A column whose widest word is longer than 16rem, or 40% of the room if that
+// is less, narrows until the table fits, but never below that bound nor
+// below what its cells need with words broken anywhere (text kept on one
+// line, a control). Every other column keeps its width, so a table that is
+// wide for its number of columns still holds pixels and scrolls in its box.
+// Narrows `widths` in place and returns how much narrower the table is.
+function htmxoColumnsNarrow(table, cells, widths, excess, room, scale) {
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const bound = Math.min(16 * rem, 0.4 * room);
+    if (!widths.some(w => w > bound)) return 0;
+    table.dataset.htmxoColumnsBreak = '';
+    table.style.width = '0px';
+    const broken = cells.map(c => c.getBoundingClientRect().width / scale);
+    delete table.dataset.htmxoColumnsBreak;
+    table.style.width = '';
+    const floor = widths.map((w, i) => Math.max(Math.min(w, broken[i]), Math.min(w, bound)));
+    const at = level => widths.map((w, i) => Math.max(floor[i], Math.min(w, level)));
+    const sum = ws => ws.reduce((a, b) => a + b, 0);
+    const target = sum(widths) - excess;
+    let lo = 0, hi = Math.max(...widths);
+    if (sum(at(lo)) < target)
+        for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (sum(at(mid)) < target) lo = mid; else hi = mid; }
+    const next = at(sum(at(lo)) < target ? hi : lo), less = sum(widths) - sum(next);
+    next.forEach((w, i) => { widths[i] = w; });
+    return less;
 }
 // The observer's notices are measured in a task of their own: the layout a
 // measurement changes would re-notify inside the callback.
@@ -26925,7 +26964,14 @@ the columns once, with the browser's own table layout over every row the
 table holds, shown or hidden: the leaves of collapsed groups and branches and
 the rows a search hides count, detail rows do not. It then holds those widths
 (`table-layout: fixed` and a `<colgroup>`), so a row shown later wraps its
-text inside its column, breaking a word too long for it. It sizes them again
+text inside its column, breaking a word too long for it. A word too long for
+the room (an identifier, a URL, a long `code` span) does not make the table
+wider than its room either: when the columns would not fit, a column whose
+widest word is longer than 16rem, or 40% of the room if that is less, narrows
+until the table fits, never below that bound nor below text kept on one line,
+and the word breaks inside it. Every other column keeps the width its words
+give it, so a table that is wide for its number of columns still scrolls in
+its own box. It sizes them again
 when the room the table has changes by more than a scrollbar (the window or a
 sidebar resizes), when the browser regroups the table, when a table first
 shows (a closed tab or detail row) and once web fonts have loaded. A detail
@@ -40295,14 +40341,21 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
 /* A table's columns keep their widths while its rows open, load and filter
    (`data-htmxo-columns`, held by the table runtime). While the runtime sizes
    them ("sizing"), the hidden rows take part, collapsed, so the widths fit
-   every row the table holds; detail rows stay out. Held, the layout is
-   fixed, and a word too long for its column breaks inside its cell instead
-   of running into the next one. A detail row's content never sizes the
-   columns, held or not: it fills the width they give it. `!important`
-   beats Pico's `[hidden] { display: none !important }`. */
+   every row the table holds; detail rows stay out. A table too wide for its
+   room only because of an over-long word is measured once more with words
+   breaking anywhere (`data-htmxo-columns-break`), to know how narrow those
+   columns can be. Held, the layout is fixed, and a word too long for its
+   column breaks inside its cell instead of running into the next one; in a
+   row's own cells that includes a word in an inline block, such as Pico's
+   `code`. A detail row's content never sizes the columns, held or not: it
+   fills the width they give it, and its words break only where they must
+   (`break-word`), so a table inside it keeps the widths its words give it.
+   `!important` beats Pico's `[hidden] { display: none !important }`. */
 table[data-htmxo-columns="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { display: table-row !important; visibility: collapse; }
+table[data-htmxo-columns="sizing"][data-htmxo-columns-break] > tbody > tr:not([id^="detail-"]) > td { overflow-wrap: anywhere; }
 table[data-htmxo-columns="held"] { table-layout: fixed; }
 table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; }
+table[data-htmxo-columns="held"] > tbody > tr:not([id^="detail-"]) > td { overflow-wrap: anywhere; }
 tr[id^="detail-"] > td > :is(.htmxo-md-detail, .htmxo-md-detail-slot) { contain: inline-size; }
 
 /* A number input with a range (`number_domain`): the slider, then the number
