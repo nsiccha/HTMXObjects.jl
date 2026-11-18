@@ -644,6 +644,8 @@ end
     styles = repr("text/html", htmxo_utility_styles())
     @test contains(styles, ".htmxo-table-toolbar[data-htmxo-sticky] { position: sticky;")
     @test contains(styles, "table[data-htmxo-sticky] > thead { position: sticky;")
+    # Borders that stick with the header's cells (snag rendered-a-maste-8560643d).
+    @test contains(styles, "table[data-htmxo-sticky] { border-collapse: separate; border-spacing: 0; }")
     @test contains(styles, ".table-wrap[data-htmxo-width=\"wide\"]")
     @test contains(styles, ":is(td, th) .table-wrap[data-htmxo-width=\"wide\"] { max-height:")
 end
@@ -821,6 +823,104 @@ end
                        "off-scrolls", "wide", "wide-head", "inner-scrolls", "nested-wide", "nested-wide-head",
                        "nested-wide-under")
             @test contains(dom, "data-$marker=\"true\"")
+        end
+    end
+end
+
+@testitem "a stuck two-row header lets no row show through it" setup=[TabsetBrowser] tags=[:browser] begin
+    # Snag rendered-a-maste-8560643d: under a `header_groups` heading, the rows
+    # scrolled beneath the stuck header showed through the 3 px strip between the
+    # heading and its leaves, and the header's bottom rule scrolled away with
+    # them: the browser paints Pico's collapsed borders with the table, not with
+    # the stuck header. What the screen shows is read from a real capture.
+    using HTMXObjects, HTTP
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        arms = [(; id="a$i", name="Arm $i") for i in 1:60]
+        timing = h.td(h.strong("1.4 ms"), h.br(), h.small("first 100 steps 2.3 ms · last 17 ms"))
+        table(id) = master_detail_table([ColumnSpec("Arm"), "T = 100", "T = 1,000", "T = 10,000", "Correctness"], arms;
+            key=a -> "$id-$(a.id)", master=a -> (h.td(a.name), timing, timing, timing, h.td("passed")),
+            detail=a -> h.p(a.name), header_groups=["Mean step time" => 2:4], id)
+        # The body cells are red, so red inside the stuck header is a row showing
+        # through it. Control: the same table with Pico's collapsed borders back.
+        style = h.style(Raw("""
+            table > tbody > tr > td { background-color: rgb(255, 0, 0) !important; }
+            table:has(> #control) { border-collapse: collapse; }"""))
+        filler = h.p(repeat("Filler text. ", 200))
+        content = h.main(; class="container")(style, h.section(table("fixed")), filler,
+            h.section(table("control")), filler, filler)
+        mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
+            page = joinpath(directory, "page.html")
+            write(page, repr("text/html", htmx(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION, htmx_version=nothing,
+                hyperscript_version=nothing, preload_version=nothing)))
+            profile = joinpath(directory, "profile")
+            cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --hide-scrollbars --window-size=1400,900 --remote-debugging-port=0 '--remote-allow-origins=*' --user-data-dir=$profile about:blank`
+            process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+            try
+                active = joinpath(profile, "DevToolsActivePort")
+                @test timedwait(() -> isfile(active) && countlines(active) >= 2, 30; pollint=0.05) === :ok
+                debug_port = strip(first(readlines(active)))
+                targets = String(HTTP.get("http://127.0.0.1:$debug_port/json/list").body)
+                target = match(r"\"webSocketDebuggerUrl\"\s*:\s*\"(ws://[^\"]*/page/[^\"]*)\"", targets)[1]
+                HTTP.WebSockets.open(target; suppress_close_error=true) do ws
+                    b = Browser(ws, Ref(0))
+                    find(id) = "document.getElementById('$id').closest('table')"   # `id` names the <tbody>
+                    # Scroll the table's rows under its stuck header and capture the
+                    # header (whole pixels inside its box only), as a PNG.
+                    function capture(id)
+                        box = evaluate(b, "(t => { window.scrollTo(0, t.getBoundingClientRect().top + scrollY + 500); " *
+                            "const r = t.tHead.getBoundingClientRect(), x = Math.ceil(r.left), y = Math.ceil(r.top); " *
+                            "return [x + scrollX, y + scrollY, Math.floor(r.right) - x, Math.floor(r.bottom) - y].join(' '); })($(find(id)))")
+                        x, y, w, hgt = parse.(Int, split(box))
+                        reply = TabsetBrowser.call(b, "Page.captureScreenshot",
+                            "{\"format\":\"png\",\"clip\":{\"x\":$x,\"y\":$y,\"width\":$w,\"height\":$hgt,\"scale\":1}}")
+                        String(match(r"\"data\":\"([^\"]+)\"", reply)[1])
+                    end
+                    # Read a capture back through a canvas: its red pixels, and how many
+                    # pixels of the row 2 px above its bottom (the bottom rule) have
+                    # the rule's colour, of how many.
+                    function painted(png, id)
+                        answer = evaluate(b, "new Promise(done => { const img = new Image(); img.onload = () => { " *
+                            "const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; " *
+                            "const g = c.getContext('2d'); g.drawImage(img, 0, 0); " *
+                            "const px = g.getImageData(0, 0, c.width, c.height).data; " *
+                            "const rule = getComputedStyle($(find(id)).tHead.rows[1].cells[0]).borderBottomColor.match(/\\d+/g).map(Number); " *
+                            "let red = 0, on = 0; for (let i = 0; i < px.length; i += 4) if (px[i] > 200 && px[i + 1] < 80 && px[i + 2] < 80) red++; " *
+                            "for (let x = 0, y = c.height - 2; x < c.width; x++) { const i = 4 * (y * c.width + x); " *
+                            "if (Math.abs(px[i] - rule[0]) + Math.abs(px[i + 1] - rule[1]) + Math.abs(px[i + 2] - rule[2]) <= 6) on++; } " *
+                            "done([red, on, c.width].join(' ')); }; img.src = 'data:image/png;base64,$png'; })")
+                        parse.(Int, split(answer))
+                    end
+                    for scheme in ("light", "dark")
+                        @testset "$scheme" begin
+                            TabsetBrowser.call(b, "Emulation.setEmulatedMedia",
+                                "{\"features\":[{\"name\":\"prefers-color-scheme\",\"value\":\"$scheme\"}]}")
+                            TabsetBrowser.call(b, "Page.navigate", "{\"url\":\"file://$page\"}")
+                            sleep(0.1)
+                            @test wait_for(b, "document.readyState === 'complete' && " *
+                                "document.querySelectorAll('.table-wrap[data-htmxo-width=fits]').length === 2")
+                            @test evaluate(b, "String(matchMedia('(prefers-color-scheme: dark)').matches)") == string(scheme == "dark")
+                            # Opaque from top to bottom, its bottom rule drawn across its width.
+                            red, on, width = painted(capture("fixed"), "fixed")
+                            @test red == 0
+                            @test on >= 0.98 * width
+                            # Control: collapsed borders let the red rows through, and
+                            # the bottom rule is gone.
+                            red, on, width = painted(capture("control"), "control")
+                            @test red > 0
+                            @test on < 0.5 * width
+                        end
+                    end
+                end
+            finally
+                kill(process)
+                timedwait(() -> process_exited(process), 5; pollint=0.05) === :ok || kill(process, Base.SIGKILL)
+            end
         end
     end
 end

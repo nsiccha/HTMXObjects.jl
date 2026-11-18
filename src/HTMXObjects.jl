@@ -40496,7 +40496,15 @@ table[data-htmxo-columns] > :is(thead, tbody) > tr > [data-htmxo-column-hidden] 
    too, as tall as the window below the outer table's line and header, with
    its header at the box top beneath the outer one, on the line's background
    (Pico's translucent row stripes reach a nested header through the outer
-   row). UNLAYERED: Pico styles `label`, `input` and `small` unlayered. */
+   row). A stuck header is opaque from top to bottom, its rules included:
+   Pico collapses table borders, and the browser paints a collapsed border
+   with the table, not with the header stuck above it, so the rows scrolled
+   beneath showed through the strip between a `header_groups` heading and
+   its leaves, and the header's bottom rule scrolled away with them. Separate
+   borders with no spacing belong to their cells and stick with them; Pico's
+   cells draw only a bottom border, so a table that is not stuck looks the
+   same. UNLAYERED: Pico styles `label`, `input`, `small` and `table`
+   unlayered. */
 .htmxo-table-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem 1rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
 .htmxo-table-toolbar[hidden], .htmxo-table-toolbar > label[hidden] { display: none; }
 .htmxo-table-toolbar > * { margin: 0; }
@@ -40505,6 +40513,7 @@ table[data-htmxo-columns] > :is(thead, tbody) > tr > [data-htmxo-column-hidden] 
 .htmxo-table-toolbar > label > small { display: inline; width: auto; margin: 0; font-size: inherit; }
 .htmxo-table-toolbar > .htmxo-tree-controls, .htmxo-table-toolbar > .htmxo-selection-bar { margin: 0; }
 .htmxo-table-toolbar[data-htmxo-sticky] { position: sticky; top: var(--htmxo-sticky-top, 0px); z-index: 3; padding-block: .35rem; background: var(--htmxo-sticky-bg, var(--pico-background-color, Canvas)); }
+table[data-htmxo-sticky] { border-collapse: separate; border-spacing: 0; }
 table[data-htmxo-sticky] > thead { position: sticky; top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px)); z-index: 2; }
 table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-sticky-top, 0px) + var(--htmxo-table-toolbar-h, 0px) + var(--htmxo-table-head-h, 0px)); }
 .table-wrap[data-htmxo-width="fits"] { overflow: visible; }
