@@ -1,5 +1,24 @@
 using TestItemRunner
 
+@testitem "Exported docstrings have a complete reference summary" tags=[:unit] begin
+    using HTMXObjects, Markdown
+    include(joinpath(@__DIR__, "..", "docs", "reference_summaries.jl"))
+
+    binding = Base.Docs.Binding(HTMXObjects, :RelativeTo)
+    docs = values(Base.Docs.meta(HTMXObjects)[binding].docs)
+    originals = [(doc, doc.object) for doc in docs]
+    summaries = reference_summaries()
+    @test !isempty(originals)
+    @test all(haskey(summaries, doc) && doc.object === original for (doc, original) in originals)
+
+    # The signature is optional. A prose paragraph is required even when a signature exists.
+    signature = "    RelativeTo(columns)"
+    summarize(text) = reference_summary(binding, Markdown.parse(text))
+    @test_throws ErrorException("No reference summary for $binding") summarize(signature)
+    @test_throws ErrorException("Unfinished reference summary for $binding") summarize("Pick a column:\n\n`columns`")
+    @test_throws ErrorException("Banned prose in reference summary for $binding") summarize("Simply pick a column.")
+end
+
 @testitem "Julia documentation references are explicit, shared projections without mutation" tags=[:unit] begin
     using HTMXObjects, Markdown
 
