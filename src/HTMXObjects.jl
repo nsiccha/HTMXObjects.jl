@@ -39,7 +39,7 @@ export ErrorRecorder, record_error!
 export is_htmx, hx_target, hx_trigger, hx_current_url, hx_boosted, hx_prompt
 export hx_response, redirect_to, redirect_history_script
 export hx_link, htmx_or, modifier_click_script
-export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, format_date, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
+export wants_markdown, wants_errors, markdown_response, pdf_report, e, filter_errors, render_table, sortable_table, RelativeTo, sortable_table_js, sortable_table_styles, download_table_js, master_detail_table, master_detail_pair, master_detail_js, table_texts, TableTexts, format_number, format_date, number_cell, IntervalEstimate, format_interval, interval_cell, CaptionSpec, ColumnSpec, sort_values, interval_sort_keys, interval_sort_values, ColumnSummary, summary_cell, render_caption, with_caption, caption_style
 export comparison_view, comparison_js, comparison_styles
 export html_only, markdown_only, HtmlOnly, MarkdownOnly, HTMLSnapshot, report_view
 export CaptionTexts, caption_texts
@@ -23239,6 +23239,8 @@ function sortTable(col, th) {
         if (!keyed.has(row)) {
             const cell = htmxoCellAt(row, col);
             if (keys) keyed.set(row, htmxoSortValue(cell, key, keys.length, sortKey));
+            // A compared cell without a ratio (`RelativeTo`) sorts last.
+            else if ('htmxoMissing' in cell.dataset) keyed.set(row, {missing: true});
             else {
                 const text = sortKey(cell);
                 const explicit = cell.dataset.sortValue ?? cell.dataset.htmxoNumber;
@@ -23257,6 +23259,7 @@ function sortTable(col, th) {
         return asc ? c : -c;
     } : (a, b) => {
         const av = keyOf(a), bv = keyOf(b);
+        if (av.missing || bv.missing) return av.missing && bv.missing ? 0 : av.missing ? 1 : -1;
         let c;
         if (!isNaN(av.number) && !isNaN(bv.number)) {
             c = av.number < bv.number ? -1 : av.number > bv.number ? 1 : 0;
@@ -24443,8 +24446,10 @@ function htmxoColumnsCell(cell, col, hidden) {
     return span;
 }
 // Write the table's header and the rows not written yet for the columns it
-// hides; true when those columns changed.
+// hides; true when those columns changed. Rows that come later are written
+// relative to the reader's reference column too (`htmxoRelativeShow`).
 function htmxoColumnsShow(table) {
+    htmxoRelativeShow(table);
     if (!table || !table.tHead) return false;
     const chosen = 'htmxoColumnMenu' in table.dataset || 'htmxoHiddenColumns' in table.dataset;
     if (!chosen && !table.dataset.htmxoColumnsApplied) return false;
@@ -24561,6 +24566,205 @@ function htmxoTableColumns(target, columns) {
     const hidden = htmxoColumnsApplied(table), out = [];
     for (let c = 1; c <= n; c++) if (!hidden.has(c)) out.push(c);
     return out;
+}
+
+// --- A reader's reference column: `relative_to = RelativeTo(...)` ---
+// A table with `data-htmxo-relative-to` (its compared columns and, for each
+// label a reader may pick, the column each compared one is divided by,
+// `of`) shows its compared number cells as multiples of the picked column's
+// cell in the same row. `htmxoRelativeShow` writes a cell's text, sort key
+// (`data-sort-value`) and ⬇ CSV number (`data-htmxo-number`) from its exact
+// value and keeps what it replaced (`data-htmxo-absolute-number`,
+// `data-htmxo-absolute-sort`, the cell's markup; the server keeps the markup
+// of a table that opens relative in a `<template data-htmxo-absolute>`), so
+// *Absolute values* puts it back. Two cells pair unless either is
+// `data-htmxo-incomparable` or both have `data-htmxo-compare` keys that
+// differ; a cell without a pair reads `–` and sorts last
+// (`data-htmxo-missing`). `data-htmxo-relative` is the ratio a cell was
+// written with: a cell whose number is no longer it was written again by the
+// table (a group sum after a regroup) and counts as absolute. Each row is
+// stamped with the pick it is written for (`data-htmxo-relative-for`), so
+// rows that come later (lazy group rows, row updates, a bound table's new
+// rows) are written as they arrive and the rest are left alone; a regroup,
+// which writes its group rows' sums again in place, has every row checked.
+// The pick is kept in this browser (`localStorage`) per table (its body id)
+// and page path, like the *Columns* menu's.
+window.htmxoRelativeChoices = window.htmxoRelativeChoices || new Map();
+function htmxoRelativeSpec(table) {
+    const s = table && table.dataset ? table.dataset.htmxoRelativeTo : undefined;
+    if (!s) return null;
+    if (table.htmxoRelativeSource !== s) { table.htmxoRelativeSource = s; table.htmxoRelativeParsed = JSON.parse(s); }
+    return table.htmxoRelativeParsed;
+}
+function htmxoRelativeScope(table) {
+    const id = table.tBodies[0] && table.tBodies[0].id;
+    return id ? 'htmxo-relative|' + id + '|' + location.pathname : null;
+}
+// The picked label, '' for absolute values: the reader's pick where it names
+// one of the table's labels, else the label the table opens with.
+function htmxoRelativeChoice(table, spec) {
+    const scope = htmxoRelativeScope(table);
+    let stored = table.htmxoRelativeChoice;
+    if (scope) {
+        if (!window.htmxoRelativeChoices.has(scope)) {
+            let v = null;
+            try { v = JSON.parse(localStorage.getItem(scope) || 'null'); } catch (e) {}
+            window.htmxoRelativeChoices.set(scope, typeof v === 'string' ? v : null);
+        }
+        stored = window.htmxoRelativeChoices.get(scope);
+    }
+    if (typeof stored === 'string' && (stored === '' || spec.choices.some(c => c.name === stored))) return stored;
+    return spec.default || '';
+}
+function htmxoRelativeRemember(table, name) {
+    const scope = htmxoRelativeScope(table);
+    if (!scope) { table.htmxoRelativeChoice = name; return; }
+    window.htmxoRelativeChoices.set(scope, name);
+    try { localStorage.setItem(scope, JSON.stringify(name)); } catch (e) {}
+}
+// Whether a cell shows a ratio written for it now. A cell the table wrote
+// again since (its number is not the ratio) loses the marks, its sort key
+// back as the table had it.
+function htmxoRelativeCurrent(cell) {
+    const ds = cell.dataset;
+    if (!('htmxoRelative' in ds)) return false;
+    if ((ds.htmxoNumber ?? '') === ds.htmxoRelative && ('htmxoMissing' in ds) === (ds.htmxoRelative === '')) return true;
+    if ('htmxoAbsoluteSort' in ds) ds.sortValue = ds.htmxoAbsoluteSort; else delete ds.sortValue;
+    ['htmxoRelative', 'htmxoAbsoluteNumber', 'htmxoAbsoluteSort', 'htmxoMissing'].forEach(k => delete ds[k]);
+    delete cell.htmxoAbsoluteHtml;
+    const kept = cell.querySelector(':scope > template[data-htmxo-absolute]');
+    if (kept) kept.remove();
+    return false;
+}
+// A compared cell's exact value as the table wrote it; undefined for a cell
+// without one, or one sorted by several keys (an interval cell).
+function htmxoRelativeValue(cell) {
+    if (!cell || 'htmxoSortKeys' in cell.dataset || 'htmxoInterval' in cell.dataset) return undefined;
+    const s = htmxoRelativeCurrent(cell) ? cell.dataset.htmxoAbsoluteNumber : cell.dataset.htmxoNumber;
+    return s === undefined ? undefined : Number(s);
+}
+function htmxoRelativePair(a, b) {
+    if ('htmxoIncomparable' in a.dataset || 'htmxoIncomparable' in b.dataset) return false;
+    const ka = a.dataset.htmxoCompare, kb = b.dataset.htmxoCompare;
+    return ka === undefined || kb === undefined || ka === kb;
+}
+// The cell as the table wrote it.
+function htmxoRelativeAbsolute(cell) {
+    const ds = cell.dataset, kept = cell.querySelector(':scope > template[data-htmxo-absolute]');
+    const html = cell.htmxoAbsoluteHtml ?? (kept ? kept.innerHTML : null);
+    if (html !== null) cell.innerHTML = html;
+    if ('htmxoAbsoluteNumber' in ds) ds.htmxoNumber = ds.htmxoAbsoluteNumber;
+    if ('htmxoAbsoluteSort' in ds) ds.sortValue = ds.htmxoAbsoluteSort; else delete ds.sortValue;
+    ['htmxoRelative', 'htmxoAbsoluteNumber', 'htmxoAbsoluteSort', 'htmxoMissing'].forEach(k => delete ds[k]);
+    delete cell.htmxoAbsoluteHtml;
+}
+// The cell as the ratio `r` (null: no pair), as `_relative_cell` writes it.
+function htmxoRelativeWrite(cell, r, spec, texts) {
+    const ds = cell.dataset;
+    if (!('htmxoRelative' in ds)) {
+        cell.htmxoAbsoluteHtml = cell.innerHTML;
+        ds.htmxoAbsoluteNumber = ds.htmxoNumber;
+        if ('sortValue' in ds) ds.htmxoAbsoluteSort = ds.sortValue;
+    } else if (cell.htmxoAbsoluteHtml === undefined) {
+        const kept = cell.querySelector(':scope > template[data-htmxo-absolute]');
+        cell.htmxoAbsoluteHtml = kept ? kept.innerHTML : cell.innerHTML;
+    }
+    if (r === null) {
+        delete ds.htmxoNumber;
+        delete ds.sortValue;
+        ds.htmxoMissing = '';
+        ds.htmxoRelative = '';
+        cell.textContent = '–';
+    } else {
+        const v = String(r);
+        ds.htmxoNumber = v;
+        ds.sortValue = v;
+        ds.htmxoRelative = v;
+        delete ds.htmxoMissing;
+        cell.textContent = htmxoNumberText(r, {texts, sigdigits: spec.sigdigits}, false) + spec.suffix;
+    }
+}
+// Write the table's compared cells for the reader's pick, in the rows not
+// written for it yet (`force`: every row); true when a cell changed (a
+// sorted table is sorted again by the new values).
+function htmxoRelativeShow(table, force) {
+    const spec = htmxoRelativeSpec(table);
+    if (!spec) return false;
+    const name = htmxoRelativeChoice(table, spec);
+    const choice = spec.choices.find(c => c.name === name);
+    const of = choice ? choice.of : {};
+    const texts = htmxoTexts(table);
+    let changed = false;
+    Array.from(table.tBodies).forEach(body => Array.from(body.rows).forEach(row => {
+        if (row.id && row.id.startsWith('detail-')) return;
+        if (!force && row.dataset.htmxoRelativeFor === name) return;
+        row.dataset.htmxoRelativeFor = name;
+        const at = [];
+        let c = 1;
+        Array.from(row.cells).forEach(cell => { const n = htmxoSpan(cell); if (n === 1) at[c] = cell; c += n; });
+        spec.columns.forEach(i => {
+            const cell = at[i], a = htmxoRelativeValue(cell);
+            if (a === undefined) return;
+            const j = of[i];
+            if (j === undefined) {
+                if (htmxoRelativeCurrent(cell)) { htmxoRelativeAbsolute(cell); changed = true; }
+                return;
+            }
+            const ref = at[j], b = htmxoRelativeValue(ref);
+            const r = b !== undefined && isFinite(a) && isFinite(b) && b !== 0 && htmxoRelativePair(cell, ref) ? a / b : null;
+            const was = htmxoRelativeCurrent(cell) ? cell.dataset.htmxoRelative : undefined;
+            if (was === (r === null ? '' : String(r))) return;
+            htmxoRelativeWrite(cell, r, spec, texts);
+            changed = true;
+        });
+    }));
+    if (name) {
+        table.dataset.htmxoRelativeShown = name;
+        table.dataset.htmxoRelativeCols = Object.keys(of).map(Number).sort((x, y) => x - y).join(',');
+    } else {
+        delete table.dataset.htmxoRelativeShown;
+        delete table.dataset.htmxoRelativeCols;
+    }
+    document.querySelectorAll('select[data-htmxo-relative-select]').forEach(s => {
+        if (s.value !== name && htmxoColumnTable(s) === table) s.value = name;
+    });
+    if (changed && table.querySelector('thead th[data-sort-dir]')) htmxoResort(table);
+    return changed;
+}
+// The *Relative to* control: show the table relative to the picked label.
+function htmxoRelativePick(select) {
+    const table = htmxoColumnTable(select);
+    if (table) htmxoRelativeChoose(table, select.value);
+}
+function htmxoRelativeChoose(table, name) {
+    htmxoRelativeRemember(table, name);
+    if (htmxoRelativeShow(table)) htmxoColumnsMeasure(table, true);
+    table.dispatchEvent(new CustomEvent('htmxo:relative-changed', {bubbles: true,
+        detail: {reference: htmxoRelativeChoice(table, htmxoRelativeSpec(table)) || null}}));
+}
+// The label the table at `target` (the table, its body's id, or an element
+// around it) is shown relative to, '' for absolute values; with `name`, show
+// it relative to that label ('' for absolute values), as the reader's pick.
+function htmxoTableRelative(target, name) {
+    const el = typeof target === 'string' ? document.querySelector(target) : target;
+    const table = !el ? null : el.matches('table') ? el : el.matches('thead, tbody, tr, td, th') ? el.closest('table') :
+        el.querySelector('table[data-htmxo-relative-to]') || el.closest('table');
+    const spec = table && htmxoRelativeSpec(table);
+    if (!spec) throw new Error('htmxoTableRelative: no table with relative_to at ' + target);
+    if (name !== undefined) {
+        name = String(name || '');
+        if (name && !spec.choices.some(c => c.name === name))
+            throw new Error('htmxoTableRelative: ' + JSON.stringify(name) + ' is none of ' + JSON.stringify(spec.choices.map(c => c.name)));
+        htmxoRelativeChoose(table, name);
+    }
+    return htmxoRelativeChoice(table, spec);
+}
+if (!window.htmxoRelativeBound) {
+    window.htmxoRelativeBound = true;
+    document.addEventListener('htmxo:regrouped', e => {
+        const t = e.target.querySelector('table[data-htmxo-relative-to]');
+        if (t) htmxoRelativeShow(t, true);
+    });
 }
 
 // --- Columns keep their widths: every sortable_table (`data-htmxo-columns`) ---
@@ -26058,10 +26262,16 @@ function downloadTableCsv(btn, filename) {
     const ths = Array.from(table.querySelectorAll(grouped ? 'thead th[data-htmxo-sort-col]' : 'thead th'))
         .sort((a, b) => grouped ? Number(a.dataset.htmxoSortCol) - Number(b.dataset.htmxoSortCol) : 0);
     const bounds = ths.map(th => th.dataset.htmxoIntervalCsv ? JSON.parse(th.dataset.htmxoIntervalCsv) : null);
+    // A column shown relative to another (`RelativeTo`) holds ratios: its
+    // name says so (`relative_column`).
+    const reference = table.dataset.htmxoRelativeShown;
+    const divided = new Set((table.dataset.htmxoRelativeCols || '').split(',').filter(x => x).map(Number));
     const headers = ths.flatMap((th, i) => {
         if (hidden.has(i + 1)) return [];
         const group = grouped ? groupNames[Number(th.dataset.htmxoSortCol) - 1] : '';
-        const n = group ? group + ' / ' + name(th) : name(th);
+        const plain = group ? group + ' / ' + name(th) : name(th);
+        const n = reference && divided.has(i + 1) && typeof htmxoText === 'function' ?
+            htmxoText(table, 'relative_column', {name: plain, reference}) : plain;
         return (bounds[i] ? [n, n + ' / ' + bounds[i][0], n + ' / ' + bounds[i][1]] : [n]).map(esc);
     });
     // A number cell (`number_cell`, a group summary) exports its number, not
@@ -26110,7 +26320,10 @@ The words a table's built-in controls show: the search field, its count and
 empty state, the selection bar, *Expand all* / *Collapse all*, the *Group by*
 control, lazy-detail status lines, the CSV button, the *Columns* menu
 (`columns`, and `columns_reset` for its button that brings back the columns
-the table opens with), the toggle of its
+the table opens with), the *Relative to* control of a table with
+[`RelativeTo`](@ref) columns (`relative_to`, `relative_absolute` for its choice
+that shows the values as the table wrote them, and `relative_column` for a
+compared column's name in the ⬇ CSV and Markdown), the toggle of its
 caption's long text (`more`, as in [`caption_texts`](@ref)), the marks of
 the numbers the table writes (`decimal`, `thousands` and the sign of a
 negative number, `minus`: `-` in English, the minus sign `−` (U+2212) in
@@ -26142,8 +26355,9 @@ browser alike: `count` takes `{shown}` and `{total}` (items, not rows: see
 `selected_filtered` and `selected_collapsed` take `{count}`; the `group_*`
 texts take `{name}` (the grouping), `group_level` also `{level}`;
 `rows_failed` takes `{status}`; `linked_deep` takes `{levels}`;
-`linked_inside_many` takes `{count}`; `sort_ascending` and `sort_descending`
-take `{name}` (the sort key); `interval` and `interval_signed` take
+`linked_inside_many` takes `{count}`; `relative_column` takes `{name}` (the
+column's name) and `{reference}` (the column it is divided by);
+`sort_ascending` and `sort_descending` take `{name}` (the sort key); `interval` and `interval_signed` take
 `{estimate}`, `{lower}` and `{upper}`; `range` and `range_signed` take
 `{lower}` and `{upper}`; `date_long`, `date_short` and `date_month` take
 `{day}`, `{month}` (from `months`), `{month_short}` (from `months_short`) and
@@ -26182,6 +26396,9 @@ struct TableTexts
     csv::String                 # the CSV download button
     columns::String             # the Columns menu: its button and accessible name
     columns_reset::String       # its button bringing back the columns the table opens with
+    relative_to::String         # the *Relative to* control's label (`RelativeTo`)
+    relative_absolute::String   # its choice that shows the values as the table wrote them
+    relative_column::String     # a compared column's name in the ⬇ CSV and Markdown while shown relative to another
     more::String                # the caption's long-text toggle (`CaptionTexts`)
     decimal::String             # the decimal mark of the numbers the table writes
     thousands::String           # their thousands separator
@@ -26235,6 +26452,7 @@ const _TABLE_TEXT_PLACEHOLDERS = (
     group_add = (:name,), group_add_inner = (:name,), group_level = (:level, :name),
     group_kept = (:name,), group_stop = (:name,), group_earlier = (:name,), group_later = (:name,),
     rows_failed = (:status,), linked_deep = (:levels,), linked_inside_many = (:count,),
+    relative_column = (:name, :reference),
     sort_ascending = (:name,), sort_descending = (:name,),
     interval = (:estimate, :lower, :upper), interval_signed = (:estimate, :lower, :upper),
     range = (:lower, :upper), range_signed = (:lower, :upper),
@@ -26272,6 +26490,9 @@ const _TABLE_TEXT_LOCALES = (
         csv = "⬇ CSV",
         columns = "Columns",
         columns_reset = "Reset",
+        relative_to = "Relative to",
+        relative_absolute = "Absolute values",
+        relative_column = "{name} relative to {reference}",
         more = _CAPTION_TEXT_LOCALES.en.more,
         decimal = _SEMANTIC_TEXT_LOCALES.en.decimal,
         thousands = ",",
@@ -26328,6 +26549,9 @@ const _TABLE_TEXT_LOCALES = (
         csv = "⬇ CSV",
         columns = "Spalten",
         columns_reset = "Zurücksetzen",
+        relative_to = "Relativ zu",
+        relative_absolute = "Absolute Werte",
+        relative_column = "{name} relativ zu {reference}",
         more = _CAPTION_TEXT_LOCALES.de.more,
         decimal = _SEMANTIC_TEXT_LOCALES.de.decimal,
         thousands = ".",
@@ -26564,10 +26788,18 @@ function render_table(table; id=nothing, sortable=true, download=true, download_
     # A table of browser outputs (`bound(x; columns)`): the page writes its
     # rows again after each computation, from this description of them.
     bound = _bound_table_attrs(table, cols, headers, formats, empty_aligns; cell, search_text, link_key, kwargs)
+    # The columns a reader may show relative to one of them: each row's
+    # cells in them get its pairing keys (`RelativeTo(...; comparable)`),
+    # which a table the browser writes again could not call.
+    relative = _relative_spec(get(kwargs, :relative_to, nothing), headers, get(kwargs, :header_groups, nothing))
+    isempty(bound) || isnothing(relative) || isnothing(relative.comparable) || throw(ArgumentError(string(
+        "render_table: a table of browser outputs (`bound(...)`) is written again in the browser, which ",
+        "cannot call RelativeTo's `comparable`; leave it out (every two numbers pair) or compute the pairs ",
+        "in the browser module, giving a cell that has none no number")))
 
     body_rows = [
-        h.tr([_render_sort_values(headers[j], _render_cell(cell, _render_value(table, Tables.getcolumn(row, c)), c, ri, texts, empty_aligns[j], formats[j]), row)
-              for (j, c) in enumerate(cols)]...;
+        h.tr(_relative_compare_cells!(Any[_render_sort_values(headers[j], _render_cell(cell, _render_value(table, Tables.getcolumn(row, c)), c, ri, texts, empty_aligns[j], formats[j]), row)
+              for (j, c) in enumerate(cols)], relative, row)...;
              (isnothing(search_text) ? (;) : (; data_htmxo_search=string(search_text(row))))...,
              (isnothing(row_key) ? (;) : (; data_htmxo_link_key=string(row_key(row))))...)
         for (ri, row) in enumerate(Tables.rows(table))
@@ -26866,6 +27098,10 @@ function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
     has_cell = length(cells) >= col
     cell = has_cell ? cells[col] : nothing
     if nkeys == 0
+        # A compared cell without a ratio (`RelativeTo`) has no value: it
+        # sorts last in either direction (`text === nothing`).
+        has_cell && !isnothing(_node_attr(cell, "data-htmxo-missing")) &&
+            return _RowSortKey(_row_pinned(row), true, nothing, NaN, false, nothing, nothing, nothing)
         text = has_cell ? _cell_sort_text(cell) : ""
         _RowSortKey(_row_pinned(row), has_cell, text, _js_parse_float(text), _cell_sort_numeric(cell, text), text, nothing, nothing)
     else
@@ -26887,11 +27123,14 @@ _numbers_tie(ks) = !allunique(k.number + 0.0 for k in ks if !k.numeric && !isnan
 # `sortTable`'s comparison of two rows, `asc` or not, as -1, 0 or 1: pinned
 # rows first; with one order, numbers by value when both texts start with
 # one; at the same number, numeric keys tie and precede text, two texts use
-# natural collation; with several, a missing value last in either direction.
+# natural collation; a missing value (several orders, or a compared cell
+# without a ratio) last in either direction.
 function _compare_rows(a::_RowSortKey, b::_RowSortKey, asc::Bool, nkeys::Int)
     pin = Int(b.pinned) - Int(a.pinned)
     pin == 0 || return pin
     c = if nkeys == 0
+        (a.has_cell && isnothing(a.text) || b.has_cell && isnothing(b.text)) &&
+            return isnothing(a.text) == isnothing(b.text) ? 0 : isnothing(a.text) ? 1 : -1
         if !isnan(a.number) && !isnan(b.number)
             n = _compare_numbers(a.number, b.number)
             n != 0 ? n : a.numeric != b.numeric ? Int(b.numeric) - Int(a.numeric) :
@@ -26976,7 +27215,7 @@ end
                    default_sort=nothing, header_groups=nothing,
                    searchable=false, selectable=nothing,
                    select_form=nothing, link=nothing, sticky=true,
-                   column_menu=nothing, hidden_columns=(), texts=table_texts(), kwargs...)
+                   column_menu=nothing, hidden_columns=(), relative_to=nothing, texts=table_texts(), kwargs...)
 
 Lower-level table renderer for pre-built rows. Use when cells need rich
 attributes (`data-status`, `hx-*`, `data-sort-value`, …) that
@@ -27063,6 +27302,9 @@ that fits its column drops that scroll box so its header can stay in view
 - `hidden_columns`: the columns the table opens with hidden, by header label,
   `"Group / Leaf"` for a leaf under a `header_groups` heading, or 1-based
   position (`hidden_columns=["Kaltmiete", 7]`). The first column always shows.
+- `relative_to`: a [`RelativeTo`](@ref) naming columns a reader may show
+  relative to one of them, with a *Relative to* control in the toolbar. See
+  *Columns relative to one a reader picks* below.
 - `texts`: the words of the table's built-in controls (the search label,
   count and empty state, the selection bar, the CSV button, lazy-detail
   status lines), as a [`TableTexts`](@ref) from [`table_texts`](@ref), e.g.
@@ -27162,6 +27404,18 @@ with, without `hidden_columns`. A page script reads the shown columns with
 change fires a bubbling `htmxo:columns-changed` event on the table whose
 `detail` holds `shown` and `hidden`, 1-based. It all runs in the browser, so
 a static bundle ([`record!`](@ref), [`export_site`](@ref)) has the menu too.
+
+# Columns relative to one a reader picks
+`relative_to = RelativeTo(["Wren", "RKPPL", "Soss"]; default, comparable)`
+gives the table a *Relative to* control (`texts.relative_to`) before the
+*Columns* menu: picking a label shows each compared number cell as a multiple
+of the same row's cell of that label under the same `header_groups` heading,
+`2, 4, 8` against `4` reading `0.5×, 1×, 2×`, with the exact ratios as sort
+keys and ⬇ CSV numbers. A pair whose keys differ (`data_htmxo_compare` on a
+cell here; [`master_detail_table`](@ref) and [`render_table`](@ref) write them
+from `comparable`) reads `–` and sorts last. Only the compared cells change,
+so open details, the search, the selection and hidden columns stay as they
+are; the pick is kept like the *Columns* menu's. See [`RelativeTo`](@ref).
 
 # Controls and headers stay in view
 The controls a table draws itself share one line above it (`div.htmxo-table-toolbar`):
@@ -27346,8 +27600,10 @@ function sortable_table(headers, rows;
                         searchable::Bool=false, search_query::AbstractString="",
                         selectable=nothing, select_form=nothing, link=nothing,
                         sticky::Bool=true, column_menu=nothing, hidden_columns=(),
+                        relative_to=nothing,
                         texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true,
-                        _presorted::Bool=false, _columns_placed::Bool=false, kwargs...)
+                        _presorted::Bool=false, _columns_placed::Bool=false,
+                        _relative_projected::Bool=false, kwargs...)
     density_attrs = _table_density_attrs(density)
     header_align = _table_header_align(header_align)
     isnothing(link) || link isa Union{AbstractString,Symbol} && !isempty(string(link)) || throw(ArgumentError(
@@ -27384,6 +27640,11 @@ function sortable_table(headers, rows;
         names = _sort_key_names(hdr)
         isempty(names) || _check_sort_values(rows, i, names, _header_label(hdr))
     end
+    # A table that opens relative to a column (`RelativeTo(...; default)`)
+    # writes its compared cells so, before they are sorted;
+    # `master_detail_table` writes them itself, before it sorts.
+    relative = _relative_spec(relative_to, headers, header_groups)
+    _relative_projected || (rows = _relative_rows(rows, relative, texts))
     # The rows come in the order the header says (`_default_sort_rows`);
     # `master_detail_table` sorts them itself, to write its details after the
     # table in the same order.
@@ -27421,7 +27682,7 @@ function sortable_table(headers, rows;
     # `data-htmxo-columns`: the table runtime holds the columns' widths
     # (see "Columns keep their widths" above).
     table_node = h.table(; class=table_class, role, density_attrs..., link_attrs..., _sticky_attrs(sticky)...,
-                         data_htmxo_columns="", column_attrs..., kwargs...)(
+                         data_htmxo_columns="", column_attrs..., _relative_table_attrs(relative)..., kwargs...)(
         isempty(hidden) ? thead : _head_columns_hidden(thead, hidden),
         # Keep runtime-sized children as a collection. Splatting heterogeneous
         # master/detail rows creates large tuples with row-count-dependent
@@ -27433,14 +27694,17 @@ function sortable_table(headers, rows;
     # wrapper instead of widening the page. `table-wrap` is the class
     # `downloadTableCsv` already seeks, so CSV download keeps working.
     # Markdown writes a grouped header as one row of "Group / Leaf" names,
-    # and leaves out the columns the table opens with hidden.
-    table_wrap = if isnothing(grouped) && isempty(hidden)
+    # leaves out the columns the table opens with hidden, and names a column
+    # the table opens relative to another as such (`relative_column`).
+    divided = isnothing(relative) || isnothing(relative.default) ? Int[] : _relative_divided(relative, relative.default)
+    table_wrap = if isnothing(grouped) && isempty(hidden) && isempty(divided)
         h.div(; class="table-wrap")(table_node)
     else
         shown = [i for i in eachindex(headers) if !(i in hidden)]
-        flat_headers = isnothing(grouped) ? th_nodes[shown] : map(shown) do i
+        flat_headers = isnothing(grouped) && isempty(divided) ? th_nodes[shown] : map(shown) do i
             label = column_label(i)
-            h.th(isempty(group_names[i]) ? label : group_names[i] * " / " * label)
+            name = isempty(group_names[i]) ? label : group_names[i] * " / " * label
+            h.th(i in divided ? _table_text(texts, :relative_column; name, reference=relative.default) : name)
         end
         flat_rows = isempty(hidden) ? body_rows : Any[_row_columns_dropped(r, hidden) for r in body_rows]
         flat_table = h.table(h.thead(h.tr(flat_headers)), h.tbody(flat_rows))
@@ -27471,9 +27735,10 @@ function sortable_table(headers, rows;
         table_wrap
     end
     # The selection bar joins the search field's toolbar when there is one,
-    # and so does the *Columns* menu; `master_detail_table` places its own.
+    # and so do the *Relative to* control and the *Columns* menu;
+    # `master_detail_table` places its own.
     bar = isnothing(selectable) || !searchable ? nothing : _selection_bar(rows; texts)
-    menu = menu_on && !_columns_placed ? _column_menu(texts) : nothing
+    menu = _columns_placed ? nothing : _table_end_controls(relative, menu_on, texts)
     searched = searchable ? _searchable_table(framed, rows; query=search_query, texts, sticky, selection=bar,
         columns=menu) : framed
     selected = !isnothing(selectable) ?
@@ -27504,35 +27769,332 @@ end
 # names the ⬇ CSV writes). `label(i)` is column `i`'s label. The first
 # column holds the row's label and controls and always shows.
 function _hidden_column_positions(hidden, n::Integer, group_names, label)
-    entries = hidden isa Union{AbstractString,Symbol,Integer} ? (hidden,) : hidden
+    out = _named_column_positions(hidden, n, group_names, label, "hidden_columns")
+    if 1 in out
+        names = _column_full_names(n, group_names, label)
+        throw(ArgumentError(string("hidden_columns: the first column, ", repr(names[1]),
+            ", always shows (it holds the row's label and controls)")))
+    end
+    out
+end
+
+# Each column's name as the ⬇ CSV writes it: its label, "Group / Leaf" under
+# a `header_groups` heading.
+_column_full_names(n::Integer, group_names, label) = [let leaf = string(label(i))
+    isempty(group_names[i]) ? leaf : group_names[i] * " / " * leaf end for i in 1:n]
+
+# The 1-based columns `entries` names, sorted: positions, header labels, or
+# "Group / Leaf" for a leaf under a `header_groups` heading. `what` names the
+# keyword in the errors.
+function _named_column_positions(entries, n::Integer, group_names, label, what::AbstractString)
+    entries = entries isa Union{AbstractString,Symbol,Integer} ? (entries,) : entries
     isempty(entries) && return Int[]
     leaves = [string(label(i)) for i in 1:n]
-    names = [isempty(group_names[i]) ? leaves[i] : group_names[i] * " / " * leaves[i] for i in 1:n]
+    names = _column_full_names(n, group_names, label)
     out = Int[]
     for x in entries
         i = if x isa Integer
-            1 <= x <= n || throw(ArgumentError("hidden_columns: the table has columns 1 to $n; got $x"))
+            1 <= x <= n || throw(ArgumentError("$what: the table has columns 1 to $n; got $x"))
             Int(x)
         elseif x isa Union{AbstractString,Symbol}
             name = string(x)
             found = findall(==(name), names)
             isempty(found) && (found = findall(==(name), leaves))
-            isempty(found) && throw(ArgumentError(string("hidden_columns: no column is named ", repr(name),
+            isempty(found) && throw(ArgumentError(string(what, ": no column is named ", repr(name),
                 "; the columns are ", join(repr.(names), ", "))))
-            length(found) == 1 || throw(ArgumentError(string("hidden_columns: ", length(found),
+            length(found) == 1 || throw(ArgumentError(string(what, ": ", length(found),
                 " columns are named ", repr(name), "; name one ",
                 allunique(names[found]) ? string("as ", join(repr.(names[found]), " or "), ", or ") : "",
                 "by its position, ", join(found, " or "))))
             only(found)
         else
-            throw(ArgumentError(string("hidden_columns: name a column by its label or its 1-based ",
+            throw(ArgumentError(string(what, ": name a column by its label or its 1-based ",
                 "position; got ", repr(x))))
         end
-        i == 1 && throw(ArgumentError(string("hidden_columns: the first column, ", repr(names[1]),
-            ", always shows (it holds the row's label and controls)")))
         push!(out, i)
     end
     sort!(unique!(out))
+end
+
+# Each column's `header_groups` heading, "" where none spans it. Lenient:
+# `_grouped_thead` is what refuses a malformed entry.
+function _header_group_names(header_groups, n::Integer)
+    names = fill("", n)
+    isnothing(header_groups) && return names
+    for entry in header_groups
+        entry isa Pair && first(entry) isa AbstractString && last(entry) isa AbstractUnitRange{<:Integer} || continue
+        for i in last(entry)
+            1 <= i <= n && (names[i] = String(first(entry)))
+        end
+    end
+    names
+end
+
+# --- A reader's reference column: `relative_to = RelativeTo(...)` ---
+
+"""
+    RelativeTo(columns; default=nothing, sigdigits=3, suffix="×", comparable=nothing)
+
+The columns of a table whose values a reader may show relative to one of them,
+for `relative_to=` on [`sortable_table`](@ref), [`render_table`](@ref) and
+[`master_detail_table`](@ref). The table gets a *Relative to* control in its
+toolbar (`texts.relative_to`, *Relativ zu* with `table_texts(:de)`): *Absolute
+values* (`texts.relative_absolute`) and one choice per column label among
+`columns`. Picking a label divides each number cell of `columns` by the same
+row's cell of that label under the same `header_groups` heading, in the
+browser:
+
+```julia
+master_detail_table(headers, models; key, master, detail_url, id = "models",
+    header_groups = ["Primal" => 5:8, "Gradient" => 9:12],
+    relative_to = RelativeTo(["Wren", "RKPPL", "Soss", "Turing"];
+        comparable = (model, column) -> environment(model, column)))
+```
+
+Picking *RKPPL* shows each row's Primal times divided by its Primal / RKPPL
+time and its Gradient times by its Gradient / RKPPL time: times `2, 4, 8`
+read `0.5×, 1×, 2×`.
+
+- `columns`: the compared columns, by label, `"Group / Leaf"` or 1-based
+  position, as `hidden_columns` names them; two or more, never the first
+  (it holds the row's label and controls). Under one heading two compared
+  columns may not share a label.
+- A cell takes part when it carries an exact number (`data-htmxo-number`: a
+  float cell, [`number_cell`](@ref), a group sum of `group_summary`); others
+  (text, an interval cell) stay as they are. A heading without a column of
+  the picked label keeps its absolute values.
+- `default`: the label the table opens with, `nothing` for absolute values.
+  The server writes it, so the first paint, `?plain`, Markdown and
+  [`pdf_report`](@ref) show it; Markdown names a divided column
+  `"Group / Leaf relative to Wren"` (`texts.relative_column`).
+- `sigdigits` and `suffix`: how a ratio is written, in the table's language
+  (`texts`, as [`format_number`](@ref) writes it), `0.512×`.
+- `comparable(item, column)`: which pairs may be divided, for
+  `master_detail_table` (the item) and `render_table` (the Tables.jl row);
+  `column` is the column's name as the ⬇ CSV writes it (`"Primal / Wren"`).
+  Two cells pair when their keys are equal or either key is `nothing`;
+  `missing` never pairs. On `sortable_table`'s rows, built already, a cell
+  carries its key as `data_htmxo_compare` (and `data_htmxo_incomparable` for
+  `missing`) itself. A bound table (`bound(...)`) is written again in the
+  browser and refuses `comparable`.
+
+A cell whose pair has no number, a different key, or a reference of `0` reads
+`–` and sorts last in both directions. The sort keys are the exact ratios and
+the active sort follows the pick; search, selection, hidden columns,
+regrouping, row updates, lazy group rows, hover linking and open or loaded
+details are untouched, since only the compared cells change. The ⬇ CSV writes
+the ratios, naming each divided column with `texts.relative_column`. The
+reader's pick is kept in their browser per table `id` and page path, like
+the *Columns* menu's; a script reads or sets it with
+`htmxoTableRelative('#id'[, label])` (`''` for absolute values), and
+`htmxo:relative-changed` (`detail.reference`, `null` for absolute values)
+announces each pick.
+"""
+struct RelativeTo
+    columns::Vector{Any}
+    default::Union{Nothing,String}
+    sigdigits::Int
+    suffix::String
+    comparable::Any
+end
+function RelativeTo(columns; default=nothing, sigdigits::Integer=3, suffix::AbstractString="×", comparable=nothing)
+    entries = columns isa Union{AbstractString,Symbol,Integer} ? Any[columns] : Any[columns...]
+    length(entries) >= 2 || throw(ArgumentError(string("RelativeTo: name two or more columns a reader ",
+        "compares; got ", repr(columns))))
+    1 <= sigdigits <= 15 || throw(ArgumentError("RelativeTo: sigdigits must be 1 to 15; got $sigdigits"))
+    isnothing(default) || default isa Union{AbstractString,Symbol} || throw(ArgumentError(string(
+        "RelativeTo: default is the label of the column the table opens relative to, or nothing; got ", repr(default))))
+    isnothing(comparable) || comparable isa Base.Callable || throw(ArgumentError(string(
+        "RelativeTo: comparable is a function (item, column) -> key, or nothing; got ", repr(comparable))))
+    RelativeTo(entries, isnothing(default) ? nothing : string(default), Int(sigdigits), String(suffix), comparable)
+end
+
+const _RELATIVE_COMPARE = Symbol("data-htmxo-compare")
+const _RELATIVE_INCOMPARABLE = Symbol("data-htmxo-incomparable")
+
+# What the table and the runtime read from a `RelativeTo`: the compared
+# columns, each one's name as the ⬇ CSV writes it (`full`), and for each label
+# a reader may pick (in the order the columns give them), the column each
+# compared one is divided by (`of`, keyed by its position as a string, the
+# JSON the runtime reads): the compared column of that label under the same
+# heading.
+function _relative_spec(rel, headers, header_groups; label=i -> _relative_label(headers[i]))
+    rel isa RelativeTo || throw(ArgumentError(string("relative_to must be a RelativeTo(columns; …), ",
+        "or nothing; got ", repr(rel))))
+    n = length(headers)
+    group_names = _header_group_names(header_groups, n)
+    leaves = [string(label(i)) for i in 1:n]
+    full = _column_full_names(n, group_names, label)
+    cols = _named_column_positions(rel.columns, n, group_names, label, "relative_to")
+    1 in cols && throw(ArgumentError(string("relative_to: the first column, ", repr(full[1]),
+        ", holds the row's label and controls; it is not compared")))
+    length(cols) >= 2 || throw(ArgumentError(string("relative_to: name two or more different columns; got ",
+        repr(rel.columns))))
+    names = unique(leaves[cols])
+    choices = map(names) do name
+        of = Dict{String,Int}()
+        for i in cols
+            same = [j for j in cols if leaves[j] == name && group_names[j] == group_names[i]]
+            length(same) > 1 && throw(ArgumentError(string("relative_to: ", length(same),
+                " compared columns are named ", repr(name),
+                isempty(group_names[i]) ? "" : string(" under ", repr(group_names[i])),
+                " (columns ", join(same, " and "), "); a reader could not tell which one they pick")))
+            isempty(same) || (of[string(i)] = only(same))
+        end
+        (; name, of)
+    end
+    isnothing(rel.default) || rel.default in names || throw(ArgumentError(string("relative_to: default ",
+        repr(rel.default), " is no compared column's label; the labels are ", join(repr.(names), ", "))))
+    (; columns=cols, names, choices, full, default=rel.default, sigdigits=rel.sigdigits,
+       suffix=rel.suffix, comparable=rel.comparable)
+end
+_relative_spec(::Nothing, headers, header_groups; kw...) = nothing
+
+# A header's label: its text, or a hand-built `<th>`'s as Markdown reads it.
+_relative_label(hdr) = something(_header_label(hdr), strip(repr("text/markdown", hdr)))
+
+# The `data-htmxo-relative-to` JSON the runtime reads.
+_relative_json(spec) = JSON.json(Dict("columns" => spec.columns,
+    "choices" => [Dict("name" => c.name, "of" => c.of) for c in spec.choices],
+    "default" => spec.default, "sigdigits" => spec.sigdigits, "suffix" => spec.suffix))
+
+# The compared columns the label `name` divides (those under a heading that has it).
+_relative_divided(spec, name) = sort!([parse(Int, k) for k in keys(spec.choices[findfirst(c -> c.name == name, spec.choices)].of)])
+
+# The table attributes a `RelativeTo` writes: what the runtime reads, and
+# while it opens relative to a column, which one and the columns it divides
+# (which the ⬇ CSV names with `relative_column`).
+function _relative_table_attrs(spec)
+    isnothing(spec) && return (;)
+    attrs = (; data_htmxo_relative_to=_relative_json(spec))
+    isnothing(spec.default) && return attrs
+    (; attrs..., data_htmxo_relative_shown=spec.default,
+       data_htmxo_relative_cols=join(_relative_divided(spec, spec.default), ","))
+end
+
+# The cells of one row, a vector a master row's cells (`cells`), with their
+# pairing keys: `comparable(item, name)` for each compared column's cell,
+# written as `data-htmxo-compare` (`nothing`: no key, pairs with any;
+# `missing`: `data-htmxo-incomparable`, pairs with none).
+function _relative_compare_cells!(cells::AbstractVector, spec, item)
+    (isnothing(spec) || isnothing(spec.comparable)) && return cells
+    col = 1
+    for (k, c) in enumerate(cells)
+        _is_cell(c) || continue
+        span = _cell_span(c)
+        if span == 1 && col in spec.columns
+            key = spec.comparable(item, spec.full[col])
+            if !isnothing(key)
+                attrs = copy(HTMX.attrs(c))
+                ismissing(key) ? (attrs[_RELATIVE_INCOMPARABLE] = "") : (attrs[_RELATIVE_COMPARE] = string(key))
+                cells[k] = Node(HTMX.tag(c), attrs, HTMX.children(c))
+            end
+        end
+        col += span
+    end
+    cells
+end
+
+# The rows as the table opens relative to `spec.default` (`_relative_row`),
+# as the runtime's `htmxoRelativeShow` writes them.
+function _relative_rows(rows, spec, texts::TableTexts)
+    (isnothing(spec) || isnothing(spec.default)) && return rows
+    of = spec.choices[findfirst(c -> c.name == spec.default, spec.choices)].of
+    Any[_relative_row(r, spec, of, texts) for r in rows]
+end
+
+# A master row's compared number cells divided by their reference cells. A
+# cell keeps what it replaces, its value (`data-htmxo-absolute-number`), its
+# sort key (`data-htmxo-absolute-sort`) and its content (an HTML-only
+# `<template data-htmxo-absolute>`), so the browser can show it absolute
+# again; `data-htmxo-relative` is the ratio it was written with ("" for none).
+function _relative_row(row, spec, of, texts::TableTexts)
+    row isa Node && HTMX.tag(row) === :tr && _is_master_row(row) || return row
+    children = Any[HTMX.children(row)...]
+    at = Dict{Int,Int}()
+    col = 1
+    for (k, c) in enumerate(children)
+        _is_cell(c) || continue
+        span = _cell_span(c)
+        span == 1 && (at[col] = k)
+        col += span
+    end
+    # Every value is read before any cell is written: a reference column
+    # is itself compared, and is written too.
+    cells = copy(children)
+    value(k) = isnothing(k) ? nothing : _relative_number(cells[k])
+    changed = false
+    for i in spec.columns
+        j = get(of, string(i), nothing)
+        k = get(at, i, nothing)
+        (isnothing(j) || isnothing(k)) && continue
+        a = value(k)
+        isnothing(a) && continue
+        kj = get(at, j, nothing)
+        b = value(kj)
+        r = !isnothing(b) && isfinite(a) && isfinite(b) && !iszero(b) &&
+            _relative_pair(cells[k], cells[kj]) ? a / b : nothing
+        children[k] = _relative_cell(cells[k], r, spec, texts)
+        changed = true
+    end
+    changed ? Node(:tr, HTMX.attrs(row), children) : row
+end
+
+# A compared cell's exact value (`data-htmxo-number`), NaN for an unreadable
+# one; `nothing` for a cell without one, or one sorted by several keys (an
+# interval cell), which stays as it is.
+function _relative_number(cell)
+    (isnothing(_node_attr(cell, "data-htmxo-sort-keys")) && isnothing(_node_attr(cell, "data-htmxo-interval"))) ||
+        return nothing
+    s = _node_attr(cell, "data-htmxo-number")
+    isnothing(s) ? nothing : something(tryparse(Float64, string(s)), NaN)
+end
+
+# Whether two cells may be divided (`htmxoRelativePair`).
+_relative_pair(a, b) = isnothing(_node_attr(a, "data-htmxo-incomparable")) &&
+    isnothing(_node_attr(b, "data-htmxo-incomparable")) &&
+    let ka = _node_attr(a, "data-htmxo-compare"), kb = _node_attr(b, "data-htmxo-compare")
+        isnothing(ka) || isnothing(kb) || string(ka) == string(kb)
+    end
+
+function _relative_cell(cell, r, spec, texts::TableTexts)
+    attrs = copy(HTMX.attrs(cell))
+    number, sort = Symbol("data-htmxo-number"), Symbol("data-sort-value")
+    attrs[Symbol("data-htmxo-absolute-number")] = string(attrs[number])
+    haskey(attrs, sort) && (attrs[Symbol("data-htmxo-absolute-sort")] = string(attrs[sort]))
+    text = if isnothing(r)
+        delete!(attrs, number)
+        delete!(attrs, sort)
+        attrs[Symbol("data-htmxo-missing")] = ""
+        attrs[Symbol("data-htmxo-relative")] = ""
+        "–"
+    else
+        v = _js_number_text(r)
+        attrs[number] = v
+        attrs[sort] = v
+        attrs[Symbol("data-htmxo-relative")] = v
+        format_number(r; texts, sigdigits=spec.sigdigits) * spec.suffix
+    end
+    Node(HTMX.tag(cell), attrs,
+        Any[html_only(h.template(; data_htmxo_absolute="")(HTMX.children(cell)...)), text])
+end
+
+# The *Relative to* control: a select whose choices are *Absolute values* and
+# each compared label. HTML-only, like the rest of the toolbar; the runtime
+# sets it to the reader's pick (`htmxoRelativeShow`).
+_relative_control(spec, texts::TableTexts) = h.span(; class="htmxo-relative-control")(
+    h.label(texts.relative_to,
+        h.select(; data_htmxo_relative_select="", onchange="htmxoRelativePick(this)")(
+            h.option(texts.relative_absolute; value="", selected=isnothing(spec.default)),
+            (h.option(name; value=name, selected=name == spec.default) for name in spec.names)...)))
+
+# The controls at the end of a table's toolbar: the *Relative to* control and
+# the *Columns* menu, as they apply; `nothing` for none.
+function _table_end_controls(spec, menu_on::Bool, texts::TableTexts)
+    items = Any[]
+    isnothing(spec) || push!(items, _relative_control(spec, texts))
+    menu_on && push!(items, _column_menu(texts))
+    isempty(items) ? nothing : length(items) == 1 ? only(items) : items
 end
 
 const _COLUMN_HIDDEN = Symbol("data-htmxo-column-hidden")
@@ -40520,6 +41082,12 @@ fieldset[data-htmxo-checkbox-group] > label > input[type="checkbox"],
    heading's columns in a box of their own. Buttons reset as above. */
 table[data-htmxo-columns] > :is(thead, tbody) > tr > [data-htmxo-column-hidden] { display: none !important; }
 .htmxo-table-toolbar > .htmxo-column-menu-holder { margin-inline-start: auto; }
+/* The *Relative to* control (`RelativeTo`) sits before the *Columns* menu at
+   the end of the toolbar: a label and a select at the toolbar's size. */
+.htmxo-table-toolbar > .htmxo-relative-control { margin-inline-start: auto; }
+.htmxo-table-toolbar > .htmxo-relative-control + .htmxo-column-menu-holder { margin-inline-start: 0; }
+.htmxo-relative-control > label { display: inline-flex; align-items: center; gap: .5rem; margin: 0; font-size: .875em; }
+.htmxo-relative-control > label > select { width: auto; height: auto; margin: 0; padding-block: .15em; font-size: inherit; }
 .htmxo-column-menu-holder > .htmxo-column-menu-toggle,
 .htmxo-column-menu > .htmxo-column-reset { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
 .htmxo-column-menu-holder > .htmxo-column-menu-toggle::after { content: " ▾"; }

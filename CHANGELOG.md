@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.1.174
+
+- `relative_to = RelativeTo(columns; default, sigdigits, suffix, comparable)`
+  on `sortable_table`, `render_table` and `master_detail_table` lets a reader
+  show compared columns relative to one they pick. The toolbar gets a
+  *Relative to* control (`texts.relative_to`, *Relativ zu* in German) before
+  the *Columns* menu. Picking a label divides each compared number cell by the
+  same row's cell of that label under the same `header_groups` heading, in the
+  browser: times `2, 4, 8` read `0.5×, 1×, 2×` against `4`. The exact ratios
+  are the sort keys and the ⬇ CSV numbers, and the CSV names a divided column
+  `"Primal / A relative to B"` (`texts.relative_column`). Only the compared
+  cells change, so open and loaded details, search, selection, hidden columns,
+  regrouping, row updates, lazy group rows and hover linking keep their state.
+  `comparable(item, column)` (an item of `master_detail_table`, a row of
+  `render_table`; `data_htmxo_compare` on `sortable_table`'s cells) says which
+  pairs may be divided: a pair with different keys, a `missing` key, no number
+  or a reference of `0` reads `–` and sorts last in both directions. `default`
+  opens the table relative to a label, written by the server, so `?plain`,
+  Markdown and `pdf_report` show it too. The pick is kept per table `id` and
+  page path; `htmxoTableRelative('#id'[, label])` reads or sets it and
+  `htmxo:relative-changed` announces it (snag `build-a-master-d-31c79059`,
+  design `1exoqn6`).
+- `TableTexts` gains `relative_to`, `relative_absolute` and `relative_column`.
+
 ## 0.1.173
 
 - A tree grouping (`groupings = [name => :children, …]`) keeps what the page

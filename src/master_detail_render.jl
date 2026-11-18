@@ -84,6 +84,10 @@ function _master_detail_table(headers, items;
     # Refused: without collapsible branches there is nothing to expand.
     expand_controls && (isnothing(children) || !branches_collapsible) && throw(ArgumentError(
         "master_detail_table: expand_controls needs `children` with collapsible branches"))
+    # The columns a reader may show relative to one of them (`RelativeTo`):
+    # each item's cells in them get its pairing keys (`comparable`), and a
+    # table that opens relative to one is written so before it is sorted.
+    relative = _relative_spec(get(kwargs, :relative_to, nothing), headers, get(kwargs, :header_groups, nothing))
     selecting = !isnothing(selectable)
     selecting || all(isnothing, (select_form, select_value, select_submit)) || throw(ArgumentError(
         "master_detail_table: select_form/select_value/select_submit require selectable=<input name>"))
@@ -173,6 +177,11 @@ function _master_detail_table(headers, items;
         # A group row (`_sort_item` gives `nothing`) sorts by its own value.
         sort_item = isempty(sort_columns) ? nothing : _sort_item(item)
         isnothing(sort_item) || _md_sort_values!(cells, sort_columns, sort_item, headers)
+        # A group row (`_sort_item` gives `nothing`) has no item to key its cells.
+        if !isnothing(relative) && !isnothing(relative.comparable)
+            compared_item = _sort_item(item)
+            isnothing(compared_item) || _relative_compare_cells!(cells, relative, compared_item)
+        end
         _md_merge_row_attrs!(attrs, row_attrs, master_class)
         if branch && branches_collapsible && !selecting && !haskey(attrs, :onclick)
             attrs[:onclick] = "htmxoTreeRow(this,event)"
@@ -295,6 +304,7 @@ function _master_detail_table(headers, items;
     body_id = !expand_controls ? nothing : haskey(kwargs, :id) ? string(kwargs[:id]) :
         "htmxo-tree-" * string(hash(Tuple(_md_safe_key(key(item)) for item in items)); base=36)
     expand_controls && !haskey(kwargs, :id) && (table_attrs = (; table_attrs..., id=body_id))
+    rows = _relative_rows(rows, relative, texts)
     # The rows in the `default_sort` order, as `sortable_table` would write
     # them, and the details written after the table in the same order. A
     # column of interval cells has their five sort keys (`interval_cell`).
@@ -311,7 +321,8 @@ function _master_detail_table(headers, items;
     menu_on = _column_menu_on(column_menu, length(table_headers),
         hidden_columns isa Union{AbstractString,Symbol,Integer} ? (hidden_columns,) : hidden_columns)
     table = sortable_table(map(_sort_key_names_only, table_headers), rows; table_attrs..., texts, link, sticky,
-        column_menu=menu_on, hidden_columns, _columns_placed=true, _stamp_texts=false, _presorted=true, kwargs...)
+        column_menu=menu_on, hidden_columns, _columns_placed=true, _stamp_texts=false, _presorted=true,
+        _relative_projected=true, kwargs...)
     # Depth is semantic row metadata, not per-row inline styling. The
     # stylesheet covers the actual depth; its other rules style the row
     # controls every master/detail table now carries. A narrow first column
@@ -375,10 +386,10 @@ function _master_detail_table(headers, items;
     controls = isempty(tools) ? nothing : h.p(; class="htmxo-tree-controls")(tools...)
     scaffold = searchable || !isnothing(children) || !isnothing(controls)
     # The selection bar joins the search toolbar when there is one, and so
-    # does the *Columns* menu; else the menu joins the selection bar, or
-    # takes a toolbar of its own.
+    # do the *Relative to* control and the *Columns* menu; else they join
+    # the selection bar, or take a toolbar of their own.
     bar = selecting && scaffold ? _selection_bar(rows; texts) : nothing
-    menu = menu_on ? _column_menu(texts) : nothing
+    menu = _table_end_controls(relative, menu_on, texts)
     searched = scaffold ?
         _searchable_table(table, rows; field=searchable, controls, query=search_query, texts, pending,
             sticky, selection=bar, columns=menu) : table

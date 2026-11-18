@@ -20,6 +20,16 @@ and page. The CSV download writes the shown columns; Markdown and PDF write
 the columns the table opens with. The options work with `render_table`,
 `sortable_table` and `master_detail_table`.
 
+To let readers compare columns against one of their choice, pass
+`relative_to=RelativeTo(["Wren", "RKPPL", "Soss"])`. The toolbar then offers
+*Relative to*: picking a label divides each compared number cell by the same
+row's cell of that label under the same heading, so times `2, 4, 8` read
+`0.5×, 1×, 2×` against `4`. Sorting uses the exact ratios, the CSV download
+writes them, and open details, search, selection and hidden columns stay as
+they are. `comparable(item, column)` keys which pairs may be divided; other
+pairs read `–` and sort last. `default="Wren"` opens the table relative to
+that column, also in Markdown and PDF.
+
 Entries show the signature and opening contract. The source link on each entry
 opens the full docstring; the guides contain executed usage examples.
 

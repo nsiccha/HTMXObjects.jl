@@ -194,6 +194,7 @@ names = [
     "ColumnSpec",
     "ColumnSummary",
     "IntervalEstimate",
+    "RelativeTo",
     "TableTexts",
     "caption_style",
     "caption_texts",
