@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.1.171
+
+- `serve(; dev=true)` is a development mode for iterating on an app's UI: a
+  saved source edit is applied before the next request, without a restart,
+  and every open page reloads itself at the same scroll position. Before each
+  request it checks the source files of the packages under the dev roots (by
+  default every package Revise tracks that is not installed from a registry;
+  `dev_roots` names them instead): their size and modification time on every
+  request, their content at most once a second. It applies a changed package
+  with Revise's `revise(mod; force=false)`, which does not depend on a file
+  watcher noticing the edit. Edits inside an `@htmx struct`'s property and
+  route bodies apply as well. An edit Revise cannot apply in a running
+  process, such as a new struct field, is listed at the bottom of every open
+  page and in the log until the server restarts, and routes of that struct
+  can fail until then; an error page reloads by itself too. It needs `using Revise` before the app is loaded, and is for
+  development only, never a deployed app (decision 14xfxqy, todo 074575c).
+
 ## 0.1.170
 
 - `serve(; compute_trace=:requested)` shows what one request computed: a

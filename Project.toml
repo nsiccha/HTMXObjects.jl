@@ -1,7 +1,7 @@
 name = "HTMXObjects"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.1.170"
+version = "0.1.171"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
@@ -43,6 +43,7 @@ MIMEs = "1"
 Markdown = "1"
 PrecompileTools = "1"
 REPL = "1"
+Revise = "3"
 ScopedValues = "1.6"
 Sockets = "1"
 julia = "1"
@@ -51,6 +52,7 @@ TestItemRunner = "1"
 [extras]
 Artifacts = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
@@ -61,4 +63,4 @@ url = "https://github.com/nsiccha/Treebars.jl"
 rev = "e03f2c7be5579fafce38d8759b531a6e22996ba5"
 
 [targets]
-test = ["Artifacts", "Logging", "TOML", "Test", "TestItemRunner", "Treebars"]
+test = ["Artifacts", "Logging", "Revise", "TOML", "Test", "TestItemRunner", "Treebars"]

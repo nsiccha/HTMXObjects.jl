@@ -221,7 +221,7 @@ _url_segment_escapes(b::UInt8) =
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
           middleware=[], check_origin=nothing, access_log=<timed default>,
           operation_log=<default>, runtime_tracking=true, compress=true,
-          compute_trace=false, kwargs...)
+          compute_trace=false, dev=false, dev_roots=nothing, kwargs...)
 
 Start an HTTP server for the routes registered on `ROUTER`. When
 `async=false` (the default), blocks until interrupted and calls
@@ -265,6 +265,11 @@ Start an HTTP server for the routes registered on `ROUTER`. When
   DynamicObjects compute trace of each request that asks for it (see below),
   and `:all` that of every request. A development switch: a trace names the
   app's types and properties and how long each took.
+- `dev=true` is development mode: a saved source edit is applied before the
+  next request and the open page reloads itself (see below). It needs
+  `using Revise` before the app is loaded. Never for a deployed app.
+  `dev_roots` names the package directories whose edits apply; by default,
+  every package Revise tracks that is not installed from a registry.
 - `revise` — `:lazy` applies pending Revise revisions before each request;
   `:eager` also applies them in the background as soon as a file changes. Both
   need `using Revise` before the app is loaded.
@@ -297,6 +302,21 @@ export and prewarming do not go through `serve`: wrap such a call in
 `with_compute_trace` yourself. A `@queued` body that runs in a job-queue worker
 process ([`configure_job_queue!`](@ref)) is not traced; the request's trace shows
 its wait.
+
+With `dev=true`, `serve` checks before every request whether a source file of
+a package under the dev roots changed: its size or modification time on every
+request, its content at most once a second. It applies a changed package with
+Revise's `revise(mod; force=false)`, which re-reads every file of that package,
+so an edit is applied whether or not a file watcher noticed it (unlike
+`revise=:lazy`, which waits for one). Every full page carries a small script
+that asks the page's own address once a second whether the source changed or
+the server restarted, and then reloads the page at the same scroll position.
+An edit Revise cannot apply in a running process, such as a struct whose
+fields change, stays listed at the bottom of every open page, and in the log,
+until the server restarts; Revise applies such an edit only in part, so routes
+of that struct can fail until then. Error pages carry the script too, so a page
+comes back by itself once its edit is fixed or the server restarts. An app must
+be a package (its own, or `Pkg.develop`ed) for its edits to apply.
 
 After the listener starts, `serve` logs `Serving on http://<host>:<port>` and
 flushes `stderr` before waiting or returning. With Julia's default logger the
@@ -410,9 +430,11 @@ function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
         runtime_tracking::Bool=true, compress::Bool=true, prestart::Bool=true,
-        operation_stream::Bool=true, compute_trace=false, kwargs...)
+        operation_stream::Bool=true, compute_trace=false, dev::Bool=false,
+        dev_roots=nothing, kwargs...)
     kwargs = _drop_oxygen_kwargs(kwargs)
     _check_compute_trace(compute_trace)
+    dev_mode = _dev_mode(dev, dev_roots, revise)
     revise in (nothing, :none, :lazy, :eager) ||
         throw(ArgumentError("`revise` must be nothing, :lazy or :eager, got $(repr(revise))"))
     Revise = revise in (:lazy, :eager) ? _revise_module() : nothing
@@ -427,13 +449,14 @@ function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false
     handle = _stream_handler(
         _served_middleware(_request_pipeline(middleware, access_log, Revise,
                                              tracker; operation_stream, router,
-                                             compute_trace)),
+                                             compute_trace, dev=dev_mode)),
         check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
     warning === nothing || @warn warning
     pool === nothing || (handle = _spawning_stream_handler(handle, pool))
 
+    _DEV_MODE[] = dev_mode
     server = HTTP.listen!(handle, host, port; kwargs...)
     _SERVER[] = server
     revise === :eager && (_EAGER_REVISE_STOP[] = _start_eager_revise(Revise))
@@ -465,6 +488,7 @@ function terminate()
     _PRESTART_APP[] = nothing
     _OPERATION_STREAM[] = false
     _OPERATION_PUSH_APP[] = nothing
+    _DEV_MODE[] = nothing
     server !== nothing && isopen(server) && close(server)
     return nothing
 end
@@ -489,11 +513,14 @@ function _drop_oxygen_kwargs(kwargs)
     return (; (k => v for (k, v) in pairs(kwargs) if !(k in _OXYGEN_SERVE_KWARGS))...)
 end
 
-# The request pipeline, outermost first: access log → runtime `tracker` →
-# compute trace → Revise → caller `middleware` → fallback → `ROUTER`. Traces
-# are recorded on `tracker`, or on the global tracker when tracking is off.
+# The request pipeline, outermost first: development mode → access log →
+# runtime `tracker` → compute trace → Revise → caller `middleware` → fallback →
+# `ROUTER`. Traces are recorded on `tracker`, or on the global tracker when
+# tracking is off. Development mode (`dev`, a `_DevMode`) applies source edits
+# before anything else runs, and answers its pages' polls before the access
+# log and the tracker see them.
 function _request_pipeline(middleware, access_log, Revise, tracker=nothing;
-        operation_stream::Bool=false, router=ROUTER, compute_trace=false)
+        operation_stream::Bool=false, router=ROUTER, compute_trace=false, dev=nothing)
     app = _fallback_middleware(
         operation_stream ? _operation_stream_router(router) : router)
     for m in reverse(middleware)
@@ -504,6 +531,7 @@ function _request_pipeline(middleware, access_log, Revise, tracker=nothing;
         (app = _trace_requests(app, compute_trace, something(tracker, runtime_tracker())))
     tracker === nothing || (app = track_requests(app; tracker))
     access_log === nothing || (app = _access_log_middleware(app, access_log))
+    dev === nothing || (app = _dev_middleware(app, dev))
     return app
 end
 
@@ -14483,6 +14511,8 @@ function _check_revise_errors!()
     # running code is stale.
     rev = _revise_module()
     isnothing(rev) && return
+    # Development mode shows what it could not apply on the page instead.
+    _DEV_MODE[] === nothing || return
     # Queue errors first: a failed revision is the more direct staleness signal.
     # why: Revise.queue_errors is internal — fail open (treat as empty) on
     # field rename rather than mask every request as having stale code.
@@ -30529,6 +30559,8 @@ include("routes/shared_ops_routes.jl")
 include("runtime.jl")
 
 include("request_trace.jl")
+
+include("dev_mode.jl")
 
 include("runtime_panels.jl")
 
