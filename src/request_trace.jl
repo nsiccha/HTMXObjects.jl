@@ -184,8 +184,8 @@ function _trace_response(req::HTTP.Request, response::HTTP.Response,
     timing = _server_timing(compute_trace_rows(rt.trace))
     isempty(timing) || push!(headers, "Server-Timing" => timing)
     body = response.body
-    if mode === :requested && _trace_page_response(req, response)
-        page = _trace_page_body(body)
+    if mode === :requested && _full_page_response(req, response)
+        page = _inject_after_body(body, _TRACE_PAGE_SCRIPT)
         if page !== nothing
             body = page
             filter!(p -> lowercase(first(p)) != "content-length", headers)
@@ -220,9 +220,9 @@ _server_timing_token(label::AbstractString) =
 _http_quoted(text::AbstractString) =
     string('"', replace(text, '\\' => "\\\\", '"' => "\\\"", r"[\r\n]" => " "), '"')
 
-# A full page whose own htmx requests should ask for their traces too: a
-# navigation's HTML answer, not a fragment swap.
-_trace_page_response(req::HTTP.Request, response::HTTP.Response) =
+# A full page — a navigation's HTML answer, not a fragment swap — which can
+# carry a page script (a traced page's, development mode's).
+_full_page_response(req::HTTP.Request, response::HTTP.Response) =
     !_hx_partial_swap(req) && response.status == 200 &&
     occursin("text/html", lowercase(HTTP.header(response, "Content-Type", "")))
 
@@ -231,16 +231,16 @@ _trace_page_response(req::HTTP.Request, response::HTTP.Response) =
 # listener does not need htmx loaded yet).
 const _TRACE_PAGE_SCRIPT = """<script data-htmxo-trace>document.addEventListener("htmx:configRequest",function(e){try{if(new URL(e.detail.path,location.href).origin===location.origin){e.detail.headers["$(_TRACE_HEADER)"]="1"}}catch(_){}});</script>"""
 
-# `body` with the script after its `<body …>` tag, or `nothing` when the
-# body is not held in memory (a stream) or has no `<body>` tag.
-function _trace_page_body(body)
+# `body` with `snippet` after its `<body …>` tag, or `nothing` when the body
+# is not held in memory (a stream) or has no `<body>` tag.
+function _inject_after_body(body, snippet::AbstractString)
     bytes = _buffered_bytes(body)
     bytes === nothing && return nothing
     text = String(copy(bytes))
     m = match(r"<body(?:\s[^>]*)?>"i, text)
     m === nothing && return nothing
     stop = m.offset + ncodeunits(m.match) - 1
-    string(SubString(text, 1, stop), _TRACE_PAGE_SCRIPT,
+    string(SubString(text, 1, stop), snippet,
            SubString(text, nextind(text, stop)))
 end
 
