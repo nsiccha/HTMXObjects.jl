@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.175
+
+- A fresh link to a `#id` in an eager `master_detail_table` detail opens the
+  enclosing groups and details and scrolls the target into view, including in
+  static exports.
+
 ## 0.1.174
 
 - `relative_to = RelativeTo(columns; default, sigdigits, suffix, comparable)`

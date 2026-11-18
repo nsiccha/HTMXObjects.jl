@@ -13360,6 +13360,10 @@ puts it, as the browser does while the page loads: a link to
 whether the tabset is part of the page or arrives in a fragment, and whatever
 loads first.
 
+A link into an eager [`master_detail_table`](@ref) detail opens its containing
+groups and details before scrolling to the element. This also works in a static
+export. The target must be present on the page or arrive in a swap.
+
 It acts only after a fresh navigation (a reload or Back keeps the position the
 browser restores), and only until the reader scrolls, clicks or types. A page
 scrolled before a swap brings the element stays where it is.
@@ -13389,17 +13393,21 @@ url_anchor_script() = h.script(Raw(raw"""
   });
   window.addEventListener('hashchange', stop);
   window.addEventListener('popstate', stop);
-  // Parsed with the page: the browser scrolls to it, but keeps it there only
-  // until the page's `load` event, not through the swaps that follow.
+  function land(target, afterSwap) {
+    if (!pending || location.hash !== hash || !target) return;
+    var opened = typeof htmxoMdReveal === 'function' && htmxoMdReveal(target);
+    // The browser already handles a visible anchor parsed with the page.
+    if (opened || afterSwap) target.scrollIntoView();
+  }
   document.addEventListener('DOMContentLoaded', function () {
-    if (document.getElementById(id)) reached = true;
+    var target = document.getElementById(id);
+    if (target) { reached = true; land(target, false); }
   });
   // Once per frame, however many elements a swap settles: each
   // `scrollIntoView` lays the page out again.
-  var land = function () {
+  var afterSwap = function () {
     queued = false;
-    var target = document.getElementById(id);
-    if (pending && location.hash === hash && target) target.scrollIntoView();
+    land(document.getElementById(id), true);
   };
   // htmx announces each element a swap inserts once the swap has settled.
   document.addEventListener('htmx:load', function (e) {
@@ -13414,7 +13422,7 @@ url_anchor_script() = h.script(Raw(raw"""
     // Every swap may move the element: content loading above it pushes it
     // down, and content loading into or below it lets a page that was too
     // short bring it to the top.
-    if (!queued) { queued = true; requestAnimationFrame(land); }
+    if (!queued) { queued = true; requestAnimationFrame(afterSwap); }
   });
 })();
 """))
@@ -23447,6 +23455,13 @@ function htmxoTreeRemember(row) {
     if (root) htmxoSearchOf(root).open.set(row.id, row.dataset.htmxoTreeOpen);
 }
 
+function htmxoOpenGroup(row) {
+    if (row.dataset.htmxoTreeOpen !== 'false') return false;
+    row.dataset.htmxoTreeOpen = 'true';
+    htmxoTreeRemember(row);
+    return true;
+}
+
 // Re-open (or close) the remembered branches of a rendered table; a lazy
 // group the user had open loads its rows again. True when a branch changed.
 function htmxoTreeRestore(root, state) {
@@ -24021,13 +24036,12 @@ function htmxoUpdateRows(update, origin) {
     // group that has not loaded its rows the rest waits for them (below).
     const parentId = id => { const r = byId.get(id) || incomingById.get(id); return r ? parentOf(r) : ''; };
     const above = id => { const path = []; for (let p = parentId(id); p; p = parentId(p)) path.unshift(p); return path; };
-    const openGroup = r => { if (r.dataset.htmxoTreeOpen === 'false') { r.dataset.htmxoTreeOpen = 'true'; htmxoTreeRemember(r); } };
     const later = follow.filter(f => {
         for (const p of above(f.id)) {
             const r = own(p);
             if (!r) return false;
             if ('htmxoLazyRows' in r.dataset) return true;
-            openGroup(r);
+            htmxoOpenGroup(r);
         }
         return false;
     });
@@ -24066,7 +24080,7 @@ function htmxoUpdateRows(update, origin) {
             const r = own(p);
             if (!r) return;
             if ('htmxoLazyRows' in r.dataset) await htmxoLoadRows(r);
-            else openGroup(r);
+            else htmxoOpenGroup(r);
         }
         const row = own(f.id), d = row && own(detailId(row));
         if (!row) return;
@@ -28655,6 +28669,35 @@ function htmxoMdShow(row, d, show) {
         if (control.hasAttribute('data-htmxo-disclosure'))
             control.textContent = show ? '$(_md_disclosure_glyph(true))' : '$(_md_disclosure_glyph(false))';
     }
+}
+// Reveal a fragment target in a collapsed table. Detail rows nest in the DOM;
+// a tree row's logical parents are sibling rows named by data-htmxo-parent.
+function htmxoMdReveal(target) {
+    var changed = false;
+    for (var hidden = target.closest('tr[hidden]'); hidden; hidden = hidden.parentElement.closest('tr[hidden]')) {
+        var row = hidden, detail = hidden.id.startsWith('detail-');
+        if (detail) {
+            row = hidden.previousElementSibling;
+            if (!row || row.id !== 'row-' + hidden.id.slice(7) ||
+                !hidden.querySelector(':scope > td > .htmxo-md-detail')) continue;
+        }
+        if (row.hidden && row.dataset.htmxoParent && !row.hasAttribute('data-htmxo-filtered') &&
+            typeof htmxoOpenGroup === 'function') {
+            var opened = false, seen = new Set([row]);
+            for (var parent = row; parent.dataset.htmxoParent;) {
+                parent = document.getElementById(parent.dataset.htmxoParent);
+                if (!parent || parent.parentElement !== row.parentElement || seen.has(parent)) break;
+                seen.add(parent);
+                if (htmxoOpenGroup(parent)) opened = true;
+            }
+            if (opened) { htmxoFilterTable(row); changed = true; }
+        }
+        if (detail && hidden.hidden && !row.hidden) {
+            htmxoMdShow(row, hidden, true);
+            changed = true;
+        }
+    }
+    return changed;
 }
 function htmxoLoadSlot(s) {
     if (s && s.dataset.loaded !== '1' && s.dataset.loading !== '1') htmxoMdFire(s);

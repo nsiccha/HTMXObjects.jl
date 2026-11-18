@@ -13,6 +13,52 @@
     @test contains(html(static_transform(page, StaticExport())), "window.htmxoUrlAnchor = true")
 end
 
+@testitem "a fresh fragment link opens the enclosing eager table detail in a static export" setup=[HTMXOTestImports, ChromeDump] tags=[:browser] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        rows = [(; id="one", group="North"), (; id="two", group="South")]
+        inner = master_detail_table(["Fix"], ["nested"]; key=identity,
+            master=x -> (h.td(x),), detail=x -> h.p("Prepared fix"; id="prepared-fix"))
+        table = master_detail_table(["Issue"], rows; key=r -> r.id,
+            master=r -> (h.td(r.id),), detail=r -> r.id == "one" ? inner : h.p("Other"),
+            groupings=["Region" => r -> r.group], group_by="Region", id="issues")
+        probe = h.script(Raw(raw"""
+        window.addEventListener('load', () => setTimeout(() => {
+            const target = document.getElementById(location.hash.slice(1));
+            const box = target.getBoundingClientRect();
+            const expanded = selector => Array.from(document.querySelectorAll(selector))
+                .filter(button => button.getAttribute('aria-expanded') === 'true').length;
+            const result = document.createElement('output');
+            result.id = 'landing';
+            result.textContent = [
+                'visible=' + (box.height > 0),
+                'atTarget=' + (Math.abs(box.top) < 2 && box.bottom > 0 && scrollY > 0),
+                'groups=' + expanded('[data-htmxo-tree-toggle]'),
+                'details=' + expanded('[data-htmxo-detail-toggle]')
+            ].join(',');
+            document.body.appendChild(result);
+        }, 100));
+        """))
+        page = htmx(h.main(h.div(style="height: 2000px"), h.h2("Projects"; id="projects"),
+            table, h.div(style="height: 2000px"), probe); assets="vendor")
+        mktempdir() do dir
+            copy_vendorfiles(joinpath(dir, "vendor"))
+            file = joinpath(dir, "page.html")
+            write(file, repr("text/html", static_transform(page, StaticExport())))
+            for (id, state) in [("prepared-fix", "groups=1,details=2"), ("projects", "groups=0,details=0")]
+                profile = joinpath(dir, "profile-" * id)
+                url = "file://$file#$id"
+                dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile $url`)
+                result = match(r"<output id=\"landing\">([^<]*)</output>", dom)
+                @test !isnothing(result)
+                isnothing(result) || @test result[1] == "visible=true,atTarget=true,$state"
+            end
+        end
+    end
+end
+
 @testitem "a link's #id lands on a tabset that arrives in a fragment, in a real browser" setup=[HTMXOTestImports] tags=[:browser] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
         @test_skip false
