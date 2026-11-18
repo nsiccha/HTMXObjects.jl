@@ -3435,6 +3435,108 @@ end
     end
 end
 
+@testitem "a tree grouping keeps what the page changed in a leaf across regroups browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects, HTTP, Sockets
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        # Each clause shows a live status with a stable id (snag
+        # `tree-regroup-liv-09cbe71c`): an htmx out-of-band response replaces
+        # it wherever it is on the page, and the server renders the newest.
+        # Clause c2 has a row under two sections, both holding its status.
+        status = Dict{String,String}()
+        live_master(prefix) = r -> r.kind === :section ? (h.td(r.title), h.td(""), h.td("")) :
+            (h.td(r.note), h.td(h.span(; id="st-" * prefix * r.id)(get(status, prefix * r.id, "old"))),
+             h.td(string(r.points); data_sort_value=string(r.points)))
+        live_table(id, prefix, levels) = master_detail_table(["Item", "Status", "Points"], OUTLINE;
+            key=outline_key(prefix), children=outline_children, master=live_master(prefix),
+            detail=r -> h.p("about " * r.id), groupings=OUTLINE_GROUPINGS, group_by=levels,
+            leaf_key=r -> r.kind === :clause ? prefix * r.id : nothing, leaf_order=r -> r.order, id)
+        # l opens as the tree; m opens grouped by Status, its tree waiting beside it.
+        tables = Dict("l" => levels -> live_table("l", "", levels), "m" => levels -> live_table("m", "m", levels))
+        driver = h.script(Raw(regroup_driver_prelude() * raw"""
+        window.addEventListener('load', async function() {
+            const w = id => document.getElementById(id).closest('[data-htmxo-grouped]');
+            const pill = (id, name) => w(id).querySelector('[data-htmxo-group-name="' + name + '"] > button');
+            const texts = sid => Array.from(document.querySelectorAll('[id="' + sid + '"]'), e => e.textContent).join(',');
+            // An update has landed once every copy shows it and htmx has settled it;
+            // htmx leaves an empty class attribute behind, the server renders none.
+            const settled = sid => Array.from(document.querySelectorAll('[id="' + sid + '"]'))
+                .every(e => !e.classList.contains('htmx-added') && !e.classList.contains('htmx-settling'));
+            const update = async (leaf, text) => {
+                await htmx.ajax('GET', '/oob?leaf=' + leaf + '&text=' + text, {target: '#sink', swap: 'none'});
+                const ok = await wait(() => texts('st-' + leaf) !== '' &&
+                    texts('st-' + leaf).split(',').every(t => t === text) && settled('st-' + leaf));
+                document.querySelectorAll('[id="st-' + leaf + '"][class=""]').forEach(e => e.removeAttribute('class'));
+                return ok;
+            };
+            const stashed = id => w(id).querySelector('template[data-htmxo-tree]').content.children.length;
+            try {
+            check('l-first', await parity(w('l'), '/l?group_by=Outline', true));
+            // The reporter's case: the tree off, a leaf's status replaced, the tree on.
+            pill('l', 'Outline').click();
+            check('l-flat', w('l').dataset.htmxoGroupBy === '["None"]' && await parity(w('l'), '/l?group_by=None', true));
+            check('l-flat-update', await update('c1', 'new1') && await update('c2', 'new2'));
+            check('l-flat-after', await parity(w('l'), '/l?group_by=None', true));
+            pill('l', 'Outline').click();
+            check('l-tree-back', w('l').dataset.htmxoGrouped === '["Outline"]' && texts('st-c1') === 'new1' &&
+                texts('st-c2') === 'new2,new2' && stashed('l') === 0 && await parity(w('l'), '/l?group_by=Outline', true));
+            // Changed in the tree, then under another grouping, then back.
+            check('l-tree-update', await update('c3', 'new3'));
+            pill('l', 'Status').click();
+            check('l-status', await parity(w('l'), '/l?group_by=Status', true));
+            check('l-status-update', await update('c4', 'new4') && await update('c2', 'again2'));
+            pill('l', 'Outline').click();
+            check('l-status-back', texts('st-c2') === 'again2,again2' && await parity(w('l'), '/l?group_by=Outline', true));
+            // A table that opens grouped: its tree comes from the page.
+            check('m-first', await parity(w('m'), '/m?group_by=Status', true));
+            check('m-update', await update('mc1', 'm1') && await update('mc2', 'm2'));
+            pill('m', 'Outline').click();
+            check('m-tree', texts('st-mc2') === 'm2,m2' && stashed('m') === 0 && await parity(w('m'), '/m?group_by=Outline', true));
+            pill('m', 'Status').click();
+            check('m-status', await parity(w('m'), '/m?group_by=Status', true));
+            } catch (e) { check('driver', (e && e.stack) || String(e)); }
+            finish();
+        });
+        """))
+        page() = repr("text/html", htmx(tables["l"](["Outline"]), tables["m"](["Status"]), h.div(; id="sink"), driver;
+            extra_head=(sortable_table_js(), sortable_table_styles()),
+            hyperscript_version=nothing, feedback=false, compose=false, overlay=false))
+        socket = listen(Sockets.localhost, 0)
+        port = Int(getsockname(socket)[2]); close(socket)
+        server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
+            uri = HTTP.URI(req.target)
+            params = HTTP.queryparampairs(uri)
+            levels = [String(last(p)) for p in params if first(p) == "group_by"]
+            html(x) = HTTP.Response(200, ["Content-Type" => "text/html"], x)
+            uri.path == "/" && return html(page())
+            if uri.path == "/oob"
+                leaf, text = Dict(params)["leaf"], Dict(params)["text"]
+                status[leaf] = text
+                return html(repr("text/html", h.span(; id="st-" * leaf, hx_swap_oob="true")(text)))
+            end
+            table = get(tables, lstrip(uri.path, '/'), nothing)
+            isnothing(table) ? HTTP.Response(404) : html(repr("text/html", table(levels)))
+        end
+        try
+            dom = mktempdir() do profile
+                dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom --user-data-dir=$profile http://127.0.0.1:$port/`)
+            end
+            checks = match(r"<pre id=\"checks\">(.*?)</pre>"s, dom)
+            @test !isnothing(checks)
+            if !isnothing(checks)
+                for line in split(checks[1], '\n')
+                    @test endswith(line, ":true")
+                end
+                @test count(==('\n'), checks[1]) + 1 == 13
+            end
+        finally
+            close(server)
+        end
+    end
+end
+
 @testitem "a recorded tree grouping regroups with no server browser" setup=[GroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
     using HTMXObjects, HTTP, Sockets
     if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"

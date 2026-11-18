@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.173
+
+- A tree grouping (`groupings = [name => :children, …]`) keeps what the page
+  changed in a leaf when the reader regroups. The other groupings and the
+  flat view used to show copies of each leaf's tree row, and picking the tree
+  again brought back the rows it held before: a leaf's status replaced by id
+  while another grouping showed (an htmx out-of-band swap, a script) came back
+  old, and the other grouping's copy took the update but was thrown away. Now
+  the leaf's first row in the tree is the row every grouping shows, moved
+  between them, and the leaf's other rows in the tree take its elements that
+  have an id when the tree comes back, as an out-of-band swap updates every
+  element of that id while the tree shows. A table that opens on another
+  grouping puts the rows it shows into its tree the same way (snag
+  `tree-regroup-liv-09cbe71c`).
+
 ## 0.1.172
 
 - `serve` reports addresses that leave a proxy's mount prefix. A response a

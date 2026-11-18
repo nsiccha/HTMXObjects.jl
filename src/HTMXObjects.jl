@@ -25295,6 +25295,49 @@ function htmxoRekeyLeaf(row, detail, safe) {
     const slot = detail.querySelector('[id="detail-slot-' + old + '"]');
     if (slot) slot.id = 'detail-slot-' + safe;
 }
+// Put a tree grouping's tree back from `stash` (`htmxoRegroup`). Each leaf's
+// first row in the tree is the row the page shows or keeps beside the table
+// now (its copy with the detail open, else its first), moved to that row's
+// place (a cell-less copy, or the server's row when the table opened on
+// another grouping) with the place's id, parent and level. Its other rows in
+// the tree take its elements that have an id, as an htmx out-of-band swap
+// updates every element of that id while the tree shows.
+function htmxoTreeBack(body, stash, store) {
+    const live = Array.from(body.rows).concat(store ? Array.from(store.content.children) : []);
+    const companions = htmxoTableCompanions(live), leaves = new Map();
+    live.forEach(r => {
+        if (!('htmxoLeaf' in r.dataset)) return;
+        const have = leaves.get(r.dataset.htmxoLeaf), open = r.dataset.htmxoDetailOpen === 'true';
+        if (!have || (open && !have.open)) leaves.set(r.dataset.htmxoLeaf, {row: r, detail: companions.get(r.id) || null, open});
+    });
+    body.replaceChildren(stash.content);
+    if (store) store.content.replaceChildren();
+    const rows = Array.from(body.rows), details = htmxoTableCompanions(rows), others = new Map();
+    rows.forEach(r => {
+        const key = r.dataset.htmxoLeaf;
+        if (key === undefined) return;
+        if (others.has(key)) { others.get(key).push(r); return; }
+        others.set(key, []);
+        const m = leaves.get(key);
+        if (!m) { if ('htmxoTreePlace' in r.dataset) r.remove(); return; }
+        htmxoRekeyLeaf(m.row, m.detail, r.id.slice(4));
+        ['data-htmxo-parent', 'aria-level'].forEach(a =>
+            r.hasAttribute(a) ? m.row.setAttribute(a, r.getAttribute(a)) : m.row.removeAttribute(a));
+        if (details.has(r.id)) details.get(r.id).remove();
+        r.replaceWith(...(m.detail ? [m.row, m.detail] : [m.row]));
+    });
+    others.forEach((copies, key) => {
+        const m = leaves.get(key), byId = new Map();
+        if (!m || !copies.length) return;
+        [m.row, m.detail].forEach(x => { if (x) x.querySelectorAll('[id]').forEach(e => byId.set(e.id, e)); });
+        copies.forEach(c => [c, details.get(c.id)].forEach(x => {
+            if (x) x.querySelectorAll('[id]').forEach(e => {
+                const now = byId.get(e.id);
+                if (now && x.contains(e)) e.replaceWith(now.cloneNode(true));
+            });
+        }));
+    });
+}
 // Regroup a table by `levels` (grouping names, outermost first; none for the
 // flat view). Branches the reader opened and the selection, search and sort
 // apply to the new rows as after a re-render, and a group holding a leaf
@@ -25305,12 +25348,14 @@ function htmxoRegroup(wrapper, levels) {
     const store = wrapper.querySelector('template[data-htmxo-unplaced]');
     // A tree grouping (`name => :children`) shows the app's tree, which waits
     // in `template[data-htmxo-tree]` while another grouping shows and comes
-    // back as the reader left it. The other groupings are built from copies
-    // of each leaf's first row in the tree, the row the server lists.
+    // back as the reader left it (`htmxoTreeBack`). The other groupings show
+    // each leaf's first row in the tree, the row the server lists: the row
+    // itself, with its detail, so what the page changes in it (an update by
+    // id, a loaded detail) is there in every grouping. A cell-less copy of it
+    // keeps its place in the tree.
     const stash = cfg.tree != null ? wrapper.querySelector('template[data-htmxo-tree]') : null;
     if (stash && levels.includes(cfg.tree)) {
-        if (store) store.content.replaceChildren();
-        body.replaceChildren(stash.content);
+        htmxoTreeBack(body, stash, store);
         if (window.htmx) Array.from(body.rows).forEach(r => htmx.process(r));
         htmxoRegrouped(wrapper, table, levels, cfg);
         return;
@@ -25318,14 +25363,23 @@ function htmxoRegroup(wrapper, levels) {
     let source = Array.from(body.rows);
     const fresh = new Set();
     if (stash && JSON.parse(wrapper.dataset.htmxoGrouped).includes(cfg.tree)) {
-        const firsts = htmxoTableCompanions(source), seen = new Set(), copies = [];
+        const firsts = htmxoTableCompanions(source), seen = new Set(), leaves = new Set(), moved = [];
         source.forEach(r => {
             if (!('htmxoLeaf' in r.dataset) || seen.has(r.dataset.htmxoLeaf)) return;
             seen.add(r.dataset.htmxoLeaf);
-            [r, firsts.get(r.id)].forEach(x => { if (x) { const copy = x.cloneNode(true); copies.push(copy); fresh.add(copy); } });
+            leaves.add(r);
+            moved.push(r);
+            if (firsts.has(r.id)) moved.push(firsts.get(r.id));
         });
-        source.forEach(r => stash.content.append(r));
-        source = copies;
+        const going = new Set(moved);
+        source.forEach(r => {
+            if (leaves.has(r)) {
+                const spot = r.cloneNode(false);
+                spot.dataset.htmxoTreePlace = '';
+                stash.content.append(spot);
+            } else if (!going.has(r)) stash.content.append(r);
+        });
+        source = moved;
     }
     const stored = store ? Array.from(store.content.children) : [];
     stored.forEach(r => fresh.add(r));
@@ -28740,7 +28794,14 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   browser (live and in a [`record!`](@ref) bundle). Its pill stands alone:
   turning it on turns the other levels off, another pill replaces it, and
   turning it on again brings the tree back as the reader left it (open
-  branches and details). `group_by` may open on it or on another grouping.
+  branches and details). A leaf's first row in the tree is the row the other
+  groupings show, one element moving between them, so what the page changes
+  in it (an element replaced by id, such as an htmx out-of-band swap, or a
+  loaded detail) is there in every grouping; when the tree comes back, the
+  leaf's other rows take its elements that have an id. A row the current
+  grouping does not show (a branch row of the tree, or a leaf a grouping
+  leaves out) is not on the page, so an update by id cannot reach it there.
+  `group_by` may open on it or on another grouping.
   A leaf's rows under several branches share its `leaf_key`: they select,
   hover-link and count as one item (the count counts leaves, not branches),
   and the other groupings list its first row in the tree, with that row's
