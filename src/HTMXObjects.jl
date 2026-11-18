@@ -365,6 +365,19 @@ for within ten minutes is dropped and logged as `unclaimed`. `middleware`
 receives each prestart request as well, through its own composition without
 the access log, the runtime tracker or Revise.
 
+A response a browser receives under a proxy's mount prefix
+(`X-Forwarded-Prefix`, such as the KB's `/p/<slug>`) is checked for addresses
+that leave the mount, whatever `prestart` says: an `href`, `src`, `action`,
+`formaction`, `hx-get`/`-post`/`-put`/`-patch`/`-delete`, `hx-push-url`,
+`hx-replace-url`, `ws-connect` or `sse-connect` whose value is a root-absolute
+path (`/foo`) outside the prefix reaches the proxy's root instead of the app.
+`serve` logs each such address once per process (at `Warn`, with
+`_group=:mount_url`), naming the request, the attribute and the address, up to
+100 addresses. This finds what the `@htmx` macro's warning cannot see: a
+literal an app passes through a helper function onto an attribute. Raw HTML
+markup (`Raw`) and script text (a hyperscript `_` attribute, a `<script>`) are
+not read, and the overlay bar's own address is not reported.
+
 With `operation_stream=true`, a page whose `:auto` pollers are running holds
 one event stream for them, so a poller's result arrives when its computation
 ends instead of at its next poll. Each running poller `serve` renders is
@@ -1598,15 +1611,20 @@ end
 
 _warn_legacy_page_name!(struct_expr) = _warn_legacy_name!(struct_expr, :page, :__page__)
 
-# Attribute names that should be `__prefix__`-aware (and therefore should
-# not be hardcoded root-absolute strings). `hx-*` attributes get
-# underscore-to-hyphen translation by HTMX's node builder; we match the underscore form
-# as written in source.
-const _URL_BEARING_ATTRS = (
-    :href, :src, :action, :formaction,
-    :hx_get, :hx_post, :hx_put, :hx_patch, :hx_delete,
-    :hx_post_url, :hx_target, :sse_connect,
-)
+# The attributes whose value the browser, htmx, or htmx's WebSocket and SSE
+# extensions resolve as an address, as they stand in the HTML. Their value must
+# be `__prefix__`-aware: a root-absolute one leaves an app served under a mount
+# prefix. The response walk checks these (`_mount_escapes!`).
+const _MOUNT_URL_ATTRS = Symbol.((
+    "href", "src", "action", "formaction",
+    "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete",
+    "hx-push-url", "hx-replace-url",
+    "ws-connect", "sse-connect",
+))
+# The same attributes as an `@htmx` body writes them: HTMX's node builder turns
+# a keyword's underscores into hyphens (`hx_get=` renders `hx-get`).
+const _URL_BEARING_ATTRS = Tuple(Symbol(replace(String(attr), '-' => '_'))
+                                 for attr in _MOUNT_URL_ATTRS)
 
 # Cheaply detect if an expression is a hardcoded root-absolute URL string —
 # i.e. `"/foo"` or `"/foo/$id"`-style interpolation that begins with `/`.
@@ -1623,12 +1641,17 @@ _is_root_str_prefix(_) = false
     _warn_hardcoded_url_in_attrs!(struct_expr)
 
 Walk the struct body looking for `href="/foo"` / `hx_get="/foo"` /
-`src="/foo"` etc. — root-absolute URL string literals on URL-bearing
-attributes. Such URLs bypass `__prefix__` (so they break under any
-non-root mount, base-path deploy, or `record!` target) and bypass
-`__route__` (so updating a route's path requires hunting all literal
+`ws_connect="/foo"` etc. — root-absolute URL string literals on the
+URL-bearing attributes (`_URL_BEARING_ATTRS`). Such URLs bypass `__prefix__`
+(so they break under any non-root mount, base-path deploy, or `record!` target)
+and bypass `__route__` (so updating a route's path requires hunting all literal
 references). Suggest `__self__/"…"` (cross-route) or `__route__`
 (self-link) instead.
+
+Only a literal written on the attribute keyword itself is seen: one passed to a
+helper function that puts it on an attribute (an app's own form builder,
+`lazy`, `sse_region`) is not. The response walk catches those
+when a request arrives under a mount prefix (`_mount_escapes!`).
 
 Warning, not error: the hardcoded form still works for root-mounted
 local dev. Apps adopt the prefix-aware form gradually.
@@ -3969,7 +3992,7 @@ function htmx(args...;
             # `KB_ORIGIN/overlay/bar.js` instead of inlining `<style>`+`<script>`.
             # The bar is `position:fixed`, so a deferred async load has no
             # layout-shift to guard (no skeleton/placeholder needed).
-            (overlay ? (h.script(""; src = KB_ORIGIN * "/overlay/bar.js", defer = true),) : ())...,
+            (overlay ? (h.script(""; src = _overlay_bar_url(), defer = true),) : ())...,
             _runtime_heads(mount, page_blocks...)...,
             _shell_extra_head(extra_head, mount, carried)...,
         ),
@@ -9535,12 +9558,13 @@ end
 _prestart_slot(req::HTTP.Request) = get(req.context, :htmxo_prestart, nothing)
 _prestart_slot(_) = nothing
 
-# A response is prestarted only when it goes to a browser that will run its
-# htmx: a page navigation (`Accept: text/html`, as the page-load deferral reads
-# it) or an htmx request. A script, a static export, an in-process `dispatch`
-# and the server's own prewarm requests get the response as rendered.
-function _prestart_wanted(req::HTTP.Request)
-    _PRESTART_APP[] === nothing && return false
+# A response is walked (prestarted, and checked for addresses outside its
+# mount) only when it goes to a browser that will run its htmx: a page
+# navigation (`Accept: text/html`, as the page-load deferral reads it) or an
+# htmx request. A script, a static export, an in-process `dispatch`, a
+# prestart's own request and the server's prewarm requests get the response as
+# rendered.
+function _response_walk_wanted(req::HTTP.Request)
     get(req.context, :htmxo_served, false) === true || return false
     _prestart_slot(req) === nothing || return false
     static_export(req) === nothing || return false
@@ -9548,17 +9572,31 @@ function _prestart_wanted(req::HTTP.Request)
     is_htmx(req) || _operation_rich_page_request(req)
 end
 
+_prestart_wanted(req::HTTP.Request) =
+    _PRESTART_APP[] !== nothing && _response_walk_wanted(req)
+
 struct _PrestartWalk
     req::HTTP.Request
     current_url::String
     count::Base.RefValue{Int}
+    # Whether the walk starts load-triggered fragments (`serve(; prestart)`).
+    start::Bool
+    # The proxy's mount prefix, or "" when the response has none; the
+    # attributes the walk found holding a root-absolute address outside it.
+    mount::String
+    escapes::Vector{Pair{Symbol,String}}
 end
 
 function _prestart_fragments(req::HTTP.Request, val)
-    _prestart_wanted(req) || return val
+    _response_walk_wanted(req) || return val
+    start = _PRESTART_APP[] !== nothing
+    mount = _request_prefix(req, "")
+    start || !isempty(mount) || return val
     value = _html_value(val)
-    walk = _PrestartWalk(req, _prestart_current_url(req), Ref(0))
+    walk = _PrestartWalk(req, _prestart_current_url(req), Ref(0), start, mount,
+                         Pair{Symbol,String}[])
     walked = _prestart_walk(value, walk, false)
+    _log_mount_escapes(walk)
     walked === nothing ? val : walked
 end
 
@@ -9604,9 +9642,10 @@ const _PRESTART_INHERITED = (_HX_VALUES_ATTRS..., _HX_INCLUDE_ATTRS...,
 
 function _prestart_walk(node::Node, walk::_PrestartWalk, blocked::Bool)
     attrs = HTMX.attrs(node)
+    isempty(walk.mount) || _mount_escapes!(walk.escapes, attrs, walk.mount)
     blocked = blocked || any(attr -> haskey(attrs, attr), _PRESTART_INHERITED)
     new_attrs = nothing
-    url = blocked ? nothing : _prestart_candidate(attrs)
+    url = blocked || !walk.start ? nothing : _prestart_candidate(attrs)
     if url !== nothing
         token = _prestart!(walk, url, attrs)
         if token !== nothing
@@ -9682,6 +9721,77 @@ function _prestart_route_target(req::HTTP.Request, url::String)
     isempty(rest) && return "/"
     first(rest) == '/' && return rest
     first(rest) == '?' ? "/" * rest : nothing
+end
+
+# --- Addresses outside the mount ---
+#
+# Behind a proxy that serves the app under a mount prefix (`X-Forwarded-Prefix`,
+# such as the KB's `/p/<slug>`), an address the response renders root-absolute
+# (`/foo`) reaches the proxy's root, not this app: the link, request or stream
+# silently goes elsewhere. `@htmx` warns about such a literal written on an
+# attribute keyword when it expands (`_warn_hardcoded_url_in_attrs!`); the
+# response walk finds the rest in what a browser actually receives, such as an
+# address an app's helper function put on an attribute.
+
+# Whether `url` is a root-absolute address outside the mount `prefix`.
+function _mount_escape(url::AbstractString, prefix::AbstractString)
+    (startswith(url, '/') && !startswith(url, "//")) || return false
+    startswith(url, prefix) || return true
+    next = ncodeunits(prefix) + 1
+    next > ncodeunits(url) && return false
+    !(codeunit(url, next) in (UInt8('/'), UInt8('?'), UInt8('#')))
+end
+
+# Adds each address attribute of `attrs` that leaves the mount `prefix` to
+# `escapes`. An address built from the route struct (`__self__/"…"`) is not a
+# string here and carries the prefix by construction; the overlay bootstrap is
+# the KB's own address.
+function _mount_escapes!(escapes, attrs, prefix)
+    for (attr, value) in attrs
+        (attr in _MOUNT_URL_ATTRS && value isa AbstractString) || continue
+        (_mount_escape(value, prefix) && value != _overlay_bar_url()) || continue
+        push!(escapes, attr => String(value))
+    end
+    escapes
+end
+
+# Each address outside the mount is logged once per process (its attribute and
+# path, without query or fragment), the first `_MOUNT_ESCAPE_LOG_LIMIT` of them,
+# so an app that renders one per row (`/item/$id`) grows neither the log nor
+# this set without bound.
+const _MOUNT_ESCAPE_LOG_LIMIT = 100
+const _MOUNT_ESCAPES_LOGGED = Set{Tuple{Symbol,String}}()
+const _MOUNT_ESCAPES_LOCK = ReentrantLock()
+
+# `:new` the first time `key` is seen, `:limit` once the limit is reached,
+# `:seen` otherwise.
+function _mount_escape_first!(key::Tuple{Symbol,String})
+    lock(_MOUNT_ESCAPES_LOCK) do
+        n = length(_MOUNT_ESCAPES_LOGGED)
+        (n > _MOUNT_ESCAPE_LOG_LIMIT || key in _MOUNT_ESCAPES_LOGGED) && return :seen
+        push!(_MOUNT_ESCAPES_LOGGED, n < _MOUNT_ESCAPE_LOG_LIMIT ? key : (:limit, ""))
+        n < _MOUNT_ESCAPE_LOG_LIMIT ? :new : :limit
+    end
+end
+
+function _log_mount_escapes(walk::_PrestartWalk)
+    isempty(walk.escapes) && return nothing
+    route = string(walk.req.method, " ", _request_route_path(walk.req, walk.mount))
+    for (attr, url) in walk.escapes
+        path = String(first(split(url, ('?', '#'); limit=2)))
+        first_time = _mount_escape_first!((attr, path))
+        if first_time === :new
+            @warn """$route was served under the mount prefix `$(walk.mount)` \
+                (X-Forwarded-Prefix), and its response carries `$attr="$url"`: a \
+                root-absolute address outside that prefix, which the browser sends \
+                to the proxy's root instead of this app. Build it from the route \
+                struct (`__self__/"…"`, `__route__`, `query_url`) so it carries the \
+                prefix. Logged once per address.""" _group=:mount_url
+        elseif first_time === :limit
+            @warn "$(_MOUNT_ESCAPE_LOG_LIMIT) root-absolute addresses outside the mount prefix were logged; further ones are not." _group=:mount_url
+        end
+    end
+    nothing
 end
 
 # The headers of the browser's request for this fragment, as far as the server
@@ -41478,6 +41588,10 @@ then applies (the bar's own `/repos` + `/agents/...` calls are same-origin to
 the *page*, not to `KB_ORIGIN`) — documented here, not solved.
 """
 const KB_ORIGIN = ""
+
+# The overlay bootstrap's address. Root-absolute by design: it is the KB's, so
+# the mount check (`_mount_escapes!`) does not report it.
+_overlay_bar_url() = KB_ORIGIN * "/overlay/bar.js"
 
 """
     overlay_bar()

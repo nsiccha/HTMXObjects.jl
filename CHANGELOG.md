@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.1.172
+
+- `serve` reports addresses that leave a proxy's mount prefix. A response a
+  browser receives (a page navigation or an htmx request) under
+  `X-Forwarded-Prefix`, such as the KB's `/p/<slug>`, is checked for an
+  `href`, `src`, `action`, `formaction`, `hx-get`/`-post`/`-put`/`-patch`/`-delete`,
+  `hx-push-url`, `hx-replace-url`, `ws-connect` or `sse-connect` holding a
+  root-absolute path outside the prefix, which the browser sends to the
+  proxy's root instead of the app. Each such address is logged once per
+  process at `Warn` (`_group=:mount_url`), naming the request, the attribute
+  and the address, up to 100 addresses. It finds the addresses the `@htmx`
+  macro cannot see, such as a literal an app's helper function puts on an
+  attribute. Script text (a hyperscript `_` attribute) and `Raw` markup are
+  not read, the overlay bar's own address is not reported, and the page is
+  sent unchanged (snag `relied-on-the-ht-e42acfbb`).
+- The `@htmx` macro's hardcoded-URL warning now also covers `ws_connect`,
+  `hx_push_url` and `hx_replace_url`, and no longer looks at `hx_target` (a
+  CSS selector) or `hx_post_url` (no such attribute). Its attribute list and
+  the response check's are one list.
+
 ## 0.1.171
 
 - `serve(; dev=true)` is a development mode for iterating on an app's UI: a
