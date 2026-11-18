@@ -1949,7 +1949,7 @@ end
 _inline_struct_props(::Type) = ()
 
 """
-    _child_struct_type(T, ::Val{name}) -> Type or nothing
+    _child_struct_type(T, name::Symbol) -> Type or nothing
 
 The type whose `meta` declares the routes of the child mounted at `name`.
 
@@ -1961,16 +1961,22 @@ DynamicObject guard: `_nested_struct_type` alone misses externals declared
 under a plain `@dynamicstruct`, and the unguarded analysis paths happily answer
 `Int` for `port::Int = 8080`, which a route walker must never follow.
 
-Falls back to the raw hook when DynamicObjects is too old to export the
-accessor.
+Falls back to the raw hook when DynamicObjects does not define the accessor;
+DynamicObjects 0.5.23, the `[compat]` floor, does not.
+
+The name is a plain `Symbol` and `T` is neither compiled nor inferred per
+type, so one method serves every property the route walker visits on every
+routed type. Keyed on `Val{name}`, this helper compiled once per property name
+in every fresh process (317 times for the KnowledgeBase's routes; snag
+htmxobjects-chil-c0ea405d). The hook still dispatches on `Val(name)`, but that
+call is dynamic here and its default method compiles nothing per name.
 """
-function _child_struct_type(T, v::Val)
+Base.@nospecializeinfer function _child_struct_type(@nospecialize(T), name::Symbol)
     if isdefined(DynamicObjects, :nested_object_type)
-        name = typeof(v).parameters[1]
         return Base.invokelatest(
             getproperty(DynamicObjects, :nested_object_type), T, name)
     end
-    _nested_struct_type(T, v)
+    _nested_struct_type(T, Val(name))
 end
 
 # Map a route-macro symbol to the verb short symbol used in `Verb{V}` and
@@ -18297,7 +18303,7 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
         end
 
         # Not a route — try nested-include recursion.
-        nested_type = _child_struct_type(IterT, Val(name))
+        nested_type = _child_struct_type(IterT, name)
         if !isnothing(nested_type) && !isempty(Base.invokelatest(DynamicObjects.meta, nested_type))
             recurse_nested(name, info, nested_type)
             continue

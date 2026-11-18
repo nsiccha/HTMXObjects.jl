@@ -8229,6 +8229,40 @@ end
     @test contains(String(response.body), "abc")
 end
 
+@testitem "route walking compiles one child-type lookup for every property name" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit] begin
+    # Route walking asks `_child_struct_type` for the mounted type behind every
+    # property that is not a route. Keyed on `Val{name}`, that lookup compiled
+    # once per property name in every fresh process: 317 times for the
+    # KnowledgeBase's routes (snag htmxobjects-chil-c0ea405d).
+    import DynamicObjects
+    roots = [TestApp, IndexApp, ParamApp, MountRootApp, AppDataApp, SemanticApp,
+             NavRoot, ArchitectureRoot, ResourceApp, IndexedMountRoot,
+             SingleRouteIncludeRoot, DomainRoot, EditorMountRoot, OpenAPIRoot]
+    verbs = keys(HTMXObjects._http_verbs)
+    asked = Set{Symbol}()
+    for T in roots, (name, info) in DynamicObjects.meta(T)
+        DynamicObjects.isfixed(info) || any(in(verbs), info.macros) ||
+            push!(asked, name)
+    end
+    for T in roots
+        HTMXObjects._walk_route_meta(T, (_...) -> nothing, (_...) -> nothing)
+    end
+    # Control: the walk asked about many distinct names, so a per-name
+    # specialization would show here as one compiled method per name.
+    @test length(asked) >= 10
+    # What remains are argument-type widenings (`Any`, `Type`, `DataType`, and
+    # `UnionAll` for a parametric root), none of them per name or per routed
+    # type: the suite routes dozens of types before this item runs.
+    compiled = [mi.specTypes for m in methods(HTMXObjects._child_struct_type)
+                for mi in Base.specializations(m)]
+    @test all(sig -> sig.parameters[end] === Symbol, compiled)
+    @test length(compiled) <= 4
+
+    # The lookup still finds a mounted child and nothing behind a plain value.
+    @test HTMXObjects._child_struct_type(IndexedMountRoot, :item) === IndexedMountChild
+    @test HTMXObjects._child_struct_type(IndexedMountRoot, :index) === nothing
+end
+
 @testitem "an indexed @include declaring one route is a sub-router, not a mount" setup=[HTMXOTestFixtures, HTMXOTestImports] tags=[:unit, :semantic] begin
     # The short-form unwrap reads a one-statement block as the parser's
     # wrapping. That is right for `@include item(key) = Child(key)` and wrong
