@@ -110,7 +110,8 @@ end
     RequestTrace
 
 The DynamicObjects compute trace of one traced request (see [`serve`](@ref)'s
-`compute_trace`), as [`RuntimeRoutes`](@ref) lists it:
+`compute_trace`), as [`RuntimeRoutes`](@ref) lists it and
+[`request_traces`](@ref) returns it.
 
 - `id` — its number, sent as the response's `X-HTMXO-Trace-Id`;
 - `method`, `target` — the request, its target redacted like the request
