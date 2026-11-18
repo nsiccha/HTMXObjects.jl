@@ -27842,7 +27842,7 @@ toolbar (`texts.relative_to`, *Relativ zu* with `table_texts(:de)`): *Absolute
 values* (`texts.relative_absolute`) and one choice per column label among
 `columns`. Picking a label divides each number cell of `columns` by the same
 row's cell of that label under the same `header_groups` heading, in the
-browser:
+browser.
 
 ```julia
 master_detail_table(headers, models; key, master, detail_url, id = "models",
