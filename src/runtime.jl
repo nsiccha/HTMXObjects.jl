@@ -107,7 +107,42 @@ mutable struct RuntimeJob
 end
 
 """
-    RuntimeTracker(; history_limit=1000, job_history_limit=100, record_polls=false)
+    RequestTrace
+
+The DynamicObjects compute trace of one traced request (see [`serve`](@ref)'s
+`compute_trace`), as [`RuntimeRoutes`](@ref) lists it:
+
+- `id` — its number, sent as the response's `X-HTMXO-Trace-Id`;
+- `method`, `target` — the request, its target redacted like the request
+  ledger's;
+- `status` — the response status, `0` until the response is ready;
+- `started_at` — Unix seconds;
+- `response_s` — seconds until the response was ready (`NaN` before);
+- `duration` — seconds until the trace closed: the request and every operation
+  it started have ended (`NaN` while one still runs);
+- `trace` — the `DynamicObjects.ComputeTrace`: show it for its table and
+  invalidation log, or read `compute_trace_rows(trace)` and
+  `trace.invalidations`.
+"""
+mutable struct RequestTrace
+    id::Int
+    method::String
+    target::String
+    poll::Bool
+    status::Int
+    started_at::Float64
+    started_ns::UInt64
+    response_s::Float64
+    duration::Float64
+    trace::DynamicObjects.ComputeTrace
+    open::Int
+    hidden::Bool
+    keep_empty::Bool
+end
+
+"""
+    RuntimeTracker(; history_limit=1000, job_history_limit=100, record_polls=false,
+                   trace_limit=100)
 
 Process-local ledger of tracked requests and long-running jobs. The package
 keeps one global instance ([`runtime_tracker`](@ref)); separate instances are
@@ -119,6 +154,8 @@ useful for tests or for tracking a second server independently.
   Off by default: a live poller issues a request every `poll_interval`, which
   would otherwise crowd everything else out. Polls are still counted on their
   job either way.
+- `trace_limit` — finished request traces kept (see [`serve`](@ref)'s
+  `compute_trace`).
 - `enabled` — mutable switch; a disabled tracker passes requests straight
   through.
 """
@@ -138,16 +175,22 @@ mutable struct RuntimeTracker
     started_at::Float64
     total_requests::Int
     total_jobs::Int
+    trace_limit::Int
+    next_trace::Int
+    open_traces::Dict{Int,RequestTrace}
+    traces::Vector{RequestTrace}
 end
 
 function RuntimeTracker(; history_limit::Integer=1000,
         job_history_limit::Integer=100, record_polls::Bool=false,
-        enabled::Bool=true)
+        enabled::Bool=true, trace_limit::Integer=100)
     history_limit >= 0 || throw(ArgumentError("history_limit must be non-negative"))
     job_history_limit >= 0 || throw(ArgumentError("job_history_limit must be non-negative"))
+    trace_limit >= 0 || throw(ArgumentError("trace_limit must be non-negative"))
     RuntimeTracker(ReentrantLock(), enabled, history_limit, job_history_limit,
         record_polls, 0, 0, Dict{Int,RuntimeRequest}(), RuntimeRequest[],
-        Dict{Int,RuntimeJob}(), RuntimeJob[], Dict{Any,Int}(), time(), 0, 0)
+        Dict{Int,RuntimeJob}(), RuntimeJob[], Dict{Any,Int}(), time(), 0, 0,
+        trace_limit, 0, Dict{Int,RequestTrace}(), RequestTrace[])
 end
 
 const _RUNTIME_TRACKER = RuntimeTracker()
@@ -163,14 +206,14 @@ runtime_tracker() = _RUNTIME_TRACKER
 
 """
     configure_runtime!(tracker=runtime_tracker(); enabled, history_limit,
-                       job_history_limit, record_polls) -> tracker
+                       job_history_limit, record_polls, trace_limit) -> tracker
 
 Adjust a tracker in place. Omitted settings are unchanged. Shrinking a limit
 trims the corresponding history immediately.
 """
 function configure_runtime!(tracker::RuntimeTracker=runtime_tracker();
         enabled=nothing, history_limit=nothing, job_history_limit=nothing,
-        record_polls=nothing)
+        record_polls=nothing, trace_limit=nothing)
     lock(tracker.lock) do
         enabled === nothing || (tracker.enabled = enabled)
         record_polls === nothing || (tracker.record_polls = record_polls)
@@ -182,8 +225,13 @@ function configure_runtime!(tracker::RuntimeTracker=runtime_tracker();
             job_history_limit >= 0 || throw(ArgumentError("job_history_limit must be non-negative"))
             tracker.job_history_limit = job_history_limit
         end
+        if trace_limit !== nothing
+            trace_limit >= 0 || throw(ArgumentError("trace_limit must be non-negative"))
+            tracker.trace_limit = trace_limit
+        end
         _runtime_trim!(tracker.history, tracker.history_limit)
         _runtime_trim!(tracker.finished, tracker.job_history_limit)
+        _runtime_trim!(tracker.traces, tracker.trace_limit)
     end
     tracker
 end
@@ -191,13 +239,14 @@ end
 """
     clear_runtime_history!(tracker=runtime_tracker()) -> tracker
 
-Forget finished requests and jobs. In-flight requests and running jobs are
-kept — they are still happening.
+Forget finished requests, jobs and request traces. In-flight requests,
+running jobs and open traces are kept — they are still happening.
 """
 function clear_runtime_history!(tracker::RuntimeTracker=runtime_tracker())
     lock(tracker.lock) do
         empty!(tracker.history)
         empty!(tracker.finished)
+        empty!(tracker.traces)
     end
     tracker
 end
@@ -409,11 +458,11 @@ Exclude a request from the history — used by the dashboard's own routes so
 watching the server does not bury what it is watching. The job the request
 started, if any, is hidden with it.
 """
-_runtime_hide_request!(req) = _runtime_annotate!(req) do record
+_runtime_hide_request!(req) = (_trace_hide!(req); _runtime_annotate!(req) do record
     record.hidden = true
     job = get(_runtime_tracker_of(req).running, record.job, nothing)
     job isa RuntimeJob && (job.hidden = true)
-end
+end)
 
 _runtime_note_mode!(req, mode::Symbol) =
     _runtime_annotate!(record -> (record.mode = mode), req)

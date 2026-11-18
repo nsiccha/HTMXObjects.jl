@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.1.170
+
+- `serve(; compute_trace=:requested)` shows what one request computed: a
+  request that carries `?__trace` or `X-HTMXO-Trace: 1` runs inside
+  DynamicObjects' `with_compute_trace`, which counts per property the reads,
+  memory hits, memoized computations, `@fresh` runs, disk loads, waits and
+  errors with their times, and logs the invalidations that dropped values.
+  `compute_trace=:all` traces every request; the default `false` traces
+  nothing and ignores the flag and the header. The trace stays open until the
+  request and every operation it started have ended, so a route that answers
+  with a poller is traced to the end of its computation. A traced response
+  carries `X-HTMXO-Trace-Id` and a `Server-Timing` header with the ten
+  properties that took the most own time (browser developer tools show it), a
+  full page traced on request adds the header to its own same-origin htmx
+  requests, and a closed trace writes one log line (`_group=:trace`) naming
+  its three slowest properties. The latest 100 closed traces (`trace_limit`
+  on `RuntimeTracker` and `configure_runtime!`) are listed by `RuntimeRoutes`'
+  new `traces` and `trace(id)` pages (Markdown with `?plain`) and returned by
+  the new `request_traces` and `request_trace`, as `RequestTrace` records.
+  Only the per-property table and the invalidation log are kept, never read
+  arguments (todo 09gck4a, decision 1wbhyfs).
+
 ## 0.1.169
 
 - A retained root keeps the construction keywords of its `@param`s and of its

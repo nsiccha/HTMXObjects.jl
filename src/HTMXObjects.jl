@@ -60,7 +60,7 @@ export TestRoutes, StructureRoutes, SchemaRoutes, SharedOpsRoutes, OpenAPIRoutes
 export RuntimeRoutes, RuntimeTracker, RuntimeRequest, RuntimeJob, runtime_tracker,
     runtime_snapshot, runtime_dashboard, track_requests, configure_runtime!,
     clear_runtime_history!, runtime_jobs, track_job!, jobs_board,
-    configure_job_queue!
+    configure_job_queue!, RequestTrace, request_traces, request_trace
 export poll_trigger, process_rss_bytes, system_load_panel,
     collect_and_measure!, last_memory_collection, memory_collect_panel
 export reflect, select_routes, precompile_routes!, prewarm_routes!, prewarm_workload!, dispatch, dispatch_parent
@@ -220,7 +220,8 @@ _url_segment_escapes(b::UInt8) =
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
           middleware=[], check_origin=nothing, access_log=<timed default>,
-          operation_log=<default>, runtime_tracking=true, compress=true, kwargs...)
+          operation_log=<default>, runtime_tracking=true, compress=true,
+          compute_trace=false, kwargs...)
 
 Start an HTTP server for the routes registered on `ROUTER`. When
 `async=false` (the default), blocks until interrupted and calls
@@ -260,10 +261,42 @@ Start an HTTP server for the routes registered on `ROUTER`. When
 - `operation_stream=true` (the default) gives each page one event stream that
   announces the end of its pollers' operations (see below). Pass `false` to
   leave every poller to its own polls.
+- `compute_trace=false` (the default) traces nothing. `:requested` records the
+  DynamicObjects compute trace of each request that asks for it (see below),
+  and `:all` that of every request. A development switch: a trace names the
+  app's types and properties and how long each took.
 - `revise` — `:lazy` applies pending Revise revisions before each request;
   `:eager` also applies them in the background as soon as a file changes. Both
   need `using Revise` before the app is loaded.
 - Remaining keyword arguments are passed to `HTTP.listen!`.
+
+With `compute_trace=:requested`, a request asks for its trace with the `?__trace`
+query flag or the header `X-HTMXO-Trace: 1`; with the default `false` both are
+ignored. A traced request runs inside DynamicObjects' `with_compute_trace`,
+which records, per property, its reads, memory hits, memoized computations,
+`@fresh` runs, disk loads, waits on another request's computation and errors,
+with their times, and the invalidations that dropped values. The trace stays
+open until the request and every operation it started have ended, so a route
+that answers with a poller is traced to the end of its computation. The
+response carries `X-HTMXO-Trace-Id: <id>` and a `Server-Timing` header with the
+ten properties that took the most own time so far, which browser developer
+tools show in the request's timing view. A full page traced on request carries
+a script that adds `X-HTMXO-Trace: 1` to every same-origin htmx request it makes,
+so its fragments, lazy loads and polls are traced too. When a trace closes,
+`serve` logs one line at `Info` with `_group=:trace`, naming its three slowest
+properties, for example `time - trace 17 GET /review 200 1.842s:
+AppData.load_transaction_state 1.512s (28 fresh), …`. The latest closed traces
+(`trace_limit`, 100 by default, see [`configure_runtime!`](@ref)) are kept with
+[`runtime_tracker`](@ref)'s ledgers, read by [`request_traces`](@ref) and
+[`RuntimeRoutes`](@ref)' `traces` and `trace(id)` pages. A trace keeps the
+per-property table and the invalidation log, never the arguments of a read.
+Not kept: the dashboard's own requests, a follow-up poll that computed nothing
+(its operation's work is in the trace of the request that started it), and,
+under `:all`, a request that read no property. [`dispatch`](@ref), static
+export and prewarming do not go through `serve`: wrap such a call in
+`with_compute_trace` yourself. A `@queued` body that runs in a job-queue worker
+process ([`configure_job_queue!`](@ref)) is not traced; the request's trace shows
+its wait.
 
 After the listener starts, `serve` logs `Serving on http://<host>:<port>` and
 flushes `stderr` before waiting or returning. With Julia's default logger the
@@ -377,8 +410,9 @@ function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
         runtime_tracking::Bool=true, compress::Bool=true, prestart::Bool=true,
-        operation_stream::Bool=true, kwargs...)
+        operation_stream::Bool=true, compute_trace=false, kwargs...)
     kwargs = _drop_oxygen_kwargs(kwargs)
+    _check_compute_trace(compute_trace)
     revise in (nothing, :none, :lazy, :eager) ||
         throw(ArgumentError("`revise` must be nothing, :lazy or :eager, got $(repr(revise))"))
     Revise = revise in (:lazy, :eager) ? _revise_module() : nothing
@@ -392,7 +426,8 @@ function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false
     _OPERATION_PUSH_APP[] = operation_stream ? _inner_pipeline(middleware, router) : nothing
     handle = _stream_handler(
         _served_middleware(_request_pipeline(middleware, access_log, Revise,
-                                             tracker; operation_stream, router)),
+                                             tracker; operation_stream, router,
+                                             compute_trace)),
         check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
@@ -455,15 +490,18 @@ function _drop_oxygen_kwargs(kwargs)
 end
 
 # The request pipeline, outermost first: access log → runtime `tracker` →
-# Revise → caller `middleware` → fallback → `ROUTER`.
+# compute trace → Revise → caller `middleware` → fallback → `ROUTER`. Traces
+# are recorded on `tracker`, or on the global tracker when tracking is off.
 function _request_pipeline(middleware, access_log, Revise, tracker=nothing;
-        operation_stream::Bool=false, router=ROUTER)
+        operation_stream::Bool=false, router=ROUTER, compute_trace=false)
     app = _fallback_middleware(
         operation_stream ? _operation_stream_router(router) : router)
     for m in reverse(middleware)
         app = m(app)
     end
     Revise === nothing || (app = _revise_middleware(app, Revise))
+    _check_compute_trace(compute_trace) === false ||
+        (app = _trace_requests(app, compute_trace, something(tracker, runtime_tracker())))
     tracker === nothing || (app = track_requests(app; tracker))
     access_log === nothing || (app = _access_log_middleware(app, access_log))
     return app
@@ -16134,7 +16172,7 @@ end
 # request contexts of the answer that starts it, so what a route body renders
 # there is for the same reader (`private`) in the same language (`page_lang`).
 # Literal pool symbols: `@spawn` only accepts a computed pool on newer Julia.
-_spawn_operation(f, pool::Symbol) = _spawn_operation(f, Val(pool))
+_spawn_operation(f, pool::Symbol) = _spawn_operation(_traced_operation(f), Val(pool))
 _spawn_operation(f, ::Val{:default}) = Threads.@spawn :default f()
 _spawn_operation(f, ::Val{:interactive}) = Threads.@spawn :interactive f()
 
@@ -30489,6 +30527,8 @@ include("routes/resource_routes.jl")
 include("routes/shared_ops_routes.jl")
 
 include("runtime.jl")
+
+include("request_trace.jl")
 
 include("runtime_panels.jl")
 
