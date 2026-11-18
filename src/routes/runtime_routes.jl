@@ -10,6 +10,8 @@
 #   GET  /runtime/jobs       one job board as a fragment (it polls itself)
 #   GET  /runtime/job/:id    inspect or watch one retained job
 #   GET  /runtime/job_board/:id  one retained job as a polling fragment
+#   GET  /runtime/traces     traced requests (`serve(; compute_trace)`)
+#   GET  /runtime/trace/:id  one request's compute trace
 #   GET  /runtime/snapshot   `runtime_snapshot()` as JSON
 #   POST /runtime/clear      forget finished requests and jobs
 #
@@ -355,6 +357,150 @@ function _runtime_region(id::AbstractString, children...; prefix, live::Bool,
           hx_swap="outerHTML")
 end
 
+# --- request traces (`serve(; compute_trace)`) -------------------------------
+
+const _RUNTIME_NO_TRACES = "No traced requests. Start the server with " *
+    "`serve(; compute_trace=:requested)` and add `?__trace` to an address (or " *
+    "send `X-HTMXO-Trace: 1`), or with `compute_trace=:all` to trace every request."
+
+_runtime_trace_href(prefix, id) = "$(prefix)/trace/$(id)"
+
+function _runtime_trace_slowest(rows)
+    isempty(rows) && return "—"
+    r = first(rows)
+    h.span(_runtime_code(_trace_label(r)), " ", _trace_seconds(r.self_s + r.hit_s),
+           " s (", _trace_counts(r), ")")
+end
+
+_runtime_trace_took(rt) = isnan(rt.duration) ?
+    h.span("running"; class="u-text-muted",
+           title="The request, or an operation it started, still runs.") :
+    _trace_seconds(rt.duration) * " s"
+
+"""
+    _runtime_traces_view(tracker; prefix, limit) -> Node
+
+The traced requests, newest first: open ones, then the latest closed ones.
+"""
+function _runtime_traces_view(tracker::RuntimeTracker; prefix::AbstractString,
+        limit::Integer=100)
+    traces = request_traces(tracker)
+    shown = traces[1:min(max(0, Int(limit)), length(traces))]
+    rows = map(shown) do rt
+        trows = compute_trace_rows(rt.trace)
+        h.tr(
+            h.td(h.a("#$(rt.id)"; href=_runtime_trace_href(prefix, rt.id))),
+            h.td(_runtime_clock(rt.started_at)),
+            h.td(rt.method),
+            h.td(_runtime_code(rt.target)),
+            h.td(rt.status == 0 ? "…" : string(rt.status)),
+            h.td(isnan(rt.response_s) ? "…" : _trace_seconds(rt.response_s) * " s"),
+            h.td(_runtime_trace_took(rt)),
+            h.td(string(sum(r -> r.calls, trows; init=0))),
+            h.td(_runtime_trace_slowest(trows)),
+        )
+    end
+    caption = length(shown) < length(traces) ?
+        "Traced requests (latest $(length(shown)) of $(length(traces)))" :
+        "Traced requests"
+    h.section(
+        h.style(_RUNTIME_STYLES),
+        h.p(h.a("← Runtime"; href=prefix); class="u-text-muted"),
+        _runtime_table(caption,
+            ("Trace", "At", "Method", "Target", "Status", "Response", "Took", "Reads",
+             "Slowest property"),
+            rows; empty=_RUNTIME_NO_TRACES);
+        class="htmxo-runtime")
+end
+
+# The per-property columns, as DynamicObjects prints them: header, row field,
+# formatter, always shown (the others only when some row has a value).
+const _RUNTIME_TRACE_COLUMNS = (
+    ("Self s", :self_s, _trace_seconds, true),
+    ("Total s", :total_s, _trace_seconds, false),
+    ("Max s", :max_s, _trace_seconds, false),
+    ("Hit s", :hit_s, _trace_seconds, false),
+    ("Wait s", :wait_s, _trace_seconds, false),
+    ("Calls", :calls, string, true),
+    ("Hits", :hits, string, false),
+    ("Computed", :computed, string, false),
+    ("Fresh", :fresh, string, false),
+    ("Disk", :disk, string, false),
+    ("Waits", :waits, string, false),
+    ("Pending", :pending, string, false),
+    ("Errors", :errors, string, false),
+)
+
+function _runtime_trace_properties(rows)
+    columns = [c for c in _RUNTIME_TRACE_COLUMNS
+               if c[4] || any(r -> getfield(r, c[2]) != 0, rows)]
+    body = map(rows) do r
+        h.tr(h.td(_runtime_code(_trace_label(r))),
+             (h.td(c[3](getfield(r, c[2]))) for c in columns)...)
+    end
+    _runtime_table("Properties, by own time", ("Property", (c[1] for c in columns)...),
+        body; empty="This request read no property.")
+end
+
+function _runtime_trace_invalidations(rt::RequestTrace)
+    isnan(rt.duration) && return h.section(h.h2("Invalidations"),
+        h.p("Shown when the trace closes."; class="u-text-muted"))
+    invalidations = rt.trace.invalidations
+    body = map(invalidations) do inv
+        h.tr(
+            h.td("+" * _trace_seconds(inv.at) * " s"),
+            h.td(_runtime_code(inv.verb)),
+            h.td(_runtime_code(_trace_type_label(inv.type))),
+            h.td(isempty(inv.dropped) ? "nothing" : join(inv.dropped, ", ")),
+            h.td(inv.issued_from === nothing ? "outside a traced computation" :
+                 _runtime_code(string(_trace_type_label(inv.issued_from[1]), ".",
+                                      inv.issued_from[2]))),
+            h.td(inv.key === nothing ? "—" :
+                 _runtime_code(repr(inv.key; context=:limit => true))),
+        )
+    end
+    dropped = rt.trace.invalidations_dropped
+    h.div(
+        _runtime_table("Invalidations",
+            ("At", "Verb", "Type", "Dropped", "Issued from", "Key"), body;
+            empty="No invalidation."),
+        dropped > 0 ? h.p("… $(dropped) more not kept."; class="u-text-muted") : nothing)
+end
+
+"""
+    _runtime_trace_view(tracker; prefix, id) -> Node
+
+One request's compute trace: the request, the per-property table sorted by own
+time, and the invalidation log.
+"""
+function _runtime_trace_view(tracker::RuntimeTracker; prefix::AbstractString, id::Integer)
+    back = h.p(h.a("← Traced requests"; href="$(prefix)/traces"); class="u-text-muted")
+    rt = request_trace(id, tracker)
+    rt === nothing && return h.section(back, h.h1("Trace #$(id)"),
+        h.p("Not kept: the tracker keeps the latest $(tracker.trace_limit) traces, " *
+            "and none of a request that read no property or of a poll that computed " *
+            "nothing."); class="htmxo-runtime")
+    rows = compute_trace_rows(rt.trace)
+    total(f) = sum(r -> getfield(r, f), rows; init=0)
+    summary = h.p(
+        _runtime_code(string(rt.method, " ", rt.target)), " · ",
+        rt.status == 0 ? "no response yet" : "status $(rt.status)", " · ",
+        "started ", _runtime_timestamp(rt.started_at), " · ",
+        "response ", isnan(rt.response_s) ? "…" : _trace_seconds(rt.response_s) * " s", " · ",
+        "took ", _runtime_trace_took(rt), " · ",
+        "$(total(:calls)) reads · $(total(:hits)) hits · $(total(:computed)) computed · " *
+        "$(total(:fresh)) fresh · $(total(:disk)) disk · $(total(:waits)) waits";
+        class="u-text-muted")
+    h.section(
+        h.style(_RUNTIME_STYLES),
+        back,
+        h.h1("Trace #$(rt.id)"),
+        summary,
+        _runtime_trace_properties(rows),
+        _runtime_trace_invalidations(rt);
+        class="htmxo-runtime")
+end
+
 """
     runtime_dashboard(tracker=runtime_tracker(); prefix="/runtime", live=true,
                       refresh="2s", limit=100)
@@ -382,6 +528,7 @@ function runtime_dashboard(tracker::RuntimeTracker=runtime_tracker();
             hx_target="#htmxo-runtime", hx_swap="outerHTML")
     controls = h.p(
         toggle, " · ",
+        h.a("Traced requests"; href="$(prefix)/traces"), " · ",
         h.a("JSON"; href="$(prefix)/snapshot"), " · ",
         h.button("Clear history"; type="button", class="secondary",
                  hx_post=query_url("$(prefix)/clear"; live, limit),
@@ -437,6 +584,14 @@ Provides:
   authoritative record live; its Result action appears only for a safe,
   unredacted GET target.
 - `@get job_board(id)` — the single-job polling fragment used by `job`.
+- `@get traces(; limit=100)` — the traced requests (see [`serve`](@ref)'s
+  `compute_trace`), newest first: address, status, time to the response, time
+  until the trace closed (`running` while an operation the request started
+  still runs), reads and the slowest property.
+- `@get trace(id)` — one request's compute trace: every property it read with
+  its own and total time, hits, computations, `@fresh` runs, disk loads, waits
+  and errors, sorted by own time, and the invalidations issued meanwhile. `id`
+  is the response's `X-HTMXO-Trace-Id`. Both read as Markdown with `?plain`.
 - `@get snapshot()` — [`runtime_snapshot`](@ref) as JSON.
 - `@post clear()` — [`clear_runtime_history!`](@ref).
 
@@ -484,6 +639,16 @@ headers, cookies or bodies.
         _runtime_hide_request!(__req__)
         _runtime_job_board(something(tracker, runtime_tracker());
                            prefix=string(__self__), id, poll_interval=refresh)
+    end
+    @fresh @direct @get traces(; limit::Int=100) = begin
+        _runtime_hide_request!(__req__)
+        _runtime_traces_view(something(tracker, runtime_tracker());
+                             prefix=string(__self__), limit)
+    end
+    @fresh @direct @get trace(id::Int) = begin
+        _runtime_hide_request!(__req__)
+        _runtime_trace_view(something(tracker, runtime_tracker());
+                            prefix=string(__self__), id)
     end
     @fresh @direct @get snapshot() = begin
         _runtime_hide_request!(__req__)
