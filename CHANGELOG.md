@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.182
+
+- `send_ahead(() -> view(results))` builds an intermediate view only when
+  its computation has a running poller. The builder runs at the call site,
+  including in a queue worker. A stage reached before polling starts is skipped.
+
 ## 0.1.181
 
 - `htmx` and `pico_page` accept `html_attrs` for the opening `<html>` tag

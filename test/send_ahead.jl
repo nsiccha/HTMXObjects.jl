@@ -38,7 +38,10 @@ using TestItemRunner
         lock(() -> (counts[key] = get(counts, key, 0) + 1), ahead_lock)
         send_ahead(h.p("first-$key"; id="first-$key"))
         wait(gate("$key-1"))
-        send_ahead(h.p("second-$key"; id="second-$key"))
+        send_ahead() do
+            lock(() -> (counts["preview-$key"] = get(counts, "preview-$key", 0) + 1), ahead_lock)
+            h.p("second-$key"; id="second-$key")
+        end
         wait(gate("$key-2"))
         h.p("final-$key"; id="final-$key")
     end
@@ -52,7 +55,8 @@ using TestItemRunner
         @fresh @get ahead_quiet(; key::String) = (wait(gate("$key-1")); h.p("quiet-$key"))
         "A read that finishes within the grace period"
         @fresh @get ahead_fast(; key::String) =
-            (send_ahead(h.p("fast-part-$key")); h.p("fast-$key"))
+            (send_ahead(h.p("fast-part-$key"));
+             send_ahead(() -> error("ineligible preview was built")); h.p("fast-$key"))
     end
 
     # A memoized read on a retained root, so several requests follow one
@@ -60,6 +64,30 @@ using TestItemRunner
     @htmx struct AheadSharedApp
         "A slow memoized read that sends two parts ahead"
         @get ahead_shared(; key::String) = staged(key)
+        @get ahead_preview_page() = lazy("/ahead_previews?key=survey"; id="survey")
+        @fresh @get ahead_inline() = begin
+            send_ahead(() -> error("built an inline preview"))
+            h.p("inline")
+        end
+        @get ahead_previews(; key::String) = preview_stages(key)
+    end
+
+    function preview_stages(key)
+        first = true
+        for stage in 1:4
+            wait(gate("$key-$stage"))
+            send_ahead() do
+                nested = dispatch(:GET, "/ahead_inline"; operation_policy=:blocking)
+                nested.status == 200 || error("nested blocking preview ran")
+                lock(() -> (counts["built-$stage"] = 1), ahead_lock)
+                node = first ? h.div(; id="preview")("frame") :
+                               h.div(; id="preview", hx_swap_oob="true")("update")
+                first = false
+                node
+            end
+            lock(() -> (counts["attempted-$stage"] = 1), ahead_lock)
+        end
+        h.p("done")
     end
 
     # The beacon the browser driver sent that starts with `prefix`, or `nothing`.
@@ -80,7 +108,7 @@ using TestItemRunner
             document.getElementById('rows-$key').appendChild(li);
             """)))
         wait(gate("$key-1"))
-        send_ahead(h.div(; hx_swap_oob="beforeend:#rows-$key")(h.li("swapped")))
+        send_ahead(() -> h.div(; hx_swap_oob="beforeend:#rows-$key")(h.li("swapped")))
         wait(gate("$key-2"))
         h.p("final-$key"; id="final-$key")
     end
@@ -198,6 +226,7 @@ end
     import HTMXObjects: h
 
     @test send_ahead(h.p("nowhere")) === nothing
+    @test send_ahead(() -> error("built outside an operation")) === nothing
     @test HTMXObjects._SENT_AHEAD[] === nothing
     # A start whose result is no running computation binds nothing lasting.
     @test HTMXObjects._with_sent_ahead(() -> (send_ahead(h.p("x")); 1)) == 1
@@ -218,12 +247,27 @@ end
                     pollint=0.01) === :ok
     # A second start that joins the same computation: what its own list held
     # goes to the computation's, and so does everything it sends later.
+    worker_probe = Ref("")
     joined = HTMXObjects._with_sent_ahead() do
         send_ahead(h.p("joined"))
+        worker_probe[] = HTMXObjects._wire_preview_reader(HTMXObjects._PREVIEW_READER[])
         started
     end
     @test joined === started
     @test HTMXObjects._sent_ahead_of(joined) === sink
+    # A worker wired before the join sees the same live eligibility, including
+    # expiry without a request coming back to prune the registry.
+    now = HTMXObjects._operation_poll_now()
+    HTMXObjects._set_preview_deadline!(sink, "reader", now + 60)
+    @test HTMXObjects._has_preview_reader(worker_probe[])
+    HTMXObjects.ScopedValues.with(HTMXObjects._PREVIEW_READER => sink) do
+        @test_throws ErrorException send_ahead(() -> error("builder failed"))
+    end
+    HTMXObjects._set_preview_deadline!(sink, "reader", now - 1)
+    @test !HTMXObjects._has_preview_reader(sink)
+    @test !HTMXObjects._has_preview_reader(worker_probe[])
+    HTMXObjects._set_preview_deadline!(sink, "reader", 0.0)
+    @test !ispath(worker_probe[])
     notify(gate)
     @test fetch(started) == 1
     @test last.(HTMXObjects._sent_ahead_parts(sink, 0)) ==
@@ -272,6 +316,8 @@ end
         @test contains(first, "first-a")
         url = poll_url(first)
         token = stream_token(url)
+        sink = HTMXObjects._operation_poll_snapshot()[token].preview_sink
+        @test HTMXObjects._has_preview_reader(sink)
         # A poll says how many parts its page applied, and gets only the rest.
         applied(n) = carriers(String(HTTP.get(base * url,
             [hx; "HTMXO-Sent-Ahead" => string(n)]; retry=false).body))
@@ -300,11 +346,14 @@ end
         finally
             close(stream.sock)
         end
+        # The computation ended without an end record or a final browser poll.
+        @test timedwait(() -> !HTMXObjects._has_preview_reader(sink), 10.0) === :ok
         final = HTTP.get(base * url, hx; retry=false, status_exception=false)
         @test final.status == 286
         @test contains(String(final.body), "final-a")
         @test carriers(String(final.body)) == Int[]
         @test runs("a") == 1
+        @test runs("preview-a") == 1
 
         # A pushing stream: its running answers carry no parts (the stream
         # sends them as `ahead` events), nor does the final answer.
@@ -362,6 +411,7 @@ end
         @test contains(text, "final-m")
         @test !contains(text, "first-m")
         @test !contains(text, "second-m")
+        @test runs("preview-m") == 0
 
         # Neither does a blocking in-process dispatch.
         blocking = @async String(dispatch(:GET, "/ahead_fresh?key=d"; headers=hx,
@@ -372,6 +422,10 @@ end
         @test contains(body, "final-d")
         @test isempty(carriers(body))
         @test !contains(body, "first-d")
+        @test runs("preview-d") == 0
+        recorded = dispatch(:GET, "/ahead_fast?key=static"; headers=hx, static=StaticExport())
+        @test recorded.status == 200
+        @test contains(String(recorded.body), "fast-static")
 
         # An answer within the grace period is the bare result.
         fast = String(HTTP.get(base * "/ahead_fast?key=f", hx; retry=false).body)
@@ -408,9 +462,60 @@ end
         @test poll(url_two) == [1, 2]
         release!("c-2")
         @test runs("c") == 1
+        @test runs("preview-c") == 1
     finally
         terminate()
         HTMXObjects.OPERATION_LOG[] = operation_log
+    end
+end
+
+@testitem "lazy previews follow the first and last running reader of a prestarted computation" setup=[SentAheadFixtures, PrestartFixtures] tags=[:integration] begin
+    using HTMXObjects, Test
+    # The operation begins as the page renders. It can have a retained token
+    # well before a poller exists, and two poll URLs may follow one computation.
+    SentAheadFixtures.reset_ahead!()
+    route!(AheadSharedApp(); root_provider=RootProvider(scope=:job, key=_ -> "shared",
+        retention=RootRetention(max_entries=4, ttl=600)))
+    hx = ("HX-Request" => "true",)
+    request(url) = PrestartFixtures.body_text(PrestartFixtures.served_get(url, hx...))
+    function stage(n)
+        SentAheadFixtures.release!("survey-$n")
+        @test timedwait(() -> SentAheadFixtures.runs("attempted-$n") == 1, 10.0) === :ok
+        SentAheadFixtures.runs("built-$n")
+    end
+    try
+        PrestartFixtures.with_prestart() do
+            page = PrestartFixtures.body_text(PrestartFixtures.served_get(
+                "/ahead_preview_page", "Accept" => "text/html"))
+            token = PrestartFixtures.prestart_token(page, "survey")
+            @test token !== nothing
+            @test stage(1) == 0
+
+            first = request("/ahead_previews?key=survey&__htmxo_operation=$token")
+            first_url = SentAheadFixtures.poll_url(first)
+            @test stage(2) == 1
+            @test occursin("frame", request(first_url))
+            second = request("/ahead_previews?key=survey")
+            second_url = SentAheadFixtures.poll_url(second)
+            @test SentAheadFixtures.stream_token(second_url) != token
+            @test SentAheadFixtures.carriers(second) == [1]
+
+            HTMXObjects._delete_operation_poll!(token)
+            @test stage(3) == 1
+            body = request(second_url)
+            @test SentAheadFixtures.carriers(body) == [1, 2]
+            @test occursin("hx-swap-oob", body)
+            HTMXObjects._end_operation_poll!(SentAheadFixtures.stream_token(second_url), :evicted)
+            @test stage(4) == 0
+        end
+        mktempdir() do dir
+            record!(AheadSharedApp(); record_dir=dir, paths=["/ahead_inline"],
+                    full=false, hx=true, markdown=false)
+            @test contains(read(joinpath(dir, "hx", "ahead_inline.html"), String), "<p>inline</p>")
+        end
+    finally
+        foreach(n -> SentAheadFixtures.release!("survey-$n"), 1:4)
+        HTMXObjects._clear_operation_polls!()
     end
 end
 
