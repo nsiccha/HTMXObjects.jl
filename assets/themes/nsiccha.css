@@ -16,10 +16,11 @@ main section > h2 {
     padding-block-end: 0.45rem;
     border-bottom: 2px solid var(--pico-muted-border-color, var(--htmxo-muted));
 }
-main .grid {
+main .grid:has(> article) {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
     gap: 1rem;
+    margin-block-end: 2.5rem;
 }
 main article {
     margin: 0;
