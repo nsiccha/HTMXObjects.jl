@@ -181,3 +181,120 @@ end
     @test_throws ArgumentError prewarm_routes!("http://127.0.0.1:1", ["/"];
         timeout=-1)
 end
+
+@testitem "package warmup joins the selected page's load-triggered GETs" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    using Treebars
+    starts = String[]
+    attached = String[]
+    function observe(handler)
+        function (req)
+            if haskey(req.context, :htmxo_prestart)
+                push!(starts, String(req.target))
+            elseif haskey(req.context, :htmxo_warm_page) && HTMXObjects._operation_attach_request(req)
+                push!(attached, HTMXObjects._request_route_path(req))
+            end
+            handler(req)
+        end
+    end
+    @htmx struct WarmFragmentApp
+        @direct @get panel() = h.div(lazy("/part_a"), lazy("/part_b?x=2"),
+                                      h.div(; hx_get=__self__/"unused", hx_trigger="click"))
+        @get part_a() = h.p("warm-a")
+        @get part_b(; x::Int=1) = h.p("warm-b-$x")
+        @get unused() = error("a click is not part of the page load")
+    end
+    route!(WarmFragmentApp())
+    settings = (; middleware=[observe])
+    for (mode, routes, urls, expected) in (
+            (:linked, [:panel], (), ["/part_a", "/part_b?x=2"]),
+            (:selected, [:panel], (), String[]),
+            (:selected, [:panel, :part_a], (), ["/part_a"]),
+            (:selected, [:panel], ["/part_b?x=2"], ["/part_b?x=2"]))
+        empty!(starts)
+        empty!(attached)
+        # Omit the keyword entirely for the default.
+        kw = mode === :linked ? (;) : (; fragments=mode)
+        rows = prewarm_workload!(WarmFragmentApp; routes, urls, server_kwargs=settings, kw...)
+        @test first(rows.routes).status == 200
+        @test starts == expected
+        @test sort(intersect(attached, ["/part_a", "/part_b"])) ==
+              sort([first(split(x, '?')) for x in expected])
+        @test all(e -> !haskey(e.request.context, :htmxo_warm_page),
+                  values(HTMXObjects._operation_poll_snapshot()))
+    end
+    @test_throws ArgumentError prewarm_workload!(WarmFragmentApp; fragments=:all)
+end
+
+@testitem "a failed warm attachment releases only that workload's operations" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    @htmx struct FailedWarmApp
+        @direct @get landing() = h.section(lazy("/child"))
+        @get child() = h.p("child")
+    end
+    route!(FailedWarmApp())
+    token = Ref("")
+    function reject_attach(handler)
+        function (req)
+            if haskey(req.context, :htmxo_warm_page) && HTMXObjects._operation_attach_request(req)
+                token[] = HTMXObjects._operation_poll_token(req)
+                return HTTP.Response(200, ["X-HTMXO-Error-Id" => "warm-test"], "failed")
+            end
+            handler(req)
+        end
+    end
+    failure = try
+        prewarm_workload!(FailedWarmApp; routes=[:landing], server_kwargs=(; middleware=[reject_attach]))
+        nothing
+    catch err
+        err
+    end
+    @test failure isa ErrorException
+    @test occursin("warm-test", sprint(showerror, failure))
+    @test !isempty(token[])
+    @test !haskey(HTMXObjects._operation_poll_snapshot(), token[])
+    @test !haskey(HTMXObjects._pushed_answers, token[])
+    @test !isopen(HTMXObjects._SERVER[])
+
+    # An ordinary navigation on the same temporary listener has its own token.
+    unrelated = Ref("")
+    prewarm_workload!(FailedWarmApp; routes=[:landing]) do base
+        response = HTTP.get(base * "/landing", ["Accept" => "text/html"])
+        address = HTMXObjects._prewarm_next(String(response.body))
+        unrelated[] = HTTP.queryparams(HTTP.URI(address))["__htmxo_operation"]
+    end
+    try
+        @test haskey(HTMXObjects._operation_poll_snapshot(), unrelated[])
+    finally
+        HTMXObjects._end_operation_poll!(unrelated[], :abandoned)
+    end
+end
+
+@testitem "a warm navigation consumes the built-in operation stream" setup=[HTMXOTestImports] tags=[:integration, :server] begin
+    using Treebars
+    release = Base.Event()
+    stream_seen = Ref(false)
+    function observe(handler)
+        function (req)
+            if haskey(req.context, :htmxo_warm_page) &&
+                    HTMXObjects._operation_stream_tokens(req) !== nothing
+                stream_seen[] = true
+                notify(release)
+            end
+            handler(req)
+        end
+    end
+    @htmx struct WarmStreamApp
+        @direct @get warm_landing() = h.section(lazy("/warm_fragment"))
+        @get warm_fragment() = (wait(release); h.p("stream-result"))
+    end
+    route!(WarmStreamApp())
+    try
+        rows = prewarm_workload!(WarmStreamApp; routes=[:warm_landing],
+            timeout=10, server_kwargs=(; middleware=[observe]))
+        @test all(row -> row.status == 200, rows.routes)
+        @test stream_seen[]
+        @test all(e -> !haskey(e.request.context, :htmxo_warm_page),
+                  values(HTMXObjects._operation_poll_snapshot()))
+    finally
+        notify(release)
+    end
+end
