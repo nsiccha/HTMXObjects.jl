@@ -37,6 +37,29 @@
     @test_throws ArgumentError htmx(content; theme=h.link(rel="icon", href="/logo.svg"))
 end
 
+@testitem "the page shell accepts attributes on the document root" tags=[:unit] begin
+    using HTMXObjects
+    html(page) = repr(MIME"text/html"(), page)
+    root(page) = match(r"<html[^>]*>", html(page)).match
+    content = h.p("Report")
+    attrs = (; data_theme="light", data_design="A & \"B\"", hidden=false, dir=nothing)
+    for shell in (htmx, HTMXObjects.pico_page)
+        @test html(shell(content; html_attrs=(;))) == html(shell(content))
+        page = shell(content; lang="en", html_attrs=attrs)
+        @test root(page) == "<html lang=\"en\" hx-ext=\"preload\" data-theme=\"light\" data-design=\"A &amp; &quot;B&quot;\">"
+        @test root(static_transform(page)) == root(page)
+    end
+
+    # The caller and shell may repeat the same attribute, using either spelling.
+    @test root(htmx(content; html_attrs=(; var"HX-EXT"="preload"))) == root(htmx(content))
+    @test_throws ArgumentError htmx(content; html_attrs=(; var"HX-EXT"="other"))
+    @test_throws ArgumentError htmx(content; lang="en", html_attrs=(; lang="de"))
+    @test_throws ArgumentError htmx(content; error_texts=error_texts(:de),
+        html_attrs=(; data_htmxo_error_texts="other"))
+    @test_throws ArgumentError htmx(content; html_attrs=(; data_theme="light", var"data-theme"="dark"))
+    @test_throws ArgumentError htmx(content; html_attrs=(; var"bad name"="value"))
+end
+
 @testitem "the themed site example exports both pages with one local stylesheet" tags=[:integration] begin
     using HTMXObjects
     include(joinpath(pkgdir(HTMXObjects), "examples", "themed_site.jl"))
@@ -60,6 +83,7 @@ end
     using HTMXObjects
     @htmx struct BrandedApp
         __page__(content) = htmx(h.main(content); assets=:vendor,
+            html_attrs=(; data_theme="light", data_design="lab"),
             theme=h.link(rel="stylesheet", href="/theme-test-brand/site.css"))
         @get index() = h.h1("Branded page")
     end
@@ -74,9 +98,15 @@ end
         route!(BrandedApp(); prefix="/themed-doc", operation_policy=:blocking)
         out = joinpath(dir, "site")
         url = "/themed-doc/"
-        @test occursin("href=\"/theme-test-brand/site.css\"", String(dispatch(:GET, url).body))
+        live = String(dispatch(:GET, url).body)
+        @test occursin("href=\"/theme-test-brand/site.css\"", live)
         export_site(out; pages=[url])
         page = read(joinpath(out, static_file_name(url)), String)
+        for document in (live, page)
+            root = match(r"<html[^>]*>", document).match
+            @test occursin("data-theme=\"light\"", root)
+            @test occursin("data-design=\"lab\"", root)
+        end
         @test occursin("href=\"theme-test-brand/site.css\"", page)
         @test read(joinpath(out, "theme-test-brand", "site.css"), String) == css
         @test read(joinpath(out, "theme-test-brand", "mark.svg"), String) == mark

@@ -63,18 +63,26 @@ states such as `[aria-current="page"]`, HTMXObjects variables such as
 `--htmxo-accent`, and Pico's `--pico-*` variables. Theme CSS comes after
 the shell's defaults. `extra_head` comes last for app-specific overrides.
 
+If the design has a light palette only, pass `html_attrs=(; data_theme="light")`.
+This writes `data-theme="light"` on the document root, so Pico keeps its light
+form controls even when the reader prefers dark mode. You can include other
+root attributes in the same named tuple.
+
 ```@example views
 app_dir = mktempdir(); # hide
 write(joinpath(app_dir, "lab.css"), lab_css); # hide
 const LAB_THEME = read(joinpath(app_dir, "lab.css"), String);
 
 @htmx struct LabApp
-    __page__(content) = HTMXObjects.pico_page(content; theme=LAB_THEME)
+    __page__(content) = HTMXObjects.pico_page(content; theme=LAB_THEME,
+        html_attrs=(; data_theme="light"))
     @get index() = h.article(h.h1("Estimates"))
 end
 route!(LabApp(); prefix="/lab", operation_policy=:blocking);
 response = dispatch(:GET, "/lab/");
-@assert response.status == 200 && occursin(LAB_THEME, String(response.body))
+lab_page = String(response.body);
+@assert response.status == 200 && occursin(LAB_THEME, lab_page)
+@assert occursin("data-theme=\"light\"", match(r"<html[^>]*>", lab_page).match)
 ```
 
 If your design also changes the **page structure**, build the landmarks

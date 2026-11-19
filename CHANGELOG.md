@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.181
+
+- `htmx` and `pico_page` accept `html_attrs` for the opening `<html>` tag
+  on live pages and HTML exports. Use `html_attrs=(; data_theme="light")`
+  for a light-only Pico design.
+
 ## 0.1.180
 
 - Use `theme=:nsiccha` in a live app or its HTML snapshot for the

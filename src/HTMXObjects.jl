@@ -3710,7 +3710,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, pico_color=nothing, theme=nothing, katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, pico_color=nothing, theme=nothing, html_attrs=(;), katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -3809,6 +3809,12 @@ file across pages. The theme follows the built-in styles and precedes
 `__page__` for both live pages and HTML exports. The bundled theme follows
 `runtime`. The default `theme=nothing` adds nothing.
 
+`html_attrs` is a named tuple of attributes for the opening `<html>` tag.
+For a light-only Pico design, pass `html_attrs=(; data_theme="light")`.
+These attributes travel with saved pages and static exports. As on other
+HTML nodes, underscores become hyphens and attribute values are escaped.
+If an attribute is also set by the shell, both values must agree.
+
 `assets=:vendor` serves the same files same-origin from `/vendor/...`
 (byte-identical to the CDN files at the pinned versions) instead of the CDN,
 so the page loads fully offline — mount them with [`vendorfiles`](@ref) and
@@ -3858,6 +3864,7 @@ function htmx(args...;
     pico_version        = nothing,
     pico_color          = nothing,
     theme               = nothing,
+    html_attrs          = (;),
     katex_version       = _KATEX_VERSION,
     prism_version       = _PRISM_VERSION,
     assets              = :cdn,
@@ -3908,9 +3915,9 @@ function htmx(args...;
     isnothing(prism_version)       || push!(cdn, _head_asset_node(Val(:prism), _head_asset_src(:prism, prism_version, "https://cdn.jsdelivr.net/npm/prismjs@$(prism_version)", assets; versioned)))
     # `hx-ext` on `<html>` rather than `<body>`: htmx collects extensions from
     # every ancestor, and a caller-supplied `body` keeps its own `hx-ext`.
-    html_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
+    shell_attrs = (; _lang_attrs(lang)..., (preload ? (; hx_ext="preload") : (;))...,
         _error_texts_attrs(error_texts)...)
-    html = isempty(html_attrs) ? h.html : h.html(; html_attrs...)
+    html = _page_html(shell_attrs, html_attrs)
     # The runtime blocks the shell carries, before and after the overlay
     # bootstrap.
     shell_blocks = (
@@ -4012,6 +4019,24 @@ function htmx(args...;
         ),
         body(args...),
     ))
+end
+
+function _page_html(shell_attrs, html_attrs::NamedTuple)
+    isempty(html_attrs) && isempty(shell_attrs) && return h.html
+    root = h.html(; shell_attrs...)
+    attrs = HTMX.attrs(root)
+    for (key, value) in pairs(html_attrs)
+        (value === nothing || value === false) && continue
+        # HTML attribute names are ASCII case-insensitive.
+        name = replace(String(key), '_' => '-', r"[A-Z]+" => lowercase)
+        if isempty(name) || occursin(r"""[\x00-\x20\x7f"'<>/=]""", name)
+            throw(ArgumentError("html_attrs: invalid HTML attribute name $(repr(key))"))
+        end
+        text = string(value)
+        get!(attrs, Symbol(name), text) == text || throw(ArgumentError(
+            "html_attrs: conflicting values for the <html> attribute $(repr(name))"))
+    end
+    root
 end
 
 # The `<html>` attribute that carries the page's language. A BCP 47 tag is a
@@ -4256,7 +4281,8 @@ pinned release under vendor assets (`assets=:vendor` or a mount path), which
 serve only that pin. `pico_color` picks the page's accent among Pico's colour
 builds, light and dark mode alike: `pico_page(content; pico_color=:cyan)`
 ([`htmx`](@ref) lists the names). Choose `theme=:juliabayes` or `theme=:nsiccha`, or pass your own CSS
-text or stylesheet link as `theme` to style the whole page. Every other keyword (`extra_head`, `runtime`, `tables`,
+text or stylesheet link as `theme` to style the whole page. For a light-only
+design, add `html_attrs=(; data_theme="light")`. Every other keyword (`extra_head`, `runtime`, `tables`,
 `error_texts`, `title`, the library versions, …) goes to [`htmx`](@ref):
 `pico_page(content; assets=:vendor, runtime=:linked)` is an offline page
 with a cacheable head, and `pico_page(content; lang="de",
