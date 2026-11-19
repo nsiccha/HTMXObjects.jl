@@ -8,7 +8,9 @@
   load-triggered GET fragments of each selected page. Use `fragments=:selected`
   to restrict fragment starts to the addresses in the workload. Rendered
   `CallerFault` panels are valid fragment answers during warmup. The serving
-  and precompilation request pools share a listener specialization.
+  and precompilation request pools share a listener specialization. The
+  package workload also restores native code for page and stream methods
+  invalidated by application dependencies.
 
 ## 0.1.184
 

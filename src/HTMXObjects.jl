@@ -10138,7 +10138,7 @@ function _operation_push!(sse, req, token::String; final::Bool)
     if response.status == 200
         return send("progress", String(_message_body_bytes(response))) ? :running : :closed
     end
-    _store_pushed_answer!(token, _request_route_path(poll), response; pages)
+    _store_pushed_answer!(token, _request_route_path(poll), response, pages)
     _operation_pushable(response) ?
         ended(send("result", String(_message_body_bytes(response)))) :
         ended(send("ready"))
@@ -10173,7 +10173,7 @@ const _PUSHED_ANSWER_LIMIT = 256
 const _PUSHED_ANSWER_TTL = 600.0
 const _pushed_answers = Dict{String,@NamedTuple{path::String,response::HTTP.Response,at::Float64}}()
 
-function _store_pushed_answer!(token::String, path::String, response::HTTP.Response; pages=nothing)
+function _store_pushed_answer!(token::String, path::String, response::HTTP.Response, pages=nothing)
     now = _operation_poll_now()
     stored = _copy_mutation_terminal(response)
     lock(_operation_poll_lock) do
@@ -20325,6 +20325,9 @@ function _prewarm_workload!(root, streams; routes=nothing, urls=(),
             end
         end
         streams === nothing || streams(base)
+        if operations && ccall(:jl_generating_output, Cint, ()) == 1
+            _precompile_page_paths()
+        end
         finished = true
         (; routes=route_rows, urls=url_rows)
     finally
