@@ -4,8 +4,9 @@ HTMXObjects turns Julia objects into HTTP routes that return HTML pages, fragmen
 
 [Start with installation and an executed example](https://nsiccha.github.io/HTMXObjects.jl/dev/).
 
-Use `theme=:juliabayes` for a JuliaBayes-style app and HTML snapshot, or
-supply your own stylesheet. [Run the two-page example](examples/themed_site.jl)
+Use `theme=:juliabayes` or `theme=:nsiccha` for a JuliaBayes-style or
+portfolio-style app and HTML snapshot, or supply your own stylesheet.
+[Run the two-page example](examples/themed_site.jl)
 or [customize the page shell](docs/src/guides/views.md#style-an-app-and-its-html-snapshots).
 
 The [documentation source](docs/README.md) describes the page structure and local build.

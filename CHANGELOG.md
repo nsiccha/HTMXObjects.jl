@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.180
+
+- Use `theme=:nsiccha` in a live app or its HTML snapshot for the
+  nsiccha.github.io portfolio's card grid, section headings and typography.
+
 ## 0.1.179
 
 - `htmx` and `HTMXObjects.pico_page` accept a `theme` for live pages and

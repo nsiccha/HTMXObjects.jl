@@ -1,9 +1,9 @@
 _page_theme_heads(::Nothing, mount) = ()
 
 function _page_theme_heads(name::Symbol, mount)
-    name === :juliabayes || throw(ArgumentError(
-        "unknown page theme $(repr(name)); use :juliabayes, CSS text, a style element or stylesheet link, or nothing"))
-    (_runtime_head(:juliabayes, mount),)
+    name in (:juliabayes, :nsiccha) || throw(ArgumentError(
+        "unknown page theme $(repr(name)); use :juliabayes, :nsiccha, CSS text, a style element or stylesheet link, or nothing"))
+    (_runtime_head(name, mount),)
 end
 
 function _page_theme_heads(node::Node, mount)
@@ -33,3 +33,9 @@ const _JULIABAYES_CSS = let assets = joinpath(@__DIR__, "..", "assets")
 end
 
 _juliabayes_styles() = h.style(Raw(_JULIABAYES_CSS))
+
+const _NSICCHA_CSS = let path = joinpath(@__DIR__, "..", "assets", "themes", "nsiccha.css")
+    Base.include_dependency(path)
+    read(path, String)
+end
+_nsiccha_styles() = h.style(Raw(_NSICCHA_CSS))

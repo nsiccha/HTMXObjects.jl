@@ -41,6 +41,11 @@ styles the headings, navigation and articles your app already renders.
 Add `class="htmxo-masthead"` to the introductory header for the site's
 multicolour density curve.
 
+For the style of [Nikolas Siccha's portfolio](https://nsiccha.github.io/),
+set `theme=:nsiccha` in the same shell. It uses Pico's light and dark palettes,
+ruled section headings and softly outlined article cards. Put sibling articles
+in `h.div(; class="grid")` to use the portfolio's responsive card grid.
+
 ```@example views
 lab_css = ":root { --htmxo-container-max-width: 80rem } main h1 { font-family: Georgia, serif }";
 themed_shell(content) = HTMXObjects.pico_page(content; theme=:juliabayes,

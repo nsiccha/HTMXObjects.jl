@@ -1,0 +1,40 @@
+/* The portfolio at nsiccha.github.io uses Pico's typography and palette.
+   Apply its section rules and card geometry to ordinary report markup. */
+:where(body) {
+    font-family: var(--pico-font-family, system-ui, sans-serif);
+    color: var(--pico-color, CanvasText);
+    background: var(--htmxo-bg, Canvas);
+}
+body > header > nav { justify-content: flex-end; gap: 1rem; }
+main > header:has(h1), main section > header:has(h1) {
+    margin-block-end: 1.5rem;
+}
+main header:has(h1) > p { font-size: 1.1rem; max-width: 62rem; }
+main section > h2 {
+    font-size: 1.45rem;
+    margin: 1.5rem 0 0.75rem;
+    padding-block-end: 0.45rem;
+    border-bottom: 2px solid var(--pico-muted-border-color, var(--htmxo-muted));
+}
+main .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+    gap: 1rem;
+}
+main article {
+    margin: 0;
+    padding: 1.25rem 1.4rem;
+    border: 1px solid var(--pico-muted-border-color, var(--htmxo-muted));
+    border-radius: 0.6rem;
+    background: var(--pico-card-background-color, var(--htmxo-bg));
+    box-shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 4px 14px rgb(0 0 0 / 7%);
+}
+main article + article { margin-block-start: 1rem; }
+main .grid > article { margin: 0; }
+main article > header {
+    margin: 0 0 0.5rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+main article :is(h2, h3) { font-size: 1.15rem; }
