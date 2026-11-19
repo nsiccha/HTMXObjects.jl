@@ -166,6 +166,61 @@ end
     export WorkerApp
 end
 
+@testitem "configure_job_queue! preloads a worker with its launch flags before the first job and after restart" setup=[WorkerAppFixtures] tags=[:integration, :workers] begin
+    using HTMXObjects, Test
+    import DynamicObjects
+
+    initial = configure_job_queue!()
+    @test_throws ArgumentError configure_job_queue!(; worker_start=:invalid, worker_stall=30)
+    @test_throws ArgumentError configure_job_queue!(; worker_preload=[42], abandon_after=30)
+    @test configure_job_queue!() == initial
+
+    mktempdir() do dir
+        withenv("HTMXO_TEST_WORKER_LAUNCH_DIR" => dir) do
+            # The worker status alone can become ready before package initialization.
+            function preloaded_worker(previous_pid)
+                ready = timedwait(240; pollint=0.1) do
+                    s = DynamicObjects.worker_status()
+                    s.running && s.pid != previous_pid && isfile(joinpath(dir, string(s.pid)))
+                end
+                ready === :ok || error("worker package did not initialize: $(DynamicObjects.worker_status())")
+                pid = DynamicObjects.worker_status().pid
+                @test pid != getpid()
+                @test parse.(Int, readlines(joinpath(dir, string(pid)))) == [2, 1, 1, 768 * 1024^2]
+                pid
+            end
+            try
+                flags = ["--threads=2,1", "--gcthreads=1", "--heap-size-hint=768M"]
+                settings = configure_job_queue!(; workers=1, worker_start=:now,
+                    worker_preload=[WorkerApp], worker_exeflags=flags)
+                @test keys(settings) == keys(initial)
+                @test settings.workers == 1
+                first_pid = preloaded_worker(nothing)
+                @test configure_job_queue!(; max_running=1).max_running == 1
+                DynamicObjects.restart_worker!()
+                second_pid = preloaded_worker(first_pid)
+                @test WorkerApp.FaultApp().heavy_probe(1).pid == second_pid
+
+                # A stale preload entry would fail the next job. Empty lists must
+                # reach the backend even in a call that does not set workers.
+                configure_job_queue!(; workers=0, worker_start=:lazy)
+                missing_pkg = Base.PkgId(Base.UUID("d043fb38-d12e-45e2-a8cc-60fe004b8950"), "AbsentWorkerTestPackage")
+                configure_job_queue!(; worker_preload=[missing_pkg])
+                configure_job_queue!(; worker_preload=[], worker_exeflags=[])
+                configure_job_queue!(; workers=1)
+                @test !DynamicObjects.worker_status().running
+                pid = WorkerApp.FaultApp().heavy_probe(2).pid
+                @test pid != getpid() && pid != second_pid
+                @test last(readlines(joinpath(dir, string(pid)))) == string(Int(Base.JLOptions().heap_size_hint))
+            finally
+                configure_job_queue!(; workers=0, worker_start=:lazy, worker_exeflags=[],
+                    worker_preload=[], max_running=initial.max_running,
+                    worker_stall=initial.worker_stall, abandon_after=initial.abandon_after)
+            end
+        end
+    end
+end
+
 @testitem "a @queued route of a package computes in the worker process, and its part sent ahead reaches the page" setup=[FreshTransportFixtures, WorkerAppFixtures] tags=[:integration, :workers] begin
     using HTMXObjects, Test
     import HTMXObjects: _clear_operation_polls!

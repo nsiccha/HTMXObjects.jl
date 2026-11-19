@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.176
+
+- `configure_job_queue!` accepts `worker_exeflags`, `worker_start` and
+  `worker_preload`. Apps can set a worker-specific heap target and thread
+  counts and load packages in the background before the first queued job.
+
 ## 0.1.175
 
 - A fresh link to a `#id` in an eager `master_detail_table` detail opens the
