@@ -1,0 +1,110 @@
+/* A page theme inspired by https://juliabayes.org/. The Julia colours frame
+   articles; link text uses shades that stay legible on the page and cards. */
+@font-face {
+    font-family: "IBM Plex Sans";
+    src: url("ibm-plex-sans-latin-wght-normal.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 100 700;
+    font-display: swap;
+}
+
+:root {
+    color-scheme: light dark;
+    --jb-font: "IBM Plex Sans", system-ui, sans-serif;
+    --jb-canvas: light-dark(#f8f9fb, #1a1a2e);
+    --jb-ink: light-dark(#1a1a2e, #f8f9fb);
+    --jb-surface: light-dark(white, #242438);
+    --jb-muted: light-dark(#555565, #bfbdce);
+    --jb-line: light-dark(#d8dae2, #49495c);
+    --jb-link: light-dark(#2b7520, #84cf71);
+    --jb-link-hover: light-dark(#205b17, #ace499);
+    --jb-green: #389826;
+    --jb-purple: #9558b2;
+    --jb-red: #cb3c33;
+    --jb-blue: #4063d8;
+}
+[data-theme="light"] { color-scheme: light; }
+[data-theme="dark"] { color-scheme: dark; }
+
+/* Match Pico's colour-scheme selectors; the same values also style a shell
+   built with htmx alone. Both shells expose the usual HTMXObjects tokens. */
+:root:not([data-theme="dark"]), [data-theme="dark"], [data-theme="light"] {
+    --pico-font-family: var(--jb-font);
+    --pico-background-color: var(--jb-canvas);
+    --pico-color: var(--jb-ink);
+    --pico-muted-color: var(--jb-muted);
+    --pico-muted-border-color: var(--jb-line);
+    --pico-h1-color: var(--jb-ink);
+    --pico-h2-color: var(--jb-ink);
+    --pico-h3-color: var(--jb-ink);
+    --pico-h4-color: var(--jb-ink);
+    --pico-h5-color: var(--jb-ink);
+    --pico-h6-color: var(--jb-ink);
+    --pico-card-background-color: var(--jb-surface);
+    --pico-card-sectioning-background-color: var(--jb-surface);
+    --pico-card-box-shadow: none;
+    --pico-primary: var(--jb-link);
+    --pico-primary-hover: var(--jb-link-hover);
+    --pico-primary-background: var(--jb-link);
+    --pico-primary-border: var(--jb-link);
+    --pico-primary-hover-background: var(--jb-link-hover);
+    --pico-primary-hover-border: var(--jb-link-hover);
+    --pico-primary-focus: color-mix(in srgb, var(--jb-link) 30%, transparent);
+    --pico-primary-underline: currentColor;
+    --pico-text-selection-color: var(--pico-primary-focus);
+    --htmxo-bg: var(--jb-canvas);
+    --htmxo-accent: var(--jb-link);
+    --htmxo-muted: var(--jb-muted);
+}
+
+:where(body) {
+    background: var(--jb-canvas);
+    color: var(--jb-ink);
+    font-family: var(--jb-font);
+    line-height: 1.5;
+}
+:where(a) { color: var(--jb-link); }
+:where(a:hover) { color: var(--jb-link-hover); }
+body > header:has(nav) {
+    padding-block: .5rem;
+    border-bottom: 1px solid var(--jb-line);
+}
+body > header nav { min-height: 3rem; }
+body > header nav strong { font-size: 1.25rem; }
+body > header nav a { color: var(--jb-ink); text-decoration: none; }
+body > header nav a:is(:hover, [aria-current="page"]) { color: var(--jb-link); text-decoration: underline; }
+body > footer { border-top: 1px solid var(--jb-line); color: var(--jb-muted); }
+
+:where(main header:has(> h1)) { padding-block: 2rem 1rem; text-align: center; }
+:where(main header) > h1 { font-size: clamp(2.5rem, 4vw, 4rem); line-height: 1.1; }
+
+/* The landing page's density curve is decorative. Opt in on the introductory
+   header; a report or detail page can keep an ordinary heading. */
+.htmxo-masthead::before {
+    content: "";
+    display: block;
+    width: min(100%, 30rem);
+    aspect-ratio: 5 / 1;
+    margin: 0 auto .5rem;
+    background: linear-gradient(90deg, transparent, var(--jb-green) 8%, var(--jb-blue) 32%,
+        var(--jb-purple) 58%, var(--jb-red) 92%, transparent);
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 500 100'%3E%3Cpath d='M0 97C70 97 107 76 144 44S214 3 250 3S319 12 356 44S430 97 500 97' fill='none' stroke='black' stroke-width='4'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* Use the semantics of the app itself. Sibling articles receive the four
+   accents in reading order; an app can set --jb-card-accent on its article. */
+article {
+    --jb-card-accent: var(--jb-green);
+    background-color: var(--jb-surface);
+    border: .16rem solid var(--jb-card-accent);
+    border-radius: .75rem;
+    padding: 1.25rem;
+}
+article:where(:nth-of-type(4n+2)) { --jb-card-accent: var(--jb-purple); }
+article:where(:nth-of-type(4n+3)) { --jb-card-accent: var(--jb-red); }
+article:where(:nth-of-type(4n)) { --jb-card-accent: var(--jb-blue); }
+article > header {
+    --pico-card-sectioning-background-color: color-mix(in srgb, var(--jb-card-accent) 8%, var(--jb-surface));
+    background-color: var(--pico-card-sectioning-background-color);
+}
+article > header :is(h2, h3):only-child { margin: 0; font-size: 1.25rem; }

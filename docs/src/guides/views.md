@@ -30,6 +30,61 @@ returns route content for an HTMX request. A real page shell can use `htmx` to
 include the document structure, browser runtime and styling. The small shell
 above makes the wrapper distinction visible without loading browser assets.
 
+## Style an app and its HTML snapshots
+
+Choose the design once in the root `__page__`. The live app and
+`export_site` render that same shell. Fragments swapped into a live page
+inherit its styles. For the bundled JuliaBayes design, use
+`HTMXObjects.pico_page(content; theme=:juliabayes)`. It includes IBM Plex
+Sans, light and dark palettes and Julia-coloured article borders. The preset
+styles the headings, navigation and articles your app already renders.
+Add `class="htmxo-masthead"` to the introductory header for the site's
+multicolour density curve.
+
+```@example views
+lab_css = ":root { --htmxo-container-max-width: 80rem } main h1 { font-family: Georgia, serif }";
+themed_shell(content) = HTMXObjects.pico_page(content; theme=:juliabayes,
+    brand="Field notes" => "/", extra_head=(h.style(Raw(lab_css)),));
+page_html = repr(MIME"text/html"(), themed_shell(h.article(h.h1("Estimates"))));
+@assert occursin("IBM Plex Sans", page_html) && occursin(lab_css, page_html) # hide
+nothing # hide
+```
+
+For a design of your own, read an app-owned CSS file once and pass its text
+as `theme`. You can style semantic elements (`nav`, `article`, `table`),
+states such as `[aria-current="page"]`, HTMXObjects variables such as
+`--htmxo-accent`, and Pico's `--pico-*` variables. Theme CSS comes after
+the shell's defaults. `extra_head` comes last for app-specific overrides.
+
+```julia
+const LAB_THEME = read(joinpath(@__DIR__, "lab.css"), String)
+
+@htmx struct LabApp
+    __page__(content) = HTMXObjects.pico_page(content; theme=LAB_THEME)
+    @get index() = h.article(h.h1("Estimates"))
+end
+```
+
+If your design also changes the **page structure**, build the landmarks
+yourself, for example `htmx(h.header(nav), h.main(content), h.footer(credits);
+theme=LAB_THEME)`. This gives you the HTMXObjects runtime with your own
+markup and CSS. Inline theme text travels with each HTML page. For a shared
+stylesheet with relative font or image URLs, mount its directory once with
+`staticfiles(joinpath(@__DIR__, "branding"), "branding")`. The page wrapper
+can then pass `theme=h.link(rel="stylesheet", href=__prefix__ * "/branding/lab.css")`.
+`export_site` copies the linked local CSS and follows its local `url(...)`
+references. Use `assets=:vendor, runtime=:linked` and mount `vendorfiles()`
+to keep the built-in assets, including the JuliaBayes preset, local and
+shared across pages.
+
+The [themed site example](https://github.com/nsiccha/HTMXObjects.jl/blob/devibe/examples/themed_site.jl)
+serves a two-page app or writes the same pages to an empty directory:
+
+```sh
+julia --project examples/themed_site.jl
+julia --project examples/themed_site.jl export site
+```
+
 ## Tables and captions
 
 ```@example views
