@@ -8,6 +8,7 @@
 _runtime_blocks() = (
     preload_runtime = (:js, preload_runtime_js),
     theme = (:css, htmxo_theme),
+    juliabayes = (:css, _juliabayes_styles),
     pico_bridge = (:css, pico_bridge),
     request_feedback_style = (:css, request_feedback_style),
     request_feedback_script = (:js, request_feedback_script),

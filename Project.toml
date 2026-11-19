@@ -1,9 +1,10 @@
 name = "HTMXObjects"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.1.178"
+version = "0.1.179"
 
 [deps]
+Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 CommonMark = "a80b9123-70ca-4bc0-993e-6e3bcb318db6"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
@@ -30,6 +31,7 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 HTMXObjectsTreebarsExt = "Treebars"
 
 [compat]
+Base64 = "1"
 CodecZlib = "0.7"
 CommonMark = "1"
 Dates = "1"

@@ -83,6 +83,7 @@ using DynamicObjects, HTTP, Tables
 # `artifact"..."` for the vendored `htmx()` head assets. Lazy: nothing
 # downloads until `vendorfiles()` runs, so CDN users fetch nothing.
 using LazyArtifacts
+import Base64
 import Dates
 import Random
 import CommonMark
@@ -3694,6 +3695,7 @@ end
 
 # --- Page runtime: inline, or linked from the vendor mount ---
 #
+include("page_theme.jl")
 include("runtime_assets.jl")
 
 # `runtime` → the mount the shell links its runtime from, or `nothing` to
@@ -3708,7 +3710,7 @@ _runtime_mount(::Val{R}, assets) where {R} =
     error("htmx: unknown runtime mode $(repr(R)) — use :inline or :linked.")
 
 """
-    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, pico_color=nothing, katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
+    htmx(body...; htmx_version="2.0.8", sse_version="2.2.4", ws_version="2.0.4", hyperscript_version="0.9.14", preload_version="2.1.2", pico_version=nothing, pico_color=nothing, theme=nothing, katex_version="0.19.0", prism_version="1.30.0", assets=:cdn, runtime=:inline, feedback=true, thread=true, tables=true, extra_head=(), error_texts=nothing, lang=nothing, title=nothing)
 
 Generate a full HTML page with HTMX and optionally Hyperscript/PicoCSS loaded from CDN.
 Pass `nothing` to any version kwarg to skip that library.
@@ -3797,6 +3799,15 @@ look. So an app chooses its accent here instead of redeclaring Pico's
 `extra_head`. Another name, or `pico_color` without `pico_version`, throws an
 `ArgumentError`. `nothing` (the default) is Pico's default build.
 
+`theme=:juliabayes` adds the light and dark JuliaBayes-inspired stylesheet,
+including its font. Pass CSS text (for example, `theme=read(path, String)`)
+or an `h.style` element to inline your own stylesheet, or pass
+`theme=h.link(rel="stylesheet", href="/assets/site.css")` to share a CSS
+file across pages. The theme follows the built-in styles and precedes
+`extra_head`, where you can add overrides. Configure it in the root
+`__page__` for both live pages and HTML exports. The bundled theme follows
+`runtime`. The default `theme=nothing` adds nothing.
+
 `assets=:vendor` serves the same files same-origin from `/vendor/...`
 (byte-identical to the CDN files at the pinned versions) instead of the CDN,
 so the page loads fully offline — mount them with [`vendorfiles`](@ref) and
@@ -3845,6 +3856,7 @@ function htmx(args...;
     preload_version     = _HTMX_PRELOAD_VERSION,
     pico_version        = nothing,
     pico_color          = nothing,
+    theme               = nothing,
     katex_version       = _KATEX_VERSION,
     prism_version       = _PRISM_VERSION,
     assets              = :cdn,
@@ -3994,6 +4006,7 @@ function htmx(args...;
             # layout-shift to guard (no skeleton/placeholder needed).
             (overlay ? (h.script(""; src = _overlay_bar_url(), defer = true),) : ())...,
             _runtime_heads(mount, page_blocks...)...,
+            _page_theme_heads(theme, mount)...,
             _shell_extra_head(extra_head, mount, carried)...,
         ),
         body(args...),
@@ -4241,7 +4254,8 @@ header, `main` and footer.
 pinned release under vendor assets (`assets=:vendor` or a mount path), which
 serve only that pin. `pico_color` picks the page's accent among Pico's colour
 builds, light and dark mode alike: `pico_page(content; pico_color=:cyan)`
-([`htmx`](@ref) lists the names). Every other keyword (`extra_head`, `runtime`, `tables`,
+([`htmx`](@ref) lists the names). Use `theme=:juliabayes` or pass your own CSS
+text or stylesheet link as `theme` to style the whole page. Every other keyword (`extra_head`, `runtime`, `tables`,
 `error_texts`, `title`, the library versions, …) goes to [`htmx`](@ref):
 `pico_page(content; assets=:vendor, runtime=:linked)` is an offline page
 with a cacheable head, and `pico_page(content; lang="de",

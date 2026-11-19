@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.179
+
+- `htmx` and `HTMXObjects.pico_page` accept a `theme` for live pages and
+  HTML snapshots. Use `:juliabayes` for the bundled light and dark design
+  with IBM Plex Sans, or supply your own CSS as text or a stylesheet link.
+
 ## 0.1.178
 
 - `Records` accepts ordered `presets`, restored by Reset, and `label_from`
