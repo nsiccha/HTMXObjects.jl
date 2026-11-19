@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.182
+
+- On a generated tabbed page with shared inputs, the tab bar spans the
+  sidebar and the result. Labels wrap when they exceed the app's full width.
+
 ## 0.1.181
 
 - `htmx` and `pico_page` accept `html_attrs` for the opening `<html>` tag

@@ -36066,18 +36066,20 @@ function _default_semantic_tab(entry)
           data_verb=entry.verb, data_path=entry.path)
 end
 
-# The page: the title, then the sidebar, ending in the page's Reset, beside
-# the tabs (the tabs alone when no input is shared; each tab with inputs then
-# draws the Reset).
+# Keep one tab list above the sidebar and panels. A context form whose inputs
+# are all placed in tabs stays on the page without a visible sidebar.
 function _default_semantic_tabs_layout(parts)
     heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
-    tabs = tabset(parts.tabs...; id=parts.id * "-tabs", names=parts.tab_names,
-                  active=parts.active, url_scope=get(parts, :url_scope, nothing))
     reset = get(parts, :reset, nothing)
-    body = !isnothing(parts.sidebar) ?
-        app_layout(h.aside(parts.sidebar, (isnothing(reset) ? () : (reset,))...), tabs;
-                   content_id=parts.id * "-content") :
+    sidebar = isnothing(parts.sidebar) ? nothing :
+        h.aside(parts.sidebar, (isnothing(reset) ? () : (reset,))...)
+    tabs = _tabset(sidebar, parts.tabs; id=parts.id * "-tabs", names=parts.tab_names,
+                   active=parts.active, url_scope=get(parts, :url_scope, nothing))
+    body = if !isnothing(sidebar)
+        h.main(tabs; id=parts.id * "-content")
+    else
         isnothing(parts.context) ? tabs : h.div(parts.context, tabs)
+    end
     h.section(heading..., body; id=parts.id, class="htmxo-semantic-app htmxo-semantic-page")
 end
 
@@ -36118,7 +36120,9 @@ carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
 
 `presentation=:tabs` makes it an app page: the inputs several operations
 read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
-the one it opens on), and results that follow their inputs. It is as tall as
+the one it opens on), and results that follow their inputs. The default tab bar
+spans the app above the sidebar and result. Labels wrap when they need more
+than the app's full width. The page is as tall as
 its inputs and results, so it can be one part of a longer page, between
 paragraphs of an article or a report. A result taller than its bound (a
 table of a few hundred rows, say) scrolls inside itself instead of
@@ -40919,6 +40923,9 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
     }
     .htmxo-app-layout > aside { grid-area: sidebar; padding: 1rem 1rem 1rem 0; border-right: 1px solid var(--pico-muted-border-color); }
     .htmxo-app-layout > main { grid-area: content; }
+    .tabset.htmxo-app-layout { grid-template-areas: "tabs tabs" "sidebar content"; }
+    .tabset.htmxo-app-layout > nav { grid-area: tabs; min-width: 0; }
+    .tabset.htmxo-app-layout > .tab-panel { grid-area: content; min-width: 0; }
     .htmxo-app-layout > aside > nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; }
 }
 .u-bg-soft { background: var(--pico-card-background-color, #f8f8f8); }
@@ -43635,14 +43642,17 @@ Plain text (`repr("text/plain", …)` of the semantic content holding the tabset
 writes the same without the markup: each label on its own line over its
 content, a lazy tab as `Details (/api/details)`.
 """
-function tabset(tabs::Pair...; active=1, preload=nothing, url_param="tab", names=nothing,
+tabset(tabs::Pair...; kwargs...) = _tabset(nothing, tabs; kwargs...)
+
+function _tabset(sidebar, tabs; active=1, preload=nothing, url_param="tab", names=nothing,
                 label::Union{Nothing,AbstractString}=nothing,
                 url_scope::Union{Nothing,AbstractString}=nothing,
                 id=_tabset_default_id(tabs, label, url_param, names, url_scope)) # after what it reads
     tab_names = isnothing(url_param) && isnothing(names) && active isa Integer ? nothing :
         _tabset_checked_names(_tabset_names(tabs, names))
     active = _tabset_active_index(active, tab_names)
-    h.div(; id, class="tabset", _tabset_url_attrs(url_param, preload, url_scope)...)(
+    classes = isnothing(sidebar) ? "tabset" : "tabset htmxo-app-layout"
+    h.div(; id, class=classes, _tabset_url_attrs(url_param, preload, url_scope)...)(
         _TabsetPart(h.nav(; role="none")(
             h.ul(; role="tablist", aria_label=label)([
                 h.li(h.a(tab_label;
@@ -43671,6 +43681,7 @@ function tabset(tabs::Pair...; active=1, preload=nothing, url_param="tab", names
                 for (i, (tab_label, content)) in enumerate(tabs)
             ]...)
         ), nothing),
+        (isnothing(sidebar) ? () : (sidebar,))...,
         [_TabsetPart(_tabset_panel(content, i, active, id), _tabset_markdown(tab_label, content))
          for (i, (tab_label, content)) in enumerate(tabs)]...,
         h.script(Raw(_TABSET_INSERTED)),
