@@ -15178,7 +15178,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     # browser's own request fails the same way and records it once.
     _prestart_slot(req) === nothing || return HTTP.Response(500)
     uid, path = _record_error(err, bt, req)
-    _runtime_note_error!(req, err, uid)
+    _note_route_fault!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _hook_response(req, err_val, err)
     isnothing(direct) || return _stamp_error_id(direct, uid)
@@ -17888,7 +17888,7 @@ function _operation_failed(transport, err, uid)
 end
 
 function _note_operation_failure!(req::HTTP.Request, err, uid)
-    _runtime_note_error!(req, err, uid)
+    _note_route_fault!(req, err, uid)
     req.context[:htmxo_operation_failure] = (; err, uid)
     nothing
 end
@@ -20015,12 +20015,13 @@ end
 # (`prewarm_workload!` closes its server at once on a failure): throwing into
 # its task could interrupt HTTP.jl in the middle of I/O.
 function _prewarm_request(verb::Symbol, url::AbstractString, timeout::Real;
-        headers=Pair{String,String}[], browser=false)
+        headers=Pair{String,String}[], browser=false, fragment_pages=nothing)
     request = @async try
         resp = HTTP.request(string(verb), url, headers; connect_timeout=10,
                             status_exception=false, retry=false, redirect=!browser)
         fault = browser ? HTTP.header(resp, "X-HTMXO-Error-Id", "") : ""
-        (; status=resp.status, error=isempty(fault) ? nothing : "route error $fault", body=resp.body)
+        handled = isempty(fault) || (fragment_pages !== nothing && _warm_caller_fault(fragment_pages, fault))
+        (; status=resp.status, error=handled ? nothing : "route error $fault", body=resp.body)
     catch err
         (; status=nothing, error=sprint(showerror, err), body=nothing)
     end
@@ -20356,8 +20357,10 @@ and follows their operation stream or polls to completion. `fragments=:linked`
 includes those GETs by default. Use `fragments=:selected` to start only fragment
 addresses selected by `routes` or named in `urls` (including their query).
 The workload bounds fragment starts per navigation and only follows its own
-operation tokens. `operations=false` skips this pass. The operation workload
-exercises the spawned request handler by default; `server_kwargs.parallel`
+operation tokens. It accepts a fragment's rendered [`CallerFault`](@ref)
+as its answer, for example an empty-state panel. Unexpected fragment errors
+and failed route checks throw. `operations=false` skips this pass. The
+workload exercises the spawned handler by default; `server_kwargs.parallel`
 overrides the pool, as in the live app.
 
 The optional do-block `streams(base_url)` runs **after** HTTP routes and URLs.

@@ -5,12 +5,32 @@ mutable struct _WarmPages
     key::String
     selected::Union{Nothing,Set{String}}
     tokens::Dict{String,String}  # token => concrete GET address
+    caller_faults::Set{String}  # recorded ids of application-declared 4xx answers
     remaining::Int
     closed::Bool
 end
 
 _WarmPages(fragments::Symbol) = _WarmPages(bytes2hex(rand(Random.RandomDevice(), UInt8, 24)),
-    fragments === :selected ? Set{String}() : nothing, Dict{String,String}(), 0, false)
+    fragments === :selected ? Set{String}() : nothing, Dict{String,String}(),
+    Set{String}(), 0, false)
+
+# A page can legitimately display an empty-state panel, e.g. when its app has
+# no data installed while building the image. htmx swaps that answer with a
+# successful HTTP status, just as it does for an unexpected server exception.
+function _note_route_fault!(req, err, uid)
+    _runtime_note_error!(req, err, uid)
+    pages = req isa HTTP.Request ? get(req.context, :htmxo_warm_page, nothing) : nothing
+    if pages !== nothing && unwrap_error(err) isa CallerFault
+        lock(_operation_poll_lock) do
+            pages.closed || push!(pages.caller_faults, uid)
+        end
+    end
+    nothing
+end
+
+_warm_caller_fault(pages::_WarmPages, uid) = lock(_operation_poll_lock) do
+    uid in pages.caller_faults
+end
 
 function _warm_fragment_allowed!(pages::_WarmPages, route)
     lock(_operation_poll_lock) do
@@ -42,6 +62,7 @@ function _reset_warm_pages!(pages::_WarmPages; close=false)
             delete!(_pushed_answers, token)
         end
         empty!(pages.tokens)
+        empty!(pages.caller_faults)
     end
     _record_operation_ends!(dropped, :abandoned)
 end
@@ -78,12 +99,12 @@ function _warm_followups(pages, html)
     unique!(found)
 end
 
-function _warm_page_get(url, headers, timeout, clock)
+function _warm_page_get(url, headers, timeout, clock; fragment_pages=nothing)
     spent = _prewarm_elapsed(clock)
     remaining = timeout - spent.busy
     remaining > 0 || error("prewarm_workload!: GET $url " *
         _prewarm_overrun("did not finish", timeout, spent))
-    r = _prewarm_request(:GET, url, remaining; headers, browser=true)
+    r = _prewarm_request(:GET, url, remaining; headers, browser=true, fragment_pages)
     # The strict route checks already validated redirects. A redirect itself
     # has no fragments and this browser pass stays on the workload listener.
     r.error === nothing && r.status in (301, 302, 303, 307, 308) && return ""
@@ -115,7 +136,7 @@ function _warm_navigation!(pages, base, url, timeout, stream)
                 sleep(0.05)
             end
         end
-        answer = _warm_page_get(base * next, headers, timeout, clock)
+        answer = _warm_page_get(base * next, headers, timeout, clock; fragment_pages=pages)
         append!(pending, _warm_followups(pages, answer))
     end
     nothing

@@ -6,7 +6,8 @@
 
 - `prewarm_workload!` now warms the browser navigation and attachment to
   load-triggered GET fragments of each selected page. Use `fragments=:selected`
-  to restrict fragment starts to the addresses in the workload. The serving
+  to restrict fragment starts to the addresses in the workload. Rendered
+  `CallerFault` panels are valid fragment answers during warmup. The serving
   and precompilation request pools share a listener specialization.
 
 ## 0.1.184

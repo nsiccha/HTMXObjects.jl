@@ -228,6 +228,10 @@ end
 @testitem "a failed warm attachment releases only that workload's operations" setup=[HTMXOTestImports] tags=[:integration, :server] begin
     @htmx struct FailedWarmApp
         @direct @get landing() = h.section(lazy("/child"))
+        @direct @get empty_page() = h.section(lazy("/empty_panel"))
+        @get empty_panel() = throw(CallerFault(404, "no records yet"))
+        @direct @get broken_page() = h.section(lazy("/broken_panel"))
+        @get broken_panel() = error("broken panel computation")
         @get child() = h.p("child")
     end
     route!(FailedWarmApp())
@@ -253,6 +257,10 @@ end
     @test !haskey(HTMXObjects._operation_poll_snapshot(), token[])
     @test !haskey(HTMXObjects._pushed_answers, token[])
     @test !isopen(HTMXObjects._SERVER[])
+
+    @test all(r -> r.status == 200, prewarm_workload!(FailedWarmApp; routes=[:empty_page]).routes)
+    @test_throws ErrorException prewarm_workload!(FailedWarmApp; routes=[:empty_panel])
+    @test_throws ErrorException prewarm_workload!(FailedWarmApp; routes=[:broken_page])
 
     # An ordinary navigation on the same temporary listener has its own token.
     unrelated = Ref("")
