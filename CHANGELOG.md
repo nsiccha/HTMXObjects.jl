@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.176
+
+- `export_site` shares computed values across pages and releases cache entries
+  held only by the export after its rendering tasks finish, including on error.
+  Cleanup reaches the app and its queue worker. Custom report renderers can
+  group their HTML and Markdown dispatches with `DynamicObjects.with_compute_scope`.
+
 ## 0.1.175
 
 - A fresh link to a `#id` in an eager `master_detail_table` detail opens the

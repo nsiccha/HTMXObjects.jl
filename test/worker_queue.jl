@@ -481,3 +481,96 @@ end
     @test query_url("/r", plain.sweep; cursor=4) == "/r?cursor=4"
     @test isempty(hidden_inputs(plain.sweep))
 end
+
+@testitem "whole site exports release only their own model values after all pages finish" setup=[WorkerAppFixtures] tags=[:integration, :workers] begin
+    using HTMXObjects, Test, Treebars
+
+    function get_body(url; static=nothing, headers=["HX-Request"=>"true"])
+        response = dispatch(:GET, url; static, headers, operation_policy=:blocking)
+        @test response.status == 200
+        String(response.body)
+    end
+    function is_held(side, key; workers)
+        body = get_body("/$(side)_census/$key")
+        result = match(r"pid=(\d+) held=(true|false)", body)
+        isnothing(result) && error("Unexpected census response for $side: $body")
+        @test (parse(Int, result[1]) == getpid()) == (side == "app" || workers == 0)
+        result[2] == "true"
+    end
+
+    route!(WorkerApp.ExportLifetimeApp())
+    settings = configure_job_queue!()
+    try
+        for workers in (0, 1)
+            configure_job_queue!(; workers)
+            sides = ("app", "worker")
+            live = rand(1:10^8) * 10
+            # A standalone static dispatch retains ordinary reuse outside an export.
+            cached = [get_body("/$(side)_fit/$live/1"; static=StaticExport()) for side in sides]
+            for (i, side) in pairs(sides)
+                @test is_held(side, live; workers)
+                @test get_body("/$(side)_fit/$live/2") == cached[i]
+
+                # A report groups HTML fragments and ordinary Markdown previews.
+                key = live + 4
+                DynamicObjects.with_compute_scope() do
+                    html = get_body("/$(side)_fit/$key/1"; static=StaticExport())
+                    markdown = get_body("/$(side)_fit/$key/2"; headers=["Accept"=>"text/markdown"])
+                    @test occursin("fit=$key run=", markdown)
+                    @test occursin(strip(markdown), html)
+                end
+                @test !is_held(side, key; workers)
+            end
+
+            for (j, (parallel, broken)) in enumerate(((false, false), (true, false), (true, true)))
+                @testset "workers=$workers parallel=$parallel broken=$broken" begin
+                    key = live + j
+                    pages = ["/$(side)_fit/$key/$embed" for side in sides for embed in 1:2]
+                    append!(pages, ["/$(side)_fit/$live/3" for side in sides])
+                    first_generation = Dict{String,String}()
+                    mktempdir() do dir
+                        if broken
+                            err = try
+                                export_site(dir; pages=[pages; "/absent_export_page"], parallel)
+                                nothing
+                            catch err
+                                err isa StaticSiteIncomplete || rethrow()
+                                err
+                            end
+                            @test err isa StaticSiteIncomplete
+                            @test !isnothing(err) && any(p -> first(p) == "/absent_export_page", err.failed)
+                        else
+                            @test export_site(dir; pages, parallel).files >= 6
+                        end
+                        for side in sides
+                            page(k, embed) = read(joinpath(dir, static_file_name("/$(side)_fit/$k/$embed")), String)
+                            first_page = page(key, 1)
+                            @test occursin("fit=$key run=", first_page)
+                            @test first_page == page(key, 2)
+                            first_generation[side] = first_page
+                            @test occursin(cached[side == "app" ? 1 : 2], page(live, 3))
+                        end
+                    end
+                    for side in sides
+                        @test !is_held(side, key; workers)
+                        @test is_held(side, live; workers)
+                    end
+                    if broken
+                        mktempdir() do dir
+                            export_site(dir; pages, parallel)
+                            for side in sides
+                                path = static_file_name("/$(side)_fit/$key/1")
+                                page = read(joinpath(dir, path), String)
+                                @test occursin("fit=$key run=", page)
+                                @test page != first_generation[side]
+                                @test !is_held(side, key; workers)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    finally
+        configure_job_queue!(; workers=settings.workers)
+    end
+end
