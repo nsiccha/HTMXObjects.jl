@@ -24456,13 +24456,11 @@ if (document.body) htmxoSearchRestore(document.body);
 // `.table-wrap` is `data-htmxo-width="fits"` while its table fits it, which
 // drops the sideways scroll box so the header can stick to the window, else
 // `"wide"`: a window-tall box scrolling both ways with the header at its top.
-// Measurements run in a task of their own, never inside the observer's
-// callback, whose layout changes would re-notify in the same frame; a newly
-// found element is measured that way too, without waiting for the
-// observer's first notice. A table inside another table's cell does not
-// stick to the window, but its wrapper is measured all the same, so a wide
-// one becomes that box too, sized to fit below the outer table's line and
-// header. Its own line and header are not measured: its rows keep scrolling
+// Measure new tables and toolbars after the swap's column sizing and before
+// paint. Later resizes run in a separate task because measuring inside the
+// observer's callback could re-notify it in the same frame. A nested table's
+// wrapper is measured too, so a wide one fits below the outer table's toolbar
+// and header. Its own line and header are not measured: its rows keep scrolling
 // into view below the outer ones, whose heights they inherit.
 // Only the observer and a newly found element measure. A swap anywhere on the
 // page can drop the values the server did not render (a morph, or htmx's
@@ -24541,19 +24539,21 @@ function htmxoStickyTrack(elt) {
     const sticky = '.htmxo-table-toolbar[data-htmxo-sticky], table[data-htmxo-sticky]';
     const found = Array.from(elt.querySelectorAll(sticky));
     if (elt.matches && elt.matches(sticky)) found.push(elt);
+    const fresh = [];
     found.forEach(el => {
         if (!el.isConnected || (el.tagName !== 'TABLE' && el.parentElement.closest('td, th'))) return;
         const wrap = el.tagName === 'TABLE' && el.parentElement.classList.contains('table-wrap') ? el.parentElement : null;
+        if (tracked.has(el) && (!wrap || tracked.has(wrap))) return htmxoStickyRestore(el);
+        fresh.push(el);
         [el, wrap].forEach(t => {
-            if (!t) return;
-            if (tracked.has(t)) return htmxoStickyRestore(t);
+            if (!t || tracked.has(t)) return;
             tracked.add(t);
             // A toolbar or table by its border box, the height and width
             // measured; the wrapper by its content box, which a scrollbar changes.
             ro.observe(t, {box: t === wrap ? 'content-box' : 'border-box'});
-            htmxoStickyQueue(t);
         });
     });
+    if (fresh.length) queueMicrotask(() => fresh.forEach(htmxoStickyMeasure));
 }
 function htmxoStickyRestoreAll() {
     window.htmxoStickyTracked.forEach(htmxoStickyRestore);
@@ -24562,7 +24562,7 @@ if (!window.htmxoStickyBound) {
     window.htmxoStickyBound = true;
     document.addEventListener('htmx:load', e => htmxoStickyTrack(e.target));
     // A morph drops the values at the swap, htmx's settle at the settle.
-    document.addEventListener('htmx:afterSwap', htmxoStickyRestoreAll);
+    document.addEventListener('htmx:afterSwap', () => htmxoStickyTrack(document.body));
     document.addEventListener('htmx:afterSettle', htmxoStickyRestoreAll);
     document.addEventListener('DOMContentLoaded', () => htmxoStickyTrack(document.body));
 }
