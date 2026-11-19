@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.184
+
+- Committing a valid input change on a generated tab starts its server refresh
+  on the next browser turn, once dependent controls are ready. With Treebars
+  0.1.5 or later, an ordinary result replaces the previous one directly from
+  the operation stream, through the live target's usual swap handler.
+
 ## 0.1.183
 
 - `send_ahead(() -> view(results))` builds an intermediate view only when

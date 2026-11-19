@@ -37409,7 +37409,8 @@ Before it lands, the terminal is offered to the live target as an
 `htmx:beforeSwap`, as htmx offers a direct answer (`htmx.swap` itself fires
 none): `target` is the live element, `serverResponse` the bare result,
 `swapOverride` the effective swap style, `htmxoLiveTerminal` is `true`, and
-the rest is the terminal poll's detail (`xhr`, `requestConfig`, `pathInfo`).
+the rest comes from the poll answer. A streamed answer carries
+`treebarPushed: true` and has no `xhr`.
 A consumer's swap gate therefore covers diverted terminals too: setting
 `shouldSwap = false` (or `preventDefault()`) skips the swap and just clears
 the reporter, and a rewritten `serverResponse` or `swapOverride` is what
@@ -37582,7 +37583,7 @@ live_refresh_script() = h.script(Raw(raw"""
   // listeners before it lands, as htmx offers a direct answer: `htmx.swap`
   // fires no `htmx:beforeSwap`, so without this a consumer's swap gate
   // (skip an unchanged answer, carry client-only state into it) never sees a
-  // diverted terminal. The detail is the terminal poll's own (its `xhr`,
+  // diverted terminal. The detail is the poll answer's own (its `xhr` if fetched,
   // `requestConfig`, `pathInfo`) with `target` the live element,
   // `serverResponse` the bare result, `swapOverride` the effective swap
   // style, and `htmxoLiveTerminal: true`. Returns the detail with whatever a
@@ -37814,7 +37815,7 @@ live_refresh_script() = h.script(Raw(raw"""
       return;
     }
 
-    // (B) The diverted poll loop resolved (terminal reached the reporter):
+    // (B) A pushed or fetched terminal reached the reporter:
     //     move the result to the live target, clear + hide the reporter.
     var rep2 = target && target.closest ? target.closest('.htmxo-live-reporter') : null;
     var found = rep2 && rep2.__htmxoLiveTarget ? terminalOf(resp) : null;
@@ -38355,7 +38356,9 @@ listeners never see them as requests. If no answer has arrived three seconds
 after the stream opened (a proxy holding the stream back), the poller polls
 once a second until one does. A poller goes back to its own polls with
 `treebarPollerLost` when the stream drops. A poller inside a live-refresh
-reporter keeps polling and fetches its result.
+reporter also takes pushed answers with Treebars 0.1.5 or later: its
+`htmx:beforeSwap` offer sends the terminal through the same live-target
+swap gate as a fetched answer. Older reporters fetch their terminal.
 When the stream reports an operation `ready`, the script sends that poller's
 poll at once (`htmx.ajax` with the polling element as its source, the request
 its own timer would send), so the answer is swapped, ended and recorded as any
@@ -38473,13 +38476,18 @@ operation_stream_script() = h.script(Raw(raw"""
     if (state.push) window.treebarPollerLost(el, '');
     if (window.htmx) htmx.ajax('get', el.getAttribute('hx-get'), { source: el });
   }
+  // Older Treebars can push into a poller but cannot offer a pushed answer to
+  // the live target's beforeSwap handler. Its reporter must fetch the result.
+  function needsLivePoll(el) {
+    return el && el.closest('.htmxo-live-reporter') &&
+      el.getAttribute('data-htmxo-operation-stream') !== 'live';
+  }
   function apply(data, result) {
     var answer = split(data), token = answer.token;
     if (ended[token]) return;
     if (result) finish(token);
     pollers(token).forEach(function(el) {
-      // Live refresh reports such a poller's answers through its own requests.
-      if (el.closest('.htmxo-live-reporter')) { if (result) poll(el); return; }
+      if (needsLivePoll(el)) { if (result) poll(el); return; }
       if (window.treebarUpdatePoller(el, answer.html)) {
         if (!result) { pushed[token] = true; delete awaited[token]; }
       } else {
@@ -38564,8 +38572,8 @@ operation_stream_script() = h.script(Raw(raw"""
     var d = e.detail || {}, token = pollToken(d.path);
     if (!token) return;
     var now = Date.now();
-    if (pushed[token] || (awaited[token] && now - awaited[token] < FIRST_PUSH_MS &&
-                          !(d.elt && d.elt.closest('.htmxo-live-reporter')))) {
+    if (!needsLivePoll(d.elt) &&
+        (pushed[token] || (awaited[token] && now - awaited[token] < FIRST_PUSH_MS))) {
       e.preventDefault();
       return;
     }
@@ -38575,6 +38583,12 @@ operation_stream_script() = h.script(Raw(raw"""
       return;
     }
     lastPoll[token] = now;
+  });
+  // A diverted interim never swaps. Subscribe when its request ends, before
+  // the reporter's first timer poll would produce a load/settle event.
+  document.addEventListener('htmx:afterRequest', function(e) {
+    var target = e.detail && e.detail.target;
+    if (target && target.hasAttribute && target.hasAttribute('data-htmxo-live-busy')) schedule();
   });
   document.addEventListener('htmx:load', schedule);
   document.addEventListener('htmx:afterSettle', schedule);
@@ -38970,19 +38984,15 @@ Keep the results of a [`semantic_app`](@ref)`(…; presentation=:tabs)` page on
 their inputs. Each read's result region (`[data-htmxo-follow]`) names its
 address, the forms it is sent (`data-htmxo-inputs`: the sidebar and its tab's
 own inputs) and, where DynamicObjects can tell, the inputs it reads
-(`data-htmxo-reads`). The script asks for the result again, 300 ms after the
-last change:
+(`data-htmxo-reads`). A valid edit committed in a visible server-backed tab
+schedules its request on the next browser turn. Results and the page address
+wait for any in-flight refresh of dependent controls. When a region comes
+into view, opening its tab or scrolling to it schedules a check after 300 ms.
 
-- when an input of those forms changes while the region is on screen, and when
-  the region comes into view (its tab is opened, or it is scrolled to);
-- only when the values it reads differ from the ones its shown result was asked
-  for. Opening a tab whose inputs did not change requests nothing, and a change
-  to an input it does not read, or to a `@relevant` input that does not apply
-  (its control is hidden), requests nothing either;
-- only while the forms are valid, so an empty required input waits.
-
-Results and the page address also wait for an in-flight refresh of their
-controls: a domain may take longer to resolve than the result debounce.
+The region requests a result only if its forms are valid and the inputs it
+reads differ from those of its shown result. Reopening an unchanged tab or
+changing an input the operation does not read sends no request. A hidden
+`@relevant` input is omitted when comparing values.
 
 A hidden input is not sent, nor is one that shows its computed default until
 the reader sets it (`data-htmxo-follows`, see [`semantic_refresh_script`](@ref)),
@@ -39108,7 +39118,7 @@ semantic_follow_script() = h.script(Raw(raw"""
         var left = refreshing.get(f) - 1;
         if (left) refreshing.set(f, left); else refreshing.delete(f);
         if (d.xhr.status >= 200 && d.xhr.status < 300) {
-          readers(f).forEach(function(r) { if (visible(r)) later(r); });
+          followChanges(f);
         }
       });
       if (touched && d.xhr.status >= 200 && d.xhr.status < 300) writeAddress();
@@ -39132,9 +39142,17 @@ semantic_follow_script() = h.script(Raw(raw"""
                      {source: region, target: region, swap: 'innerHTML'});
   }
   var timers = new Map();
-  function later(region) {
-    clearTimeout(timers.get(region));
-    timers.set(region, setTimeout(function() { timers.delete(region); consider(region); }, DELAY));
+  function later(region, committed) {
+    var immediate = committed && !region.hasAttribute('data-htmxo-browser');
+    var pending = timers.get(region);
+    // A visibility notification cannot postpone an already committed edit.
+    if (pending && pending.immediate) return;
+    if (pending) clearTimeout(pending.timer);
+    var timer = setTimeout(function() {
+      timers.delete(region);
+      consider(region);
+    }, immediate ? 0 : DELAY);
+    timers.set(region, {timer: timer, immediate: immediate});
   }
   // A result computed in the browser also follows an input while it moves (a
   // slider held down, a number being typed): once a frame at most, and never
@@ -39154,6 +39172,11 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   function readers(form) {
     return regions().filter(function(r) { return formsOf(r).indexOf(form) >= 0; });
+  }
+  function followChanges(form) {
+    readers(form).forEach(function(region) {
+      if (visible(region)) later(region, true);
+    });
   }
   var seen = new WeakSet();
   var observer = 'IntersectionObserver' in window ? new IntersectionObserver(function(entries) {
@@ -39428,7 +39451,7 @@ semantic_follow_script() = h.script(Raw(raw"""
   document.addEventListener('change', function(e) {
     var form = e.target && e.target.form;
     if (!form) return;
-    readers(form).forEach(function(r) { if (visible(r)) later(r); });
+    followChanges(form);
     // After the page's own listeners, which show and hide inputs that apply.
     // Applying the address on load writes nothing back.
     if (kept(form) && !applying) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
@@ -39446,7 +39469,7 @@ semantic_follow_script() = h.script(Raw(raw"""
   // the browser cannot evaluate) can change what the forms send.
   document.addEventListener('htmx:afterSettle', function(e) {
     var t = e.target, form = t && t.closest && t.closest('form');
-    if (form) readers(form).forEach(function(r) { if (visible(r)) later(r); });
+    if (form) followChanges(form);
     if (touched && kept(form)) writeAddress(form);
   });
   function forget(e) {
@@ -40091,7 +40114,7 @@ semantic_follow_script() = h.script(Raw(raw"""
     // An input that only went back to following its default announces no
     // change: its results and the address follow from here.
     forms.forEach(function(form) {
-      readers(form).forEach(function(r) { if (visible(r)) later(r); });
+      followChanges(form);
       if (kept(form)) { touched = true; setTimeout(function() { writeAddress(form); }, 0); }
     });
   }

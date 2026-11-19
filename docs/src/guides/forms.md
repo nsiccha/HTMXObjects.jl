@@ -93,6 +93,19 @@ become hidden inputs; attributes such as `hx_target` configure the form.
 Use `obj=__self__` to forward an object's set `@param` values, with `skip` for
 parameters already supplied by visible controls.
 
+## Refreshing a tab
+
+When a reader commits a valid edit, the visible tab requests its result on the
+next browser turn. If the edit changes another control's available choices, the
+request waits for that control to finish updating. Typing in a server-backed
+field sends the result request when the change is committed, such as on blur.
+
+Fast results return inline. When a refresh takes longer than the default 100 ms
+grace period, the tab keeps its previous result visible and shows progress beside
+it. With Treebars 0.1.5 or later the page's operation stream delivers ordinary
+HTML directly. A response carrying htmx headers or a recorded error is fetched
+so the browser can handle it.
+
 ## Several apps on one page
 
 A generated tabbed app places its tab bar above its shared-input sidebar
