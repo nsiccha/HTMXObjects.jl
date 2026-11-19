@@ -677,7 +677,7 @@ end
     @test scopes(html) == ["first", "second"]
     form = tag_attrs(html, r"<form[^>]* data-htmxo-address=[^>]*>")
     @test form["data-htmxo-url-scope"] == "first"
-    tabs = tag_attrs(html, r"<div[^>]* class=\"tabset\"[^>]*>")
+    tabs = tag_attrs(html, r"<div[^>]* data-tab-param=[^>]*>")
     @test tabs["data-tab-param"] == "tab" && tabs["data-htmxo-url-scope"] == "first"
     @test rates(html) == ["3", "10"] && opened(html) == ["result", "result"]
 
@@ -1273,7 +1273,7 @@ end
     end
 end
 
-@testitem "a tabs page is as tall as its inputs and results, inside a longer page or alone" setup=[ChromeDump] tags=[:browser, :semantic] begin
+@testitem "a tabs page fits its content and its tab bar spans the sidebar and result" setup=[ChromeDump] tags=[:browser, :semantic] begin
     # A `presentation=:tabs` surface is one part of a page: between paragraphs
     # of an article, or under the page's title. It took the window's height as
     # its minimum, leaving the window's height less its content empty before
@@ -1296,6 +1296,13 @@ end
             const out = document.body.dataset;
             try {
                 const layout = document.querySelector('.htmxo-app-layout'), box = layout.getBoundingClientRect();
+                if (layout.closest('.htmxo-semantic-page') && innerWidth >= 768) {
+                    const nav = layout.querySelector('[role=tablist]').getBoundingClientRect();
+                    const side = layout.querySelector('aside').getBoundingClientRect();
+                    const panel = layout.querySelector('[role=tabpanel]').getBoundingClientRect();
+                    out.spans = String(Math.abs(nav.left - box.left) < 1 && Math.abs(nav.right - box.right) < 1);
+                    out.columns = String(nav.bottom <= side.top && nav.bottom <= panel.top && side.right < panel.left);
+                }
                 // Where the sidebar's and the main column's content ends.
                 const end = Math.max(...Array.from(layout.children).flatMap(column => Array.from(column.children))
                     .map(part => part.getBoundingClientRect().bottom));
@@ -1327,7 +1334,7 @@ end
             "shell" => app_layout(nav_sidebar(["Table" => "/", "Gallery" => "/gallery"]),
                 h.p("One paragraph.")),
         ]
-        for (name, content) in pages, width in (1400, 600)
+        for (name, content) in pages, width in (1400, 980, 600)
             dom = mktempdir() do directory
                 copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
                 fixture = joinpath(directory, "page.html")
@@ -1349,6 +1356,10 @@ end
                 @test (name, width, get(marks, "fills", nothing)) == (name, width, "true")
                 @test (name, width, get(marks, "scrolls", nothing)) == (name, width, "false")
             else
+                if width >= 768
+                    @test (name, width, get(marks, "spans", nothing)) == (name, width, "true")
+                    @test (name, width, get(marks, "columns", nothing)) == (name, width, "true")
+                end
                 @test (name, width, get(marks, "fits", nothing)) == (name, width, "true")
                 @test (name, width, get(marks, "fills", nothing)) == (name, width, "false")
                 name == "embedded" && @test (name, width, get(marks, "follows", nothing)) == (name, width, "true")

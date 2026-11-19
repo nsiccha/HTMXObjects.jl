@@ -95,6 +95,10 @@ parameters already supplied by visible controls.
 
 ## Several apps on one page
 
+A generated tabbed app places its tab bar above its shared-input sidebar
+and selected result. The bar uses the width of that app, including when
+embedded in an article. Labels wrap onto another row when the space runs out.
+
 A `presentation=:tabs` page keeps the inputs the reader set and its open tab in
 the page address (`?rate=5&tab=other`), so a reload or a shared link reopens
 it. A page can show several such apps, each a mounted object:
