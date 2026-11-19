@@ -443,6 +443,94 @@ end
     end
 end
 
+@testitem "preset cards keep automatic names and Reset restores the declared series" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+        route!(PresetApp(); operation_policy=:blocking)
+        outcome = browser_outcome(raw"""
+        window.addEventListener('load', async function() {
+          const cards = () => Array.from(document.querySelectorAll('.htmxo-record'));
+          const input = (i, selector) => cards()[i].querySelector(selector);
+          const names = () => cards().map(c => {
+            const label = c.querySelector('.htmxo-record-label');
+            return label.value || label.placeholder;
+          }).join('|');
+          const result = () => document.querySelector('[data-htmxo-follow="/series"]').textContent.trim();
+          async function until(f, expected) {
+            const end = Date.now() + 10000;
+            while (f() !== expected) {
+              if (Date.now() > end) throw Error('expected ' + expected + ', saw ' + f());
+              await new Promise(r => setTimeout(r, 25));
+            }
+          }
+          function rename(i, value) {
+            const label = input(i, '.htmxo-record-label');
+            label.value = value;
+            label.dispatchEvent(new Event('change', {bubbles:true}));
+          }
+          try {
+            await until(names, 'Shared');
+            await until(result, 'Shared=70.0');
+            document.querySelector('[data-htmxo-reset]').click();
+            await until(names, 'Baseline|Twice daily|Daily');
+            await until(result, 'Baseline=100.0|Daily=100.0');
+            const colours = () => Array.from(document.querySelectorAll('.htmxo-record-on input:checked'),
+              box => getComputedStyle(box).accentColor).join('|');
+            document.documentElement.style.setProperty('--aov-category', 'rgb(20, 40, 60), #884422, #753');
+            await until(colours, 'rgb(20, 40, 60)|rgb(136, 68, 34)');
+            input(1, '.htmxo-record-on input').click();
+            await until(colours, 'rgb(20, 40, 60)|rgb(136, 68, 34)|rgb(119, 85, 51)');
+            input(1, '[data-htmxo-record-action="duplicate"]').click();
+            await until(result, 'Baseline=100.0|Twice daily=50.0|Twice daily (2)=50.0|Daily=100.0');
+            rename(2, 'Manual');
+            input(2, 'input[type=radio][value=daily]').click();
+            await until(result, 'Baseline=100.0|Twice daily=50.0|Manual=50.0|Daily=100.0');
+            rename(2, '');
+            await until(names, 'Baseline|Twice daily|Daily|Daily (2)');
+            await until(result, 'Baseline=100.0|Twice daily=50.0|Daily=50.0|Daily (2)=100.0');
+            const shared = new URLSearchParams(location.search);
+            if (shared.get('scenarios.3.label') !== '' || shared.get('scenarios.3.regimen') !== 'daily')
+              throw Error('automatic name was pinned in ' + location.search);
+            input(0, '[data-htmxo-record-action="remove"]').click();
+            document.querySelector('[data-htmxo-record-action="add"]').click();
+            document.querySelector('[data-htmxo-reset]').click();
+            await until(names, 'Baseline|Twice daily|Daily');
+            await until(result, 'Baseline=100.0|Daily=100.0');
+            await until(() => new URLSearchParams(location.search).has('scenarios.1.label'), false);
+            fetch('/complete?passed=true');
+          } catch (e) { fetch('/complete?' + new URLSearchParams({error:String(e)})); }
+        });
+        """; path="/?scenarios.1.label=Shared&scenarios.1.dose=70")
+        @test outcome == Dict("passed" => "true")
+    end
+end
+
+@testitem "a static Records form opens a partial shared link and resets to its presets" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+        route!(PresetApp(); operation_policy=:blocking)
+        # Serve the default HTML at a different address, as a static host does.
+        outcome = browser_outcome(raw"""
+        window.addEventListener('load', function() {
+          const read = () => Array.from(document.querySelectorAll('.htmxo-record'), c => {
+            const label = c.querySelector('.htmxo-record-label');
+            return [label.value || label.placeholder, c.querySelector('[type=number]').valueAsNumber,
+              c.querySelector('.htmxo-record-on input').checked].join('/');
+          }).join('|');
+          const link = read();
+          document.querySelector('button[data-htmxo-reset]').click();
+          fetch('/complete?' + new URLSearchParams({link, reset:read()}));
+        });
+        """; address="/?scenarios.1.regimen=bid&scenarios.2.label=Older&scenarios.2.on=false")
+        @test outcome == Dict("link"=>"Twice daily/100/true|Older/100/false",
+                              "reset"=>"Baseline/100/true|Twice daily/50/false|Daily/100/true")
+    end
+end
+
 @testitem "the Reset keeps a constant default following in a browser" setup=[SemanticPageFixtures, RecordsFixtures] tags=[:browser, :semantic] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true

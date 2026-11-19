@@ -4,7 +4,18 @@ using TestItemRunner
 @testmodule RecordsFixtures begin
     using HTMXObjects, HTTP, Sockets
     using HTMXObjects.DynamicObjects: option_domain
-    export ScenarioApp, sidebar_of, attrs_of, body_of, browser_outcome
+    export ScenarioApp, PresetApp, sidebar_of, attrs_of, body_of, browser_outcome
+
+    @htmx struct PresetApp
+        @param regimen::String = "daily"
+        @options(regimen) = option_domain(["daily" => "Daily", "bid" => "Twice daily"])
+        @param dose::Float64 = 100.0
+        @param scenarios::Records = Records(:regimen, :dose; label="Scenario", label_from=:regimen,
+            presets=[(label="Baseline",), (regimen="bid", dose=50, on=false), (regimen="daily",)])
+        @get series() = h.p(join((string(s.label, "=", s.dose) for s in scenarios), "|"))
+        @get count_series() = h.p(length(scenarios))
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index)
+    end
 
     @htmx struct ScenarioApp
         "Prediction basis"
@@ -52,7 +63,7 @@ using TestItemRunner
     # fetching `/complete?<key>=<value>&…`), opened in headless Chrome: the
     # values the driver reported, or an empty Dict when it reported nothing
     # within 60 s.
-    function browser_outcome(driver::AbstractString; path="/")
+    function browser_outcome(driver::AbstractString; path="/", address=path)
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
         isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
         receipt = Channel{String}(1)
@@ -79,7 +90,7 @@ using TestItemRunner
         end
         try
             mktempdir() do profile
-                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/`
+                cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port$address`
                 process = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
                 try
                     timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05)
@@ -93,6 +104,20 @@ using TestItemRunner
             close(server)
         end
     end
+end
+
+@testitem "Records presets and edits resolve through the same route" setup=[RecordsFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    route!(PresetApp(); operation_policy=:blocking)
+    get(path) = dispatch(:GET, path; headers=["HX-Request" => "true"])
+    @test body_of(get("/series")) == "<p>Baseline=100.0|Daily=100.0</p>"
+    @test all_records(PresetApp().scenarios)[2] == (label="Twice daily", on=false, regimen="bid", dose=50.0)
+    @test body_of(get("/series?scenarios.1.regimen=bid&scenarios.2.regimen=bid&scenarios.3.label=Twice%20daily")) ==
+        "<p>Twice daily (2)=100.0|Twice daily (3)=100.0|Twice daily=100.0</p>"
+    @test body_of(get("/series?scenarios.1.label=Old&scenarios.2.on=false")) == "<p>Old=100.0</p>"
+    @test HTTP.header(get("/series?scenarios.1.dose=bad"), "X-HTMXO-Error-Param") == "scenarios.1.dose"
+    @test_throws "one of its fields" Records(:a; label_from=:missing)
+    @test_throws "preset 1 field" Records(:a; presets=[(b=1,)])
 end
 
 @testitem "a Records param is the records switched on, each typed by its fields" setup=[RecordsFixtures] tags=[:unit, :semantic] begin
@@ -187,8 +212,9 @@ end
     @test contains(two, r"name=\"scenarios\.2\.age\" type=\"number\" value=\"30\"")
     # What the address leaves out: the one record a request naming none has.
     address = HTMXObjects.JSON.parse(attrs_of(sidebar, r"<form[^>]*>")["data-htmxo-address"])
-    @test address["scenarios"]["records"]["label"] == "Scenario"
-    @test address["scenarios"]["records"]["fields"]["age"] == ["50.0"]
+    default_card = only(address["scenarios"]["records"]["entries"])
+    @test default_card["label"] == "Scenario 1"
+    @test default_card["fields"]["age"] == ["50.0"]
     # The open tab's first address carries the records.
     first_load = attrs_of(html, r"<div hx-get=\"/timecourse[^\"]*\" hx-trigger=\"load\"[^>]*>")
     query = Dict(HTTP.URIs.queryparams(HTTP.URI(first_load["hx-get"])))

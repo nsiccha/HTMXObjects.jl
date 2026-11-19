@@ -145,13 +145,38 @@ since it sees the whole page, and the server reads the same names when it
 renders the page. A custom `layout(parts)` that draws its own `tabset` passes
 `url_scope=parts.url_scope` to keep its tab the same way.
 
+## Preset record cards
+
+From 0.1.178, `presets` gives a `Records` input its starting cards in order.
+Each preset supplies the fields it changes. Here the first card takes the
+declared regimen, and the second starts switched off.
+
+```@example forms
+@htmx struct Comparison
+    @param regimen::String = "100% q 24 x 14"
+    @param scenarios::Records = Records(:regimen; label="Scenario", label_from=:regimen,
+        presets=[(label="Daily 100 %",), (label="BID 50 %", regimen="50% q 12 x 14", on=false)])
+    @get selected() = h.ul((h.li(s.label, " — ", s.regimen) for s in scenarios)...)
+end
+[s.label => s.regimen for s in Comparison().scenarios]
+```
+
+Add and Duplicate take their automatic name from `label_from`, using the
+display label for a choice. Repeated names get a numbered suffix. A name the
+reader types takes precedence, and clearing it restores automatic naming.
+Omit `label_from` to keep numbered names and copy labels.
+
+The Include box shows each enabled card's colour in order. A plot using the
+page's default categorical palette and the same category order matches those
+colours, including in dark mode or with a page-wide `--aov-category` palette.
+
 ## Resetting every input
 
 From 0.1.127, a `presentation=:tabs` page has a Reset button. It returns every
 input, in the sidebar and in each tab, to what the page shows when its address
 names nothing: its `values=` entry or its declared default. An input with a
 computed default, or one with `@resets` (next section), follows its default
-again, and a list of records goes back to its one default record. The open tab
+again, and a list of records goes back to its presets or its single default card. The open tab
 stays.
 
 ```@example forms
