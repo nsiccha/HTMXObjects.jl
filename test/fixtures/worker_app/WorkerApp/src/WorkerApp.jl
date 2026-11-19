@@ -71,7 +71,15 @@ seen() = "lang=$(something(HTMXObjects.page_lang(), "none")) audience=$(HTMXObje
         while !isempty(gate) && !isfile(gate)
             sleep(0.05)
         end
-        h.p("ahead-done pid=$(getpid())"; id="done")
+        built = Ref(false)
+        send_ahead() do
+            built[] = true
+            h.p("lazy-part pid=$(getpid())")
+        end
+        while !isempty(gate) && !isfile(gate * ".finish")
+            sleep(0.05)
+        end
+        h.p("ahead-done pid=$(getpid()) built=$(built[])"; id="done")
     end
     "Light read, always here"
     @get light() = h.p("light pid=$(getpid()) $(seen())"; id="light")

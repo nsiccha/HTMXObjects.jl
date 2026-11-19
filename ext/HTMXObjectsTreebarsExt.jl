@@ -108,10 +108,6 @@ const _ISOLATED_REQUEST = (hx_params="none", hx_vals="unset", hx_vars="unset")
 # `HTMXObjects._sent_ahead_carriers`): every poll and pushed answer replaces
 # the polling element, so they arrive with each answer, and the page lands
 # each part once.
-_isolate_auto_poll_params(response, stream::Bool=false, carriers=()) =
-    HTMXObjects._operation_running_answer(response) ?
-        _isolate_polling_inner(response, stream, carriers) : response
-
 function _isolate_polling_inner(poller, stream::Bool=false, carriers=())
     HTMX = HTMXObjects.HTMX
     children = copy(HTMX.children(poller))
@@ -295,10 +291,12 @@ function __init__()
             # operation. A result rendered through `render_operation_result`
             # has already recorded it; what Treebars rendered without a value
             # is its failure terminal.
-            HTMXObjects._operation_running_answer(responded) ||
+            if !HTMXObjects._operation_running_answer(responded)
                 HTMXObjects._operation_ended(transport, :failed)
-            _isolate_auto_poll_params(responded, get(transport, :stream, false),
-                                      get(transport, :sent_ahead, () -> ())())
+                return responded
+            end
+            _isolate_polling_inner(responded, get(transport, :stream, false),
+                                   get(transport, :sent_ahead, () -> ())())
         end
 
     # Job boards (`jobs_board`, the runtime dashboard): a keyed Treebars board,

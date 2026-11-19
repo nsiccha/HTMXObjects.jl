@@ -282,8 +282,15 @@ end
             @test contains(seen[], "ahead-part pid=$(status.pid)")
             @test running(seen[])
             touch(gate)
+            @test timedwait(30.0; pollint=0.1) do
+                contains(body_text(hx_get(poll)), "lazy-part pid=$(status.pid)")
+            end === :ok
+            touch(gate * ".finish")
             finished = settle_slowly(poll)
-            @test contains(finished, "ahead-done pid=$(status.pid)")
+            @test contains(finished, "ahead-done pid=$(status.pid) built=true")
+            blocking = dispatch(:GET, "/ahead"; headers=["HX-Request" => "true"],
+                                operation_policy=:blocking)
+            @test contains(body_text(blocking), "ahead-done pid=$(status.pid) built=false")
             @test !contains(finished, "ahead-part pid=")
             # The runtime panel names the worker.
             panel = repr(MIME"text/html"(), system_load_panel("/load"))

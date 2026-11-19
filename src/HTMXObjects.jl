@@ -16494,11 +16494,17 @@ mutable struct _SentAhead
     # is added.
     const watchers::Vector{Pair{Channel{String},String}}
     refused::Int
+    # A running poller keeps a lazy preview eligible until its token expires.
+    # Reader deadlines and forwarding for worker probes use _sent_ahead_lock.
+    const readers::Dict{String,Float64}
 end
 _SentAhead() = _SentAhead(ReentrantLock(), String[], 0, nothing,
-                          Pair{Channel{String},String}[], 0)
+                          Pair{Channel{String},String}[], 0, Dict{String,Float64}())
 
 const _SENT_AHEAD = ScopedValues.ScopedValue{Union{Nothing,_SentAhead}}(nothing)
+# Inline materializations shadow only the lazy builder's reader context. The
+# worker receives a live probe of that context, never the captured builder.
+const _PREVIEW_READER = ScopedValues.ScopedValue{Union{Nothing,_SentAhead,String}}(nothing)
 
 # What one operation keeps of the parts it sent. Past either bound a part is
 # refused, the first refusal is recorded, and the finished answer still lands.
@@ -16510,6 +16516,7 @@ const _SENT_AHEAD_HEADER = "HTMXO-Sent-Ahead"
 
 """
     send_ahead(content)
+    send_ahead(build::Function)
 
 Put `content` in front of the reader while the route that calls it is still
 running. Under the default `:auto` [`OperationPolicy`](@ref) a route that takes
@@ -16518,6 +16525,14 @@ ahead lands once, in the order sent, in a region above that poller's progress
 tree, and the route's finished answer replaces the parts together with the
 poller. `content` is anything a route may return (a `Node`, a string, a vector
 of them), rendered to HTML when `send_ahead` is called.
+
+For expensive previews, pass a zero-argument function, for example
+`send_ahead(() -> view(results))`. The function runs synchronously, once, if
+the background computation has a running poller when the call is made. A call during
+the grace period is skipped unless another reader already has a running
+poller for the same computation. Skipped builders are never replayed. The
+method returns `nothing`. Put only preview work in the function: the route
+must be able to produce its final answer even when no builder runs.
 
 A part lands the way htmx swaps an answer at the end of the region: a script in
 it runs once (AlgebraOfVega's `append_data` / `replace_data` / `update_spec`
@@ -16539,8 +16554,10 @@ end
 Only a running poller shows parts. A Markdown or `?plain` read, a
 [`dispatch`](@ref) with `operation_policy=:blocking`, a static export
 ([`record!`](@ref)), and an answer that finishes within the grace period get
-the finished answer alone, so the route needs no branch for them: there
-`send_ahead` does nothing.
+the finished answer alone, so the route needs no branch for them: passing finished
+content still pays to construct it. The function form skips that construction.
+Work started inline on a blocking request has no parts list, even if another
+request later joins its memoized result.
 
 `send_ahead` reaches the operation from anywhere in its computation: the route
 body, the helpers it calls, the tasks it spawns, and the property computations
@@ -16567,7 +16584,13 @@ refusal is recorded like a caught error ([`record_error`](@ref)), and the
 finished answer still lands. The page applies parts with the `htmx()` shell's
 `sent_ahead_script()`, installed with the Treebars assets.
 """
-function send_ahead(content)
+send_ahead(content) = _send_ahead_content(content)
+function send_ahead(build::Function)
+    _has_preview_reader(_PREVIEW_READER[]) && _send_ahead_content(build())
+    nothing
+end
+
+function _send_ahead_content(content)
     sink = _SENT_AHEAD[]
     if sink === nothing
         # In a worker process (DynamicObjects' worker executor behind
@@ -16669,6 +16692,71 @@ end
 # computation each get a `Pending` of their own), its handle and its list.
 const _sent_ahead_lock = ReentrantLock()
 const _sent_ahead_lists = IdDict{Any,Pair{Any,_SentAhead}}()
+const _preview_worker_dir = Ref("")
+const _preview_worker_paths = WeakKeyDict{_SentAhead,Vector{String}}()
+
+# A queue worker shares the requester's filesystem. Publish just the expiry of
+# the last reader under a private directory, only for worker-bound scopes.
+# Atomic replacement lets a worker sample demand without a round trip or
+# holding any lock across application code. Both processes use the host clock.
+_preview_deadline(sink::_SentAhead) = maximum(values(sink.readers); init=0.0)
+function _publish_preview_deadline!(path::String, deadline::Float64)
+    if iszero(deadline)
+        rm(path; force=true)
+    else
+        mktemp(dirname(path)) do tmp, io
+            write(io, deadline)
+            close(io)
+            Base.Filesystem.rename(tmp, path)
+        end
+    end
+    nothing
+end
+
+_wire_preview_reader(value::Union{Nothing,String}) = value
+function _wire_preview_reader(sink::_SentAhead)
+    lock(_sent_ahead_lock) do
+        sink.forward === nothing || return _wire_preview_reader(sink.forward)
+        paths = get!(_preview_worker_paths, sink) do
+            isempty(_preview_worker_dir[]) && (_preview_worker_dir[] = mktempdir())
+            path = tempname(_preview_worker_dir[]; cleanup=false)
+            deadline = _preview_deadline(sink)
+            iszero(deadline) || _publish_preview_deadline!(path, deadline)
+            [path]
+        end
+        first(paths)
+    end
+end
+
+_has_preview_reader(::Nothing) = false
+function _has_preview_reader(path::String)
+    try
+        open(io -> read(io, Float64), path) > _operation_poll_now()
+    catch err
+        err isa SystemError && err.errnum == Base.Libc.ENOENT || rethrow()
+        false
+    end
+end
+function _has_preview_reader(sink::_SentAhead)
+    lock(_sent_ahead_lock) do
+        sink.forward === nothing || return _has_preview_reader(sink.forward)
+        _preview_deadline(sink) > _operation_poll_now()
+    end
+end
+
+function _set_preview_deadline!(sink::_SentAhead, token, deadline)
+    lock(_sent_ahead_lock) do
+        if iszero(deadline)
+            delete!(sink.readers, token)
+        else
+            sink.readers[token] = deadline
+        end
+        paths = get(_preview_worker_paths, sink, nothing)
+        paths === nothing && return
+        last_reader = _preview_deadline(sink)
+        foreach(path -> _publish_preview_deadline!(path, last_reader), paths)
+    end
+end
 
 # Bind a parts list for a computation `start()` starts, and return what it
 # returns. A list belongs to its computation: a start that joined a running
@@ -16678,7 +16766,7 @@ const _sent_ahead_lists = IdDict{Any,Pair{Any,_SentAhead}}()
 # have finished leave the registry here.
 function _with_sent_ahead(start)
     mine = _SentAhead()
-    started = ScopedValues.with(start, _SENT_AHEAD => mine)
+    started = ScopedValues.with(start, _SENT_AHEAD => mine, _PREVIEW_READER => mine)
     started isa _OperationHandle || return started
     key = _runtime_handle_key(started)
     lock(_sent_ahead_lock) do
@@ -16689,6 +16777,14 @@ function _with_sent_ahead(start)
                 foreach(html -> _add_part!(kept, html), mine.parts)
                 empty!(mine.parts)
                 mine.bytes = 0
+                # A racing start may already have carried its own probe to a
+                # worker. Keep that probe in sync with the computation it joined.
+                paths = pop!(_preview_worker_paths, mine, nothing)
+                if paths !== nothing
+                    append!(get!(Vector{String}, _preview_worker_paths, kept), paths)
+                    deadline = _preview_deadline(kept)
+                    foreach(path -> _publish_preview_deadline!(path, deadline), paths)
+                end
                 mine.forward = kept
             end
         end
@@ -16711,10 +16807,19 @@ end
 # poll. None in an answer the page's stream pushes: the stream sends each part
 # itself, as an `ahead` event. The Treebars extension puts it inside the
 # polling element, which every poll and pushed answer replaces.
-function _sent_ahead_carriers(req::HTTP.Request, started)
-    get(req.context, :htmxo_push, false) === true && return ()
-    sink = _sent_ahead_of(started)
+function _sent_ahead_carriers(req::HTTP.Request, entry)
+    sink = _sent_ahead_of(entry.started)
     sink === nothing && return ()
+    if !_operation_prewarm_request(req)
+        lock(_operation_poll_lock) do
+            if get(_operation_polls, entry.token, nothing) === entry &&
+                    isnan(entry.finished_at[]) && !entry.terminal_ready
+                entry.preview_sink = sink
+                _set_preview_deadline!(sink, entry.token, entry.touched_at + _OPERATION_POLL_TTL)
+            end
+        end
+    end
+    get(req.context, :htmxo_push, false) === true && return ()
     after = something(tryparse(Int, HTTP.header(req, _SENT_AHEAD_HEADER, "0")), 0)
     parts = _sent_ahead_parts(sink, after)
     isempty(parts) && return ()
@@ -16801,13 +16906,14 @@ mutable struct _OperationPollEntry
     # poller was rendered): where the page's operation stream renders the
     # answers it pushes (`_operation_push!`).
     poll_url::String
+    preview_sink::Union{Nothing,_SentAhead}
 end
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job) =
     _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, job, false, nothing,
-        0, false, false, Threads.Atomic{Float64}(NaN), false, "")
+        0, false, false, Threads.Atomic{Float64}(NaN), false, "", nothing)
 
 _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at) =
@@ -16815,6 +16921,14 @@ _OperationPollEntry(token, signature, prop, keys, call_kwargs, started,
         error_obj, request, created_at, touched_at, nothing)
 
 const _operation_polls = Dict{String,_OperationPollEntry}()
+
+# Called under _operation_poll_lock; repeated cleanup of the same token is safe.
+function _close_preview_reader!(entry::_OperationPollEntry)
+    sink = entry.preview_sink
+    sink === nothing && return
+    _set_preview_deadline!(sink, entry.token, 0.0)
+    entry.preview_sink = nothing
+end
 
 mutable struct _MutationTerminal
     signature::Any
@@ -16986,7 +17100,8 @@ end
 function _delete_operation_poll!(token::AbstractString)
     lock(_operation_poll_lock)
     try
-        delete!(_operation_polls, String(token))
+        entry = pop!(_operation_polls, String(token), nothing)
+        entry === nothing || _close_preview_reader!(entry)
     finally
         unlock(_operation_poll_lock)
     end
@@ -16996,6 +17111,7 @@ end
 function _clear_operation_polls!()
     lock(_operation_poll_lock)
     try
+        foreach(_close_preview_reader!, values(_operation_polls))
         empty!(_operation_polls)
         empty!(_mutation_terminals)
     finally
@@ -17040,17 +17156,17 @@ end
 function _record_operation_end!(entry::_OperationPollEntry, outcome::Symbol;
         now::Real=_operation_poll_now())
     format = OPERATION_LOG[]
-    format === nothing && return nothing
-    # A prestart no browser joined was dropped unclaimed, not abandoned
-    # mid-poll: nothing ever asked for its result.
-    entry.prestarted && entry.polls == 0 && outcome in (:abandoned, :evicted) &&
-        (outcome = :unclaimed)
     claimed = lock(_operation_poll_lock) do
-        (entry.retained && !entry.recorded) || return false
+        _close_preview_reader!(entry)
+        (format !== nothing && entry.retained && !entry.recorded) || return false
         entry.recorded = true
         true
     end
     claimed || return nothing
+    # A prestart no browser joined was dropped unclaimed, not abandoned
+    # mid-poll: nothing ever asked for its result.
+    entry.prestarted && entry.polls == 0 && outcome in (:abandoned, :evicted) &&
+        (outcome = :unclaimed)
     try
         @info sprint(format, _operation_record(entry, outcome, now)) _group=:operation
     catch err
@@ -17079,9 +17195,8 @@ end
 # failure itself reaches the client through the poll that answers it. One
 # lightweight task per polled operation, on the interactive pool when there is
 # one (the `@queued` job watcher's placement), so a saturated `:default` pool
-# does not delay the stamp. Skipped while operation records are off.
+# does not delay the stamp or let an escaped task build previews after completion.
 function _watch_operation_finish!(entry::_OperationPollEntry)
-    OPERATION_LOG[] === nothing && return nothing
     handle = entry.started
     finished = entry.finished_at
     if !(handle isa _OperationHandle)
@@ -17094,7 +17209,10 @@ function _watch_operation_finish!(entry::_OperationPollEntry)
         catch
             # The poll that reaches this operation answers its failure.
         end
-        finished[] = _operation_poll_now()
+        lock(_operation_poll_lock) do
+            finished[] = _operation_poll_now()
+            _close_preview_reader!(entry)
+        end
     end
     Threads.nthreads(:interactive) > 0 ?
         Threads.@spawn(:interactive, watch()) : Threads.@spawn(watch())
@@ -17510,7 +17628,8 @@ function _execute_materialization(target, name, verb_inst, idx_vals, kw_pairs;
         fetch=Base.fetch, kwargs...)
     materialize() = _materialize_route(target, name, verb_inst, idx_vals,
                                        kw_pairs; fetch, kwargs...)
-    fetch === Base.fetch ? materialize() : _with_sent_ahead(materialize)
+    fetch === Base.fetch && return ScopedValues.with(materialize, _PREVIEW_READER => nothing)
+    _with_sent_ahead(materialize)
 end
 
 function _materialize_route(target, name, verb_inst, idx_vals, kw_pairs;
@@ -17799,7 +17918,7 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         stalled=_operation_stall(entry, age, descriptor, name, verb_inst, req,
                                  prefix),
         stream=_operation_stream_wanted(req),
-        sent_ahead=() -> _sent_ahead_carriers(req, entry.started),
+        sent_ahead=() -> _sent_ahead_carriers(req, entry),
     )
     entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
@@ -17900,7 +18019,7 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
                  ended=outcome -> _record_operation_end!(entry, outcome),
                  failed=(err, uid) -> _note_operation_failure!(req, err, uid),
                  stream=_operation_stream_wanted(req),
-                 sent_ahead=() -> _sent_ahead_carriers(req, started))
+                 sent_ahead=() -> _sent_ahead_carriers(req, entry))
     entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
         value -> _finish_operation_poll(token, value),
@@ -18089,7 +18208,7 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
                      ended=outcome -> _record_operation_end!(entry, outcome),
                      failed=(err, uid) -> _note_operation_failure!(req, err, uid),
                      stream=_operation_stream_wanted(req),
-                     sent_ahead=() -> _sent_ahead_carriers(req, started))
+                     sent_ahead=() -> _sent_ahead_carriers(req, entry))
         entry.poll_url = transport.poll_url
         value = _operation_page_runtime(req, _operation_polling(
             value -> _finish_operation_poll(token, value),
@@ -44963,6 +45082,7 @@ function __init__()
     if isdefined(DynamicObjects, :carry_to_worker!)
         DynamicObjects.carry_to_worker!(@__MODULE__, :_PAGE_META;
             wire=_wire_page_meta, unwire=_unwire_page_meta)
+        DynamicObjects.carry_to_worker!(@__MODULE__, :_PREVIEW_READER; wire=_wire_preview_reader)
         DynamicObjects.carry_to_worker!(@__MODULE__, :_AUDIENCE)
         DynamicObjects.carry_to_worker!(@__MODULE__, :_REPORT)
     end
