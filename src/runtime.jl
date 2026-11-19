@@ -957,7 +957,9 @@ _has_queue_workers() = _has_job_queue() &&
         methods(_dynamicobjects_queue(:configure_queue!)))
 
 """
-    configure_job_queue!(; max_running=nothing, abandon_after=nothing, workers=nothing) -> NamedTuple
+    configure_job_queue!(; max_running=nothing, abandon_after=nothing, workers=nothing,
+        worker_stall=nothing, worker_exeflags=nothing, worker_start=nothing,
+        worker_preload=nothing) -> NamedTuple
 
 Bound how many `@queued` (heavy) computations run at once. Off by default
 (`max_running=0`): a `@queued` computation starts on `:default` immediately. With
@@ -1000,6 +1002,19 @@ and audience around the computation, so `page_lang()` and `private` read in the
 worker as they do here. The default `0` keeps every computation in this
 process.
 
+By default the worker starts on its first computation (`worker_start=:lazy`).
+Set `worker_start=:now` with `workers=1` to start it in the background.
+`worker_preload=[AppModule]` loads the listed packages (modules or
+`Base.PkgId`s) at startup, including after an explicit restart. An early
+computation waits for loading to finish. Pass `worker_preload=[]` to clear
+the list for future starts.
+
+`worker_exeflags` sets Julia arguments for the next worker launch. For example,
+`["--threads=4,1", "--gcthreads=2", "--heap-size-hint=2G"]` sets the worker's
+thread pools, GC threads and heap target. Custom flags replace the default
+thread argument, so include the interactive thread when setting a heap hint.
+Pass `worker_exeflags=[]` to clear custom flags.
+
 A failure in the worker answers as it does here (DynamicObjects 0.5.13):
 `unwrap_error` returns the worker's exception itself, so a `CallerFault` or a
 refused `@param` answers its status and message and an `__error__` hook reads
@@ -1016,7 +1031,7 @@ costs a failed fit, not a frozen app. A heavy fit's first-call compile can run
 for tens of minutes without a frame, so set `s` well above that.
 
 The queue is DynamicObjects' (`DynamicObjects.configure_queue!`, which this
-forwards `max_running` and `workers` to); `@queued` needs a DynamicObjects with
+forwards `max_running`, `workers` and the worker launch options to); `@queued` needs a DynamicObjects with
 it (`pre-inference` ≥ `64aba0c`), and `workers` one whose `configure_queue!`
 takes that keyword and that carries scoped values into the worker (0.5.8): on
 an older one `workers=0` is accepted and a positive count refused. Returns the
@@ -1024,7 +1039,8 @@ current settings; omitted settings are unchanged. Setting `max_running=0`
 starts everything still queued.
 """
 function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
-        workers=nothing, worker_stall=nothing)
+        workers=nothing, worker_stall=nothing, worker_exeflags=nothing,
+        worker_start=nothing, worker_preload=nothing)
     if max_running !== nothing
         max_running >= 0 || throw(ArgumentError("max_running must be non-negative"))
         max_running > 0 && !_has_job_queue() && throw(ArgumentError(
@@ -1042,18 +1058,21 @@ function configure_job_queue!(; max_running=nothing, abandon_after=nothing,
     end
     if abandon_after !== nothing
         abandon_after > 0 || throw(ArgumentError("abandon_after must be positive"))
-        _QUEUE_ABANDON_AFTER[] = Float64(abandon_after)
+        abandon_after = Float64(abandon_after)
     end
     if worker_stall !== nothing
         worker_stall > 0 || throw(ArgumentError("worker_stall must be positive (Inf turns the watchdog off)"))
-        _WORKER_STALL[] = Float64(worker_stall)
+        worker_stall = Float64(worker_stall)
     end
-    queue_kw = (;
-        (max_running === nothing ? (;) : (; max_running=Int(max_running)))...,
+    queue_options = (;
+        max_running = max_running === nothing || !_has_job_queue() ? nothing : Int(max_running),
         # A zero on a DynamicObjects without the executor is the state it is in.
-        (workers === nothing || !_has_queue_workers() ? (;) : (; workers=Int(workers)))...)
-    isempty(queue_kw) || !_has_job_queue() ||
-        _dynamicobjects_queue(:configure_queue!)(; queue_kw...)
+        workers = workers === nothing || !_has_queue_workers() ? nothing : Int(workers),
+        worker_exeflags, worker_start, worker_preload)
+    queue_kw = (; (k => v for (k, v) in pairs(queue_options) if v !== nothing)...)
+    isempty(queue_kw) || _dynamicobjects_queue(:configure_queue!)(; queue_kw...)
+    abandon_after === nothing || (_QUEUE_ABANDON_AFTER[] = abandon_after)
+    worker_stall === nothing || (_WORKER_STALL[] = worker_stall)
     settings = job_queue_settings()
     isfinite(settings.worker_stall) && settings.workers > 0 && _start_worker_watchdog!()
     settings

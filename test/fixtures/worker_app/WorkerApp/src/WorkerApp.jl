@@ -6,6 +6,21 @@ module WorkerApp
 using HTMXObjects
 import HTMXObjects: h
 
+# Record when this package actually loads, even if no job has been submitted.
+function __init__()
+    dir = get(ENV, "HTMXO_TEST_WORKER_LAUNCH_DIR", nothing)
+    dir === nothing && return
+    path = joinpath(dir, string(getpid()))
+    options = Base.JLOptions()
+    open(path * ".tmp", "w") do io
+        println(io, Threads.nthreads(:default))
+        println(io, Threads.nthreads(:interactive))
+        println(io, options.nmarkthreads)
+        println(io, Int(options.heap_size_hint))
+    end
+    mv(path * ".tmp", path)
+end
+
 @htmx struct ParamChild
     @param (; dataset, data_version, tags, level, optional, note) = __parent__
     @param child::Int = 3
