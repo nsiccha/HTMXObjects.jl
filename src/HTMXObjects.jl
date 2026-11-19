@@ -8900,6 +8900,13 @@ can run inside a serving app (it renders in process with
   is a failure of that address. A link to an outside target keeps the `#id`
   it names.
 - `parent` is the progress node each route's work hangs under (`dispatch`).
+- **Computed values.** Pages share derived values, such as a fit used by two
+  plots, for the whole crawl. Once its rendering tasks finish, returning or
+  throwing releases the cache entries held only by this export in the app and
+  its queue worker. To give a custom report the same lifetime, run its render
+  loop and join its tasks inside `DynamicObjects.with_compute_scope`.
+  Both static HTML and ordinary Markdown dispatches inherit that scope.
+  A standalone dispatch retains its usual cache behavior.
 - **Threads.** With `parallel=true` pages render concurrently, as many at
   once as the process can keep busy: its default threads (`julia -t 8`), or
   fewer when a CPU quota allows fewer (a container, a systemd scope with
@@ -8959,6 +8966,12 @@ export_site("site"; pages = ["/", "/bericht", "/daten"])
 """
 function export_site(dir::AbstractString; pages, file_name=static_file_name, controls::Symbol=:remove,
                      aliases=Dict{String,String}(), parent=nothing, audience=:public, parallel::Bool=_parallel_pays())
+    DynamicObjects.with_compute_scope() do
+        _export_site(dir, pages, file_name, controls, aliases, parent, audience, parallel)
+    end
+end
+
+function _export_site(dir, pages, file_name, controls, aliases, parent, audience, parallel)
     # refuses a `controls` or `audience` it does not know
     audience = StaticExport(nothing, controls, "", :linked, audience).audience
     isdir(dir) && !isempty(readdir(dir)) && throw(ArgumentError(

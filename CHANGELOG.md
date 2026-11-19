@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.177
+
+- `export_site` shares computed values across pages and releases cache entries
+  held only by the export after its rendering tasks finish, including on error.
+  Cleanup reaches the app and its queue worker. Custom report renderers can
+  group their HTML and Markdown dispatches with `DynamicObjects.with_compute_scope`.
+
 ## 0.1.176
 
 - `configure_job_queue!` accepts `worker_exeflags`, `worker_start` and

@@ -170,4 +170,30 @@ end
     @queued @fresh @get hooked() = throw(CallerFault(422, "hooked fault"))
 end
 
+# A model shared by route roots, as in an app that serves both live pages and reports.
+const EXPORT_FIT_RUNS = Threads.Atomic{Int}(0)
+@dynamicstruct struct ExportModel
+    fit(key::Int) = (; key, run=Threads.atomic_add!(EXPORT_FIT_RUNS, 1) + 1)
+end
+const EXPORT_MODEL = ExportModel()
+
+function export_fit(key)
+    result = EXPORT_MODEL.fit(key)
+    h.p("fit=$(result.key) run=$(result.run)")
+end
+function export_census(key)
+    held = any(DynamicObjects.mem_cache_entries(EXPORT_MODEL)) do entry
+        entry.property === :fit && entry.role === :derived && entry.value.key == key
+    end
+    h.p("pid=$(getpid()) held=$held")
+end
+
+@htmx struct ExportLifetimeApp
+    __page__(content) = content
+    @fresh @direct @get app_fit(key::Int, embed::Int) = export_fit(key)
+    @fresh @queued @get worker_fit(key::Int, embed::Int) = export_fit(key)
+    @fresh @direct @get app_census(key::Int) = export_census(key)
+    @fresh @queued @get worker_census(key::Int) = export_census(key)
+end
+
 end
