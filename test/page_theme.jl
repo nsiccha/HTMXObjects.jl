@@ -19,6 +19,14 @@
     css = HTMXObjects._runtime_text(:juliabayes)
     @test occursin("<style>" * css * "</style>" * html(override), html(static_transform(linked)))
 
+    portfolio_css = HTMXObjects._runtime_text(:nsiccha)
+    @test occursin("main .grid", portfolio_css)
+    @test !occursin(portfolio_css, html(page()))
+    @test occursin(portfolio_css, html(page(; theme=:nsiccha)))
+    portfolio_linked = page(; theme=:nsiccha, runtime=:linked)
+    @test occursin("/vendor/htmxo/nsiccha.css?v=", html(portfolio_linked))
+    @test occursin("<style>" * portfolio_css * "</style>" * html(override), html(static_transform(portfolio_linked)))
+
     # A custom theme works without Pico and can contain CSS string content
     # that would otherwise end a <style> element in an HTML document.
     custom = htmx(content; theme="p::after {content:'</StYlE>'}", extra_head=(override,))

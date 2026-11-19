@@ -3800,7 +3800,8 @@ look. So an app chooses its accent here instead of redeclaring Pico's
 `ArgumentError`. `nothing` (the default) is Pico's default build.
 
 `theme=:juliabayes` adds the light and dark JuliaBayes-inspired stylesheet,
-including its font. Pass CSS text (for example, `theme=read(path, String)`)
+including its font. `theme=:nsiccha` uses the card grid and ruled section
+headings from the portfolio at nsiccha.github.io. Pass CSS text (for example, `theme=read(path, String)`)
 or an `h.style` element to inline your own stylesheet, or pass
 `theme=h.link(rel="stylesheet", href="/assets/site.css")` to share a CSS
 file across pages. The theme follows the built-in styles and precedes
@@ -4254,7 +4255,7 @@ header, `main` and footer.
 pinned release under vendor assets (`assets=:vendor` or a mount path), which
 serve only that pin. `pico_color` picks the page's accent among Pico's colour
 builds, light and dark mode alike: `pico_page(content; pico_color=:cyan)`
-([`htmx`](@ref) lists the names). Use `theme=:juliabayes` or pass your own CSS
+([`htmx`](@ref) lists the names). Choose `theme=:juliabayes` or `theme=:nsiccha`, or pass your own CSS
 text or stylesheet link as `theme` to style the whole page. Every other keyword (`extra_head`, `runtime`, `tables`,
 `error_texts`, `title`, the library versions, …) goes to [`htmx`](@ref):
 `pico_page(content; assets=:vendor, runtime=:linked)` is an offline page
