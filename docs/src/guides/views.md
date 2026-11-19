@@ -51,18 +51,25 @@ nothing # hide
 ```
 
 For a design of your own, read an app-owned CSS file once and pass its text
-as `theme`. You can style semantic elements (`nav`, `article`, `table`),
+as `theme`. Here `app_dir` is the directory containing `lab.css`. Use
+`@__DIR__` when the stylesheet is alongside your Julia source file.
+You can style semantic elements (`nav`, `article`, `table`),
 states such as `[aria-current="page"]`, HTMXObjects variables such as
 `--htmxo-accent`, and Pico's `--pico-*` variables. Theme CSS comes after
 the shell's defaults. `extra_head` comes last for app-specific overrides.
 
-```julia
-const LAB_THEME = read(joinpath(@__DIR__, "lab.css"), String)
+```@example views
+app_dir = mktempdir(); # hide
+write(joinpath(app_dir, "lab.css"), lab_css); # hide
+const LAB_THEME = read(joinpath(app_dir, "lab.css"), String);
 
 @htmx struct LabApp
     __page__(content) = HTMXObjects.pico_page(content; theme=LAB_THEME)
     @get index() = h.article(h.h1("Estimates"))
 end
+route!(LabApp(); prefix="/lab", operation_policy=:blocking);
+response = dispatch(:GET, "/lab/");
+@assert response.status == 200 && occursin(LAB_THEME, String(response.body))
 ```
 
 If your design also changes the **page structure**, build the landmarks
