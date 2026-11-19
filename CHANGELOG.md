@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.178
+
+- `Records` accepts ordered `presets`, restored by Reset, and `label_from`
+  for editable names derived from a field. Enabled cards show their series
+  colours in the page's default categorical palette.
+
 ## 0.1.177
 
 - `export_site` shares computed values across pages and releases cache entries

@@ -11457,7 +11457,7 @@ _checked_relevance(relevant::Bool, _name) = relevant
 # --- A list of records (`@param name::Records = Records(fields...)`) ---
 
 """
-    Records(fields::Symbol...; label="Record")
+    Records(fields::Symbol...; label="Record", presets=nothing, label_from=nothing)
 
 Declare a list of records as one request parameter. Each record supplies values for the named `fields`, which are other parameters of the same object.
 
@@ -11477,8 +11477,17 @@ record, for the properties computed from those fields. [`all_records`](@ref)
 returns every record, those switched off included, with their `on` field.
 
 A request names a record's values `scenarios.<i>.<field>` (and
-`scenarios.<i>.label`, `scenarios.<i>.on`); one that names none has a single
-record, `"<label> 1"`, with the fields' own values. Each record's values are
+`scenarios.<i>.label`, `scenarios.<i>.on`). Without record parameters it uses
+the ordered `presets`, or one enabled record with the fields' own values.
+Presets are partial named tuples. For example,
+`presets=[(label="Daily", regimen="daily"), (regimen="twice daily", on=false)]`.
+Omitted fields take their own defaults. Reset restores these cards.
+With `label_from=:regimen`, an unnamed card follows its regimen (including
+an option's display label). A typed name overrides it until cleared. Repeated
+automatic names receive numbered suffixes. Without `label_from`, unnamed
+cards use `"<label> <i>"`. Enabled cards show the default categorical plot
+colours in order, including a page's `--aov-category` palette.
+Each record's values are
 converted, checked against their domains and read under their `@relevant`
 conditions as the fields' own are; a refused value names
 `scenarios.<i>.<field>`. On an app page
@@ -11504,16 +11513,33 @@ struct Records <: AbstractVector{NamedTuple}
     fields::Vector{Symbol}
     label::String
     entries::Vector{NamedTuple}
-    function Records(fields::Vector{Symbol}, label::AbstractString, entries::Vector{NamedTuple})
+    presets::Vector{NamedTuple}
+    label_from::Union{Nothing,Symbol}
+    automatic::BitVector
+    function Records(fields::Vector{Symbol}, label::AbstractString, entries::Vector{NamedTuple},
+                     presets=NamedTuple[(;)], label_from=nothing, automatic=falses(length(entries)))
         isempty(fields) && throw(ArgumentError("Records needs at least one field"))
         allunique(fields) || throw(ArgumentError("Records names a field twice"))
         any(in((:label, :on)), fields) && throw(ArgumentError(
             "Records fields cannot be named `label` or `on`, which each record has"))
-        new(fields, String(label), entries)
+        isnothing(label_from) || label_from in fields || throw(ArgumentError(
+            "Records label_from must name one of its fields, got $(repr(label_from))"))
+        new(fields, String(label), entries, presets, label_from, automatic)
     end
 end
-Records(fields::Symbol...; label::AbstractString="Record") =
-    Records(collect(fields), label, NamedTuple[])
+function Records(fields::Symbol...; label::AbstractString="Record", presets=nothing,
+                 label_from::Union{Symbol,Nothing}=nothing)
+    defaults = isnothing(presets) ? NamedTuple[(;)] : NamedTuple[p for p in presets]
+    isempty(defaults) && throw(ArgumentError("Records needs at least one preset"))
+    for (i, preset) in enumerate(defaults)
+        for key in keys(preset)
+            key in (:label, :on, fields...) || throw(ArgumentError("unknown Records preset $i field: $key"))
+        end
+        get(preset, :on, true) isa Bool || throw(ArgumentError("Records preset $i on must be a Bool"))
+        get(preset, :label, "") isa AbstractString || throw(ArgumentError("Records preset $i label must be text"))
+    end
+    Records(collect(fields), label, NamedTuple[], defaults, label_from)
+end
 _enabled_records(r::Records) =
     NamedTuple[Base.structdiff(entry, NamedTuple{(:on,)}) for entry in r.entries if entry.on]
 Base.size(r::Records) = (count(entry -> entry.on, r.entries),)
@@ -11555,9 +11581,9 @@ function _submitted_records(src, fallback, name::Symbol, vector_fields)
 end
 
 # The `@param name::Records` extractor: the submitted records, typed by `obj`
-# as it answers each, else one record of the fields' own values.
+# as it answers each, or the declaration's defaults.
 function _extract_records_param(obj, req, name::Symbol, _T, declared::Records)
-    req === nothing && return _default_records(obj, declared)
+    req === nothing && return _default_records(obj, name, declared)
     method = req.method
     src = _kwargs_source(req, method)
     fallback = method in _queryparams_verbs ? nothing : queryparams(req)
@@ -11567,24 +11593,52 @@ function _extract_records_param(obj, req, name::Symbol, _T, declared::Records)
         info !== nothing && _vector_param(info.type) && push!(vector_fields, string(field))
     end
     raw = _submitted_records(src, fallback, name, vector_fields)
-    isempty(raw) && return _default_records(obj, declared)
-    Records(declared.fields, declared.label,
-            NamedTuple[_typed_record(obj, name, declared, i, entry) for (i, entry) in enumerate(raw)])
+    isempty(raw) ? _default_records(obj, name, declared) : _resolve_records(obj, name, declared, raw)
 end
 _extract_records_param(_obj, _req, name::Symbol, _T, declared) = throw(ArgumentError(string(
     "@param ", name, "::Records needs its fields as its default: ",
     "`@param ", name, "::Records = Records(:field, …)`, got ", repr(declared))))
 
-_default_records(obj, declared::Records) = Records(declared.fields, declared.label,
-    NamedTuple[_record_entry(declared, string(declared.label, " 1"), true,
-                             [getproperty(obj, field) for field in declared.fields])])
+function _default_records(obj, name, declared)
+    raw = [Dict{String,Any}(string(k) => v for (k, v) in pairs(p)) for p in declared.presets]
+    _resolve_records(obj, name, declared, raw)
+end
+
+function _resolve_records(obj, name, declared, raw)
+    entries = NamedTuple[_typed_record(obj, name, declared, i, row) for (i, row) in enumerate(raw)]
+    automatic = BitVector(declared.label_from !== nothing && isempty(strip(get(row, "label", ""))) for row in raw)
+    used = Set(e.label for (i, e) in enumerate(entries) if !automatic[i])
+    next_suffix = Dict{String,Int}()
+    for i in eachindex(entries)
+        automatic[i] || continue
+        base = entries[i].label
+        label = base
+        suffix = get(next_suffix, base, 2)
+        while label in used
+            label = string(base, " (", suffix, ")")
+            suffix += 1
+        end
+        next_suffix[base] = suffix
+        push!(used, label)
+        entries[i] = merge(entries[i], (; label))
+    end
+    Records(declared.fields, declared.label, entries, declared.presets, declared.label_from, automatic)
+end
+
+function _record_name(view, field, value)
+    _param_relevant(view, field) || return ""
+    options = DynamicObjects.has_option_declaration(typeof(view), field) ?
+        _declared_param_options(getproperty(view, :__options__), field) : nothing
+    display(v) = options === nothing ? string(_number_control_value(v)) : _shown_option(options, v)
+    value === nothing ? "" : strip(value isa AbstractVector ? join(display.(value), ", ") : display(value))
+end
 
 function _typed_record(obj, name::Symbol, declared::Records, i::Int, raw)
     label = strip(get(raw, "label", ""))
-    isempty(label) && (label = string(declared.label, " ", i))
-    on = get(raw, "on", "true") != "false"
-    view = _record_view(obj, Dict{Symbol,Any}(field => raw[string(field)]
-        for field in declared.fields if haskey(raw, string(field))))
+    on = get(raw, "on", true) ∉ (false, "false")
+    supplied = Dict{Symbol,Any}(field => raw[string(field)]
+        for field in declared.fields if haskey(raw, string(field)))
+    view = isempty(supplied) ? obj : _record_view(obj, supplied)
     values = map(declared.fields) do field
         try
             getproperty(view, field)
@@ -11592,6 +11646,10 @@ function _typed_record(obj, name::Symbol, declared::Records, i::Int, raw)
             throw(_record_fault(unwrap_error(err), Symbol(name, ".", i, ".", field), err))
         end
     end
+    if isempty(label) && declared.label_from !== nothing
+        label = _record_name(view, declared.label_from, getproperty(view, declared.label_from))
+    end
+    isempty(label) && (label = string(declared.label, " ", i))
     _record_entry(declared, label, on, values)
 end
 
@@ -33095,21 +33153,59 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
     name = string(param.name)
     texts = _error_texts(obj)
     fields = NamedTuple[_record_field_param(obj, T, field) for field in records.fields]
-    values = [Dict{Symbol,Any}(field => getfield(entry, field) for field in records.fields)
-              for entry in records.entries]
-    views = [_record_view(obj, v) for v in values]
     shared = _records_shared_help(fields)
     help_ids = Dict{Symbol,String}(help.name => help.id for help in shared)
-    cards = Any[_record_card(T, name, records, fields, i, entry, views[i], values[i], texts;
-                             radio_max, help_ids, live)
-                for (i, entry) in enumerate(records.entries)]
+    function draw(source, list)
+        record_views = [record_view(source, e) for e in list.entries]
+        nodes = map(eachindex(record_views)) do i
+            entry = list.entries[i]
+            values = Dict{Symbol,Any}(field => getfield(entry, field) for field in list.fields)
+            _record_card(T, name, list, fields, i, entry, record_views[i], values, texts;
+                         radio_max, help_ids, live)
+        end
+        nodes, record_views
+    end
+    cards, views = draw(obj, records)
+    # A reset must also restore a preset's option controls when their domains
+    # differ between cards. On the default page the browser snapshots the
+    # cards already present. A page opened from a link carries an inert copy.
+    templates = ()
+    params = _request_param_pairs(_request_input_of(obj))
+    submitted = any(p -> startswith(first(p), name * "."), params)
+    preset_attrs = (;)
+    if _has_record_presets(records)
+        bare = isempty(params) ? obj : DynamicObjects.remount(obj; __req__=nothing, __param_request__=nothing)
+        base = Dict{String,Any}()
+        if !submitted
+            # A static copy can open older links that omit fields. Those
+            # fields take their standalone defaults, even if a preset differs.
+            for field in fields
+                field.required && continue
+                try
+                    base[string(field.name)] = _semantic_address_wire(getproperty(bare, field.name))
+                catch err
+                    unwrap_error(err) isa MissingRequiredParam || rethrow()
+                end
+            end
+        end
+        if !isempty(params)
+            defaults, _ = draw(bare, getproperty(bare, param.name))
+            templates = (h.template(defaults...; data_htmxo_record_defaults=""),)
+        end
+        preset_attrs = (; data_htmxo_record_presets=_schema_json(base))
+    end
     h.fieldset(h.legend(label), cards...,
         h.button(_fill_text(texts.record_add; label=records.label); type="button",
                  class="outline secondary htmxo-record-add", data_htmxo_record_action="add"),
-        Any[_records_help_note(help, views) for help in shared]...;
+        Any[_records_help_note(help, views) for help in shared]..., templates...;
         class="htmxo-records", data_htmxo_records=name, data_htmxo_record_label=records.label,
-        data_htmxo_record_copy=texts.record_copy)
+        data_htmxo_record_copy=texts.record_copy,
+        (isnothing(records.label_from) ? (;) : (; data_htmxo_label_from=records.label_from))...,
+        (submitted ? (; data_htmxo_record_submitted="") : (;))..., preset_attrs...)
 end
+
+_has_record_presets(records) = length(records.presets) != 1 || !isempty(only(records.presets))
+_record_wire_label(records, i) = records.automatic[i] ? "" : records.entries[i].label
 
 # The fields of a list whose help text is their docstring's, the same in every
 # card, so the list shows it once: each with its label, help text, the id the
@@ -33172,7 +33268,8 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
         h.label(h.input(; type="checkbox", name=prefix * "on", value="true",
                         (entry.on ? (; checked="true") : (;))...), texts.record_include;
                 class="htmxo-record-on"),
-        h.input(; name=prefix * "label", value=entry.label, aria_label=texts.record_label,
+        h.input(; name=prefix * "label", value=_record_wire_label(records, i), aria_label=texts.record_label,
+                (records.automatic[i] ? (; placeholder=entry.label) : (;))...,
                 class="htmxo-record-label"),
         # A folded card summarises its values here, after its label; the page
         # runtime writes it when the reader folds the card.
@@ -33249,7 +33346,7 @@ function _records_wire_pairs(name, records::Records)
     pairs = Pair{String,String}[]
     for (i, entry) in enumerate(records.entries)
         prefix = string(name, ".", i, ".")
-        push!(pairs, prefix * "label" => entry.label)
+        push!(pairs, prefix * "label" => _record_wire_label(records, i))
         push!(pairs, prefix * "on" => entry.on ? "true" : "false")
         for field in records.fields
             value = getfield(entry, field)
@@ -33260,14 +33357,14 @@ function _records_wire_pairs(name, records::Records)
     end
     pairs
 end
-# What the page address leaves out of a list: the one record a request that
-# names none would have (`semantic_follow_script` compares it).
+# The same defaults drive address elision and browser Reset.
 function _semantic_address_wire(records::Records)
-    entry = first(records.entries)
-    Dict{String,Any}("records" => Dict{String,Any}(
-        "label" => records.label,
-        "fields" => Dict{String,Any}(string(field) => _semantic_address_wire(getfield(entry, field))
-                                     for field in records.fields)))
+    rows = map(eachindex(records.entries)) do i
+        entry = records.entries[i]
+        fields = Dict(string(f) => _semantic_address_wire(getfield(entry, f)) for f in records.fields)
+        (; label=_record_wire_label(records, i), on=entry.on, fields)
+    end
+    Dict("records" => (; entries=rows, presets=_has_record_presets(records)))
 end
 
 # --- A single choice drawn as a table of its options ---
@@ -36013,7 +36110,7 @@ open tab so with `url_scope=parts.url_scope`. Its Reset button
 returns every one of those inputs, each tab's included, to what the page shows
 when its address names nothing: a `values=` entry or the declared default, a
 computed default or `@resets` target following its default again, a list of
-records back to its one default record. It does so in the browser, so a static
+records back to its declared cards. It does so in the browser, so a static
 export resets offline, and the results and the address follow as after a
 change the reader made; the open tab stays. The Reset ends the sidebar, or, on
 a page without one, follows each tab's inputs. A custom `layout(parts)` places
@@ -38952,8 +39049,8 @@ semantic_follow_script() = h.script(Raw(raw"""
     });
   }
   // A list of records is kept as `name.<i>.label`, `name.<i>.on` (only when
-  // off) and each field that differs from its default; nothing at all while
-  // the list is the one record a request that names none has, unless `pinned`.
+  // off) and its fields. A changed preset list is self-contained: an explicit
+  // request starts with field defaults, never the preset at the same index.
   // `key` is its name in the address (`addressName`).
   function dropRecords(url, key) {
     Array.from(url.searchParams.keys()).forEach(function(k) {
@@ -38962,6 +39059,10 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   function hasRecords(url, key) {
     return Array.from(url.searchParams.keys()).some(function(k) { return k.indexOf(key + '.') === 0; });
+  }
+  function recordDefaults(spec) {
+    // Single-card address data from previously generated forms.
+    return spec.entries || [{label: spec.label + ' 1', on: true, fields: spec.fields}];
   }
   function writeRecords(url, form, name, spec, key, pinned) {
     var prefix = name + '.';
@@ -38982,23 +39083,31 @@ semantic_follow_script() = h.script(Raw(raw"""
         } else rec.fields[key] = [c.checked ? c.value : 'false'];
         return;
       }
+      if (c.type === 'select-multiple') {
+        rec.fields[key] = Array.from(c.selectedOptions, function(o) { return o.value; });
+        if (!rec.fields[key].length) rec.fields[key].push('');
+        return;
+      }
       rec.fields[key] = [c.value];
       rec.numeric = rec.numeric || {};
       if (c.type === 'number') rec.numeric[key] = true;
     });
     records = records.filter(Boolean);
-    function atDefault(rec, key) {
-      return same(rec.fields[key] || [], spec.fields[key], rec.numeric && rec.numeric[key]);
+    function atDefault(rec, row, key) {
+      return same(rec.fields[key] || [], row.fields[key], rec.numeric && rec.numeric[key]);
     }
-    if (!pinned && records.length === 1 && records[0].on !== false &&
-        records[0].label === spec.label + ' 1' &&
-        Object.keys(records[0].fields).every(function(k) { return atDefault(records[0], k); })) return;
+    var defaults = recordDefaults(spec);
+    if (!pinned && records.length === defaults.length && records.every(function(rec, i) {
+      var row = defaults[i];
+      return (rec.on !== false) === row.on && rec.label === row.label &&
+        Object.keys(rec.fields).every(function(k) { return atDefault(rec, row, k); });
+    })) return;
     records.forEach(function(rec, j) {
       var p = key + '.' + (j + 1) + '.';
       url.searchParams.append(p + 'label', rec.label || '');
       if (rec.on === false) url.searchParams.append(p + 'on', 'false');
       Object.keys(rec.fields).forEach(function(k) {
-        if (spec.fields[k] && atDefault(rec, k)) return;
+        if (!spec.presets && atDefault(rec, defaults[0], k)) return;
         rec.fields[k].forEach(function(v) { url.searchParams.append(p + k, v); });
       });
     });
@@ -39097,9 +39206,14 @@ semantic_follow_script() = h.script(Raw(raw"""
   // it loads. Where the server did, the controls already show them and this
   // changes nothing.
   var applying = false;
-  function setControls(form, name, wanted, changed) {
-    Array.prototype.forEach.call(form.elements, function(c) {
+  function setControls(owner, name, wanted, changed) {
+    var controls = owner.elements || owner.querySelectorAll('input, select, textarea');
+    Array.prototype.forEach.call(controls, function(c) {
       if (c.name !== name || PRESSED.test(c.type)) return;
+      if (c.hasAttribute('data-htmxo-choice-empty')) {
+        c.disabled = wanted.some(function(v) { return v !== ''; });
+        return;
+      }
       var toggle = c.type === 'radio' || c.type === 'checkbox';
       var before = toggle ? c.checked : c.value;
       if (c.type === 'radio') c.checked = wanted.indexOf(c.value) >= 0;
@@ -39118,7 +39232,10 @@ semantic_follow_script() = h.script(Raw(raw"""
       var defaults = addressOf(form);
       if (!defaults) return;
       Object.keys(defaults).forEach(function(name) {
-        if (defaults[name] && defaults[name].records) return;
+        if (defaults[name] && defaults[name].records) {
+          applyRecordAddress(form, name, defaults[name].records, params, changed);
+          return;
+        }
         // The app's own name first, else the plain one.
         var own = scopeOf(form) ? scopeOf(form) + '.' + name : null;
         var key = own && params.has(own) ? own : name;
@@ -39339,6 +39456,43 @@ semantic_follow_script() = h.script(Raw(raw"""
   function cardsOf(group) {
     return Array.prototype.filter.call(group.children, function(c) { return c.matches('.htmxo-record'); });
   }
+  function applyRecordAddress(form, name, spec, params, changed) {
+    var group = recordsGroup(form, name);
+    if (!group || group.hasAttribute('data-htmxo-record-submitted')) return;
+    var own = scopeOf(form) + '.' + name + '.', prefix = name + '.';
+    if (Array.from(params.keys()).some(function(k) { return k.startsWith(own); })) prefix = own;
+    var rows = new Map();
+    params.forEach(function(v, k) {
+      if (!k.startsWith(prefix)) return;
+      var match = /^(\d+)\.(.+)$/.exec(k.slice(prefix.length));
+      if (!match) return;
+      var i = Number(match[1]), key = match[2];
+      if (!rows.has(i)) rows.set(i, new Map());
+      var row = rows.get(i);
+      if (!row.has(key)) row.set(key, []);
+      row.get(key).push(v);
+    });
+    if (!rows.size) return;
+    rememberPresets(group);
+    var cards = cardsOf(group), fields = recordDefaults(spec)[0].fields;
+    var base = spec.presets ? JSON.parse(group.getAttribute('data-htmxo-record-presets')) : fields;
+    var add = group.querySelector('.htmxo-record-add');
+    cards.forEach(function(c) { c.remove(); });
+    Array.from(rows.keys()).sort(function(a, b) { return a - b; }).forEach(function(idx, j) {
+      var row = rows.get(idx), source = cards[j] || cards[cards.length - 1], card = source.cloneNode(true);
+      var i = j + 1, at = name + '.' + i + '.';
+      renumber(card, name, source.getAttribute('data-htmxo-record'), i);
+      add.before(card);
+      var label = (row.get('label') || ['']).slice(-1)[0];
+      card.querySelector('.htmxo-record-label').value = label ||
+        (group.hasAttribute('data-htmxo-label-from') ? '' : group.getAttribute('data-htmxo-record-label') + ' ' + i);
+      card.querySelector('.htmxo-record-on input').checked = (row.get('on') || []).slice(-1)[0] !== 'false';
+      Object.keys(fields).forEach(function(k) {
+        setControls(card, at + k, row.get(k) || base[k] || [''], changed);
+      });
+    });
+    changed.push(group);
+  }
   // A card's fold control shows its fields or, folded, a summary of its
   // values after its label in field order: a choice by its option's label, a number
   // after its field's label, a checked box by its label, other text as
@@ -39355,7 +39509,7 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   function optionText(c) {
     var label = c.closest('label');
-    if (!label) return c.value;
+    if (!label) return c.getAttribute('aria-label') || c.value;
     var named = label.querySelector('.htmxo-choice-label');
     return named ? named.textContent.trim() : ownText(label);
   }
@@ -39365,22 +39519,23 @@ semantic_follow_script() = h.script(Raw(raw"""
     var set = c.closest('fieldset'), legend = set && set.querySelector(':scope > legend');
     return legend ? legend.textContent.trim() : '';
   }
-  function fieldSummary(field) {
+  function fieldSummary(field, nameOnly) {
     var controls = Array.prototype.filter.call(field.querySelectorAll('input, select, textarea'), function(c) {
-      return c.name && c.type !== 'hidden' && !PRESSED.test(c.type) && !c.closest('[hidden]');
+      return c.name && c.type !== 'hidden' && !PRESSED.test(c.type) && !field.contains(c.closest('[hidden]'));
     });
     var first = controls[0];
     if (!first) return '';
     if (first.type === 'radio' || (first.type === 'checkbox' && first.closest('[data-htmxo-multiple]'))) {
       return controls.filter(function(c) { return c.checked; }).map(optionText).join(', ');
     }
-    if (first.type === 'checkbox') return first.checked ? fieldLabel(first) : '';
+    if (first.type === 'checkbox') return nameOnly === true ? String(first.checked) : first.checked ? fieldLabel(first) : '';
     if (first.tagName === 'SELECT') {
       return Array.prototype.map.call(first.selectedOptions, function(o) { return o.textContent.trim(); }).join(', ');
     }
-    var value = first.value.replace(/\s+/g, ' ').trim();
+    var value = nameOnly === true ? first.value.trim() : first.value.replace(/\s+/g, ' ').trim();
     if (value === '') return '';
-    return first.type === 'number' ? fieldLabel(first) + ': ' + value : value;
+    if (first.type === 'number') return nameOnly === true ? String(Number(value)) : fieldLabel(first) + ': ' + value;
+    return value;
   }
   // Each value, with the separator after it, is a span the stylesheet keeps
   // on one line where it fits: the line breaks between values, after a
@@ -39412,12 +39567,93 @@ semantic_follow_script() = h.script(Raw(raw"""
   function keepFolds(group) {
     folds[foldKey(group)] = cardsOf(group).map(function(c) { return c.hasAttribute(FOLDED); });
   }
+  // Keep the editable override on the wire. A blank input displays its
+  // effective name as a placeholder and remains automatic across requests.
+  function recordNames(group) {
+    var field = group.getAttribute('data-htmxo-label-from');
+    if (!field) return;
+    var cards = cardsOf(group), used = new Set(), next = new Map();
+    cards.forEach(function(c) { used.add(c.querySelector('.htmxo-record-label').value.trim()); });
+    cards.forEach(function(card, i) {
+      var label = card.querySelector('.htmxo-record-label');
+      if (label.value.trim()) return;
+      var key = group.getAttribute('data-htmxo-records') + '.' + (i + 1) + '.' + field;
+      var input = card.querySelector('[name="' + CSS.escape(key) + '"]');
+      var holder = input && input.closest('.htmxo-input-field');
+      var base = (holder && fieldSummary(holder, true)) || group.getAttribute('data-htmxo-record-label') + ' ' + (i + 1);
+      var value = base, suffix = next.get(base) || 2;
+      while (used.has(value)) value = base + ' (' + suffix++ + ')';
+      used.add(value);
+      next.set(base, suffix);
+      label.placeholder = value;
+    });
+  }
+  // A CSS colour can itself contain commas, as in rgb() and color-mix().
+  function recordPalette(group) {
+    var style = getComputedStyle(group), declaration = style.getPropertyValue('--aov-category').trim();
+    if (declaration) {
+      var colours = [], start = 0, depth = 0;
+      for (var i = 0; i <= declaration.length; ++i) {
+        var ch = declaration[i];
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        else if ((!depth && ch === ',') || i === declaration.length) {
+          colours.push(declaration.slice(start, i).trim());
+          start = i + 1;
+        }
+      }
+      if (colours.every(function(c) { return CSS.supports('color', c); })) return colours;
+    }
+    var rgb = /^rgba?\(([^)]+)\)/.exec(style.color);
+    var linear = rgb && rgb[1].split(',').map(function(channel) {
+      var v = Number(channel) / 255;
+      return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    var lightText = linear && 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2] > 0.179;
+    return [lightText ? '#4893e2' : '#4c78a8', '#f58518', '#e45756', '#72b7b2', '#54a24b',
+      '#eeca3b', '#b279a2', '#ff9da6', '#9d755d', '#bab0ac'];
+  }
+  function recordColours(group) {
+    var palette = recordPalette(group), n = 0;
+    cardsOf(group).forEach(function(card) {
+      var box = card.querySelector('.htmxo-record-on input');
+      if (box.checked) box.style.setProperty('--htmxo-series-color', palette[n++ % palette.length]);
+      else box.style.removeProperty('--htmxo-series-color');
+    });
+  }
+  // Preserve the complete default controls, including per-card option lists,
+  // for restoring a removed preset without asking the server.
+  function rememberPresets(group) {
+    if (!group.hasAttribute('data-htmxo-record-presets') || group.querySelector('template[data-htmxo-record-defaults]')) return;
+    var template = document.createElement('template');
+    template.setAttribute('data-htmxo-record-defaults', '');
+    cardsOf(group).forEach(function(card) { template.content.appendChild(card.cloneNode(true)); });
+    group.appendChild(template);
+  }
+  var watchingRecordTheme = false;
+  function initialiseRecordGroup(group) {
+    rememberPresets(group);
+    recordNames(group);
+    recordColours(group);
+    if (watchingRecordTheme) return;
+    watchingRecordTheme = true;
+    function recolour() { document.querySelectorAll('[data-htmxo-records]').forEach(recordColours); }
+    var observer = new MutationObserver(recolour);
+    [document.documentElement, document.body].forEach(function(el) {
+      observer.observe(el, {attributes: true});
+    });
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', recolour);
+  }
+  function initialiseRecords() { document.querySelectorAll('[data-htmxo-records]').forEach(initialiseRecordGroup); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialiseRecords);
+  else initialiseRecords();
   document.addEventListener('htmx:load', function(e) {
     var root = e.target;
     if (!root || !root.querySelectorAll) return;
     var groups = Array.prototype.slice.call(root.querySelectorAll('[data-htmxo-records]'));
     if (root.matches('[data-htmxo-records]')) groups.push(root);
     groups.forEach(function(group) {
+      initialiseRecordGroup(group);
       var kept = folds[foldKey(group)];
       if (kept) cardsOf(group).forEach(function(c, i) { if (kept[i]) fold(c, true); });
     });
@@ -39431,9 +39667,18 @@ semantic_follow_script() = h.script(Raw(raw"""
     setTimeout(function() {
       summarising = false;
       document.querySelectorAll('.htmxo-record[' + FOLDED + ']').forEach(summarise);
+      document.querySelectorAll('[data-htmxo-label-from]').forEach(recordNames);
     }, 0);
   }
   document.addEventListener('change', summariseFolded);
+  document.addEventListener('input', function(e) {
+    var group = e.target.closest && e.target.closest('[data-htmxo-records]');
+    if (group) recordNames(group);
+  });
+  document.addEventListener('change', function(e) {
+    var group = e.target.closest && e.target.closest('[data-htmxo-records]');
+    if (group) { recordNames(group); recordColours(group); }
+  });
   document.addEventListener('htmx:afterSettle', summariseFolded);
   document.addEventListener('click', function(e) {
     var button = e.target && e.target.closest && e.target.closest('[data-htmxo-record-action]');
@@ -39455,9 +39700,14 @@ semantic_follow_script() = h.script(Raw(raw"""
       var source = action === 'add' ? cards[cards.length - 1] : card;
       if (!source) return;
       var copy = source.cloneNode(true);
-      renumber(copy, name, source.getAttribute('data-htmxo-record'), cards.length + 1);
+      var options = source.querySelectorAll('option');
+      copy.querySelectorAll('option').forEach(function(o, i) { o.selected = options[i].selected; });
+      var after = cards.indexOf(source) + 1;
+      for (var i = cards.length - 1; i >= after; --i) renumber(cards[i], name, i + 1, i + 2);
+      renumber(copy, name, source.getAttribute('data-htmxo-record'), after + 1);
       var label = copy.querySelector('.htmxo-record-label');
-      if (label) label.value = action === 'add' ?
+      if (group.hasAttribute('data-htmxo-label-from')) label.value = '';
+      else if (label) label.value = action === 'add' ?
         group.getAttribute('data-htmxo-record-label') + ' ' + (cards.length + 1) :
         (group.getAttribute('data-htmxo-record-copy') || '{label}').split('{label}').join(source.querySelector('.htmxo-record-label').value);
       var on = copy.querySelector('.htmxo-record-on input');
@@ -39465,7 +39715,7 @@ semantic_follow_script() = h.script(Raw(raw"""
       source.insertAdjacentElement('afterend', copy);
       fold(copy, false);
     }
-    cardsOf(group).forEach(function(c, i) { renumber(c, name, c.getAttribute('data-htmxo-record'), i + 1); });
+    if (action === 'remove') cardsOf(group).forEach(function(c, i) { renumber(c, name, c.getAttribute('data-htmxo-record'), i + 1); });
     keepFolds(group);
     if (window.htmx) window.htmx.process(group);
     group.dispatchEvent(new Event('change', {bubbles: true}));
@@ -39556,8 +39806,8 @@ semantic_follow_script() = h.script(Raw(raw"""
   // button names (`data-htmxo-reset`) takes what the page shows when its
   // address names nothing (`data-htmxo-address`, or `data-htmxo-defaults` on
   // a page whose address keeps none): its default as its control sends it,
-  // nothing for an input without one, a list of records its one default
-  // card. An input named in `data-htmxo-reset-follows` follows its default
+  // nothing for an input without one, a list of records its default cards.
+  // An input named in `data-htmxo-reset-follows` follows its default
   // again, so it is not sent and the server draws a default computed from
   // other inputs. Then the page follows the change as one the reader made
   // (results, the page address), with no request of its own.
@@ -39579,17 +39829,26 @@ semantic_follow_script() = h.script(Raw(raw"""
   function resetRecords(form, name, spec, changed) {
     var group = recordsGroup(form, name);
     if (!group) return;
-    var cards = cardsOf(group), card = cards[0];
+    var cards = cardsOf(group), card = cards[0], template = group.querySelector('template[data-htmxo-record-defaults]');
     if (!card) return;
+    if (template) {
+      card.before(template.content.cloneNode(true));
+      cards.forEach(function(c) { c.remove(); });
+      if (window.htmx) window.htmx.process(group);
+      keepFolds(group);
+      changed.push(group);
+      return;
+    }
+    var row = recordDefaults(spec)[0];
     var moved = cards.length > 1;
     cards.slice(1).forEach(function(c) { c.remove(); });
     var label = card.querySelector('.htmxo-record-label');
-    if (label && label.value !== spec.label + ' 1') { label.value = spec.label + ' 1'; moved = true; }
+    if (label && label.value !== row.label) { label.value = row.label; moved = true; }
     var on = card.querySelector('.htmxo-record-on input');
     if (on && !on.checked) { on.checked = true; moved = true; }
     var before = changed.length;
-    Object.keys(spec.fields).forEach(function(key) {
-      assignInput(form, name + '.1.' + key, spec.fields[key], changed);
+    Object.keys(row.fields).forEach(function(key) {
+      assignInput(form, name + '.1.' + key, row.fields[key], changed);
     });
     fold(card, false);
     keepFolds(group);
@@ -40367,6 +40626,11 @@ htmxo_utility_styles() = h.style(Raw("""
 }
 .htmxo-record-head > .htmxo-record-label { flex: 1 1 6rem; min-width: 0; margin: 0; }
 .htmxo-record-head > .htmxo-record-on { flex: 0 0 auto; margin: 0; }
+.htmxo-record-on input:checked {
+    accent-color: var(--htmxo-series-color);
+    --pico-primary-background: var(--htmxo-series-color);
+    --pico-primary-border: var(--htmxo-series-color);
+}
 .htmxo-record-head > button { flex: 0 0 auto; width: auto; margin: 0; font-size: 0.85em; }
 .htmxo-semantic-inputs .htmxo-records { flex: 1 1 100%; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex-basis: 6rem; }
