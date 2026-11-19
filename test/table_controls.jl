@@ -650,6 +650,57 @@ end
     @test contains(styles, ":is(td, th) .table-wrap[data-htmxo-width=\"wide\"] { max-height:")
 end
 
+@testitem "refreshing a wide table keeps the following section in place before settle" setup=[ChromeDump] tags=[:browser] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        function sections(cols)
+            table = render_table((; (Symbol("Dose_$j") => collect(1:64) for j in 1:cols)...);
+                download=false, searchable=true)
+            (SemanticSection("Summary", table), SemanticSection("Percentiles", table))
+        end
+        # Five columns fit, nine overflow. Only a wide table should take the
+        # height of its frame, including room for its search toolbar.
+        style = h.style(Raw("#result { width: 700px; } #result :is(td, th) { min-width: 90px; }"))
+        driver = h.script(Raw(raw"""
+            window.addEventListener('load', async () => {
+                const result = document.getElementById('result'), out = document.body.dataset;
+                const wrap = () => result.querySelector('.table-wrap');
+                const top = () => result.querySelectorAll('.htmxo-semantic-section')[1].offsetTop;
+                for (const mode of ['wide', 'fits']) {
+                    const markup = document.getElementById(mode).innerHTML;
+                    htmx.swap(result, markup, {swapStyle: 'innerHTML', settleDelay: 0});
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    const before = top(), old = wrap();
+                    out[mode + 'Control'] = String(old.dataset.htmxoWidth === mode &&
+                        (old.scrollHeight > old.clientHeight) === (mode === 'wide'));
+                    htmx.swap(result, markup, {swapStyle: 'innerHTML', settleDelay: 100});
+                    // At this microtask checkpoint no later task (htmx settle
+                    // or a resize timer) could have corrected the first frame.
+                    await Promise.resolve();
+                    out[mode + 'Stable'] = String(wrap() !== old && wrap().dataset.htmxoWidth === mode &&
+                        Math.abs(top() - before) <= 1);
+                    await new Promise(resolve => setTimeout(resolve, 120));
+                }
+            });
+            """))
+        content = h.main(style, h.div(; id="result")(),
+            h.template(; id="wide")(sections(9)...), h.template(; id="fits")(sections(5)...), driver)
+        dom = mktempdir() do directory
+            copy_vendorfiles(joinpath(directory, "vendor"); packages=(:htmx, :pico))
+            fixture = joinpath(directory, "page.html")
+            write(fixture, repr("text/html", htmx(content; assets="vendor",
+                pico_version=HTMXObjects._PICO_VERSION, hyperscript_version=nothing, preload_version=nothing)))
+            dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1400,1000 --virtual-time-budget=3000 --dump-dom --user-data-dir=$(joinpath(directory, "profile")) file://$fixture`)
+        end
+        for mode in ("wide", "fits"), check in ("control", "stable")
+            @test contains(dom, "data-$mode-$check=\"true\"")
+        end
+    end
+end
+
 @testitem "a table that fits its column stays in the page when something in a row pokes out" setup=[ChromeDump] tags=[:browser] begin
     using HTMXObjects
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
