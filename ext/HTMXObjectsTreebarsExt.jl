@@ -108,6 +108,10 @@ const _ISOLATED_REQUEST = (hx_params="none", hx_vals="unset", hx_vars="unset")
 # `HTMXObjects._sent_ahead_carriers`): every poll and pushed answer replaces
 # the polling element, so they arrive with each answer, and the page lands
 # each part once.
+# Since 0.1.5 Treebars offers pushed answers to htmx:beforeSwap, including a
+# paused answer on resume. Only that contract can deliver to a live reporter.
+const _STREAM_MODE = Base.pkgversion(Treebars) >= v"0.1.5" ? "live" : ""
+
 function _isolate_polling_inner(poller, stream::Bool=false, carriers=())
     HTMX = HTMXObjects.HTMX
     children = copy(HTMX.children(poller))
@@ -116,7 +120,7 @@ function _isolate_polling_inner(poller, stream::Bool=false, carriers=())
         "Treebars' running poller has no `.treebar-poller-inner` child to isolate")
     children[inner] = stream ?
         children[inner](carriers...; _ISOLATED_REQUEST...,
-                        data_htmxo_operation_stream="") :
+                        data_htmxo_operation_stream=_STREAM_MODE) :
         children[inner](carriers...; _ISOLATED_REQUEST...)
     HTMXObjects.Node(HTMX.tag(poller), HTMX.attrs(poller), children)
 end
