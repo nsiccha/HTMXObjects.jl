@@ -70,7 +70,7 @@ using TestItemRunner
       const d = e.detail || {};
       if (isPoll(d.requestConfig && d.requestConfig.path)) polls.started++;
     }, true);
-    window.addEventListener('load', async function () {
+    async function observeFragment() {
       const sleep = ms => new Promise(r => setTimeout(r, ms));
       const beacon = text => fetch('/stream_beacon?text=' + encodeURIComponent(text));
       let n = 0;
@@ -85,7 +85,10 @@ using TestItemRunner
       const counted = 'polls:' + JSON.stringify(polls);
       await beacon(n < 1200 ? 'landed' : 'never-landed');
       await beacon(counted);
-    });
+    }
+    // A deferred page installs this driver after the document's load event.
+    if (document.readyState === 'complete') observeFragment();
+    else window.addEventListener('load', observeFragment, { once: true });
     })();
     """))
 
