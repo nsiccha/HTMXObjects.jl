@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.187
+
+- Interval cells keep the lower and upper bounds together when the table has
+  room. In narrower tables, an interval can wrap within its column.
+
 ## 0.1.186
 
 - An operation can declare its executor, caller permissions, resource limits

@@ -25157,6 +25157,10 @@ function htmxoColumnsMeasure(table, force) {
     const own = held ? held.own : table.style.width;
     table.style.width = own;
     table.dataset.htmxoColumns = 'sizing';
+    // Prefer enough room for whole intervals. If that makes the table
+    // overflow, let the browser measure the bounds with their usual breaks.
+    if (table.offsetWidth > room + 1 && table.querySelector('.htmxo-interval-bounds'))
+        table.dataset.htmxoColumns = 'sizing-wrap';
     const box = table.getBoundingClientRect().width, scale = htmxoColumnsScale(table, box);
     const widths = cells.map(c => c.getBoundingClientRect().width / scale);
     let width = box / scale;
@@ -30859,16 +30863,16 @@ in German. A negative bound changes the dash to a word (`-5 (-8 to -2)`,
 German `−5 (−8 bis −2)`): the `interval` and `interval_signed` texts.
 """
 format_interval(estimate, lower, upper; kw...) = format_interval(IntervalEstimate(estimate, lower, upper); kw...)
-function format_interval(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Union{Nothing,Integer}=nothing,
+format_interval(x::IntervalEstimate; kw...) = _format_interval(_fill_text, x, _interval_parts(x); kw...)
+function _format_interval(render, x, (est, lo, hi); texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Union{Nothing,Integer}=nothing,
                          log::Union{Nothing,Bool}=nothing, digits::Union{Nothing,Integer}=nothing,
                          sigdigits::Union{Nothing,Integer}=nothing)
-    est, lo, hi = _interval_parts(x)
     rounding = _interval_rounding(lo, hi, _interval_options(x, width_digits, log, digits, sigdigits)..., "format_interval")
     shown(v) = _format_interval_number(v, texts, rounding)
     (isnothing(lo) || isnothing(hi)) && return shown(est)
     lower, upper = shown(lo), shown(hi)
     signed = !isempty(texts.minus) && (startswith(lower, texts.minus) || startswith(upper, texts.minus))
-    _table_text(texts, signed ? :interval_signed : :interval; estimate=shown(est), lower, upper)
+    render(signed ? texts.interval_signed : texts.interval; estimate=shown(est), lower, upper)
 end
 
 # The rounding options `format_interval(x; …)` writes `x` with, in
@@ -30953,6 +30957,9 @@ upper; …)` and keeps the exact numbers:
 - for the ⬇ CSV, which writes the column as three columns: the estimate, the
   lower and the upper bound.
 
+The bounds move to the next line together when they fit there. In a narrow
+table an interval wider than its column can also wrap between its bounds.
+
 [`render_table`](@ref) and the master cells of [`master_detail_table`](@ref)
 make an [`IntervalEstimate`](@ref) this cell by themselves, with the value's
 own rounding options; pass the table's `texts` to cells you build for
@@ -30969,11 +30976,23 @@ interval_cell(estimate, lower, upper; kw...) = interval_cell(IntervalEstimate(es
 function interval_cell(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Union{Nothing,Integer}=nothing,
                        log::Union{Nothing,Bool}=nothing, digits::Union{Nothing,Integer}=nothing,
                        sigdigits::Union{Nothing,Integer}=nothing, attrs...)
-    text = format_interval(x; texts, width_digits, log, digits, sigdigits)
     est, lo, hi = _interval_parts(x)
+    content = _format_interval(_interval_cell_content, x, (est, lo, hi); texts, width_digits, log, digits, sigdigits)
     key = isnothing(est) ? (;) : (; data_sort_value=_number_key(est))
     h.td(; key..., data_htmxo_number=isnothing(est) ? "" : _number_key(est), interval_sort_values(est, lo, hi)...,
-         data_htmxo_interval=_interval_csv_json(est, lo, hi), attrs...)(text)
+         data_htmxo_interval=_interval_csv_json(est, lo, hi), attrs...)(content)
+end
+
+# Group the two bounds, their separator and adjoining punctuation in the
+# caller's template. A template may omit a bound or put the estimate between
+# them, in which case there is no single range to group.
+function _interval_cell_content(template; values...)
+    bounds = findfirst(r"[^\s{}]*(?:\{lower\}[^{}]*\{upper\}|\{upper\}[^{}]*\{lower\})[^\s{}]*", template)
+    fill(s) = _fill_text(s; values...)
+    isnothing(bounds) && return fill(template)
+    Any[fill(template[begin:prevind(template, first(bounds))]),
+        h.span(fill(template[bounds]); class="htmxo-interval-bounds"),
+        fill(template[nextind(template, last(bounds)):end])]
 end
 # The three exact numbers the ⬇ CSV writes for an interval cell, as JSON
 # strings (`""` for no value).
@@ -31057,7 +31076,8 @@ _md_group_select_attrs(selectable, kind_key, value, name) = isnothing(selectable
        (isnothing(name) ? (;) : (; data_htmxo_select_name=name))...)
 
 # Plain text of rendered cells, for searching leaves that are not loaded yet.
-_md_text(x::Node) = join((_md_text(c) for c in HTMX.children(x)), " ")
+_md_text(x::Node) = haskey(HTMX.attrs(x), Symbol("data-htmxo-interval")) ? sprint(_text_content!, x) :
+    join((_md_text(c) for c in HTMX.children(x)), " ")
 _md_text(x::Union{Tuple,AbstractVector}) = join((_md_text(c) for c in x), " ")
 _md_text(x::Raw) = replace(x.html, r"<[^>]*>" => " ")
 _md_text(c::_LabelledControl) = _md_text(c.control)
@@ -41758,8 +41778,10 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
    fills the width they give it, and its words break only where they must
    (`break-word`), so a table inside it keeps the widths its words give it.
    `!important` beats Pico's `[hidden] { display: none !important }`. */
-table[data-htmxo-columns="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { display: table-row !important; visibility: collapse; }
-table[data-htmxo-columns="sizing"][data-htmxo-columns-break] > tbody > tr:not([id^="detail-"]) > td { overflow-wrap: anywhere; }
+.htmxo-interval-bounds { display: inline-block; max-inline-size: 100%; }
+table[data-htmxo-columns="sizing"] > tbody > tr > [data-htmxo-interval] .htmxo-interval-bounds { white-space: nowrap; }
+table[data-htmxo-columns^="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { display: table-row !important; visibility: collapse; }
+table[data-htmxo-columns^="sizing"][data-htmxo-columns-break] > tbody > tr:not([id^="detail-"]) > td { overflow-wrap: anywhere; }
 table[data-htmxo-columns="held"] { table-layout: fixed; }
 table[data-htmxo-columns="held"] > tbody > tr > td { overflow-wrap: break-word; }
 table[data-htmxo-columns="held"] > tbody > tr:not([id^="detail-"]) > td { overflow-wrap: anywhere; }

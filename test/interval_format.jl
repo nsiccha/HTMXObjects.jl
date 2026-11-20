@@ -58,7 +58,7 @@ end
     using HTMXObjects
     html(x) = repr("text/html", x)
     attr(cell, name) = let m = match(Regex("$name=\"([^\"]*)\""), cell); isnothing(m) ? nothing : replace(m[1], "&quot;" => "\"") end
-    text(cell) = match(r">([^<]*)</td>", cell)[1]
+    text(cell) = HTMXObjects._html_text_content(cell)
     c = html(interval_cell(22.3, 13.1, 34.2; texts=table_texts(:de)))
     @test text(c) == "22 (13–34)" && attr(c, "data-sort-value") == "22.3" && attr(c, "data-htmxo-number") == "22.3"
     @test attr(c, "data-htmxo-sort-keys") == "[22.3,13.1,34.2,21.1,0.946188340807175]"
@@ -74,9 +74,22 @@ end
     # Further attributes reach the cell; the digits keywords are format_interval's.
     styled = html(interval_cell(52, 31, 78; width_digits=1, class="num"))
     @test text(styled) == "50 (30–80)" && attr(styled, "class") == "num" && attr(styled, "data-htmxo-interval") == "[\"52\",\"31\",\"78\"]"
+    @test occursin(">22 <span class=\"htmxo-interval-bounds\">(13–34)</span></td>", c)
+    @test occursin("<span class=\"htmxo-interval-bounds\">(−0,61 bis −0,25)</span>", neg)
+    @test !occursin("<span", html(interval_cell(1, missing, 2)))
+    for template in ("〔{upper} à {lower}〕 < {estimate}", "{lower} < {estimate} < {upper}", "{estimate}")
+        texts = table_texts(; interval=template)
+        cell = interval_cell(2, 1, 3; texts, digits=0)
+        @test text(html(cell)) == format_interval(2, 1, 3; texts, digits=0) == HTMXObjects._md_text(cell)
+        @test occursin("<span class=\"htmxo-interval-bounds\">〔3 à 1〕</span>", html(cell)) == startswith(template, "〔")
+    end
 end
 
-@testitem "tables write an IntervalEstimate as one cell sorted by its five keys" tags=[:unit] begin
+@testsnippet ExpectedIntervalMarkup begin
+    interval_markup(estimate, bounds) = ">$estimate <span class=\"htmxo-interval-bounds\">$bounds</span></td>"
+end
+
+@testitem "tables write an IntervalEstimate as one cell sorted by its five keys" setup=[ExpectedIntervalMarkup] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h, to_markdown_string
     html(x) = repr("text/html", x)
@@ -88,11 +101,11 @@ end
     # render_table: the cell in the table's language, the header with the five
     # keys and the CSV's bound names; a SemanticTable renders through it.
     r = html(render_table(table; texts=de))
-    @test contains(r, ">3,21 (2,95–3,48)</td>") && contains(r, ">52 (31–78)</td>") && contains(r, keys_de) && contains(r, csv_de)
+    @test contains(r, interval_markup("3,21", "(2,95–3,48)")) && contains(r, interval_markup("52", "(31–78)")) && contains(r, keys_de) && contains(r, csv_de)
     @test count("data-htmxo-interval-csv", r) == 1 && count("data-htmxo-sort-keys=\"[&quot;", r) == 1
     @test contains(to_markdown_string(render_table(table; texts=de)), "| CL | 3,21 (2,95–3,48) |")
     st = SemanticTable(table)
-    @test contains(html(st), ">3.21 (2.95–3.48)</td>")
+    @test contains(html(st), interval_markup("3.21", "(2.95–3.48)"))
     @test contains(repr("text/markdown", st), "| CL | 3.21 (2.95–3.48) |")
     # The tab-separated text keeps the exact numbers, as the CSV does.
     @test repr("text/plain", st) == "quantity\tmedian\tmedian / Lower bound\tmedian / Upper bound\nCL\t3.214\t2.951\t3.482\nV\t52.0\t31.0\t78.0\n"
@@ -103,7 +116,7 @@ end
     md(; kw...) = html(master_detail_table(["Name", "Schätzung"], items; key=it -> it.id,
         master=it -> (h.td(it.name), it.e), detail=it -> h.p("d"), texts=de, kw...))
     m = md()
-    @test contains(m, ">22 (13–34)</td>") && contains(m, ">3,20 (2,95–3,48)</td>") && contains(m, keys_de) && contains(m, csv_de)
+    @test contains(m, interval_markup("22", "(13–34)")) && contains(m, interval_markup("3,20", "(2,95–3,48)")) && contains(m, keys_de) && contains(m, csv_de)
     order(s) = [x[1] for x in eachmatch(r"id=\"row-(\w)\"", s)]
     @test order(md(default_sort=(col="Schätzung", key="Obergrenze", dir=:desc))) == ["c", "a", "b"]
     @test order(md(default_sort=(col="Schätzung", key="Intervallbreite", dir=:asc))) == ["b", "c", "a"]
@@ -134,7 +147,7 @@ end
     @test !isnothing(err) && contains(err, "drop `sort_keys`")
 end
 
-@testitem "an IntervalEstimate keeps its rounding options wherever a table writes it" tags=[:unit] begin
+@testitem "an IntervalEstimate keeps its rounding options wherever a table writes it" setup=[ExpectedIntervalMarkup] tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: h, to_markdown_string
     html(x) = repr("text/html", x)
@@ -165,18 +178,18 @@ end
     # (HTML, Markdown and the tab-separated exact text) and bare master cells.
     table = (Probe=["A", "B"], Konzentration=[conc, IntervalEstimate(12.0, 3.0, 40.0; log=true)])
     r = html(render_table(table; texts=de))
-    @test contains(r, ">0,5 (0,02–3)</td>") && contains(r, ">10 (3–40)</td>")
+    @test contains(r, interval_markup("0,5", "(0,02–3)")) && contains(r, interval_markup("10", "(3–40)"))
     @test contains(r, "data-htmxo-interval=\"[&quot;0.5&quot;,&quot;0.02&quot;,&quot;3.1&quot;]\"")
     @test contains(to_markdown_string(render_table(table; texts=de)), "| A | 0,5 (0,02–3) |")
     st = SemanticTable(table)
-    @test contains(html(st), ">0.5 (0.02–3)</td>") && contains(repr("text/markdown", st), "| A | 0.5 (0.02–3) |")
+    @test contains(html(st), interval_markup("0.5", "(0.02–3)")) && contains(repr("text/markdown", st), "| A | 0.5 (0.02–3) |")
     @test contains(repr("text/plain", st), "A\t0.5\t0.02\t3.1\n")
     items = [(id="a", e=conc), (id="b", e=IntervalEstimate(12.0, 3.0, 40.0; log=true))]
     m = html(master_detail_table(["Probe", "Konzentration"], items; key=it -> it.id,
         master=it -> (h.td(it.id), it.e), detail=it -> h.p("d"), texts=de))
-    @test contains(m, ">0,5 (0,02–3)</td>") && contains(m, ">10 (3–40)</td>")
+    @test contains(m, interval_markup("0,5", "(0,02–3)")) && contains(m, interval_markup("10", "(3–40)"))
     pair = html(h.tbody(master_detail_pair("a", Any[h.td("a"), conc], h.p("d"), 2; texts=de)...))
-    @test contains(pair, ">0,5 (0,02–3)</td>")
+    @test contains(pair, interval_markup("0,5", "(0,02–3)"))
     # It is written as the call that makes it.
     @test repr(IntervalEstimate(22.3, 13.1, 34.2)) == "IntervalEstimate(22.3, 13.1, 34.2)"
     @test repr(conc) == "IntervalEstimate(0.5, 0.02, 3.1; log = true)"
@@ -209,8 +222,28 @@ end
                  Median=[IntervalEstimate(22.3, 13.1, 34.2), IntervalEstimate(3.2, 2.95, 3.48),
                          IntervalEstimate(40.0, 39.0, 41.0), IntervalEstimate(missing, 1.0, 2.0), missing, nothing])
         t = render_table(table; texts=de, id="iv", download=false)
+        cells = [interval_cell(9_800, 7_400, 12_800; digits=0) for _ in 1:3]
+        layout = h.div(sortable_table(["A", "B", "C"], [h.tr(cells...)]; sortable=false, column_menu=false);
+                       id="layout")
         driver = h.script(Raw(raw"""
             window.addEventListener('load', async function() {
+                const layout = document.getElementById('layout'), table = layout.querySelector('table');
+                const cell = table.tBodies[0].rows[0].cells[0];
+                const lines = node => {
+                    const range = document.createRange();
+                    range.selectNodeContents(node);
+                    return Array.from(range.getClientRects(), rect => rect.top);
+                };
+                // Resize the same table both ways. At the middle width the
+                // estimate moves above the intact bounds. At the smallest
+                // width the bounds can wrap without widening the table.
+                document.body.dataset.layout = [750, 480, 300, 750].map(width => {
+                    layout.style.width = width + 'px';
+                    htmxoColumnsMeasure(table, true);
+                    const bounds = lines(cell.querySelector('.htmxo-interval-bounds').firstChild);
+                    const estimate = lines(cell.firstChild)[0];
+                    return [Math.round(estimate) === Math.round(bounds[0]), bounds.length, table.offsetWidth <= width + 1].join('/');
+                }).join(' ');
                 const body = document.getElementById('iv');
                 const th = body.closest('table').querySelectorAll('thead th')[1];
                 const names = () => Array.from(body.rows).map(r => r.cells[0].textContent).join(',');
@@ -230,7 +263,9 @@ end
             });
             """))
         page = string("<!doctype html><html><head><meta charset=\"utf-8\">", repr("text/html", sortable_table_js()),
-            repr("text/html", download_table_js()), "</head><body>", repr("text/html", t),
+            repr("text/html", download_table_js()), repr("text/html", htmxo_utility_styles()),
+            "<style>#layout table{width:100%;border-collapse:collapse} #layout :is(td,th){font:16px/20px monospace;padding:0}</style>",
+            "</head><body>", repr("text/html", t), repr("text/html", layout),
             repr("text/html", driver), "</body></html>")
         dom = mktempdir() do directory
             fixture = joinpath(directory, "page.html")
@@ -240,6 +275,7 @@ end
         end
         @test contains(dom, "data-done=\"1\"")
         attr(name) = let m = match(Regex("data-$name=\"([^\"]*)\""), dom); isnothing(m) ? nothing : m[1] end
+        @test attr("layout") == "true/1/true false/1/true false/2/true true/1/true"
         # By the upper bound: 41 > 34,2 > 3,48 > 2; by the width: 0,53 < 1 < 2 < 21,1.
         @test attr("upper") == "c,a,b,d,e,f"
         @test attr("width") == "b,d,c,a,e,f"
