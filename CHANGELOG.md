@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.185
+
+- `prewarm_workload!` now warms the browser navigation and attachment to
+  load-triggered GET fragments of each selected page. Use `fragments=:selected`
+  to restrict fragment starts to the addresses in the workload. Rendered
+  `CallerFault` panels are valid fragment answers during warmup. The serving
+  and precompilation request pools share a listener specialization. The
+  package workload also restores native code for page and stream methods
+  invalidated by application dependencies.
+
 ## 0.1.184
 
 - Committing a valid input change on a generated tab starts its server refresh

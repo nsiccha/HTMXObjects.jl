@@ -218,6 +218,8 @@ end
 _url_segment_escapes(b::UInt8) =
     b <= 0x20 || b == 0x7f || b in (UInt8('#'), UInt8('%'), UInt8('/'), UInt8('?'), UInt8('\\'))
 
+include("prewarm_pages.jl")
+
 """
     serve(; host="127.0.0.1", port=8080, async=false, parallel=false, revise=nothing,
           middleware=[], check_origin=nothing, access_log=<timed default>,
@@ -440,7 +442,7 @@ with `auto`. To size both pools equally, compute shell-side:
 """
 serve(; kwargs...) = _serve(ROUTER; kwargs...)
 
-function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false,
+function _serve(router, warm_pages=nothing; host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
         runtime_tracking::Bool=true, compress::Bool=true, prestart::Bool=true,
@@ -463,12 +465,16 @@ function _serve(router; host="127.0.0.1", port=8080, async=false, parallel=false
     handle = _stream_handler(
         _served_middleware(_request_pipeline(middleware, access_log, Revise,
                                              tracker; operation_stream, router,
-                                             compute_trace, dev=dev_mode)),
+                                             compute_trace, dev=dev_mode), warm_pages),
         check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
-    warning === nothing || @warn warning
-    pool === nothing || (handle = _spawning_stream_handler(handle, pool))
+    # A package workload exercises the spawned handler even on a one-thread
+    # precompile worker. Its pool size says nothing about the live server.
+    if warning !== nothing && warm_pages === nothing
+        @warn warning
+    end
+    handle = _spawning_stream_handler(handle, pool)
 
     _DEV_MODE[] = dev_mode
     server = HTTP.listen!(handle, host, port; kwargs...)
@@ -509,9 +515,18 @@ end
 
 # Marks a request as one `serve` received, which is the only kind whose
 # response prestarts its fragments (`_prestart_wanted`).
-_served_middleware(handler) = function (req::HTTP.Request)
+struct _ServedHandler{F} <: Function
+    handler::F
+    warm_pages::Union{Nothing,_WarmPages}
+end
+_served_middleware(handler, warm_pages=nothing) = _ServedHandler(handler, warm_pages)
+function (served::_ServedHandler)(req::HTTP.Request)
     req.context[:htmxo_served] = true
-    handler(req)
+    pages = served.warm_pages
+    if pages !== nothing && HTTP.header(req, "HTMXO-Warm-Page", "") == pages.key
+        req.context[:htmxo_warm_page] = pages
+    end
+    served.handler(req)
 end
 
 # `serve` keywords that only configured Oxygen, which HTMXObjects no longer
@@ -775,15 +790,23 @@ end
 # how it tells a client that hung up (logged at Debug) from a server fault.
 # Thrown inside the `catch`, it keeps the wrapper, and with it the task's
 # backtrace, beneath it on the exception stack.
-function _spawning_stream_handler(handle, pool::Symbol)
-    function (stream)
-        try
-            wait(Threads.@spawn pool handle(stream))
-        catch err
-            err isa TaskFailedException && throw(err.task.exception)
-            rethrow()
-        end
+# HTTP specializes its listener and connection tasks on the handler type. Keep
+# that type independent of where the request runs, including in a package image.
+struct _PoolStreamHandler{F} <: Function
+    handle::F
+    pool::Union{Nothing,Symbol}
+end
+_spawning_stream_handler(handle, pool) = _PoolStreamHandler(handle, pool)
+function (handler::_PoolStreamHandler)(stream)
+    pool = handler.pool
+    pool === nothing && return handler.handle(stream)
+    try
+        wait(Threads.@spawn pool handler.handle(stream))
+    catch err
+        err isa TaskFailedException && throw(err.task.exception)
+        rethrow()
     end
+    nothing
 end
 
 # --- Access log ------------------------------------------------------------
@@ -9623,6 +9646,12 @@ function _response_walk_wanted(req::HTTP.Request)
     _prestart_slot(req) === nothing || return false
     static_export(req) === nothing || return false
     _operation_prewarm_request(req) && return false
+    # The finished pass needs a real terminal poll (no forced deferral), but
+    # its response is still a probe, separate from the browser navigation.
+    if HTTP.hasheader(req, "HTMXO-Prewarm-Settled")
+        token = _OPERATION_PREWARM_TOKEN[]
+        !isempty(token) && HTTP.header(req, "HTMXO-Prewarm-Settled") == token && return false
+    end
     is_htmx(req) || _operation_rich_page_request(req)
 end
 
@@ -9748,10 +9777,13 @@ function _prestart!(walk::_PrestartWalk, url::String, attrs)
     _prestart_live_count() >= _PRESTART_LIVE_LIMIT && return nothing
     route = _prestart_route_target(walk.req, url)
     route === nothing && return nothing
+    pages = get(walk.req.context, :htmxo_warm_page, nothing)
+    pages === nothing || _warm_fragment_allowed!(pages, route) || return nothing
     walk.count[] += 1
     request = HTTP.Request("GET", route, _prestart_headers(walk, attrs), UInt8[])
     slot = Ref{Union{Nothing,String}}(nothing)
     request.context[:htmxo_prestart] = slot
+    pages === nothing || (request.context[:htmxo_warm_page] = pages)
     response = try
         app(request)
     catch err
@@ -10095,6 +10127,8 @@ function _operation_push!(sse, req, token::String; final::Bool)
         _inner_htmx_headers(req, HTTP.header(req, "Referer", "")), UInt8[])
     poll.context[:htmxo_served] = true
     poll.context[:htmxo_push] = true
+    pages = get(req.context, :htmxo_warm_page, nothing)
+    pages === nothing || (poll.context[:htmxo_warm_page] = pages)
     response = try
         _OPERATION_PUSH_APP[](poll)
     catch err
@@ -10104,7 +10138,7 @@ function _operation_push!(sse, req, token::String; final::Bool)
     if response.status == 200
         return send("progress", String(_message_body_bytes(response))) ? :running : :closed
     end
-    _store_pushed_answer!(token, _request_route_path(poll), response)
+    _store_pushed_answer!(token, _request_route_path(poll), response, pages)
     _operation_pushable(response) ?
         ended(send("result", String(_message_body_bytes(response)))) :
         ended(send("ready"))
@@ -10139,10 +10173,11 @@ const _PUSHED_ANSWER_LIMIT = 256
 const _PUSHED_ANSWER_TTL = 600.0
 const _pushed_answers = Dict{String,@NamedTuple{path::String,response::HTTP.Response,at::Float64}}()
 
-function _store_pushed_answer!(token::String, path::String, response::HTTP.Response)
+function _store_pushed_answer!(token::String, path::String, response::HTTP.Response, pages=nothing)
     now = _operation_poll_now()
     stored = _copy_mutation_terminal(response)
     lock(_operation_poll_lock) do
+        pages !== nothing && !haskey(pages.tokens, token) && return
         filter!(((_, kept),) -> now - kept.at <= _PUSHED_ANSWER_TTL, _pushed_answers)
         while length(_pushed_answers) >= _PUSHED_ANSWER_LIMIT
             delete!(_pushed_answers, argmin(t -> _pushed_answers[t].at, keys(_pushed_answers)))
@@ -15143,7 +15178,7 @@ function _route_error_response(req, err, bt; error_obj=nothing, page_chain=Any[]
     # browser's own request fails the same way and records it once.
     _prestart_slot(req) === nothing || return HTTP.Response(500)
     uid, path = _record_error(err, bt, req)
-    _runtime_note_error!(req, err, uid)
+    _note_route_fault!(req, err, uid)
     err_val = _invoke_error_handler(error_obj, err, uid, path)
     direct = _hook_response(req, err_val, err)
     isnothing(direct) || return _stamp_error_id(direct, uid)
@@ -17023,6 +17058,8 @@ function _retain_operation_poll!(entry::_OperationPollEntry;
         _record_operation_ends!(dropped, :abandoned)
         _record_operation_ends!(evicted, :evicted)
     end
+    pages = get(entry.request.context, :htmxo_warm_page, nothing)
+    pages === nothing || _warm_retained!(pages, entry)
     _watch_operation_finish!(entry)
     entry
 end
@@ -17851,7 +17888,7 @@ function _operation_failed(transport, err, uid)
 end
 
 function _note_operation_failure!(req::HTTP.Request, err, uid)
-    _runtime_note_error!(req, err, uid)
+    _note_route_fault!(req, err, uid)
     req.context[:htmxo_operation_failure] = (; err, uid)
     nothing
 end
@@ -19978,11 +20015,13 @@ end
 # (`prewarm_workload!` closes its server at once on a failure): throwing into
 # its task could interrupt HTTP.jl in the middle of I/O.
 function _prewarm_request(verb::Symbol, url::AbstractString, timeout::Real;
-        headers=Pair{String,String}[])
+        headers=Pair{String,String}[], browser=false, fragment_pages=nothing)
     request = @async try
         resp = HTTP.request(string(verb), url, headers; connect_timeout=10,
-                            status_exception=false, retry=false)
-        (; status=resp.status, error=nothing, body=resp.body)
+                            status_exception=false, retry=false, redirect=!browser)
+        fault = browser ? HTTP.header(resp, "X-HTMXO-Error-Id", "") : ""
+        handled = isempty(fault) || (fragment_pages !== nothing && _warm_caller_fault(fragment_pages, fault))
+        (; status=resp.status, error=handled ? nothing : "route error $fault", body=resp.body)
     catch err
         (; status=nothing, error=sprint(showerror, err), body=nothing)
     end
@@ -20007,7 +20046,8 @@ _prewarm_headers(::Val{:htmx}, ::Val{:GET}, token) =
     ["HX-Request" => "true", "HTMXO-Prewarm" => token]
 _prewarm_headers(::Val{:htmx}, ::Val, token) =
     ["HX-Request" => "true", "HTMXO-Swap" => "innerHTML", "HTMXO-Prewarm" => token]
-_prewarm_headers(::Val{:htmx}, ::Val{:GET}, ::Nothing) = ["HX-Request" => "true"]
+_prewarm_headers(::Val{:htmx}, ::Val{:GET}, ::Nothing) =
+    ["HX-Request" => "true", "HTMXO-Prewarm-Settled" => _operation_prewarm_token()]
 
 # The request a browser makes next for a deferred answer: the `hx-get` of the
 # page-load placeholder or of the live poller, both of which name the retained
@@ -20254,19 +20294,22 @@ function _require_prewarm_success(rows, kind::AbstractString)
 end
 
 function _prewarm_workload!(root, streams; routes=nothing, urls=(),
-        operations::Bool=true, include_post::Bool=false, timeout::Real=45,
+        fragments::Symbol=:linked, operations::Bool=true, include_post::Bool=false, timeout::Real=45,
         server_kwargs::NamedTuple=(;))
     T = root isa Type ? root : typeof(root)
     selected = routes === nothing ? select_routes(T; verb=:GET) : routes
     checks = urls isa AbstractString ? [urls] : collect(urls)
+    fragments in (:linked, :selected) ||
+        throw(ArgumentError("fragments must be :linked or :selected"))
+    pages = operations ? _WarmPages(fragments) : nothing
     settings = merge((; host="127.0.0.1", port=0, listenany=true,
-                       async=true, revise=nothing), server_kwargs)
+                       async=true, revise=nothing, parallel=operations), server_kwargs)
     settings.host == "127.0.0.1" && settings.port == 0 &&
         settings.listenany === true && settings.async === true ||
         throw(ArgumentError("prewarm_workload! requires a loopback, ephemeral, asynchronous server (host=\"127.0.0.1\", port=0, listenany=true, async=true)"))
     _prewarm_timeout(timeout)
 
-    server = serve(; settings...)
+    server = _serve(ROUTER, pages; settings...)
     finished = false
     try
         base = "http://127.0.0.1:$(HTTP.port(server))"
@@ -20275,19 +20318,29 @@ function _prewarm_workload!(root, streams; routes=nothing, urls=(),
             "route")
         url_rows = _require_prewarm_success(
             prewarm_routes!(base, checks; timeout), "URL")
+        if pages !== nothing
+            _with_compile_clock() do
+                _warm_linked_pages!(pages, base, route_rows, url_rows, Float64(timeout),
+                                    get(settings, :operation_stream, true))
+            end
+        end
         streams === nothing || streams(base)
+        if operations && ccall(:jl_generating_output, Cint, ()) == 1
+            _precompile_page_paths()
+        end
         finished = true
         (; routes=route_rows, urls=url_rows)
     finally
         # A failure may be a request the server never finished, and a graceful
         # close waits for that request, so after a failure the server closes at
         # once.
+        pages === nothing || _reset_warm_pages!(pages; close=true)
         finished ? close(server) : HTTP.forceclose(server)
     end
 end
 
 """
-    prewarm_workload!(root; routes=nothing, urls=(), operations=true,
+    prewarm_workload!(root; routes=nothing, urls=(), operations=true, fragments=:linked,
                       include_post=false, timeout=45, server_kwargs=(;))
     prewarm_workload!(streams::Function, root; kwargs...)
 
@@ -20300,6 +20353,18 @@ includes every reflected GET route; `routes` takes the same collection as
 `prewarm_routes!(root, base, coll)`. `operations=true` includes deferred
 answers. Every attempted request must finish with a 2xx status; a skipped
 explicit route, transport error, or non-2xx response throws with its URL.
+
+With `operations=true`, each selected GET also gets a browser navigation. The
+workload joins the same-app, load-triggered GETs that the served page prestarts
+and follows their operation stream or polls to completion. `fragments=:linked`
+includes those GETs by default. Use `fragments=:selected` to start only fragment
+addresses selected by `routes` or named in `urls` (including their query).
+The workload bounds fragment starts per navigation and only follows its own
+operation tokens. It accepts a fragment's rendered [`CallerFault`](@ref)
+as its answer, for example an empty-state panel. Unexpected fragment errors
+and failed route checks throw. `operations=false` skips this pass. The
+workload exercises the spawned handler by default; `server_kwargs.parallel`
+overrides the pool, as in the live app.
 
 The optional do-block `streams(base_url)` runs **after** HTTP routes and URLs.
 It can exercise bounded WebSocket or SSE sessions and should throw if its own
