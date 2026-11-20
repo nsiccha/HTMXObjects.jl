@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.186
+
+- An operation can declare its executor, caller permissions, resource limits
+  and example calls as ordinary graph properties. `execute` enforces admission
+  and returns bounded diagnostics. `run_workload` checks an expected outcome
+  through the same operation used by routes.
+
 ## 0.1.185
 
 - `prewarm_workload!` now warms the browser navigation and attachment to

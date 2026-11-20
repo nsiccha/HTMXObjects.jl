@@ -71,6 +71,8 @@ export ReflectionRoutes, semantic_graph_view, application_descriptor,
     application_explorer_styles, navigation
 export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
+export ResourceEnvelope, CapabilityPolicy, Executor, ExecutionResult, execute, execution_availability
+export ApplicationWorkload, application_workloads, run_workload
 export OperationContext, RootProvider, RootRetention, OperationPolicy, send_ahead
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
@@ -15624,6 +15626,7 @@ function _effective_route_descriptor(descriptor)
     descriptor
 end
 
+include("execution.jl")
 include("semantic_metadata.jl")
 
 function _operation_input_values(descriptor, idx_vals, kw_pairs)
@@ -15640,7 +15643,7 @@ end
 
 _operation_context_inputs(descriptor) = descriptor === nothing ? NamedTuple[] :
     [input for input in get(descriptor, :inputs, NamedTuple[])
-     if get(input, :kind, nothing) === :context]
+     if get(input, :kind, nothing) === :context && !_execution_configuration(input)]
 
 function _operation_context_value(obj, req::HTTP.Request, input, fallback_value)
     method = req.method
@@ -20448,9 +20451,7 @@ end
 
 function _semantic_context_params(property, verb::Symbol)
     property === nothing && return NamedTuple[]
-    [_semantic_context_param(input, verb)
-     for input in get(property, :inputs, NamedTuple[])
-     if get(input, :kind, nothing) === :context]
+    [_semantic_context_param(input, verb) for input in _operation_context_inputs(property)]
 end
 
 function _semantic_route(owner, route, parent_stack=Any[])
