@@ -38,6 +38,14 @@ using TestItemRunner
         outputs = fit == "two" ? ["a", "b"] : ["a"]
         # Not a comparison of inputs: the page asks the server.
         @relevant(output) = length(outputs) > 1
+        "Response quantity"
+        @param response_quantity::String = "Baseline"
+        @options(response_quantity) = option_domain(["Baseline", "Lowest change from baseline (%)",
+            "Minimum", "Minimum over the last 24 h", "Average over the last 24 h",
+            "Time to target", "Time beyond target"])
+        "Direction"
+        @param direction::String = "below"
+        @options(direction) = option_domain(["below" => "Below", "above" => "Above"])
         "Not in any section"
         @param note::String = ""
         scenario = string(fit, "/", basis, "/", subjects, "/", male, "/", age, "/", weight, "/",
@@ -47,8 +55,9 @@ using TestItemRunner
         "Dose–response"
         @get dose_response() = h.p("dose_response:", scenario, ":", doses, ":", output; class="result")
         "Fraction responding"
-        @get fraction(; threshold::Float64 = -50.0, direction::String = "below") =
-            h.p("fraction:", scenario, ":", output, ":", threshold, ":", direction; class="result")
+        @get fraction(; threshold::Float64 = -50.0) =
+            h.p("fraction:", scenario, ":", output, ":", threshold, ":", direction, ":",
+                response_quantity; class="result")
     end
 
     # Main sections, two settings sections given between them (drawn last),
@@ -60,7 +69,7 @@ using TestItemRunner
         "Typical subject" => [:male, :age, :weight],
         "Dosing" => (:regimen,),
         InputSection("View settings", [:doses, :output]; settings=true),
-        "Responder" => [:threshold, :direction],
+        "Responder" => [:direction, :response_quantity, :threshold],
     ]
 
     section_page(app=SectionPage(); kwargs...) = repr("text/html", semantic_app(app;
@@ -100,7 +109,8 @@ end
     # a form's inputs is not drawn there.
     fraction = tab_of(html, "fraction")
     @test sections_of(fraction) == [("Responder", false)]
-    @test fields_of(fraction, "Responder") == [("threshold", true), ("direction", false)]
+    @test fields_of(fraction, "Responder") ==
+        [("direction", true), ("response_quantity", false), ("threshold", true)]
     @test isempty(sections_of(tab_of(html, "timecourse")))
     # `@relevant` still hides a field: its wrapper sits in the field, as before.
     @test contains(sidebar, r"<div class=\"htmxo-input-field\" data-htmxo-width=\"short\"><div class=\"htmxo-relevant\" data-htmxo-relevant=\"subjects\" hidden=\"true\""s)
@@ -265,6 +275,13 @@ end
                     // Short fields share a row; a long one takes the whole width.
                     out.row = String(top('age') === top('weight') && top('draws') === top('seed') &&
                         field('regimen').getBoundingClientRect().width >= field('age').getBoundingClientRect().width * 1.8);
+                    // Two fields fit across this tab. The seven choices make one taller,
+                    // but both labels start at the same height. The third field wraps.
+                    const direction = field('direction').getBoundingClientRect();
+                    const quantity = field('response_quantity').getBoundingClientRect();
+                    const labelTop = name => field(name).querySelector('legend').getBoundingClientRect().top;
+                    out.tabRow = String(quantity.left > direction.left && quantity.height > direction.height &&
+                        labelTop('direction') === labelTop('response_quantity') && top('threshold') >= quantity.bottom - 1);
                     // New subjects: the typical subject's fields do not apply, so its
                     // section is gone, and the subjects field shows.
                     out.hidden = String(!shown(section('Typical subject')) && shown(field('subjects')) && shown(section('Subjects')));
@@ -289,11 +306,12 @@ end
         app = SectionPage()
         # The page as a reader asked for new subjects.
         content = h.main(; class="container")(
-            semantic_app(app; presentation=:tabs, sections=SECTIONS, url_state=false), driver)
+            semantic_app(app; presentation=:tabs, sections=SECTIONS, active="fraction", url_state=false), driver)
         for pico in (true, false)
             marked = h.script(Raw(pico ? "document.documentElement.dataset.pico = '1';" : ""))
             style = h.style(Raw("*, *::before, *::after { transition: none !important; } " *
-                ".htmxo-app-layout { --htmxo-sidebar-width: 19rem; }"))
+                ".htmxo-app-layout { --htmxo-sidebar-width: 19rem; } " *
+                ".htmxo-semantic-operation-form { max-width: 32rem; }"))
             dom = mktempdir() do directory
                 copy_vendorfiles(joinpath(directory, "vendor"); packages=(:pico,))
                 fixture = joinpath(directory, "page.html")
@@ -314,7 +332,7 @@ end
             end
             @test contains(dom, "data-done=\"1\"")
             @test !contains(dom, "data-error=")
-            for marker in ("heading", "row", "hidden", "back", "server", "once")
+            for marker in ("heading", "row", "tab-row", "hidden", "back", "server", "once")
                 @test contains(dom, "data-$marker=\"true\"")
             end
         end
