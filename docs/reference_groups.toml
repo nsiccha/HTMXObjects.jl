@@ -325,6 +325,7 @@ names = [
     "request_trace",
     "request_traces",
     "resource_descriptor",
+    "retained_roots",
     "run_workload",
     "runtime_dashboard",
     "runtime_jobs",

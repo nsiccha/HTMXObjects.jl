@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.188
+
+- `retained_roots(App)` returns the live source roots held for a routed app,
+  keyed by retention key. Pass `retained_roots(provider, App)` to inspect a
+  specific provider. Both forms preserve idle expiry and eviction order.
+
 ## 0.1.187
 
 - Interval cells keep the lower and upper bounds together when the table has

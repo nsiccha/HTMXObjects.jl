@@ -73,7 +73,7 @@ export Resource, ResourceItem, ResourcePolicy, resource_descriptor
 export Verb
 export ResourceEnvelope, CapabilityPolicy, Executor, ExecutionResult, execute, execution_availability
 export ApplicationWorkload, application_workloads, run_workload
-export OperationContext, RootProvider, RootRetention, OperationPolicy, send_ahead
+export OperationContext, RootProvider, RootRetention, retained_roots, OperationPolicy, send_ahead
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
@@ -11039,6 +11039,46 @@ _normalize_root_provider(factory) = RootProvider(factory)
 # Companion registry rather than another field on `_registered_types`: that
 # const's NamedTuple value type is frozen under Julia 1.10/Revise.
 const _root_providers = Dict{DataType,Any}()
+const _root_providers_lock = ReentrantLock()
+_registered_root_provider(T, fallback) = @lock _root_providers_lock get(_root_providers, T, fallback)
+
+"""
+    retained_roots(RootT)
+    retained_roots(provider::RootProvider, RootT)
+
+Return a snapshot mapping retention keys to the source roots of type `RootT`
+held by a managed [`RootProvider`](@ref) in this process.
+
+The one-argument form uses the provider currently registered for the app type,
+including the automatic store created by [`semantic_app`](@ref). Pass a provider
+to inspect that particular store, even after registering a replacement.
+A fresh-per-request provider returns an empty dictionary. An unregistered type
+in the one-argument form or a custom factory raises `ArgumentError`.
+
+Inspection copies the keys and root references under the store lock. It leaves
+idle times and eviction order intact, including entries awaiting TTL cleanup.
+Editing the returned dictionary affects only that snapshot. Its values are the
+live source objects and holding them keeps them reachable after eviction.
+"""
+function retained_roots(RootT::Type)
+    provider = _registered_root_provider(RootT, nothing)
+    isnothing(provider) && throw(ArgumentError("no root provider is registered for $RootT"))
+    retained_roots(provider, RootT)
+end
+
+function retained_roots(provider::RootProvider, ::Type{T}) where {T}
+    factory = provider.factory
+    factory === _default_root_factory && return Dict{Any,T}()
+    factory isa _ManagedRootFactory || throw(ArgumentError(
+        "retained_roots cannot inspect storage owned by a custom root factory for $T"))
+    entries = lock(factory.lock) do
+        Pair{Any,T}[key => entry.value for ((root_type, key), entry) in factory.entries
+                    if root_type === T]
+    end
+    # A retention key can implement its own hash and equality.
+    Dict{Any,T}(entries)
+end
+
 # The instance each root type was routed with (`_default_root_factory`).
 const _root_templates = Dict{DataType,Any}()
 const _operation_policies = Dict{DataType,OperationPolicy}()
@@ -18424,7 +18464,7 @@ function _register_route_handler(RootT, LeafT, chain::Vector, method, name,
         end
         local context, root, leaf, root_target, page_meta
         try
-            provider = get(_root_providers, RootT, root_provider)
+            provider = _registered_root_provider(RootT, root_provider)
             root_target = _operation_target(provider, RootT, Symbol[], req,
                                             root_prefix, root_segs, :http)
             context = root_target.context
@@ -18656,7 +18696,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                            count(==('/'), strip(mount_prefix, '/')) + 1
             ws_verb = Verb{:WEBSOCKET}()
             _register_websocket_handler(path, function(ws, req)
-                provider = get(_root_providers, OwnerT, root_provider)
+                provider = _registered_root_provider(OwnerT, root_provider)
                 target = _operation_target(provider, OwnerT, chain, req,
                                            mount_prefix, ws_root_segs, :websocket)
                 operation = _run_operation(target, RouteT, name, ws_verb,
@@ -18672,7 +18712,7 @@ function _register_one_route(OwnerT, RouteT, chain::Vector, prefix::AbstractStri
                             count(==('/'), strip(mount_prefix, '/')) + 1
             sse_verb = Verb{:SSE}()
             _register_sse_handler(path, function(req)
-                provider = get(_root_providers, OwnerT, root_provider)
+                provider = _registered_root_provider(OwnerT, root_provider)
                 target = _operation_target(provider, OwnerT, chain, req,
                                            mount_prefix, sse_root_segs, :sse)
                 operation = _run_operation(target, RouteT, name, sse_verb,
@@ -18769,7 +18809,7 @@ function _walk_route_meta(IterT, recurse_nested, register_route)
 end
 
 function _register_routes(T; prefix="", record_dir=nothing, record_base::String="",
-        parent_chain=Any[], root_provider=get(_root_providers, T, RootProvider()),
+        parent_chain=Any[], root_provider=_registered_root_provider(T, RootProvider()),
         operation_policy=get(_operation_policies, T, OperationPolicy()), selection=nothing)
     mount_prefix = _mount_prefix(prefix)
     _with_route_registration_pass() do
@@ -19366,7 +19406,7 @@ end
 # and the parent's `@include` desugar then threads `/<name>` per nesting level.
 function _register_included_routes(ParentT, NestedT, chain::Vector, prefix::String,
         record_dir; root_prefix::String="", record_base::String="",
-        root_provider=get(_root_providers, ParentT, RootProvider()),
+        root_provider=_registered_root_provider(ParentT, RootProvider()),
         operation_policy=get(_operation_policies, ParentT, OperationPolicy()), selection=nothing)
     # Track reverse lookup so _reroute!(NestedT) can trigger parent re-registration
     push!(get!(Set{DataType}, _included_type_parents, NestedT), ParentT)
@@ -20827,12 +20867,12 @@ end
 function _configure_route_root!(obj; root_provider=nothing,
         operation_policy=OperationPolicy())
     T = typeof(obj)
-    existing_provider = get(_root_providers, T, nothing)
-    provider = isnothing(root_provider) &&
-               _is_semantic_root_provider(existing_provider) ?
-        existing_provider : _normalize_root_provider(root_provider)
     policy = _operation_policy(operation_policy)
-    _root_providers[T] = provider
+    provider = lock(_root_providers_lock) do
+        existing = get(_root_providers, T, nothing)
+        isnothing(root_provider) && _is_semantic_root_provider(existing) && return existing
+        _root_providers[T] = _normalize_root_provider(root_provider)
+    end
     get(_root_templates, T, nothing) === obj || _forget_managed_roots!(provider, T, obj)
     _root_templates[T] = obj
     _operation_policies[T] = policy
@@ -21309,7 +21349,7 @@ function _reroute!(T::DataType)
         args = _registered_types[T]
         _register_routes(T; args.prefix, args.record_dir,
             record_base=get(_record_bases, T, ""),
-            root_provider=get(_root_providers, T, RootProvider()),
+            root_provider=_registered_root_provider(T, RootProvider()),
             operation_policy=get(_operation_policies, T, OperationPolicy()))
     end
     # If T is an @include'd sub-struct, re-register its parent(s)
@@ -21319,7 +21359,7 @@ function _reroute!(T::DataType)
             args = _registered_types[ParentT]
             _register_routes(ParentT; args.prefix, args.record_dir,
                 record_base=get(_record_bases, ParentT, ""),
-                root_provider=get(_root_providers, ParentT, RootProvider()),
+                root_provider=_registered_root_provider(ParentT, RootProvider()),
                 operation_policy=get(_operation_policies, ParentT, OperationPolicy()))
         end
     end
@@ -35500,20 +35540,14 @@ function _activate_semantic_root_provider!(obj)
     root = _semantic_root(obj)
     RootT = typeof(root)
     push!(_semantic_root_types, RootT)
-    current = get(_root_providers, RootT, RootProvider())
-    if _is_semantic_root_provider(current)
-        _seed_semantic_root!(current, root)
-        return current
+    provider = lock(_root_providers_lock) do
+        current = get(_root_providers, RootT, RootProvider())
+        current.scope === :request && current.factory === _default_root_factory ||
+            return current
+        _root_providers[RootT] = RootProvider(
+            scope=:job, key=_semantic_mount_key, retention=RootRetention())
     end
-    current.scope === :request && current.factory === _default_root_factory ||
-        return current
-    provider = RootProvider(
-        scope=:job,
-        key=_semantic_mount_key,
-        retention=RootRetention(),
-    )
-    _root_providers[RootT] = provider
-    _seed_semantic_root!(provider, root)
+    _is_semantic_root_provider(provider) && _seed_semantic_root!(provider, root)
     provider
 end
 
