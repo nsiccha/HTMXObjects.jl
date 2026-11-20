@@ -11,7 +11,7 @@ using TestItemRunner
 
     export RetentionProbe, retention_providers, reset_retention!, retention_runs,
         release_retention!, hx_get, running, settle,
-        MountProbe, mount_providers, prefixed_get
+        MountProbe, mount_providers, prefixed_get, InspectionApp, inspection_key, inspect_get
 
     const runs_lock = ReentrantLock()
     const runs = Dict{Symbol,Int}()
@@ -123,6 +123,13 @@ using TestItemRunner
 
     hx_get(target) = dispatch(:GET, target; headers=["HX-Request" => "true"])
     body_text(response) = String(HTMXObjects._message_body_bytes(response))
+    @htmx struct InspectionApp
+        serial = hit!(:inspection)
+        @fresh @direct @get index() = h.p("serial=$serial")
+    end
+    inspection_key(req) = HTTP.header(req, "X-Job", "default")
+    inspect_get(key) = body_text(dispatch(:GET, "/inspect";
+        headers=["HX-Request" => "true", "X-Job" => key]))
     prefixed_get(target, prefix) = body_text(dispatch(:GET, target;
         headers=isempty(prefix) ? Pair{String,String}[] : ["X-Forwarded-Prefix" => prefix]))
     running(body) = contains(body, "hx-trigger=\"every ")
@@ -141,6 +148,73 @@ using TestItemRunner
         body === nothing && error("poller never settled: $target")
         body
     end
+end
+
+@testitem "retained_roots exposes the source caches used by keyed requests" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    using HTMXObjects.DynamicObjects: mem_cache_entries, prune_mem_caches!
+
+    reset_retention!()
+    template = InspectionApp()
+    provider = RootProvider(; scope=:job, key=inspection_key, retention=RootRetention())
+    route!(template; prefix="inspect", root_provider=provider)
+    @test isempty(retained_roots(InspectionApp))
+    @test contains(inspect_get("a"), "serial=1")
+    @test contains(inspect_get("b"), "serial=2")
+
+    # The same key and provider can also serve another app type.
+    route!(RetentionProbe(); prefix="other", root_provider=provider)
+    other = dispatch(:GET, "/other/values/1"; headers=["X-Job" => "a", "HX-Request" => "true"])
+    @test contains(String(other.body), "root=1 child=1 single=1")
+    @test retained_roots(RetentionProbe)["a"] isa RetentionProbe
+    roots = retained_roots(InspectionApp)
+    @test Set(keys(roots)) == Set(["a", "b"])
+    @test roots["a"] !== roots["b"]
+    @test roots["a"] !== template
+    @test retained_roots(provider, InspectionApp)["a"] === roots["a"]
+    is_serial(entry) = entry.property === :serial && entry.role === :derived
+    @test !any(is_serial, mem_cache_entries(template))
+    serial = only(e for e in mem_cache_entries(roots["a"]) if is_serial(e))
+    @test serial.object === roots["a"]
+    @test serial.value == 1
+    @test prune_mem_caches!(e -> !is_serial(e), roots["a"]).evicted == 1
+    @test contains(inspect_get("b"), "serial=2")
+    @test contains(inspect_get("a"), "serial=3")
+
+    delete!(roots, "b")
+    @test haskey(retained_roots(InspectionApp), "b")
+    route!(template; prefix="inspect", root_provider=RootProvider())
+    @test isempty(retained_roots(InspectionApp))
+    @test retained_roots(provider, InspectionApp)["a"] === roots["a"]
+    @test_throws ArgumentError retained_roots(Nothing)
+    custom = RootProvider((_...) -> error("inspection invoked the factory"))
+    route!(template; prefix="inspect", root_provider=custom)
+    @test_throws ArgumentError retained_roots(InspectionApp)
+    @test_throws ArgumentError retained_roots(custom, InspectionApp)
+end
+
+@testitem "retained_roots preserves idle expiry and eviction order" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+
+    tick = Ref(0.0)
+    factory = HTMXObjects._ManagedRootFactory(RootRetention(; max_entries=2, ttl=5);
+        clock=() -> tick[])
+    provider = RootProvider(factory; scope=:job, key=inspection_key)
+    route!(InspectionApp(); prefix="inspect", root_provider=provider)
+    for (t, key) in enumerate(("a", "b", "a"))
+        tick[] = t
+        @test contains(inspect_get(key), "serial=")
+    end
+    tick[] = 4
+    snapshot = retained_roots(InspectionApp)
+    tick[] = 5
+    @test contains(inspect_get("c"), "serial=")
+    @test Set(keys(retained_roots(InspectionApp))) == Set(["a", "c"])
+    @test Set(keys(snapshot)) == Set(["a", "b"])
+    tick[] = 8
+    @test retained_roots(InspectionApp)["a"] === snapshot["a"]
+    @test contains(inspect_get("c"), "serial=")
+    @test collect(keys(retained_roots(InspectionApp))) == ["c"]
 end
 
 @testitem "provider-retained roots reuse root-level indexed work across requests" setup=[ProviderRetentionFixtures] tags=[:unit, :semantic] begin
@@ -369,6 +443,7 @@ end
     @test index.status == 200
     @test contains(index.body, "Show the fit")
     @test HTMXObjects._is_semantic_root_provider(HTMXObjects._root_providers[InstanceApp])
+    @test only(values(retained_roots(InstanceApp))).dir == first_dir
     @test contains(instance_get("/instance/show?fit=first-fit").body, "dir=$first_dir")
 
     # Routing another instance keeps the store but drops the roots it built
@@ -376,6 +451,7 @@ end
     route!(InstanceApp(; dir=second_dir); prefix="instance")
     @test HTMXObjects._is_semantic_root_provider(HTMXObjects._root_providers[InstanceApp])
     @test contains(instance_get("/instance/show?fit=second-fit").body, "dir=$second_dir")
+    @test only(values(retained_roots(InstanceApp))).dir == second_dir
     @test instance_get("/instance/show?fit=first-fit").status == 400
 end
 
