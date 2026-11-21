@@ -30808,10 +30808,10 @@ end
 # as the browser's `Number('1e' + n)` reads them (`parse` refuses those).
 _exact_pow10(n::Int) = n < -323 ? 0.0 : n > 308 ? Inf : parse(Float64, string("1e", n))
 
-# A float's digits as Julia prints it (its shortest round-trip form):
+# A number's decimal digits (the shortest round-trip form for a float):
 # `(negative, digits, point)` for ±0.digits × 10^point, without leading or
 # trailing zeros (zero has no digits).
-function _shortest_digits(x::AbstractFloat)
+function _shortest_digits(x::Union{Integer,AbstractFloat})
     m = match(r"^(-?)(\d+)(?:\.(\d*))?(?:e([+-]?\d+))?$", string(x))
     isnothing(m) && throw(ArgumentError(string("format_number: cannot read the digits of the ",
         typeof(x), " ", repr(x), "; pass it as a Float64")))
@@ -30835,7 +30835,7 @@ _number_key(x::Integer) = string(x)
 _number_key(x::AbstractFloat) = isinf(x) ? (x > 0 ? "Infinity" : "-Infinity") : string(x)
 
 """
-    IntervalEstimate(estimate, lower, upper; width_digits=2, log=false, digits=nothing, sigdigits=nothing)
+    IntervalEstimate(estimate, lower, upper; width_digits=2, log=false, digits=nothing, sigdigits=nothing, max_sigdigits=nothing)
 
 Store an estimate and its lower and upper interval bounds as one value. Tables format the estimate together with the interval, using its width to choose display precision.
 
@@ -30876,7 +30876,7 @@ band = select(df, :sample, [:q50, :q2_5, :q97_5] => ByRow((m, l, u) -> IntervalE
 
 Each of `estimate`, `lower` and `upper` is a real number, `missing` or
 `nothing`; the fields keep them as given (`x.estimate`, `x.lower`, `x.upper`),
-beside the options (`x.width_digits`, `x.log`, `x.digits`, `x.sigdigits`).
+beside the options (`x.width_digits`, `x.log`, `x.digits`, `x.sigdigits`, `x.max_sigdigits`).
 `lower > upper` throws.
 """
 struct IntervalEstimate
@@ -30887,8 +30887,10 @@ struct IntervalEstimate
     log::Bool
     digits::Union{Nothing,Int}
     sigdigits::Union{Nothing,Int}
+    max_sigdigits::Union{Nothing,Int}
     function IntervalEstimate(estimate, lower, upper; width_digits::Integer=2, log::Bool=false,
-                              digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing)
+                              digits::Union{Nothing,Integer}=nothing, sigdigits::Union{Nothing,Integer}=nothing,
+                              max_sigdigits::Union{Nothing,Integer}=nothing)
         _interval_value(estimate)
         lo, hi = _interval_value(lower), _interval_value(upper)
         # Refused: an interval that ends before it starts has no width to set digits by.
@@ -30897,7 +30899,8 @@ struct IntervalEstimate
         # Refused here rather than when a table writes the value: options
         # `format_interval` would refuse for this interval.
         _interval_rounding(lo, hi, width_digits, log, digits, sigdigits, "IntervalEstimate")
-        new(estimate, lower, upper, width_digits, log, digits, sigdigits)
+        _check_interval_cap(max_sigdigits, "IntervalEstimate")
+        new(estimate, lower, upper, width_digits, log, digits, sigdigits, max_sigdigits)
     end
 end
 
@@ -30907,7 +30910,7 @@ function Base.show(io::IO, x::IntervalEstimate)
     join(io, (repr(v; context=io) for v in (x.estimate, x.lower, x.upper)), ", ")
     options = [string(name, " = ", repr(value)) for (name, value, default) in
                ((:width_digits, x.width_digits, 2), (:log, x.log, false), (:digits, x.digits, nothing),
-                (:sigdigits, x.sigdigits, nothing)) if value !== default]
+                (:sigdigits, x.sigdigits, nothing), (:max_sigdigits, x.max_sigdigits, nothing)) if value !== default]
     isempty(options) || print(io, "; ", join(options, ", "))
     print(io, ")")
 end
@@ -30923,7 +30926,7 @@ _interval_value(x) = throw(ArgumentError(string(
 _interval_parts(x::IntervalEstimate) = map(_interval_value, (x.estimate, x.lower, x.upper))
 
 """
-    format_interval(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing) -> String
+    format_interval(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing, max_sigdigits=nothing) -> String
     format_interval(x::IntervalEstimate; kw...)
 
 Format an estimate and its interval with language-specific separators and precision determined by the interval width or explicit rounding options.
@@ -30954,12 +30957,18 @@ that place, so the last digit shown is one the uncertainty supports:
 - `digits` or `sigdigits` set one precision instead, as in
   [`format_number`](@ref): `digits = 1` writes every number of a column with
   one decimal.
+- `max_sigdigits` (1 to 15) caps the chosen precision. For example,
+  `IntervalEstimate(1.0, 1.0, 1.0000011; max_sigdigits=4)` displays as
+  `1.000 (1.000–1.000)`, while `1.7 (1.3–2.7)` keeps its coarser precision.
+  With width-based rounding or `digits`, all three numbers share the place
+  needed by the largest displayed magnitude. With `log=true`, `sigdigits`,
+  or no width to set the precision, the limit applies to each number.
 
 An [`IntervalEstimate`](@ref) keeps these options itself, and
 `format_interval(x)` writes it with them. A keyword given in the call replaces
 the value's: `width_digits` on its own, and `log`, `digits` and `sigdigits`
 together, as one rule, so `format_interval(IntervalEstimate(0.5, 0.02, 3.1;
-log = true); digits = 1)` is `0.5 (0.0–3.1)`.
+log = true); digits = 1)` is `0.5 (0.0–3.1)`. The cap can be changed independently. Pass `max_sigdigits=nothing` to remove a stored limit for one call.
 
 A number below 10⁻⁴ or from 10¹⁶ up is written as a power of ten
 (`1.20·10⁻⁵`), as `format_number` writes it. Without both bounds the estimate
@@ -30974,9 +30983,16 @@ format_interval(estimate, lower, upper; kw...) = format_interval(IntervalEstimat
 format_interval(x::IntervalEstimate; kw...) = _format_interval(_fill_text, x, _interval_parts(x); kw...)
 function _format_interval(render, x, (est, lo, hi); texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Union{Nothing,Integer}=nothing,
                          log::Union{Nothing,Bool}=nothing, digits::Union{Nothing,Integer}=nothing,
-                         sigdigits::Union{Nothing,Integer}=nothing)
+                         sigdigits::Union{Nothing,Integer}=nothing, max_sigdigits::Union{Nothing,Integer}=x.max_sigdigits)
     rounding = _interval_rounding(lo, hi, _interval_options(x, width_digits, log, digits, sigdigits)..., "format_interval")
-    shown(v) = _format_interval_number(v, texts, rounding)
+    display_rounding = if isnothing(max_sigdigits)
+        rounding
+    else
+        _check_interval_cap(max_sigdigits, "format_interval")
+        visible = isnothing(lo) || isnothing(hi) ? (est,) : (est, lo, hi)
+        _cap_interval_rounding(rounding, Int(max_sigdigits), visible)
+    end
+    shown(v) = _format_interval_number(v, texts, display_rounding)
     (isnothing(lo) || isnothing(hi)) && return shown(est)
     lower, upper = shown(lo), shown(hi)
     signed = !isempty(texts.minus) && (startswith(lower, texts.minus) || startswith(upper, texts.minus))
@@ -31011,7 +31027,57 @@ function _interval_rounding(lo, hi, width_digits, log, digits, sigdigits, who)
     _SigDigits(clamp(width_digits - 1 - _decade(log10(Float64(hi) / Float64(lo))), 1, _MAX_SIGDIGITS))
 end
 
+function _check_interval_cap(cap, who)
+    isnothing(cap) || 1 <= cap <= _MAX_SIGDIGITS || throw(ArgumentError(
+        "$who: max_sigdigits must be between 1 and $_MAX_SIGDIGITS, got $cap"))
+end
+
+# A binding cap rounds the displayed decimal digits. A shared place keeps
+# trailing zeros for width-based and fixed-decimal intervals.
+struct _CappedDigits
+    k::Int
+    place::Union{Nothing,Int}
+    fixed_notation::Bool
+end
+_cap_interval_rounding(::Nothing, cap, values) = _CappedDigits(cap, nothing, false)
+_cap_interval_rounding(r::_SigDigits, cap, values) = cap < r.k ? _CappedDigits(cap, nothing, false) : r
+function _cap_interval_rounding(r::Union{_FixedDigits,_PlaceDigits}, cap, values)
+    place = r isa _PlaceDigits ? r.p : -r.k
+    capped = place
+    for v in values
+        (isnothing(v) || !isfinite(v) || iszero(v)) && continue
+        _, digits, point = _shortest_digits(v)
+        # Account for a carry such as 9.9999 -> 10.00 when choosing the
+        # common place. All three originals are then rounded at that place.
+        _, rounded_point = _limit_interval_digits(digits, point, cap)
+        capped = max(capped, rounded_point - cap)
+    end
+    capped > place ? _CappedDigits(cap, capped, r isa _FixedDigits) : r
+end
+
+# Round decimal digits to k significant digits, halves away from zero. k can
+# be zero or negative when another value sets a coarser common place.
+function _limit_interval_digits(digits, point, k)
+    (isempty(digits) || k < 0) && return ("", 0)
+    length(digits) <= k && return (digits, point)
+    prefix = k == 0 ? 0 : parse(Int64, digits[1:k])
+    rounded = prefix + (digits[k + 1] >= '5')
+    iszero(rounded) && return ("", 0)
+    s = string(rounded)
+    rstrip(s, '0'), point + length(s) - k
+end
+
 _format_interval_number(v, texts, rounding) = _format_number(v, texts, rounding)
+function _format_interval_number(v, texts, cap::_CappedDigits)
+    (isnothing(v) || !isfinite(v)) && return _format_number(v, texts, nothing)
+    negative, digits, point = _shortest_digits(v)
+    k = isnothing(cap.place) ? cap.k : point - cap.place
+    digits, point = _limit_interval_digits(digits, point, k)
+    if !isnothing(cap.place)
+        return _format_place((negative, digits, point), cap.place, texts; fixed_notation=cap.fixed_notation)
+    end
+    _format_digits(negative, digits, point, texts.decimal, texts.thousands, v isa AbstractFloat && _float_sci(point); texts.minus)
+end
 _format_interval_number(v::Real, texts, r::_PlaceDigits) =
     isfinite(v) ? _format_place(Float64(v), r.p, texts) : _format_number(v, texts, nothing)
 
@@ -31029,13 +31095,13 @@ end
 # `x` rounded at 10^p and written with every decimal of that place, trailing
 # zeros kept (`3.20`), so the numbers of one interval end at the same place;
 # as a power of ten where `format_number` writes one (`1.20·10⁻⁵`).
-function _format_place(x::Float64, p::Int, texts)
-    negative, ds, point = _round_place(x, p)
+_format_place(x::Float64, p::Int, texts) = _format_place(_round_place(x, p), p, texts)
+function _format_place((negative, ds, point)::Tuple, p::Int, texts; fixed_notation=false)
     isempty(ds) && return p < 0 ? string('0', texts.decimal, repeat('0', -p)) : "0"
     digits = ds * repeat('0', point - p - length(ds))     # |x| / 10^p, rounded
     io = IOBuffer()
     negative && print(io, texts.minus)
-    if _float_sci(point)
+    if !fixed_notation && _float_sci(point)
         print(io, digits[1])
         length(digits) > 1 && print(io, texts.decimal, digits[2:end])
         print(io, "·10", _superscript(point - 1))
@@ -31049,7 +31115,7 @@ function _format_place(x::Float64, p::Int, texts)
 end
 
 """
-    interval_cell(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing, attrs...)
+    interval_cell(estimate, lower, upper; texts=table_texts(), width_digits=2, log=false, digits=nothing, sigdigits=nothing, max_sigdigits=nothing, attrs...)
     interval_cell(x::IntervalEstimate; kw...)
 
 Render an estimate and its interval in a table cell while retaining the underlying numbers for sorting and export.
@@ -31085,9 +31151,9 @@ sortable_table(["Zone", "Employees"],
 interval_cell(estimate, lower, upper; kw...) = interval_cell(IntervalEstimate(estimate, lower, upper); kw...)
 function interval_cell(x::IntervalEstimate; texts::TableTexts=_EN_TABLE_TEXTS, width_digits::Union{Nothing,Integer}=nothing,
                        log::Union{Nothing,Bool}=nothing, digits::Union{Nothing,Integer}=nothing,
-                       sigdigits::Union{Nothing,Integer}=nothing, attrs...)
+                       sigdigits::Union{Nothing,Integer}=nothing, max_sigdigits::Union{Nothing,Integer}=x.max_sigdigits, attrs...)
     est, lo, hi = _interval_parts(x)
-    content = _format_interval(_interval_cell_content, x, (est, lo, hi); texts, width_digits, log, digits, sigdigits)
+    content = _format_interval(_interval_cell_content, x, (est, lo, hi); texts, width_digits, log, digits, sigdigits, max_sigdigits)
     key = isnothing(est) ? (;) : (; data_sort_value=_number_key(est))
     h.td(; key..., data_htmxo_number=isnothing(est) ? "" : _number_key(est), interval_sort_values(est, lo, hi)...,
          data_htmxo_interval=_interval_csv_json(est, lo, hi), attrs...)(content)

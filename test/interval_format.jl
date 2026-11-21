@@ -54,6 +54,55 @@
     @test_throws ArgumentError table_texts(; interval="{estimate} ({low}–{upper})")
 end
 
+@testitem "max_sigdigits caps the precision supported by the interval" tags=[:unit] begin
+    using HTMXObjects
+    x = IntervalEstimate(1.0, 1.0, 1.0000011; max_sigdigits=4)
+    @test format_interval(x) == "1.000 (1.000–1.000)"
+    @test format_interval(x; texts=table_texts(:de)) == "1,000 (1,000–1,000)"
+    @test format_interval(x; max_sigdigits=3) == "1.00 (1.00–1.00)"
+    @test format_interval(x; max_sigdigits=nothing) == "1.0000000 (1.0000000–1.0000011)"
+    @test repr(x) == "IntervalEstimate(1.0, 1.0, 1.0000011; max_sigdigits = 4)"
+    f(args...; kw...) = format_interval(args...; max_sigdigits=4, kw...)
+    @test f(1.73126, 1.34286, 2.71234) == "1.7 (1.3–2.7)"
+    @test f(1000.004, 1000.0039, 1000.0041) == "1,000 (1,000–1,000)"
+    @test f(1.23456e-6, 1.23455e-6, 1.23458e-6) == "1.235·10⁻⁶ (1.235·10⁻⁶–1.235·10⁻⁶)"
+    # A carry across a power of ten, and an estimate outside its bounds.
+    @test f(-9.99999, -9.999999, -9.99998) == "-10.00 (-10.00 to -10.00)"
+    @test f(12.34567, 1.234501, 1.234509) == "12.35 (1.23–1.23)"
+    @test f(12890, 0.4, 5.0) == "12,890 (0–10)"
+    @test f(1.234499, 1.234498, 1.234501) == "1.234 (1.234–1.235)"
+    @test format_interval(x; digits=7) == format_interval(x)
+    @test format_interval(x; digits=1) == "1.0 (1.0–1.0)"
+    @test f(1.23456, 1.23455, 1.23457; log=true) == "1.235 (1.235–1.235)"
+    @test f(0.5, 0.02, 3.1; log=true) == "0.5 (0.02–3)"
+    @test f(1.23456, 1.23455, 1.23457; sigdigits=3) == "1.23 (1.23–1.23)"
+    @test f(1.23456, 1.23455, 1.23457; sigdigits=7) == "1.235 (1.235–1.235)"
+    # Without a finite width there is no place to pad to. A missing bound
+    # hides the other bound, including when choosing a place for fixed digits.
+    @test f(1.23456, 1.23456, 1.23456) == "1.235 (1.235–1.235)"
+    @test f(0, 0, 0) == "0 (0–0)"
+    @test f(0.1f0, nothing, nothing; max_sigdigits=15) == "0.1"
+    @test f(1.23456, missing, 1e6; digits=5) == "1.235"
+    @test f(1.23456, NaN, Inf) == "1.235 (NaN–∞)"
+    @test f(missing, 123456, Inf) == "– (123,500–∞)"
+    @test f(99995, nothing, nothing) == "100,000"
+    @test f(1.23456e-5, nothing, nothing; digits=10) == "0.00001235"
+    huge = big(12345) * big(10)^396
+    @test f(huge, nothing, nothing; digits=3) == format_number(big(1235) * big(10)^397)
+    @test_throws ArgumentError IntervalEstimate(1, 1, 1; max_sigdigits=0)
+    @test_throws ArgumentError format_interval(x; max_sigdigits=16)
+    @test_throws ArgumentError interval_cell(x; max_sigdigits=-1)
+
+    raw = IntervalEstimate(x.estimate, x.lower, x.upper)
+    cell = repr("text/html", interval_cell(x))
+    @test cell == repr("text/html", interval_cell(raw; max_sigdigits=4))
+    @test HTMXObjects._html_text_content(cell) == format_interval(x)
+    @test first(split(cell, '>')) == first(split(repr("text/html", interval_cell(raw)), '>'))
+    table = SemanticTable((ratio=[x],))
+    @test contains(repr("text/markdown", table), "| 1.000 (1.000–1.000) |")
+    @test contains(repr("text/plain", table), "1.0\t1.0\t1.0000011")
+end
+
 @testitem "interval_cell keeps the exact numbers for sorting and the CSV" tags=[:unit] begin
     using HTMXObjects
     html(x) = repr("text/html", x)
@@ -219,7 +268,7 @@ end
         # `e` and `f` have no value (a forecast before its issue time): they
         # sort last in both directions and export empty fields.
         table = (Name=["a", "b", "c", "d", "e", "f"],
-                 Median=[IntervalEstimate(22.3, 13.1, 34.2), IntervalEstimate(3.2, 2.95, 3.48),
+                 Median=[IntervalEstimate(22.3, 13.1, 34.2; max_sigdigits=1), IntervalEstimate(3.2, 2.95, 3.48),
                          IntervalEstimate(40.0, 39.0, 41.0), IntervalEstimate(missing, 1.0, 2.0), missing, nothing])
         t = render_table(table; texts=de, id="iv", download=false)
         cells = [interval_cell(9_800, 7_400, 12_800; digits=0) for _ in 1:3]
