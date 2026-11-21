@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.191
+
+- When a `Records` field reads another parameter and that value is invalid,
+  the error message and form highlight identify the parameter that failed.
+  An invalid value for the record field itself still identifies the card
+  and field, for example `scenarios.1.vessel`.
+
 ## 0.1.190
 
 - A crowded, normal-density Pico table halves its horizontal cell padding

@@ -145,6 +145,13 @@ end
     bad = get("/timecourse?scenarios.1.label=A&scenarios.2.age=abc")
     @test HTTP.header(bad, "X-HTMXO-Error-Param") == "scenarios.2.age"
     @test contains(body_of(bad), "Invalid value for parameter scenarios.2.age")
+    # The record's relevance check reads basis, which has its own field on the page.
+    stale = dispatch(:GET, "/timecourse?basis=unknown"; headers=["Accept" => "text/markdown"])
+    @test stale.status == 400
+    @test contains(body_of(stale), "Invalid value for parameter basis: \"unknown\"; allowed values: \"typical\", \"cohort\"")
+    stale_card = get("/timecourse?basis=unknown&scenarios.1.male=true")
+    @test HTTP.header(stale_card, "X-HTMXO-Error-Param") == "basis"
+    @test contains(body_of(stale_card), "data-htmxo-param=\"basis\"")
     # A route reads it as a vector of NamedTuples.
     app = ScenarioApp()
     @test collect(app.scenarios) == [(label="Scenario 1", regimen="100% q 24 x 14", male=false, age=50.0, weight=70.0)]
