@@ -159,59 +159,14 @@ renders the page. A custom `layout(parts)` that draws its own `tabset` passes
 
 ## Preset record cards
 
-From 0.1.178, `presets` gives a `Records` input its starting cards in order.
-Each preset supplies the fields it changes. Here the first card takes the
-declared regimen, and the second starts switched off.
-
-```@example forms
-@htmx struct Comparison
-    @param regimen::String = "100% q 24 x 14"
-    @param scenarios::Records = Records(:regimen; label="Scenario", label_from=:regimen,
-        presets=[(label="Daily 100 %",), (label="BID 50 %", regimen="50% q 12 x 14", on=false)])
-    @get selected() = h.ul((h.li(s.label, " — ", s.regimen) for s in scenarios)...)
-end
-[s.label => s.regimen for s in Comparison().scenarios]
-```
-
-Add and Duplicate take their automatic name from `label_from`, using the
-display label for a choice. Repeated names get a numbered suffix. A name the
-reader types takes precedence, and clearing it restores automatic naming.
-Omit `label_from` to keep numbered names and copy labels.
-
-The Include box shows each enabled card's colour in order. A plot using the
-page's default categorical palette and the same category order matches those
-colours, including in dark mode or with a page-wide `--aov-category` palette.
+Use `presets` to set the starting cards and `label_from` to name them.
+See [Preset record cards](@ref generated-preset-cards) for an example.
 
 ### Showing valid cards when another card has an error
 
-Give the list a `check` property when its views share a check. The property
-runs once per enabled card when the list is resolved. Here the summary uses its result
-and names the cards it omitted.
-
-```julia
-@htmx struct Samples
-    @param code::String = "A"
-    @param samples::Records = Records(:code; label="Sample", check=:identifier)
-    identifier = isempty(strip(code)) ?
-        throw(CallerFault(400, "Enter a sample code"; param=:code)) : uppercase(strip(code))
-    @get summary() = begin
-        cards = samples
-        rows = checked_records(cards)
-        faults = record_faults(cards)
-        isempty(rows) && !isempty(faults) && throw(first(faults).fault)
-        h.div(h.ul((h.li(r.record.label, " — ", r.value) for r in rows)...),
-              (h.p(f.record.label, ": ", f.fault.message) for f in faults)...)
-    end
-end
-```
-
-A field error keeps its card checked and editable. Its Include box uses no
-series colour. Fixing the field restores its colour and checked value. The
-one-based `index` in both lists counts unchecked cards too. Throwing a returned
-`fault` addresses the original field (for example `samples.3.code`). A check
-that fails on a shared input, or raises a server exception, propagates that
-error. Field conversion and declared option domains run before the check.
-Ordinary iteration over `samples` still yields every enabled entry.
+Declare a shared `check` on the list. Plot the values from `checked_records`
+and use `record_faults` to name omissions. The [checked cards example](@ref generated-checked-cards)
+shows a successful value and the error from another card in the same response.
 
 ## Resetting every input
 

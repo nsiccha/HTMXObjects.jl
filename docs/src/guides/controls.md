@@ -125,3 +125,66 @@ script computing in the browser reads the bounds, scale, step, decimal places
 and unit from the page, and follows the value through the field's `input`
 events. Place the same control by hand with
 `ninput((; attenuation); domain=number_domain(…))`.
+
+## [Preset record cards](@id generated-preset-cards)
+
+From 0.1.178, `presets` gives a `Records` input its starting cards in order.
+Each preset supplies the fields it changes. Here the first card takes the
+declared regimen, and the second starts switched off.
+
+```@example controls
+@htmx struct Comparison
+    @param regimen::String = "100% q 24 x 14"
+    @param scenarios::Records = Records(:regimen; label="Scenario", label_from=:regimen,
+        presets=[(label="Daily 100 %",), (label="BID 50 %", regimen="50% q 12 x 14", on=false)])
+    @get selected() = h.ul((h.li(s.label, " — ", s.regimen) for s in scenarios)...)
+end
+[s.label => s.regimen for s in Comparison().scenarios]
+```
+
+Add and Duplicate take their automatic name from `label_from`, using the
+display label for a choice. Repeated names get a numbered suffix. A name the
+reader types takes precedence, and clearing it restores automatic naming.
+Omit `label_from` to keep numbered names and copy labels.
+
+The Include box shows each enabled card's colour in order. A plot using the
+page's default categorical palette and the same category order matches those
+colours, including in dark mode or with a page-wide `--aov-category` palette.
+
+### [Showing valid cards when another card has an error](@id generated-checked-cards)
+
+Give the list a `check` property when its views share a check. The property
+runs once per enabled card when the list is resolved. Here the summary uses its result
+and names the cards it omitted.
+
+```@example controls
+@htmx struct Samples
+    @param code::String = "A"
+    @param samples::Records = Records(:code; label="Sample", check=:identifier)
+    identifier = isempty(strip(code)) ?
+        throw(CallerFault(400, "Enter a sample code"; param=:code)) : uppercase(strip(code))
+    @get summary() = begin
+        cards = samples
+        rows = checked_records(cards)
+        faults = record_faults(cards)
+        isempty(rows) && !isempty(faults) && throw(first(faults).fault)
+        h.div(h.ul((h.li(r.record.label, " — ", r.value) for r in rows)...),
+              (h.p(f.record.label, ": ", f.fault.message) for f in faults)...)
+    end
+end
+route!(Samples(); prefix="/checked-samples", operation_policy=:blocking);
+response = dispatch(:GET, "/checked-samples/summary?samples.1.code=ab&samples.2.code=%20";
+    headers=["HX-Request" => "true"]);
+markup = String(response.body);
+@assert response.status == 200 && occursin("Sample 1 — AB", markup) # hide
+@assert occursin("Sample 2: Enter a sample code", markup) # hide
+HTML(markup)
+```
+
+A field error keeps its card checked and editable. Its Include box uses no
+series colour. Fixing the field restores its colour and checked value. The
+one-based `index` in both lists counts unchecked cards too. Throwing a returned
+`fault` addresses the original field (for example `samples.3.code`). A check
+that fails on a shared input, or raises a server exception, propagates that
+error. Field conversion and declared option domains run before the check.
+Ordinary iteration over `samples` still yields every enabled entry.
