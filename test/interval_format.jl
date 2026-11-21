@@ -225,6 +225,14 @@ end
         cells = [interval_cell(9_800, 7_400, 12_800; digits=0) for _ in 1:3]
         layout = h.div(sortable_table(["A", "B", "C"], [h.tr(cells...)]; sortable=false, column_menu=false);
                        id="layout")
+        # One unusually wide range competes with fourteen ordinary ranges
+        # and a multi-word label. Count actual text lines in the held table.
+        ordinary = first(cells)
+        wide = interval_cell(9_800_000, 7_400_000, 12_800_000; digits=0)
+        rows = [h.tr(h.td("Minimum over the last measurement of this quantity"),
+                     ordinary, ordinary, i == 1 ? wide : ordinary) for i in 1:5]
+        crowded = h.div(sortable_table(["Quantity", "A", "B", "C"], rows; sortable=false, column_menu=false);
+                        id="crowded")
         driver = h.script(Raw(raw"""
             window.addEventListener('load', async function() {
                 const layout = document.getElementById('layout'), table = layout.querySelector('table');
@@ -242,7 +250,21 @@ end
                     htmxoColumnsMeasure(table, true);
                     const bounds = lines(cell.querySelector('.htmxo-interval-bounds').firstChild);
                     const estimate = lines(cell.firstChild)[0];
-                    return [Math.round(estimate) === Math.round(bounds[0]), bounds.length, table.offsetWidth <= width + 1].join('/');
+                    const mostLines = Math.max(...Array.from(table.querySelectorAll('.htmxo-interval-bounds'),
+                        span => lines(span.firstChild).length));
+                    return [Math.round(estimate) === Math.round(bounds[0]), mostLines, table.offsetWidth <= width + 1].join('/');
+                }).join(' ');
+                const frame = document.getElementById('crowded'), mixed = frame.querySelector('table');
+                const spans = mixed.querySelectorAll('.htmxo-interval-bounds');
+                const padding = () => parseFloat(getComputedStyle(spans[0].parentElement).paddingLeft);
+                let normal;
+                document.body.dataset.crowded = [125, 66, 125].map(width => {
+                    frame.style.width = width + 'ch';
+                    htmxoColumnsMeasure(mixed, true);
+                    if (normal === undefined) normal = padding();
+                    const split = Array.from(spans).filter(span => lines(span.firstChild).length > 1);
+                    return [Math.round(100 * padding() / normal), split.length,
+                            split.every(span => span === spans[2]), mixed.offsetWidth <= frame.clientWidth + 1].join('/');
                 }).join(' ');
                 const body = document.getElementById('iv');
                 const th = body.closest('table').querySelectorAll('thead th')[1];
@@ -263,9 +285,11 @@ end
             });
             """))
         page = string("<!doctype html><html><head><meta charset=\"utf-8\">", repr("text/html", sortable_table_js()),
-            repr("text/html", download_table_js()), repr("text/html", htmxo_utility_styles()),
-            "<style>#layout table{width:100%;border-collapse:collapse} #layout :is(td,th){font:16px/20px monospace;padding:0}</style>",
-            "</head><body>", repr("text/html", t), repr("text/html", layout),
+            repr("text/html", download_table_js()), "<style>td,th{padding:8px var(--pico-spacing)}</style>",
+            repr("text/html", htmxo_utility_styles()), "<style>#crowded{font:16px/20px monospace;--pico-spacing:2ch} ",
+            "#crowded :is(td,th){font:inherit} #crowded table,#layout table{width:100%;border-collapse:collapse} ",
+            "#layout :is(td,th){font:16px/20px monospace;padding:0}</style>",
+            "</head><body>", repr("text/html", t), repr("text/html", layout), repr("text/html", crowded),
             repr("text/html", driver), "</body></html>")
         dom = mktempdir() do directory
             fixture = joinpath(directory, "page.html")
@@ -276,6 +300,7 @@ end
         @test contains(dom, "data-done=\"1\"")
         attr(name) = let m = match(Regex("data-$name=\"([^\"]*)\""), dom); isnothing(m) ? nothing : m[1] end
         @test attr("layout") == "true/1/true false/1/true false/2/true true/1/true"
+        @test attr("crowded") == "100/0/true/true 50/1/true/true 100/0/true/true"
         # By the upper bound: 41 > 34,2 > 3,48 > 2; by the width: 0,53 < 1 < 2 < 21,1.
         @test attr("upper") == "c,a,b,d,e,f"
         @test attr("width") == "b,d,c,a,e,f"
