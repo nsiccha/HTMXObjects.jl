@@ -40946,6 +40946,7 @@ htmxo_utility_styles() = h.style(Raw("""
     gap: 0 1rem;
     align-items: flex-end;
 }
+.htmxo-input-section > .htmxo-input-section-fields { align-items: flex-start; }
 .htmxo-input-section-fields > .htmxo-input-field { flex: 1 1 100%; min-width: 0; }
 .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex: 1 1 8rem; }
 .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
@@ -40959,7 +40960,6 @@ htmxo_utility_styles() = h.style(Raw("""
 }
 .htmxo-semantic-inputs > .htmxo-input-section,
 .htmxo-semantic-inputs > .htmxo-semantic-controls > .htmxo-input-section { flex: 1 1 100%; }
-.htmxo-semantic-operation-form .htmxo-input-section > .htmxo-input-section-fields { align-items: flex-start; }
 .htmxo-semantic-inputs .htmxo-input-section-fields > .htmxo-input-field { flex: 0 1 16rem; }
 .htmxo-semantic-inputs .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex: 0 1 8rem; }
 .htmxo-semantic-inputs .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
