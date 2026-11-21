@@ -11607,8 +11607,9 @@ cards use `"<label> <i>"`. Enabled cards show the default categorical plot
 colours in order, including a page's `--aov-category` palette.
 Each record's values are
 converted, checked against their domains and read under their `@relevant`
-conditions as the fields' own are; a refused value names
-`scenarios.<i>.<field>`. On an app page
+conditions as the fields' own are. A refused field value names
+`scenarios.<i>.<field>`. If reading the field fails because another
+parameter is invalid, the fault keeps that parameter's name. On an app page
 ([`semantic_app`](@ref)`(…; presentation=:tabs)`) the list is a card per record
 with an on/off box, an editable label, Duplicate and Remove, and Add, which
 copies the last record. A card shows
@@ -11761,7 +11762,9 @@ function _typed_record(obj, name::Symbol, declared::Records, i::Int, raw)
         try
             getproperty(view, field)
         catch err
-            throw(_record_fault(unwrap_error(err), Symbol(name, ".", i, ".", field), err))
+            fault = unwrap_error(err)
+            _fault_param(fault) === field || rethrow()
+            throw(_record_fault(fault, Symbol(name, ".", i, ".", field)))
         end
     end
     if isempty(label) && declared.label_from !== nothing
@@ -14376,12 +14379,10 @@ _fault_param(e::Union{MissingRequiredParam,InvalidDomainValue,InvalidParamValue}
 
 # A fault about a field of a record (`Records`) names the field as the page
 # sends it, `name.<i>.<field>`.
-_record_fault(e::MissingRequiredParam, name, _err) = MissingRequiredParam(name)
-_record_fault(e::InvalidDomainValue, name, _err) = InvalidDomainValue(name, e.value, e.allowed)
-_record_fault(e::InvalidParamValue, name, _err) = InvalidParamValue(name, e.value, e.type, e.reason)
-_record_fault(e::CallerFault, name, err) =
-    e.param === nothing ? err : CallerFault(e.status, e.message; param=name)
-_record_fault(_e, _name, err) = err
+_record_fault(::MissingRequiredParam, name) = MissingRequiredParam(name)
+_record_fault(e::InvalidDomainValue, name) = InvalidDomainValue(name, e.value, e.allowed)
+_record_fault(e::InvalidParamValue, name) = InvalidParamValue(name, e.value, e.type, e.reason)
+_record_fault(e::CallerFault, name) = CallerFault(e.status, e.message; param=name)
 Base.showerror(io::IO, e::CallerFault) = print(io, e.message)
 
 # Standard reason phrases (RFC 9110, plus 429), the `reasons` of the English

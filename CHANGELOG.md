@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.190
+
+- When a `Records` field reads another parameter and that value is invalid,
+  the error message and form highlight identify the parameter that failed.
+  An invalid value for the record field itself still identifies the card
+  and field, for example `scenarios.1.vessel`.
+
 ## 0.1.189
 
 - A result that computes in the browser (`@browser`) needs no view per value
