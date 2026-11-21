@@ -86,23 +86,29 @@ using TestItemRunner
     # fetching `/complete?<key>=<value>&…`), opened in headless Chrome: the
     # values the driver reported, or an empty Dict when it reported nothing
     # within 60 s.
-    function browser_outcome(driver::AbstractString; path="/", address=path)
+    function browser_outcome(driver::AbstractString; path="/", address=path, pico=false)
         chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
         isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
         receipt = Channel{String}(1)
         assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
             "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
+        if pico
+            assets["/test-assets/pico.min.css"] = read(HTMXObjects._vendor_file(:pico), String)
+        end
         page = repr("text/html", htmx(Raw(body_of(dispatch(:GET, path; headers=["HX-Request" => "true"]))),
             h.script(Raw(driver)); assets="/test-assets", sse_version=nothing, ws_version=nothing,
-            preload_version=nothing, pico_version=nothing, feedback=false, compose=false, overlay=false))
+            preload_version=nothing, pico_version=pico ? HTMXObjects._PICO_VERSION : nothing,
+            feedback=false, compose=false, overlay=false))
         socket = listen(Sockets.localhost, 0)
         port = Int(getsockname(socket)[2])
         close(socket)
         server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
             target = HTTP.URI(req.target).path
             target == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], page)
-            haskey(assets, target) &&
-                return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[target])
+            if haskey(assets, target)
+                mime = endswith(target, ".css") ? "text/css" : "application/javascript"
+                return HTTP.Response(200, ["Content-Type" => mime], assets[target])
+            end
             target == "/favicon.ico" && return HTTP.Response(204)
             if target == "/complete"
                 isready(receipt) || put!(receipt, String(req.target))
@@ -305,12 +311,13 @@ end
     @test ["scenarios.1.on", "scenarios.1.label", "scenarios.1.regimen", "scenarios.1.male",
            "scenarios.1.age", "scenarios.1.weight"] ⊆ collect(names)
     # A card: the hidden off value and the Include box, the label, Duplicate, Remove.
-    @test contains(sidebar, "<input type=\"hidden\" name=\"scenarios.1.on\" value=\"false\"><label class=\"htmxo-record-on\"><input type=\"checkbox\" name=\"scenarios.1.on\" value=\"true\" checked=\"true\">Include</label><input name=\"scenarios.1.label\" value=\"Scenario 1\" aria-label=\"Label\" class=\"htmxo-record-label\">")
+    @test contains(sidebar, "<input type=\"hidden\" name=\"scenarios.1.on\" value=\"false\"><label class=\"htmxo-record-on\"><input type=\"checkbox\" name=\"scenarios.1.on\" value=\"true\" checked=\"true\">Include</label>")
+    @test contains(sidebar, "<span class=\"htmxo-record-name\" data-name=\"Scenario 1\"><textarea name=\"scenarios.1.label\" rows=\"1\" aria-label=\"Label\" aria-multiline=\"false\" class=\"htmxo-record-label\">Scenario 1</textarea></span>")
     @test contains(sidebar, "data-htmxo-record-action=\"duplicate\">Duplicate</button>")
     # The fold control comes first in the head and names the card's fields;
     # the summary a folded card shows is (empty) after the label.
     @test contains(sidebar, "<div class=\"htmxo-record-head\"><button type=\"button\" class=\"htmxo-record-fold\" aria-expanded=\"true\" aria-controls=\"htmxo-record-fields--scenarios-1\" aria-label=\"Fields\" title=\"Fields\" data-htmxo-record-action=\"fold\"></button><input type=\"hidden\" name=\"scenarios.1.on\"")
-    @test contains(sidebar, "class=\"htmxo-record-label\"><span class=\"htmxo-record-summary\"></span><button type=\"button\" class=\"outline secondary\" data-htmxo-record-action=\"duplicate\">")
+    @test contains(sidebar, "</textarea></span><span class=\"htmxo-record-summary\"></span><button type=\"button\" class=\"outline secondary\" data-htmxo-record-action=\"duplicate\">")
     @test contains(sidebar, "</div><div id=\"htmxo-record-fields--scenarios-1\" class=\"htmxo-input-section-fields\">")
     @test contains(sidebar, "data-htmxo-record-action=\"add\">Add Scenario</button>")
     # Its fields as their own controls are, `@relevant` included, renamed for
@@ -330,7 +337,7 @@ end
     @test count("Doses as", two) == 1
     described = [m.captures[1] for m in eachmatch(r"name=\"scenarios\.\d\.regimen\"[^>]*aria-describedby=\"(htmxo-help-\d+)\"", two)]
     @test length(described) == 2 && allequal(described) && contains(two, "<small id=\"$(described[1])\" class=\"htmxo-help\">")
-    @test contains(two, "name=\"scenarios.2.label\" value=\"High\"")
+    @test contains(two, r"<textarea name=\"scenarios\.2\.label\"[^>]*>High</textarea>")
     @test contains(two, "<input type=\"checkbox\" name=\"scenarios.2.on\" value=\"true\">Include")
     @test contains(two, r"name=\"scenarios\.2\.age\" type=\"number\" value=\"30\"")
     # What the address leaves out: the one record a request naming none has.
@@ -482,6 +489,70 @@ end
         """)
         @test get(outcome, "error", "") == ""
         for key in ("add", "duplicate", "help", "own", "off", "remove", "last")
+            @test (key => get(outcome, key, "missing")) == (key => "true")
+        end
+    end
+end
+
+@testitem "editable Records names fit or wrap in open and folded cards" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
+    using HTMXObjects
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        @htmx struct NamedCards
+            @param regimen::String = "Daily"
+            @param scenarios::Records = Records(:regimen; label_from=:regimen)
+            @get names() = join((s.label for s in scenarios), ", ")
+            @get count_series() = length(scenarios)
+            @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index)
+        end
+        route!(NamedCards(); operation_policy=:blocking)
+        outcome = browser_outcome(raw"""
+        window.addEventListener('load', function() {
+          const card = document.querySelector('.htmxo-record'), form = card.closest('form');
+          form.style.cssText = 'box-sizing:border-box;width:350px;padding-inline:2rem';
+          const name = card.querySelector('.htmxo-record-label'), include = card.querySelector('.htmxo-record-on');
+          const regimen = form.elements['scenarios.1.regimen'], fold = card.querySelector('.htmxo-record-fold');
+          const long = '200% q 24 then 100% q 24 x 13';
+          const unbroken = 'Comparison'.repeat(18);
+          function type(el, text) {
+            el.value = text;
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+          }
+          function visible() {
+            const box = name.getBoundingClientRect(), head = name.closest('.htmxo-record-head').getBoundingClientRect();
+            return box.width > 0 && box.left >= head.left - 1 && box.right <= head.right + 1 &&
+              name.scrollWidth <= name.clientWidth + 1 && name.scrollHeight <= name.clientHeight + 1;
+          }
+          const checks = {};
+          checks.sidebar = form.offsetWidth === 350 && !!getComputedStyle(form).getPropertyValue('--pico-font-family');
+          for (const state of ['open', 'folded']) {
+            if (state === 'folded') fold.click();
+            type(regimen, 'Daily');
+            checks[state + '-short'] = name.placeholder === 'Daily' && visible() &&
+              name.getBoundingClientRect().top < include.getBoundingClientRect().bottom;
+            type(regimen, long);
+            const oneLineHeight = name.clientHeight;
+            checks[state + '-long'] = name.placeholder === long && visible() &&
+              name.getBoundingClientRect().top >= include.getBoundingClientRect().bottom;
+            type(name, unbroken);
+            checks[state + '-wrap'] = visible() && name.clientHeight > oneLineHeight &&
+              new FormData(form).get(name.name) === unbroken;
+            type(name, '');
+            checks[state + '-automatic'] = name.placeholder === long && visible() &&
+              name.clientHeight === oneLineHeight && new FormData(form).get(name.name) === '';
+          }
+          name.focus();
+          type(name, 'Custom\nname\n');
+          checks.singleLine = name.value === 'Custom name' && !name.dispatchEvent(new InputEvent('beforeinput',
+            {inputType:'insertLineBreak', bubbles:true, cancelable:true})) && document.activeElement === name;
+          fetch('/complete?' + new URLSearchParams(checks));
+        });
+        """; pico=true)
+        @test get(outcome, "sidebar", "missing") == "true"
+        @test get(outcome, "singleLine", "missing") == "true"
+        for state in ("open", "folded"), check in ("short", "long", "wrap", "automatic")
+            key = "$state-$check"
             @test (key => get(outcome, key, "missing")) == (key => "true")
         end
     end

@@ -11621,8 +11621,9 @@ conditions as the fields' own are. A refused field value names
 parameter is invalid, the fault keeps that parameter's name. On an app page
 ([`semantic_app`](@ref)`(…; presentation=:tabs)`) the list is a card per record
 with an on/off box, an editable label, Duplicate and Remove, and Add, which
-copies the last record. A card shows
-every field, its controls set closer than a section's. A field's docstring help
+copies the last record. A short name stays beside the on/off box. Longer names
+move down and wrap to show the whole name, including when the card is folded.
+A card shows every field, its controls set closer than a section's. A field's docstring help
 text, the same in every card, is shown once under the cards after the field's
 label (hidden while the field applies to no card); a `@help` text, computed
 per record, stays in each card.
@@ -33778,9 +33779,10 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
         h.label(h.input(; type="checkbox", name=prefix * "on", value="true",
                         (entry.on ? (; checked="true") : (;))...), texts.record_include;
                 class="htmxo-record-on"),
-        h.input(; name=prefix * "label", value=_record_wire_label(records, i), aria_label=texts.record_label,
-                (records.automatic[i] ? (; placeholder=entry.label) : (;))...,
-                class="htmxo-record-label"),
+        h.span(h.textarea(_record_wire_label(records, i); name=prefix * "label", rows=1,
+                          aria_label=texts.record_label, aria_multiline="false", class="htmxo-record-label",
+                          (records.automatic[i] ? (; placeholder=entry.label) : (;))...);
+               class="htmxo-record-name", data_name=entry.label),
         # A folded card summarises its values here, after its label; the page
         # runtime writes it when the reader folds the card.
         h.span(; class="htmxo-record-summary"),
@@ -40145,10 +40147,8 @@ semantic_follow_script() = h.script(Raw(raw"""
   }
   // Keep the editable override on the wire. A blank input displays its
   // effective name as a placeholder and remains automatic across requests.
-  function recordNames(group) {
-    var field = group.getAttribute('data-htmxo-label-from');
-    if (!field) return;
-    var cards = cardsOf(group), used = new Set(), next = new Map();
+  function automaticRecordNames(group, field, cards) {
+    var used = new Set(), next = new Map();
     cards.forEach(function(c) { used.add(c.querySelector('.htmxo-record-label').value.trim()); });
     cards.forEach(function(card, i) {
       var label = card.querySelector('.htmxo-record-label');
@@ -40162,6 +40162,15 @@ semantic_follow_script() = h.script(Raw(raw"""
       used.add(value);
       next.set(base, suffix);
       label.placeholder = value;
+    });
+  }
+  function recordNames(group) {
+    var cards = cardsOf(group), field = group.getAttribute('data-htmxo-label-from');
+    if (field) automaticRecordNames(group, field, cards);
+    cards.forEach(function(card) {
+      var label = card.querySelector('.htmxo-record-label'), size = label.parentElement;
+      var name = label.value || label.placeholder;
+      if (size.dataset.name !== name) size.dataset.name = name;
     });
   }
   // A CSS colour can itself contain commas, as in rgb() and color-mix().
@@ -40248,9 +40257,26 @@ semantic_follow_script() = h.script(Raw(raw"""
     }, 0);
   }
   document.addEventListener('change', summariseFolded);
+  // The name is still a single-line value. Soft wrapping is only for display.
+  document.addEventListener('beforeinput', function(e) {
+    if (e.inputType === 'insertLineBreak' && e.target.matches?.('.htmxo-record-label')) {
+      e.preventDefault();
+      // Commit a changed value once, as Enter does on a text input.
+      e.target.blur();
+      e.target.focus({preventScroll: true});
+    }
+  });
   document.addEventListener('input', function(e) {
-    var group = e.target.closest && e.target.closest('[data-htmxo-records]');
-    if (group) recordNames(group);
+    var el = e.target, group = el.closest && el.closest('[data-htmxo-records]');
+    if (!group) return;
+    if (el.matches('.htmxo-record-label') && el.value.includes('\n')) {
+      // Text inputs paste internal line breaks as spaces and drop trailing ones.
+      var end = el.selectionStart;
+      var before = el.value.slice(0, end).replace(/\n+$/, '').replace(/\n/g, ' ');
+      el.value = before + el.value.slice(end).replace(/\n/g, ' ');
+      el.setSelectionRange(before.length, before.length);
+    }
+    recordNames(group);
   });
   document.addEventListener('change', function(e) {
     var group = e.target.closest && e.target.closest('[data-htmxo-records]');
@@ -41202,7 +41228,19 @@ htmxo_utility_styles() = h.style(Raw("""
     --pico-form-element-spacing-vertical: 0.25rem;
     --pico-form-element-spacing-horizontal: 0.5rem;
 }
-.htmxo-record-head > .htmxo-record-label { flex: 1 1 6rem; min-width: 0; margin: 0; }
+/* A hidden copy sizes the editor to its name or automatic placeholder.
+   Flex can move the whole editor down before the text wraps inside it. */
+.htmxo-record-name {
+    position: relative;
+    flex: 1 1 max-content;
+    min-width: min(6rem, 100%);
+    max-width: 100%;
+}
+.htmxo-record-name::before {
+    content: attr(data-name) "\\200b";
+    display: block;
+    visibility: hidden;
+}
 .htmxo-record-head > .htmxo-record-on { flex: 0 0 auto; margin: 0; }
 .htmxo-record-on input:checked {
     accent-color: var(--htmxo-series-color);
@@ -41789,6 +41827,26 @@ input[type="checkbox"][role="switch"] {
 }
 input[type="checkbox"][role="switch"]:checked {
     --pico-switch-color: var(--pico-contrast-inverse, Canvas);
+}
+/* Give the sizing text the same line breaks and box as the native editor,
+   including on pages where Pico styles textareas. */
+.htmxo-record-name::before, .htmxo-record-name > textarea {
+    box-sizing: border-box;
+    font: inherit;
+    letter-spacing: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding: var(--pico-form-element-spacing-vertical) var(--pico-form-element-spacing-horizontal);
+    border-width: var(--pico-border-width, 1px);
+    border-style: solid;
+}
+.htmxo-record-name > textarea {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    resize: none;
 }
 /* In a card of a list of records (`Records`) the pills are smaller and
    closer, so a choice among a few options takes fewer rows. */
