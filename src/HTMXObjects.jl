@@ -23560,12 +23560,12 @@ _table_runtime_text() = raw"""
 // beside the term's link, `link_terms`), which opens only on hover, focus or a
 // tap. The ⬇ CSV (`downloadTableCsv`'s `lines`) leaves the box out too.
 function htmxoShownText(node) {
-    if (!node.querySelector('.htmxo-term-def')) return node.textContent;
+    if (!node.querySelector('.htmxo-term-def, button[data-htmxo-fold-from]')) return node.textContent;
     let out = '';
     const walk = n => {
         for (const c of n.childNodes) {
             if (c.nodeType === Node.TEXT_NODE) out += c.nodeValue;
-            else if (c.nodeType === Node.ELEMENT_NODE && !c.classList.contains('htmxo-term-def')) walk(c);
+            else if (c.nodeType === Node.ELEMENT_NODE && !c.matches('.htmxo-term-def, button[data-htmxo-fold-from]')) walk(c);
         }
     };
     walk(node);
@@ -23619,6 +23619,59 @@ function sortTable(col, th) {
     th.closest('thead').querySelectorAll('th').forEach(h => {
         if (h !== th) { delete h.dataset.sortDir; h.removeAttribute('aria-sort'); }
     });
+    const {compare, keys, key} = htmxoSortOrder(col, th, asc);
+    const append = r => {
+        tbody.appendChild(r);
+        const c = companions.get(r.id);
+        if (c) tbody.appendChild(c);
+    };
+    if (th.closest('table').hasAttribute('data-htmxo-hierarchy')) {
+        // Sort each sibling set, then emit whole subtrees in preorder. Detail
+        // rows and their loaded DOM move with their master without rebuilding.
+        const siblings = new Map();
+        all.filter(r => !isCompanion(r)).forEach(r => {
+            const parent = r.dataset.htmxoParent || '';
+            if (!siblings.has(parent)) siblings.set(parent, []);
+            siblings.get(parent).push(r);
+        });
+        const visit = parent => {
+            const rows = siblings.get(parent) || [];
+            rows.sort((a, b) => htmxoCellAt(a, col) && htmxoCellAt(b, col) ? compare(a, b) : 0);
+            rows.forEach(r => { append(r); visit(r.id); });
+        };
+        visit('');
+    } else {
+        primaries.sort(compare).forEach(append);
+    }
+    // Sort caret in a dedicated trailing <span> per <th>: the old approach
+    // assigned th.textContent, which flattens EVERY child node to a text node,
+    // so sorting any column destroyed interactive content living in a header
+    // (a batch-action button, a link — e.g. the KB agents table's Model ⟳
+    // refresh and its bulk ↻/⏸/▶/🗑 buttons both went inert after a sort).
+    // Managing a caret span leaves rich header content untouched.
+    th.closest('thead').querySelectorAll('th').forEach(h => {
+        const oldCaret = h.querySelector(':scope > .htmxo-sort-caret');
+        if (oldCaret) oldCaret.remove();
+    });
+    const caret = document.createElement('span');
+    caret.className = 'htmxo-sort-caret';
+    caret.textContent = asc ? ' ▲' : ' ▼';
+    // A key other than the column's first is named after the caret.
+    if (keys && key > 0) {
+        const name = document.createElement('small');
+        name.className = 'htmxo-sort-key';
+        name.textContent = ' ' + keys[key];
+        caret.appendChild(name);
+    }
+    th.appendChild(caret);
+    // The ▾ menus mark the order now in force.
+    const order = key + ':' + (asc ? 'asc' : 'desc');
+    th.closest('thead').querySelectorAll('.htmxo-sort-pick').forEach(b =>
+        b.setAttribute('aria-pressed', String(b.closest('th') === th && b.dataset.htmxoSortPick === order)));
+}
+
+// The same order applies within a group on screen and across all leaves in a flat CSV.
+function htmxoSortOrder(col, th, asc) {
     // Sort key: prefer `data-sort-value` if the cell sets one, else the
     // exact number a number cell or a group sum carries for the CSV
     // (`data-htmxo-number`; the shown `1.234,5` would read as 1.234), else the
@@ -23676,59 +23729,9 @@ function sortTable(col, th) {
     // A pinned row (`data-htmxo-pinned`) stays ahead of the others in every
     // sort; pinned rows sort among themselves.
     const pinned = r => r.dataset.htmxoPinned !== undefined && r.dataset.htmxoPinned !== 'false';
-    const compare = (a, b) => (pinned(b) - pinned(a)) || byValue(a, b);
-    const append = r => {
-        tbody.appendChild(r);
-        const c = companions.get(r.id);
-        if (c) tbody.appendChild(c);
-    };
-    if (th.closest('table').hasAttribute('data-htmxo-hierarchy')) {
-        // Sort each sibling set, then emit whole subtrees in preorder. Detail
-        // rows and their loaded DOM move with their master without rebuilding.
-        const siblings = new Map();
-        all.filter(r => !isCompanion(r)).forEach(r => {
-            const parent = r.dataset.htmxoParent || '';
-            if (!siblings.has(parent)) siblings.set(parent, []);
-            siblings.get(parent).push(r);
-        });
-        const visit = parent => {
-            const rows = siblings.get(parent) || [];
-            rows.sort((a, b) => htmxoCellAt(a, col) && htmxoCellAt(b, col) ? compare(a, b) : 0);
-            rows.forEach(r => { append(r); visit(r.id); });
-        };
-        visit('');
-    } else {
-        primaries.sort(compare).forEach(append);
-    }
-    // Sort caret in a dedicated trailing <span> per <th>: the old approach
-    // assigned th.textContent, which flattens EVERY child node to a text node,
-    // so sorting any column destroyed interactive content living in a header
-    // (a batch-action button, a link — e.g. the KB agents table's Model ⟳
-    // refresh and its bulk ↻/⏸/▶/🗑 buttons both went inert after a sort).
-    // Managing a caret span leaves rich header content untouched.
-    th.closest('thead').querySelectorAll('th').forEach(h => {
-        const oldCaret = h.querySelector(':scope > .htmxo-sort-caret');
-        if (oldCaret) oldCaret.remove();
-    });
-    const caret = document.createElement('span');
-    caret.className = 'htmxo-sort-caret';
-    caret.textContent = asc ? ' ▲' : ' ▼';
-    // A key other than the column's first is named after the caret.
-    if (keys && key > 0) {
-        const name = document.createElement('small');
-        name.className = 'htmxo-sort-key';
-        name.textContent = ' ' + keys[key];
-        caret.appendChild(name);
-    }
-    th.appendChild(caret);
-    // The ▾ menus mark the order now in force.
-    const order = key + ':' + (asc ? 'asc' : 'desc');
-    th.closest('thead').querySelectorAll('.htmxo-sort-pick').forEach(b =>
-        b.setAttribute('aria-pressed', String(b.closest('th') === th && b.dataset.htmxoSortPick === order)));
+    return {compare: (a, b) => (pinned(b) - pinned(a)) || byValue(a, b), keys, key};
 }
-
-// A cell's value for sort key `key` of its column's `n`: from its
-// `data-htmxo-sort-keys`, else (a group row) its `data-sort-value` or text.
+// A cell's value for sort key `key` of its column's `n`.
 function htmxoSortValue(cell, key, n, sortKey) {
     if (cell && cell.dataset.htmxoSortKeys) {
         const values = JSON.parse(cell.dataset.htmxoSortKeys);
@@ -24254,6 +24257,11 @@ function htmxoUpdateRows(update, origin) {
         }
     }
     const table = tbody.closest('table');
+    const flatLeaves = update.querySelector(':scope > template[data-htmxo-export-leaves]');
+    if (flatLeaves) {
+        const saved = table.parentElement.querySelector(':scope > template[data-htmxo-export-leaves]');
+        if (saved) saved.replaceWith(flatLeaves);
+    }
     const masters = () => Array.from(tbody.rows).filter(r => !isDetail(r));
     const byId = new Map(masters().map(r => [r.id, r]));
     const own = id => { const el = document.getElementById(id); return el && el.parentElement === tbody ? el : null; };
@@ -24859,9 +24867,18 @@ function htmxoColumnsCell(cell, col, hidden) {
 function htmxoColumnsShow(table) {
     htmxoRelativeShow(table);
     if (!table || !table.tHead) return false;
-    const chosen = 'htmxoColumnMenu' in table.dataset || 'htmxoHiddenColumns' in table.dataset;
+    const groups = table.hasAttribute('data-htmxo-group-columns');
+    const chosen = groups || 'htmxoColumnMenu' in table.dataset || 'htmxoHiddenColumns' in table.dataset;
     if (!chosen && !table.dataset.htmxoColumnsApplied) return false;
     const hidden = chosen ? htmxoColumnsHidden(table) : new Set();
+    if (groups) {
+        const columns = JSON.parse(table.dataset.htmxoGroupColumns), wrapper = table.closest('[data-htmxo-grouped]');
+        const levels = wrapper ? JSON.parse(wrapper.dataset.htmxoGrouped) : [];
+        const folding = levels.filter(n => Object.hasOwn(columns, n)).map(n => columns[n]);
+        const available = folding.filter(c => !hidden.has(c));
+        folding.forEach(c => hidden.add(c));
+        if (available.length && hidden.size === htmxoColumnHead(table).n) hidden.delete(Math.max(...available));
+    }
     const stamp = Array.from(hidden).sort((a, b) => a - b).join(',');
     const changed = (table.dataset.htmxoColumnsApplied || '') !== stamp;
     if (stamp) table.dataset.htmxoColumnsApplied = stamp; else delete table.dataset.htmxoColumnsApplied;
@@ -24870,6 +24887,17 @@ function htmxoColumnsShow(table) {
         if ((row.dataset.htmxoCols || '') === stamp) return;
         let c = 1;
         Array.from(row.cells).forEach(cell => { c += htmxoColumnsCell(cell, c, hidden); });
+        if (groups) {
+            const first = Array.from(row.cells).find(c => !c.hasAttribute('data-htmxo-column-hidden'));
+            row.querySelectorAll(':scope > :is(td, th) > [data-htmxo-fold-from]').forEach(el => {
+                const home = row.cells[Number(el.dataset.htmxoFoldFrom) - 1];
+                const target = home.hasAttribute('data-htmxo-column-hidden') ? first : home;
+                if (target && target !== el.parentElement) {
+                    if (el.hasAttribute('data-htmxo-fold-summary')) target.append(el);
+                    else target.prepend(el);
+                }
+            });
+        }
         if (stamp) row.dataset.htmxoCols = stamp; else delete row.dataset.htmxoCols;
     }));
     return changed;
@@ -24914,7 +24942,7 @@ function htmxoColumnMenuFill(menu) {
         c = g.col + g.span - 1;
     }
     menu.querySelector('[data-htmxo-column-list]').replaceChildren(...items);
-    htmxoColumnMenuSync(menu, htmxoColumnsApplied(table));
+    htmxoColumnMenuSync(menu, htmxoColumnsHidden(table));
 }
 // A box is ticked when its columns show; a heading's is mixed when only some do.
 function htmxoColumnMenuSync(menu, hidden) {
@@ -24928,7 +24956,7 @@ function htmxoColumnMenuSync(menu, hidden) {
 function htmxoColumnPick(input) {
     const table = htmxoColumnTable(input);
     if (!table) return;
-    const hidden = htmxoColumnsApplied(table);
+    const hidden = htmxoColumnsHidden(table);
     input.dataset.htmxoColumns.split(',').map(Number).forEach(c => {
         if (c > 1) { if (input.checked) hidden.delete(c); else hidden.add(c); }
     });
@@ -24953,7 +24981,7 @@ function htmxoColumnsRefresh(table) {
     if (htmxoColumnsShow(table)) htmxoColumnsMeasure(table, true);
     const hidden = htmxoColumnsApplied(table), n = htmxoColumnHead(table).n, shown = [];
     for (let c = 1; c <= n; c++) if (!hidden.has(c)) shown.push(c);
-    document.querySelectorAll('.htmxo-column-menu').forEach(m => { if (htmxoColumnTable(m) === table) htmxoColumnMenuSync(m, hidden); });
+    document.querySelectorAll('.htmxo-column-menu').forEach(m => { if (htmxoColumnTable(m) === table) htmxoColumnMenuSync(m, htmxoColumnsHidden(table)); });
     table.dispatchEvent(new CustomEvent('htmxo:columns-changed', {bubbles: true,
         detail: {shown, hidden: Array.from(hidden).sort((a, b) => a - b)}}));
 }
@@ -25095,7 +25123,7 @@ function htmxoRelativeWrite(cell, r, spec, texts) {
 // Write the table's compared cells for the reader's pick, in the rows not
 // written for it yet (`force`: every row); true when a cell changed (a
 // sorted table is sorted again by the new values).
-function htmxoRelativeShow(table, force) {
+function htmxoRelativeShow(table, force, storedRows) {
     const spec = htmxoRelativeSpec(table);
     if (!spec) return false;
     const name = htmxoRelativeChoice(table, spec);
@@ -25103,7 +25131,7 @@ function htmxoRelativeShow(table, force) {
     const of = choice ? choice.of : {};
     const texts = htmxoTexts(table);
     let changed = false;
-    Array.from(table.tBodies).forEach(body => Array.from(body.rows).forEach(row => {
+    const project = row => {
         if (row.id && row.id.startsWith('detail-')) return;
         if (!force && row.dataset.htmxoRelativeFor === name) return;
         row.dataset.htmxoRelativeFor = name;
@@ -25114,18 +25142,24 @@ function htmxoRelativeShow(table, force) {
             const cell = at[i], a = htmxoRelativeValue(cell);
             if (a === undefined) return;
             const j = of[i];
-            if (j === undefined) {
-                if (htmxoRelativeCurrent(cell)) { htmxoRelativeAbsolute(cell); changed = true; }
-                return;
-            }
+            if (j === undefined && !htmxoRelativeCurrent(cell)) return;
             const ref = at[j], b = htmxoRelativeValue(ref);
             const r = b !== undefined && isFinite(a) && isFinite(b) && b !== 0 && htmxoRelativePair(cell, ref) ? a / b : null;
             const was = htmxoRelativeCurrent(cell) ? cell.dataset.htmxoRelative : undefined;
-            if (was === (r === null ? '' : String(r))) return;
-            htmxoRelativeWrite(cell, r, spec, texts);
+            if (j !== undefined && was === (r === null ? '' : String(r))) return;
+            const carried = cell.querySelectorAll(':scope > [data-htmxo-fold-from]');
+            carried.forEach(el => el.remove());
+            if (j === undefined) htmxoRelativeAbsolute(cell);
+            else htmxoRelativeWrite(cell, r, spec, texts);
+            cell.prepend(...carried);
             changed = true;
         });
-    }));
+    };
+    if (storedRows) {
+        storedRows.forEach(project);
+        return changed;
+    }
+    Array.from(table.tBodies).forEach(body => Array.from(body.rows).forEach(project));
     if (name) {
         table.dataset.htmxoRelativeShown = name;
         table.dataset.htmxoRelativeCols = Object.keys(of).map(Number).sort((x, y) => x - y).join(',');
@@ -26176,6 +26210,7 @@ function htmxoRegrouped(wrapper, table, levels, cfg) {
     wrapper.dataset.htmxoGroupBy = htmxoJsonList(levels.length ? levels : [cfg.flat ?? '']);
     const pills = wrapper.querySelector('.htmxo-group-pills');
     if (pills) htmxoGroupPillsSync(pills, levels);
+    if (table.hasAttribute('data-htmxo-group-columns')) htmxoColumnsShow(table);
     htmxoTallyScale(table);
     htmxoResort(table);
     const root = wrapper.querySelector('.htmxo-searchable-table');
@@ -26704,7 +26739,7 @@ function downloadTableCsv(btn, filename) {
         const walk = n => {
             for (const c of n.childNodes) {
                 if (c.nodeType === Node.TEXT_NODE) out += c.nodeValue.replace(/\s+/g, ' ');
-                else if (c.nodeType !== Node.ELEMENT_NODE || c.classList.contains('htmxo-term-def')) continue;
+                else if (c.nodeType !== Node.ELEMENT_NODE || c.matches('.htmxo-term-def, button[data-htmxo-fold-from]')) continue;
                 else if (c.tagName === 'BR') out += '\n';
                 else if (BLOCK.test(c.tagName)) { out += '\n'; walk(c); out += '\n'; }
                 else walk(c);
@@ -26726,8 +26761,9 @@ function downloadTableCsv(btn, filename) {
     // `data-htmxo-span`.
     const span = c => c.dataset.htmxoSpan ? Number(c.dataset.htmxoSpan) : c.colSpan;
     const applied = table.dataset.htmxoColumnsApplied;
-    const hidden = new Set(applied ? applied.split(',').map(Number) : []);
-    const grouped = table.querySelector('thead th[data-htmxo-sort-col]');
+    const leafExport = 'htmxoGroupColumns' in table.dataset;
+    const hidden = leafExport ? htmxoColumnsHidden(table) : new Set(applied ? applied.split(',').map(Number) : []);
+    const grouped = table.tHead?.querySelector('th[data-htmxo-sort-col]');
     const groupNames = [];
     if (grouped) {
         let col = 0;
@@ -26738,7 +26774,7 @@ function downloadTableCsv(btn, filename) {
     }
     // A column of interval cells (`interval_cell`) is three columns: the
     // estimate, then its bounds, named with the words its header carries.
-    const ths = Array.from(table.querySelectorAll(grouped ? 'thead th[data-htmxo-sort-col]' : 'thead th'))
+    const ths = Array.from(table.tHead?.querySelectorAll(grouped ? 'th[data-htmxo-sort-col]' : 'th') || [])
         .sort((a, b) => grouped ? Number(a.dataset.htmxoSortCol) - Number(b.dataset.htmxoSortCol) : 0);
     const bounds = ths.map(th => th.dataset.htmxoIntervalCsv ? JSON.parse(th.dataset.htmxoIntervalCsv) : null);
     // A column shown relative to another (`RelativeTo`) holds ratios: its
@@ -26762,9 +26798,31 @@ function downloadTableCsv(btn, filename) {
         lines(td.querySelector(':scope > [data-htmxo-row-label]') || td).join('\n');
     const fields = (td, i) => !bounds[i] ? [text(td)] :
         td.dataset.htmxoInterval ? JSON.parse(td.dataset.htmxoInterval) : [text(td), '', ''];
-    const rows = Array.from(table.querySelectorAll('tbody tr'))
-        .filter(tr => !(tr.id && tr.id.startsWith('detail-')))
-        .map(tr => {
+    let source = Array.from(table.tBodies).flatMap(body => Array.from(body.rows)).filter(tr => !tr.id.startsWith('detail-'));
+    if (leafExport) {
+        const wrapper = table.closest('[data-htmxo-grouped]');
+        const byKey = new Map();
+        // Live rows win over stored values (and repeated group placements).
+        for (const row of source) if (row.hasAttribute('data-htmxo-leaf') && !byKey.has(row.dataset.htmxoLeaf))
+            byKey.set(row.dataset.htmxoLeaf, row);
+        const unplaced = wrapper.querySelector(':scope > template[data-htmxo-unplaced]');
+        const lazy = table.parentElement.querySelector(':scope > template[data-htmxo-export-leaves]');
+        const stored = [
+            ...(unplaced ? unplaced.content.children : []),
+            ...(lazy ? lazy.content.querySelector('tbody').rows : [])
+        ];
+        if (stored.length) htmxoRelativeShow(table, false, stored);
+        for (const row of stored) if (row.hasAttribute('data-htmxo-leaf') && !byKey.has(row.dataset.htmxoLeaf))
+            byKey.set(row.dataset.htmxoLeaf, row);
+        source = Array.from(byKey.values()).sort((a, b) => Number(a.dataset.htmxoLeafOrder) - Number(b.dataset.htmxoLeafOrder));
+        const sorted = table.tHead.querySelector('th[aria-sort]');
+        if (sorted) {
+            const col = ths.indexOf(sorted);
+            const {compare} = htmxoSortOrder(col, sorted, sorted.dataset.sortDir === 'asc');
+            source.sort((a, b) => htmxoCellAt(a, col) && htmxoCellAt(b, col) ? compare(a, b) : 0);
+        }
+    }
+    const rows = source.map(tr => {
             // A cell spanning columns keeps the others in theirs: what it
             // covers is blank. Its fields go to the first of its columns shown.
             let col = 0;
@@ -27573,9 +27631,8 @@ struct _RowSortKey
     tie_key::Any         # its numeric collation key, once its number ties another's (`_tie_collated`)
 end
 function _RowSortKey(row, col::Int, key::Int, nkeys::Int)
-    cells = _row_cells(row)
-    has_cell = length(cells) >= col
-    cell = has_cell ? cells[col] : nothing
+    cell = _cell_in_column(_row_cells(row), col)
+    has_cell = !isnothing(cell)
     if nkeys == 0
         # A compared cell without a ratio (`RelativeTo`) has no value: it
         # sorts last in either direction (`text === nothing`).
@@ -28082,7 +28139,7 @@ function sortable_table(headers, rows;
                         relative_to=nothing,
                         texts::TableTexts=_EN_TABLE_TEXTS, _stamp_texts::Bool=true,
                         _presorted::Bool=false, _columns_placed::Bool=false,
-                        _relative_projected::Bool=false, kwargs...)
+                        _relative_projected::Bool=false, _column_groups=nothing, kwargs...)
     density_attrs = _table_density_attrs(density)
     header_align = _table_header_align(header_align)
     isnothing(link) || link isa Union{AbstractString,Symbol} && !isempty(string(link)) || throw(ArgumentError(
@@ -28097,7 +28154,7 @@ function sortable_table(headers, rows;
         kwargs = (; aria_multiselectable="true", kwargs...)
     end
     # A column of interval cells (`interval_cell`) sorts by their five keys.
-    interval_cols = _interval_columns(rows)
+    interval_cols = _interval_columns(isnothing(_column_groups) ? rows : _column_groups.rows)
     headers = _interval_headers(headers, interval_cols, texts)
     # A `ColumnSpec(align)` aligns its column's cells; a column of number
     # cells right-aligns its header (see *Column alignment* in `ColumnSpec`).
@@ -28152,17 +28209,21 @@ function sortable_table(headers, rows;
     group_names = isnothing(grouped) ? fill("", length(headers)) : last(grouped)
     column_label(i) = something(_header_label(headers[i]), strip(repr("text/markdown", th_nodes[i])))
     hidden = _hidden_column_positions(hidden_columns, length(headers), group_names, column_label)
+    folded = isnothing(_column_groups) ? Int[] : _column_groups.active
+    screen_hidden = _group_hidden_columns(hidden, folded, length(headers))
     menu_on = _column_menu_on(column_menu, length(headers), hidden)
     column_attrs = (; (menu_on ? (; data_htmxo_column_menu="") : (;))...,
-        (isempty(hidden) ? (;) : (; data_htmxo_hidden_columns=JSON.json(hidden),
-                                    data_htmxo_columns_applied=join(hidden, ",")))...)
-    shown_rows = isempty(hidden) ? body_rows : Any[r isa _MDCompanionRow ?
-        _MDCompanionRow(_row_columns_hidden(r.row, hidden)) : _row_columns_hidden(r, hidden) for r in body_rows]
+        (isnothing(_column_groups) ? (;) : (; data_htmxo_group_columns=JSON.json(_column_groups.columns)))...,
+        (isempty(hidden) ? (;) : (; data_htmxo_hidden_columns=JSON.json(hidden)))...,
+        (isempty(screen_hidden) ? (;) : (; data_htmxo_columns_applied=join(screen_hidden, ",")))...)
+    shown_rows = isempty(screen_hidden) ? body_rows : Any[r isa _MDCompanionRow ?
+        _MDCompanionRow(_row_columns_hidden(r.row, screen_hidden)) :
+        _row_columns_hidden(r, screen_hidden; folding=!isempty(folded)) for r in body_rows]
     # `data-htmxo-columns`: the table runtime holds the columns' widths
     # (see "Columns keep their widths" above).
     table_node = h.table(; class=table_class, role, density_attrs..., link_attrs..., _sticky_attrs(sticky)...,
                          data_htmxo_columns="", column_attrs..., _relative_table_attrs(relative)..., kwargs...)(
-        isempty(hidden) ? thead : _head_columns_hidden(thead, hidden),
+        isempty(screen_hidden) ? thead : _head_columns_hidden(thead, screen_hidden),
         # Keep runtime-sized children as a collection. Splatting heterogeneous
         # master/detail rows creates large tuples with row-count-dependent
         # compilation and allocation costs; HTMX flattens collections directly.
@@ -28176,7 +28237,17 @@ function sortable_table(headers, rows;
     # leaves out the columns the table opens with hidden, and names a column
     # the table opens relative to another as such (`relative_column`).
     divided = isnothing(relative) || isnothing(relative.default) ? Int[] : _relative_divided(relative, relative.default)
-    table_wrap = if isnothing(grouped) && isempty(hidden) && isempty(divided)
+    table_wrap = if !isnothing(_column_groups)
+        names = _column_full_names(length(headers), group_names, column_label)
+        for i in divided
+            names[i] = _table_text(texts, :relative_column; name=names[i], reference=relative.default)
+        end
+        flat_table = _group_export_table(names, _column_groups.rows, interval_cols, hidden, texts)
+        # Eager tables export the live leaves. Lazy tables also need the values
+        # that have not been requested by the browser yet.
+        stored = _column_groups.lazy && download ? (_group_export_store(_column_groups.rows),) : ()
+        h.div(; class="table-wrap")(html_only(table_node), stored..., markdown_only(repr("text/markdown", flat_table)))
+    elseif isnothing(grouped) && isempty(hidden) && isempty(divided)
         h.div(; class="table-wrap")(table_node)
     else
         shown = [i for i in eachindex(headers) if !(i in hidden)]
@@ -28598,7 +28669,7 @@ end
 
 # A body row with its cells written for the `hidden` columns, stamped with
 # them (`data-htmxo-cols`) so the runtime leaves it alone until they change.
-function _row_columns_hidden(row, hidden)
+function _row_columns_hidden(row, hidden; folding=false)
     row isa Node && HTMX.tag(row) === :tr || return row
     col = 1
     cells = Any[]
@@ -28612,6 +28683,7 @@ function _row_columns_hidden(row, hidden)
         end
     end
     attrs = copy(HTMX.attrs(row))
+    folding && _place_fold_controls!(cells)
     attrs[_COLUMNS_STAMP] = join(hidden, ",")
     Node(:tr, attrs, cells)
 end
@@ -29805,7 +29877,12 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   out of the submitted inputs.
 - `search_query`: pre-fill the search field; the runtime applies it on load.
 - `groupings`: a regroupable table over the same leaf rows (`items`), as a
-  vector of `name => grouping` pairs where `grouping(item)` returns a group key
+  vector of column names and/or `name => grouping` pairs. A column name
+  groups by the displayed leaf cell: `groupings=["Output", "Quantity", "None" => nothing]`.
+  Its column folds into the heading while its level is active and returns
+  when the reader turns that level off. With column-name groupings the CSV
+  and plain Markdown write the flat items once, with exact estimate/lower/upper
+  fields for each interval. For a computed grouping, `grouping(item)` returns a group key
   or several (the leaf is then listed under each) and `nothing` means the flat
   view. Replaces `children`, unless one grouping is `name => :children` (see
   *Tree grouping* below). Each group is a collapsible branch, in
@@ -30097,7 +30174,7 @@ end
 
 # The tree grouping among `groupings`, or `nothing` when there is none.
 function _md_tree_grouping(groupings, items, key, children, leaf_key, leaf_order)
-    at = [i for (i, g) in enumerate(groupings) if last(g) isa Symbol]
+    at = [i for (i, g) in enumerate(groupings) if !(g isa AbstractString) && last(g) isa Symbol]
     for i in at
         last(groupings[i]) === :children || throw(ArgumentError(string("master_detail_table: grouping ",
             repr(string(first(groupings[i]))), " => ", repr(last(groupings[i])), " is no grouping: a grouping is a function, ",
@@ -31246,9 +31323,10 @@ function _interval_columns(rows)
     attr = Symbol("data-htmxo-interval")
     for row in rows
         row isa Node && HTMX.tag(row) === :tr && _is_master_row(row) || continue
-        cells = [c for c in HTMX.children(row) if c isa Node && HTMX.tag(c) in (:td, :th)]
-        for (i, cell) in enumerate(cells)
+        i = 1
+        for cell in _row_cells(row)
             haskey(HTMX.attrs(cell), attr) && push!(cols, i)
+            i += _cell_span(cell)
         end
     end
     cols
@@ -31292,12 +31370,13 @@ end
 # `group_summary` names and blank cells elsewhere. Nested groups show the key
 # of their level; the indentation shows where they sit. The marks let the
 # browser fill in a group it builds from the template row (`htmxoRegroup`).
-_md_default_group_master(ncols, label_col, label, group_cell, texts) = (key, members) ->
+_md_default_group_master(ncols, label_col, label, group_cell, texts, span=1, folding=false) = (key, members) ->
     Any[col == label_col ?
             h.td(h.strong(label(key); data_htmxo_group_label=""), " ",
-                 h.small("($(format_number(length(members); texts)))"; data_htmxo_group_count="")) :
+                 h.small("($(format_number(length(members); texts)))"; data_htmxo_group_count="");
+                 (span == 1 ? (;) : (; colspan=span))..., (folding ? (; data_htmxo_group_caption="") : (;))...) :
             group_cell(col, key, members)
-        for col in 1:ncols]
+        for col in 1:ncols if !(label_col < col < label_col + span)]
 
 # The helper's selection attributes first; the caller's `master_attrs` win.
 _md_attr_union(a, b) = merge(Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(a)),
@@ -31351,6 +31430,19 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             :update_rows => update_rows, :update_groups => update_groups) if !isnothing(v)]
         isempty(hooks) || throw(ArgumentError(string("master_detail_table: ", join(hooks, ", "),
             " together with the tree grouping ", repr(outline.name), " (=> :children) is not built yet")))
+    end
+    column_groups = Dict{String,Int}()
+    if any(g -> g isa AbstractString, groupings)
+        group_names = _header_group_names(get(kwargs, :header_groups, nothing), length(headers))
+        for g in groupings
+            g isa AbstractString || continue
+            column_groups[g] = only(_named_column_positions(g, length(headers), group_names,
+                i -> _relative_label(headers[i]), "groupings"))
+        end
+        # Group keys, exports and repeated placements all read the same rendered row.
+        master = _cached_group_master(master)
+        groupings = [g isa AbstractString ? String(g) =>
+            (m -> _column_group_key(master(m), column_groups[g], texts)) : g for g in groupings]
     end
     names = String[string(first(g)) for g in groupings]
     isempty(names) && throw(ArgumentError("master_detail_table: `groupings` is empty"))
@@ -31517,9 +31609,11 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         isnothing(i) && return h.td("")
         value = _md_summary_value(last(summaries[i]), Any[inputs(m)[i] for m in members])
         _md_summary_cell(last(summaries[i]), value, texts, (; data_htmxo_group_summary=string(i - 1));
-                         wrap=col == 1, cats=categories[i], scale="$(col - 1)-$(length(gpath(k)))")
+                         wrap=col == 1 || col in values(column_groups), cats=categories[i], scale="$(col - 1)-$(length(gpath(k)))")
     end
-    default_master = _md_default_group_master(ncols, label_col, k -> last(gpath(k)), group_cell, texts)
+    next_summary = minimum((c for (c, _) in summaries if c > label_col); init=ncols+1)
+    label_span = isempty(column_groups) ? 1 : next_summary - label_col
+    default_master = _md_default_group_master(ncols, label_col, k -> last(gpath(k)), group_cell, texts, label_span, !isempty(column_groups))
     gmaster = something(group_master, default_master)
     subgroups(members, depth, prefix) =
         [let path = String[prefix..., k]; _MDGroup(gkey(path), path, ms) end
@@ -31643,6 +31737,12 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         value = isnothing(selectable) || isnothing(select_value) ? (;) : (; data_htmxo_select_value=string(select_value(x)))
         _md_attr_union((; data_htmxo_branch="", value...), _attrs(x))
     end
+    folding = if !isempty(column_groups)
+        full = isnothing(group_rows) && (!update || (!browser && get(kwargs, :download, true)))
+        flat_rows = full ? _group_export_rows(headers, items, key, master, _attrs, texts, kwargs) : Node[]
+        (; columns=column_groups, active=[column_groups[n] for n in levels if haskey(column_groups, n)],
+           rows=flat_rows, lazy=!browser)
+    end
     outline_rows(rows_only) = master_detail_table(headers, outline.roots;
         key = outline.key, master, children = outline.children, detail, detail_url,
         master_attrs = outline_attrs, initially_open, initially_open_detail, search_text, selectable, select_form,
@@ -31650,7 +31750,7 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
             (x -> let k = outline.leaf(x); select_submit(isnothing(k) ? x : outline.first[k]) end),
         link, link_key = isnothing(link) ? nothing :
             something(link_key, x -> something(outline.leaf(x), string(outline.key(x)))),
-        _max_level = deepest, _rows_only = rows_only, _toolbar = toolbar, texts, kwargs...)
+        _max_level = deepest, _rows_only = rows_only, _toolbar = toolbar, _column_groups=folding, texts, kwargs...)
     tree(roots, children_of, group_row; rows_only=false) = master_detail_table(headers, roots;
         key = x -> x isa _MDGroup ? grow(x.path) : leaf_row_key(x),
         master = x -> x isa _MDGroup ? group_row(x.key, x.members) : master(x.item),
@@ -31679,10 +31779,11 @@ function _grouped_master_detail_table(headers, items; key, master, detail, detai
         # whichever group it is listed; a group row has none.
         link, link_key = isnothing(link) ? nothing :
             (x -> x isa _MDGroup ? nothing : something(link_key, key)(x.item)),
-        _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, texts, kwargs...,
+        _rows_only = rows_only || !isnothing(group_rows), _toolbar = toolbar, _column_groups=folding, texts, kwargs...,
         _update_scope = (; grouped=grouped_by, leaves=leaf_keys,
             groups=unique!(["row-" * _md_safe_key(grow(p)) for p in scope]),
-            order=browser ? order_json : nothing, group_masters, group_scope=row_scope))
+            order=browser ? order_json : nothing, group_masters, group_scope=row_scope,
+            flat_leaves=update && !isnothing(folding) && folding.lazy && get(kwargs, :download, true) ? folding.rows : nothing))
     built = tree_active ? outline_rows(false) : tree(update ? roots : filter(keep, roots), x -> !(x isa _MDGroup) ? () :
         let url = lazy_url(x)
             !update && !isnothing(url) ? _MDLazyRows(url, [string(key(m)) for m in x.members]) : group_children(x)
@@ -31807,7 +31908,7 @@ end
 # reader has regrouped again. `group_scope`, the name the group rows were
 # rendered under, which the runtime swaps for the table's own.
 function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[], groups=String[], places=(),
-                        order=nothing, group_masters::Bool=false, group_scope=nothing)
+                        order=nothing, group_masters::Bool=false, group_scope=nothing, flat_leaves=nothing)
     attrs = Pair{Symbol,Any}[:data_htmxo_row_update => isnothing(id) ? "" : string(id)]
     isnothing(grouped) || push!(attrs, :data_htmxo_grouped => grouped)
     isnothing(group_scope) || push!(attrs, :data_htmxo_group_scope => group_scope)
@@ -31818,7 +31919,7 @@ function _md_row_update(rows, id; grouped=nothing, ids=String[], leaves=String[]
     isempty(groups) || push!(attrs, :data_htmxo_update_groups => JSON.json(groups))
     isempty(places) || push!(attrs, :data_htmxo_update_places =>
         JSON.json(JSON.Object(places)))
-    h.tbody(; attrs...)(rows)
+    h.tbody(; attrs...)(rows, (isnothing(flat_leaves) ? () : (_group_export_store(flat_leaves),))...)
 end
 
 # --- Formatting helpers ---

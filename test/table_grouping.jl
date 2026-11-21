@@ -3593,3 +3593,118 @@ end
         end
     end
 end
+
+@testmodule ColumnGroupingFixtures begin
+    using HTMXObjects
+    import HTMXObjects: h
+    export column_groups, measurements
+
+    const measurements = [(; id="r$i", output="Plasma", quantity=q, percentile=p, estimate=e)
+        for (i, (q, p, e)) in enumerate([("Peak", "5th", 8.12345), ("Peak", "95th", 9.12345),
+                                        ("Lowest change from baseline (%)", "5th", 1.12345)])]
+    column_groups(; kw...) = master_detail_table(["Output", ColumnSpec("Quantity"), "Percentile", "10 mg", "60 mg"],
+        measurements; key=r -> r.id, master=r -> h.tr(h.td(h.strong(r.output)), h.td(r.quantity), h.td(r.percentile),
+            interval_cell(r.estimate, 0.12345, 10.23456), interval_cell(2r.estimate, 0.12345, 20.23456)),
+        detail=r -> h.p(r.id), header_groups=["Dose" => 4:5],
+        groupings=["Output", "Quantity", "Both" => r -> ["A", "B"], "None" => nothing],
+        group_by=["Output","Quantity"], initially_open=true, initially_open_detail=false, download=true, id="measures", kw...)
+end
+
+@testitem "column groupings fold on first paint and export flat Markdown" setup=[ColumnGroupingFixtures] tags=[:unit] begin
+    using HTMXObjects
+    import HTMXObjects: to_markdown_string
+    flat = to_markdown_string(column_groups(group_by=["None"]))
+    @test contains(flat, "| Output | Quantity | Percentile | Dose / 10 mg | Dose / 10 mg / Lower bound | Dose / 10 mg / Upper bound |")
+    @test contains(flat, "| Peak | 5th | 8.12345 | 0.12345 | 10.23456 |")
+    @test count("| **Plasma** |", flat) == length(measurements)
+    for levels in (["Output", "Quantity"], ["Quantity"], ["Both"], ["Both", "Output"])
+        @test to_markdown_string(column_groups(group_by=levels)) == flat
+    end
+    html = repr("text/html", column_groups())
+    @test contains(html, "data-htmxo-columns-applied=\"1,2\"")
+    @test contains(html, "data-htmxo-span=\"5\"")
+    @test contains(repr("text/html", column_groups(group_by=["Quantity"])), "data-htmxo-columns-applied=\"2\"")
+    @test_throws ArgumentError column_groups(groupings=["Absent"])
+    @test occursin("8.12345", to_markdown_string(column_groups(group_rows_url=(k, ms) -> "/rows")))
+end
+
+@testitem "column groupings restore columns, disclosures and flat CSV in a static page" setup=[ColumnGroupingFixtures, ChromeDump] tags=[:unit, :browser] begin
+    using HTMXObjects
+    import HTMXObjects: h
+    if get(ENV, "HTMXO_BROWSER_TESTS", "0") != "1"
+        @test_skip false
+    else
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', () => {
+            const table = document.querySelector('table'), wrapper = table.closest('[data-htmxo-grouped]');
+            const body = table.tBodies[0], visible = c => c.getClientRects().length > 0;
+            const leaf = () => body.querySelector('tr[data-htmxo-leaf]');
+            const cols = () => Array.from(leaf().cells).filter(visible).length;
+            const regroup = levels => htmxoRegroup(wrapper, levels);
+            let payload;
+            window.Blob = class {constructor(parts) { payload = parts.join(''); }};
+            URL.createObjectURL = () => 'blob:test';
+            URL.revokeObjectURL = () => {};
+            HTMLAnchorElement.prototype.click = () => {};
+            const csv = () => { document.querySelector('button[onclick^="downloadTableCsv"]').click(); return payload; };
+            const check = (ok, msg) => { if (!ok) throw Error(msg); };
+            try {
+                const flatExport = csv();
+                check(flatExport.split('\n').length === 4 && flatExport.split('\n')[0].split(',').length === 9, 'flat shape');
+                check(flatExport.includes('Plasma,Peak,5th,8.12345,0.12345,10.23456'), 'exact fields');
+                check(cols() === 3 && body.querySelector('tr[data-htmxo-group] td').colSpan === 2, 'fold and span');
+                const total = () => body.querySelector('[data-htmxo-group-summary]');
+                check(visible(total()) && total().textContent.trim() === '3', 'group summary');
+                const toggle = leaf().querySelector('[data-htmxo-detail-toggle]');
+                check(visible(toggle), 'visible disclosure');
+                toggle.click();
+                check(leaf().dataset.htmxoDetailOpen === 'true', 'open detail');
+                regroup(['Quantity']);
+                check(visible(total()) && total().textContent.trim() === '2', 'regrouped summary');
+                check(cols() === 4 && visible(leaf().cells[0]) && !visible(leaf().cells[1]), 'one level');
+                regroup(['Both','Output']);
+                check(csv() === flatExport, 'duplicate placements');
+                regroup([]);
+                check(cols() === 5 && csv() === flatExport, 'flat');
+                check(visible(leaf().querySelector('[data-htmxo-detail-toggle]')), 'restored disclosure');
+                regroup(['Quantity','Output']);
+                check(cols() === 3 && csv() === flatExport, 'reversed levels');
+                const dose = table.querySelector('th[data-htmxo-sort-col="4"]');
+                sortTable(dose);
+                check(csv().split('\n')[1].includes('1.12345'), 'sort across groups');
+                htmxoTableColumns(table, [1,2,4,5]);
+                regroup([]);
+                check(cols() === 4 && visible(leaf().cells[1]) && !visible(leaf().cells[2]), 'reader choice');
+                const lazy = document.getElementById('lazy-case'), lazyTable = lazy.querySelector('table');
+                const heading = lazyTable.tBodies[0].rows[0];
+                check(!visible(heading.cells[0]) && heading.cells[1].innerText.includes('Series M'), 'custom heading');
+                htmxoRelativeChoose(lazyTable, 'B');
+                lazy.querySelector('button[onclick^="downloadTableCsv"]').click();
+                check(payload.split('\n').slice(1).join('|') === 'M,0.5,1|M,0.5,1', 'relative lazy values: ' + payload);
+                htmxoRelativeChoose(lazyTable, '');
+                lazy.querySelector('button[onclick^="downloadTableCsv"]').click();
+                check(payload.split('\n').slice(1).join('|') === 'M,2,4|M,4,8', 'absolute lazy values: ' + payload);
+                document.body.dataset.foldResult = 'passed';
+            } catch (e) { document.body.dataset.foldResult = e.message; }
+        });
+        """))
+        sums = ["60 mg" => ColumnSummary(:sum, _ -> 1)]
+        num(x) = h.td(string(x); data_htmxo_number=x)
+        lazy = master_detail_table(["Series", "A", "B"], [1, 2]; key=string,
+            master=i -> [h.td("M"), num(2i), num(4i)], groupings=["Series", "None" => nothing],
+            group_by=["Series"], group_rows_url=(k, ms) -> "/rows", id="ratios", download=true,
+            group_master=(k, ms) -> [h.td("Series " * last(HTMXObjects.group_path(k))), h.td(""), h.td("")],
+            relative_to=RelativeTo(["A", "B"]))
+        page = htmx(column_groups(group_summary=sums), h.section(lazy; id="lazy-case"), driver; htmx_version=nothing, hyperscript_version=nothing,
+            preload_version=nothing, prism_version=nothing, katex_version=nothing)
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        mktempdir() do dir
+            path = joinpath(dir, "table.html")
+            write(path, repr("text/html", page))
+            dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=3000 --user-data-dir=$(joinpath(dir, "profile")) --dump-dom file://$path`)
+            result = match(r"data-fold-result=\"([^\"]*)\"", dom)
+            @test !isnothing(result)
+            isnothing(result) || @test result.captures[1] == "passed"
+        end
+    end
+end
