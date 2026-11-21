@@ -4,7 +4,7 @@ using TestItemRunner
     using HTMXObjects
     export Lines, StaleCaption, ServerTwin, OpaqueHelp, ToggledDefault, FollowingDefault, ChosenDefault, ChosenStale,
            FixedRanges, RangesPage, SharedRangesPage, InputRange, Shield, Grid, TermSite, Window, WINDOW_START, Doses, DOSE_TEXTS, TOY_JS,
-           Halving, browser_region, bound_texts
+           Halving, Pills, browser_region, bound_texts
 
     # A module in the contract `ReactiveKernels.js_source` emits: positional
     # arguments in `INPUTS` order, a named tuple returned as an object, and a
@@ -516,6 +516,57 @@ using TestItemRunner
         @get growing() = h.main(semantic_app(line; presentation = :tabs, select = e -> e.name == :growing))
     end
 
+    # Pill inputs a result reads only through `bound` of a `@browser` property,
+    # 5×5×3×3 = 225 combinations (snag `semantic-app-bro-1606f2b8`: Portfolio's
+    # pretest explorer had nine, 24,300). `tabs` picks the results on the page.
+    const PILLS_JS = """
+    export function pills(limit, test, delay, profile, a) {
+      const s = limit + test + delay + profile + a;
+      return { total: s, x: [0, 1], y: [s, 2 * s] };
+    }
+    export const INPUTS = [{ name: "limit", type: "Int64" }, { name: "test", type: "Int64" },
+      { name: "delay", type: "Int64" }, { name: "profile", type: "Int64" }, { name: "a", type: "Float64" }];
+    """
+
+    @htmx struct Pills
+        tabs::Any = (:flow,)
+        "Limit"
+        @param limit::Int = 1
+        @options(limit) = [i => "l$i" for i in 1:5]
+        "Test"
+        @param test::Int = 1
+        @options(test) = [i => "t$i" for i in 1:5]
+        "Delay"
+        @param delay::Int = 1
+        @options(delay) = [i => "d$i" for i in 1:3]
+        "Profile"
+        @param profile::Int = 1
+        @options(profile) = [i => "p$i" for i in 1:3]
+        "Slope"
+        @param a::Float64 = 0.5
+        @options(a) = number_domain(0.0, 1.0)
+        # `lag` is no output of the module: only the server's value has it.
+        prediction = (; total = limit + test + delay + profile + a, x = [0.0, 1.0],
+                        y = [1.0, 2.0] .* (limit + test + delay + profile + a), lag = delay)
+        @browser(prediction) = browser_module(; source = PILLS_JS, entry = :pills)
+        __page__(content) = HTMXObjects.htmx(content; title = "Pills", assets = "assets/vendor",
+                                             runtime = :linked)
+        @get index() = h.main(semantic_app(__self__; presentation = :tabs, select = e -> e.name in tabs))
+        "Flow"
+        @get flow() = h.div(h.p("total ", bound(prediction.total; digits = 1); class = "total"),
+            render_table(bound(prediction; columns = (:x, :y)); columns = [:y => ColumnSpec("y"; digits = 1)]),
+            h.div(; id = "plot", bound_columns_attrs(bound(prediction; columns = (:x, :y)))...))
+        # `profile` read by the view itself, and `delay` through the server's
+        # value of the browser property, outside `bound`.
+        "Shown"
+        @get shown() = h.div(h.p(profile == 1 ? "first profile" : "other profile"; class = "fact"),
+            h.p(prediction.lag > 1 ? "long delay" : "short delay"; class = "delay"),
+            h.p("total ", bound(prediction.total; digits = 1); class = "total"))
+        # Every pill read by the view itself: 225 views.
+        "Direct"
+        @get direct() = h.p("at ", string(limit, test, delay, profile), " total ", bound(prediction.total))
+    end
+
     browser_region(html) = match(r"<div id=\"[^\"]*-result\"[^>]*data-htmxo-browser=[^>]*>", html)
     bound_texts(html) = [m.captures[1] for m in eachmatch(r"<span data-htmxo-bound=\"[^\"]*\"[^>]*>([^<]*)</span>", html)]
 end
@@ -929,6 +980,56 @@ end
     end
 end
 
+@testitem "a finite input a browser result reads only through bound needs no view of its own" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, JSON
+    HTMXObjects.vendorfiles("assets/vendor")
+    # Snag semantic-app-bro-1606f2b8: four pills the view reads only through
+    # `bound` needed 225 views, one per combination, and were refused (at most 64).
+    page(app) = (route!(app; operation_policy = :blocking);
+                 String(HTMXObjects._response_bytes(dispatch(:GET, "/"; headers = ["HX-Request" => "true"]))))
+    variants(html) = [replace(m.captures[1], "&quot;" => "\"")
+                      for m in eachmatch(r"<(?:div|template)[^>]*data-htmxo-variant=\"([^\"]*)\"", html)]
+    inputs(html) = JSON.parse(replace(match(r"data-htmxo-browser-inputs=\"([^\"]*)\"", html).captures[1], "&quot;" => "\""))
+    html = page(Pills())
+    @test variants(html) == ["{}"]
+    @test inputs(html)["names"] == []
+    @test bound_texts(html)[1] == "4.5"
+    # The module still takes every pill from its control.
+    binding = JSON.parse(match(r"<script type=\"application/json\" id=\"[^\"]*\" data-htmxo-browser-binding=\"\">([^<]*)</script>", html).captures[1])
+    @test [get(i, "param", nothing) for i in binding["inputs"]] == ["limit", "test", "delay", "profile", "a"]
+    # A pill the view reads itself is a view of its own, and so is one whose
+    # view changes with it outside `bound` (the server's value of the browser
+    # property, read as it is): 3 × 3 views. The browser computes the others.
+    html = page(Pills(; tabs = (:shown,)))
+    @test Set(keys(JSON.parse(first(variants(html))))) == Set(["delay", "profile"])
+    @test count("<template data-htmxo-variant=", html) == 9
+    @test Set(inputs(html)["names"]) == Set(["delay", "profile"])
+    @test occursin(">long delay<", html) && occursin(">other profile<", html)
+    # A static export of either has nothing it would show stale.
+    for tabs in ((:flow,), (:shown,))
+        route!(Pills(; tabs); operation_policy = :blocking)
+        mktempdir() do dir
+            @test export_site(joinpath(dir, "site"); pages = ["/"]).files > 0
+        end
+    end
+    # Pills the view reads itself still multiply, and the refusal says so.
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            route!(Pills(; tabs = (:direct,)); operation_policy = :blocking)
+            answer = dispatch(:GET, "/"; headers = ["HX-Request" => "true"])
+            uid = HTTP.header(answer, "X-HTMXO-Error-Id", "")
+            @test !isempty(uid)
+            logged = isempty(uid) ? "" : read(joinpath(dir, "$uid.log"), String)
+            @test contains(logged, "would need 225 views, one per value of its finite inputs `limit`, `test`, `delay`, `profile`")
+            @test contains(logged, "its view reads `limit`, `test`, `delay`, `profile` itself")
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+end
+
 @testitem "a static export compares a browser result with what two renders of the same inputs differ in" setup=[BrowserFixtures] tags=[:unit, :semantic] begin
     using HTMXObjects
     # Snag browser-result-u-88fa1fae: under a root with a glossary, a result
@@ -1228,6 +1329,97 @@ end
             finally
                 close(server)
             end
+        end
+    end
+end
+
+@testitem "a static page computes pills read through bound and switches views for the others, offline in a browser" setup=[BrowserFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects, HTTP, Sockets
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"), Some(nothing))
+        isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
+        # Snag semantic-app-bro-1606f2b8: `limit` and `test` have no views and
+        # are computed in the browser; `delay` and `profile` are views.
+        route!(Pills(; tabs = (:shown,)); operation_policy = :blocking)
+        HTMXObjects.vendorfiles("assets/vendor")
+        driver = """
+        <script>
+        window.addEventListener('load', async function() {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const region = () => document.querySelector('[data-htmxo-browser]');
+          const text = selector => region().querySelector(':scope > .htmxo-browser-view ' + selector).textContent;
+          const shown = () => [text('.fact'), text('.delay'), text('.total [data-htmxo-bound]')].join('|');
+          const fault = () => { const n = region().querySelector('.htmxo-browser-fault'); return n ? n.textContent : ''; };
+          const choose = (name, value) => document.querySelector('input[name="' + name + '"][value="' + value + '"]').click();
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) { if (Date.now() > end) throw new Error('timeout: ' + label + ' [' + shown() + '] ' + fault()); await sleep(25); }
+          }
+          try {
+            await until(() => shown() === 'first profile|short delay|4.5', 'server view');
+            await fetch('/mark?phase=start');
+            choose('limit', '3');
+            await until(() => shown() === 'first profile|short delay|6.5' && fault() === '', 'limit=3');
+            choose('delay', '2');
+            await until(() => shown() === 'first profile|long delay|7.5' && fault() === '', 'delay=2');
+            choose('profile', '2');
+            await until(() => shown() === 'other profile|long delay|8.5' && fault() === '', 'profile=2');
+            choose('test', '5');
+            await until(() => shown() === 'other profile|long delay|12.5' && fault() === '', 'test=5');
+            await fetch('/mark?phase=end');
+            await fetch('/complete?status=passed');
+          } catch (error) {
+            await fetch('/complete?status=' + encodeURIComponent(String(error)));
+          }
+        }, {once: true});
+        </script>
+        """
+        mktempdir() do dir
+            site = joinpath(dir, "site")
+            export_site(site; pages = ["/"])
+            receipt = Channel{String}(1)
+            requests = String[]
+            socket = listen(Sockets.localhost, 0)
+            port = Int(getsockname(socket)[2])
+            close(socket)
+            server = HTTP.serve!("127.0.0.1", port; verbose = false) do req
+                path = HTTP.URI(req.target).path
+                push!(requests, req.target)
+                if path == "/complete"
+                    isready(receipt) || put!(receipt, String(req.target))
+                    return HTTP.Response(204)
+                end
+                path == "/mark" && return HTTP.Response(204)
+                file = joinpath(site, lstrip(path == "/" ? "/index.html" : HTTP.URIs.unescapeuri(path), '/'))
+                isfile(file) || return HTTP.Response(404)
+                body = read(file, String)
+                endswith(file, "index.html") && (body = replace(body, "</body>" => driver * "</body>"))
+                type = endswith(file, ".js") ? "application/javascript" : endswith(file, ".css") ? "text/css" : "text/html"
+                HTTP.Response(200, ["Content-Type" => type], body)
+            end
+            try
+                mktempdir() do profile
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/index.html`
+                    browser_log = joinpath(profile, "browser.log")
+                    process = run(pipeline(cmd; stdout = devnull, stderr = browser_log); wait = false)
+                    try
+                        @test timedwait(() -> isready(receipt) || process_exited(process), 90; pollint = 0.05) === :ok
+                        outcome = isready(receipt) ? take!(receipt) : read(browser_log, String)
+                        @test HTTP.URIs.unescapeuri(outcome) == "/complete?status=passed"
+                    finally
+                        process_exited(process) || kill(process)
+                        wait(process)
+                    end
+                end
+            finally
+                close(server)
+            end
+            # Every change was computed and drawn without a request.
+            start = findfirst(==("/mark?phase=start"), requests)
+            stop = findfirst(==("/mark?phase=end"), requests)
+            @test start !== nothing && stop !== nothing && stop == start + 1
         end
     end
 end

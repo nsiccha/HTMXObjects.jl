@@ -475,14 +475,56 @@ function _browser_variant_key(names, values)
     Dict{String,Any}(string(n) => _option_wire_string(values[n]) for n in names)
 end
 
+# What the view of `operation` on `T` reads: `own`, the properties it reads
+# outside its `@browser` properties `browser` (the closure, not followed into
+# those, which the browser computes: the view gets only their values), and
+# `all`, everything it reads. Either is `nothing` when no static scan sees
+# every read: a property in it hands `__self__` to other code or reads through
+# `__parent__`.
+function _browser_view_reads(T::Type, operation::Symbol, browser)
+    isnothing(_opaque_properties(T)) && return (; own=nothing, all=nothing)
+    own = _dependency_closure(T, (operation,); stop=browser)
+    own = isnothing(own) || !_closure_complete(T, setdiff(own, browser)) ? nothing : Set{Symbol}(own)
+    found = _operation_reads(T, operation)
+    (; own, all=found.complete ? found.names : nothing)
+end
+
+# Why the view of a result changes with the finite input `name` outside its
+# bound values, or `nothing` when it does not: rendered at each of `values`
+# other than the current one, its skeleton is compared with `skeleton`, the
+# view's at the current values (`_browser_compare!`, which leaves out what two
+# renders of those differ in).
+function _browser_finite_change(view_at, current, name, values, skeleton, control, again)
+    for value in values
+        isequal(get(current, name, nothing), value) && continue
+        changed = copy(current)
+        changed[name] = value
+        _semantic_unfollow!(changed, (name,))
+        changed_skeleton = _browser_skeleton(view_at(changed).body)
+        changed_skeleton == skeleton && continue
+        verdict = _browser_compare!(control, skeleton, changed_skeleton, again)
+        verdict === :same && continue
+        verdict === :unlike && return string("its view holds other markup each time it is rendered, ",
+            "so its view at another value of `", name, "` cannot be compared")
+        before, after = _browser_difference(control[].pieces, _browser_pieces(changed_skeleton), control[].varies)
+        return string("its view changes with `", name, "` outside `bound` (`", before, "` becomes `",
+            after, "` with `", name, "` = ", repr(value), ")")
+    end
+    nothing
+end
+
 """
-    _browser_region(page, spec, route, current, target, sent, attrs) -> Node
+    _browser_region(page, spec, route, current, target, sent, attrs, browser) -> Node
 
 The result region of an operation that reads `@browser` properties: its view
 rendered for the page's current values and for each value of the finite inputs
-it is sent, the bindings of those properties to their modules (once per page),
-the modules and the runtime (once per page). Under a static export it also
-records in `page.problems` what of the view would still need the server.
+that are views of their own, the bindings of those properties to their modules
+(once per page), the modules and the runtime (once per page). A finite input it
+is sent is a view of its own when the view reads it itself, or when the view,
+rendered at each of its other values, changes outside its bound values; one the
+view reads only through the `@browser` properties and shows only with `bound`
+is computed in the browser, as a continuous input is. Under a static export it
+also records in `page.problems` what of the view would still need the server.
 """
 function _browser_region(page::_BrowserPage, spec, route, current, target, sent, attrs, browser;
                          markdown=nothing)
@@ -497,13 +539,50 @@ function _browser_region(page::_BrowserPage, spec, route, current, target, sent,
         values = _browser_finite_values(obj, route, param, current)
         values === nothing || push!(finite, param.name => values)
     end
+    function view_at(values)
+        url = _semantic_follow_url(target, obj, route, values, sent)
+        rendered = _browser_render(url; static=page.static)
+        # A fault shows its article as the page would; an address no route
+        # answers would leave the view empty without a word.
+        rendered.status == 200 || !isempty(rendered.error) ||
+            throw(_unserved_result_error(obj, url, rendered.status))
+        rendered
+    end
+    # Which finite inputs are views of their own, and why (for the refusal).
+    reads = _browser_view_reads(T, operation, browser)
+    own = Symbol[n for (n, _) in finite if isnothing(reads.own) || n in reads.own]
+    reasons = String[]
+    isempty(own) || push!(reasons, isnothing(reads.own) ?
+        "a property its view reads hands `__self__` to other code or reads through `__parent__`, so it may read any of them" :
+        string("its view reads ", join((string("`", n, "`") for n in own), ", "), " itself"))
+    viewed = Set{Symbol}(own)
+    # The view at the current values, rendered once a finite input is probed.
+    first_view = nothing
+    probed = [f for f in finite if !(first(f) in viewed) &&
+                                   (isnothing(reads.all) || first(f) in reads.all)]
+    if !isempty(probed)
+        first_view = view_at(current)
+        skeleton = _browser_skeleton(first_view.body)
+        again = () -> (r = view_at(current); r.status == 200 && isempty(r.error) ? _browser_skeleton(r.body) : nothing)
+        control = Ref{Union{Nothing,_BrowserControl}}(nothing)
+        for (n, values) in probed
+            change = _browser_finite_change(view_at, current, n, values, skeleton, control, again)
+            change === nothing && continue
+            push!(viewed, n)
+            push!(reasons, change)
+        end
+    end
+    finite_names = Symbol[first(f) for f in finite]
+    finite = [f for f in finite if first(f) in viewed]
     combos = Iterators.product((last(f) for f in finite)...)
     count = prod((length(last(f)) for f in finite); init=1)
     count <= _BROWSER_VARIANTS_MAX || throw(ArgumentError(string(
         "semantic_app: the result `", operation, "` computes in the browser and would need ",
         count, " views, one per value of its finite inputs ",
         join((string("`", first(f), "`") for f in finite), ", "), "; at most ",
-        _BROWSER_VARIANTS_MAX, " are rendered. Read fewer of them in its view.")))
+        _BROWSER_VARIANTS_MAX, " are rendered, and ", join(reasons, "; "), ". A finite input ",
+        "that the view shows only with `bound(...)` of a `@browser` property needs no views. ",
+        "Read fewer of them in its view.")))
     names = Symbol[first(f) for f in finite]
     views = Tuple{String,String,Bool}[]   # variant key, markup, at the current values
     for combo in (isempty(finite) ? ((),) : combos)
@@ -516,19 +595,16 @@ function _browser_region(page::_BrowserPage, spec, route, current, target, sent,
         # value sends that value.
         _semantic_unfollow!(values, (n for n in names if !isequal(get(current, n, nothing), values[n])))
         at_current = all(n -> isequal(get(current, n, nothing), values[n]), names)
-        url = _semantic_follow_url(target, obj, route, values, sent)
-        rendered = _browser_render(url; static=page.static)
-        # A fault shows its article as the page would; an address no route
-        # answers would leave the view empty without a word.
-        rendered.status == 200 || !isempty(rendered.error) ||
-            throw(_unserved_result_error(obj, url, rendered.status))
+        rendered = at_current && first_view !== nothing ? first_view : view_at(values)
         push!(views, (_browser_json(_browser_variant_key(names, values)), rendered.body, at_current))
     end
     # The current values may be none of the finite ones (a value the address
     # named that the domain no longer offers): show the first view then.
     shown = something(findfirst(last, views), 1)
+    # The export's check changes each continuous input; the finite ones were
+    # rendered at each value above.
     page.static === nothing ||
-        _browser_check!(page, obj, route, current, target, sent, operation, names)
+        _browser_check!(page, obj, route, current, target, sent, operation, finite_names)
     # The page's Markdown holds the result's own Markdown (`markdown`), never
     # the view's HTML, which a Markdown reader or a PDF cannot carry. In a
     # numbered document the view's captions take the document's numbers, and
@@ -836,8 +912,8 @@ end
 
 # Under a static export, what in the view of `operation` changes with an input
 # outside its bound values, which a static page would show stale. Each
-# continuous input it is sent is changed in turn; finite inputs are views of
-# their own.
+# continuous input it is sent is changed in turn; `_browser_region` rendered
+# the view at each value of the finite ones (`finite`).
 function _browser_check!(page::_BrowserPage, obj, route, current, target, sent, operation, finite)
     render(values) = _browser_render(_semantic_follow_url(target, obj, route, values, sent))
     skeleton = _browser_skeleton(render(current).body)
