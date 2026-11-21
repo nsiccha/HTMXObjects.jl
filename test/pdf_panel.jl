@@ -523,7 +523,11 @@ end
             const over = (el, from) => el.dispatchEvent(new PointerEvent('pointerover', {bubbles: true, relatedTarget: from || null}));
             const note = () => aside.querySelector('[data-htmxo-pdf-note]').textContent;
             const pageLine = () => aside.querySelector('[data-htmxo-pdf-page-info]').textContent;
-            const inPanel = el => { const a = aside.getBoundingClientRect(), r = el.getBoundingClientRect(); return r.top >= a.top && r.bottom <= a.bottom; };
+            const bar = aside.querySelector('.htmxo-pdf-bar');
+            const inPanel = el => {
+                const r = el.getBoundingClientRect();
+                return r.top >= bar.getBoundingClientRect().bottom && r.bottom <= aside.getBoundingClientRect().bottom;
+            };
             const unmodified = el => new Promise(ok => {   // whether the panel took a click on `el`
                 el.addEventListener('click', e => { ok(e.defaultPrevented); e.preventDefault(); }, {once: true});
             });
@@ -671,6 +675,8 @@ end
                     await wait(ready);
                 };
                 for (let n = 6; n >= 3; n--) await visit(n);
+                // A wrapped document chooser can cover the panel's usual landing position.
+                bar.style.minHeight = (aside.clientHeight / 2) + 'px';
                 lateSpan.click();
                 await wait(() => ready() && part(2) && active(part(2)));
                 check('span-click-opens-start', pageLine() === 'page 2 of 8' && inPanel(part(2)) &&

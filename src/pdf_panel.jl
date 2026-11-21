@@ -221,9 +221,10 @@ script from the page ([`htmxo_utility_styles`](@ref),
 - pointing at a reference (or a linked table row) shows the reference and its
   mark more strongly, and pointing at a mark shows its references; nothing
   scrolls;
-- a click on a reference opens the panel at its passage, scrolled a third of
-  the way down, and marks it most strongly until another is clicked; a click
-  on a mark goes to its reference;
+- a click on a reference opens the panel at its passage and marks it most
+  strongly until another is clicked. The passage starts a third of the way
+  down the panel, or just below the controls when they need more room.
+  A click on a mark goes to its reference;
 - a document chosen in the chooser opens at its first page, whatever page
   the panel was at in the file before. The moment another file is chosen or
   referenced, the pages, the page line and the place of the one shown go,
@@ -1930,12 +1931,12 @@ pdf_panel_script() = h.script(Raw(raw"""
     aside.scrollTo({top: top, behavior: smooth ? 'smooth' : 'instant'});
     aside.htmxoPdfScrolled = top;
   }
-  // Scroll the panel to a passage, a third of the way down, or to a page's top.
+  // A passage sits a third of the way down when the sticky controls leave room.
   function reach(aside, target, smooth) {
-    var bar = aside.querySelector('.htmxo-pdf-bar').offsetHeight;
+    var offset = aside.querySelector('.htmxo-pdf-bar').offsetHeight + 8;
+    if (target.classList.contains('htmxo-pdf-hit')) offset = Math.max(offset, aside.clientHeight / 3);
     var top = aside.scrollTop + target.getBoundingClientRect().top - aside.getBoundingClientRect().top;
-    top -= target.classList.contains('htmxo-pdf-hit') ? aside.clientHeight / 3 : bar + 8;
-    scrollPanel(aside, top, smooth);
+    scrollPanel(aside, top - offset, smooth);
   }
   // The page shown: the one the panel went to last, until the reader scrolls
   // it; then the one at the panel's upper third.
@@ -2059,8 +2060,8 @@ pdf_panel_script() = h.script(Raw(raw"""
         var quoted = key && refs(aside).some(function (r) { return r.dataset.htmxoPdfKey === key && r.dataset.htmxoPdfQuote; });
         note(aside, quoted && !hit ? text(aside, 'NotFound') : '');
         aside.htmxoPdfPinned = n;
+        info(aside);   // lay out the page label before measuring the sticky controls
         reach(aside, hit || box, o.smooth);
-        info(aside);
         done();
       });
     }).catch(function (error) { if (token === aside.htmxoPdfToken) { failed(aside, error); done(); } });
@@ -2082,8 +2083,8 @@ pdf_panel_script() = h.script(Raw(raw"""
     if (!file || !file.boxes.length) return;
     var n = Math.min(Math.max(1, current(aside) + by), file.boxes.length);
     aside.htmxoPdfPinned = n;
-    reach(aside, file.boxes[n - 1].box, true);
     info(aside);
+    reach(aside, file.boxes[n - 1].box, true);
   }
 
   // Capture, so a reference in a table row never also opens or closes the row.
