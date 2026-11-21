@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.194
+
+- Editable `Records` card names stay beside Include when they fit. Longer
+  names move to the next line and wrap, whether the card is open or folded.
+
 ## 0.1.193
 
 - Clicking a quoted reference in `pdf_panel` brings the first marked line
