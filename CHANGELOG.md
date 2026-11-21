@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.193
+
+- Clicking a quoted reference in `pdf_panel` brings the first marked line
+  below the sticky controls even when the document chooser wraps.
+
 ## 0.1.192
 
 - `pdf_ref(...; page=5:6, quoted=...)` cites one quotation across consecutive
