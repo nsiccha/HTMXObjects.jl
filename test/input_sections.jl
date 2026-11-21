@@ -27,7 +27,11 @@ using TestItemRunner
         @relevant(weight) = basis == "typical"
         "Regimen"
         @param regimen::String = "100% q 24 x 14"
-        "Draws"
+        """
+        Draws
+
+        The number of posterior draws used for the simulation. More draws take longer.
+        """
         @param draws::Int = 100
         "Seed"
         @param seed::Int = 1
@@ -273,8 +277,13 @@ end
                     // A section's heading reads as one, under Pico too.
                     out.heading = String(parseInt(getComputedStyle(section('Dosing').querySelector('legend')).fontWeight) >= 600);
                     // Short fields share a row; a long one takes the whole width.
-                    out.row = String(top('age') === top('weight') && top('draws') === top('seed') &&
+                    out.row = String(top('age') === top('weight') &&
                         field('regimen').getBoundingClientRect().width >= field('age').getBoundingClientRect().width * 1.8);
+                    // In the sidebar, wrapped help makes Draws taller than Seed.
+                    const draws = field('draws').getBoundingClientRect();
+                    const seed = field('seed').getBoundingClientRect();
+                    out.sidebarRow = String(seed.left > draws.left && draws.height > seed.height &&
+                        draws.top === seed.top);
                     // Two fields fit across this tab. The seven choices make one taller,
                     // but both labels start at the same height. The third field wraps.
                     const direction = field('direction').getBoundingClientRect();
@@ -332,7 +341,7 @@ end
             end
             @test contains(dom, "data-done=\"1\"")
             @test !contains(dom, "data-error=")
-            for marker in ("heading", "row", "tab-row", "hidden", "back", "server", "once")
+            for marker in ("heading", "row", "sidebar-row", "tab-row", "hidden", "back", "server", "once")
                 @test contains(dom, "data-$marker=\"true\"")
             end
         end
