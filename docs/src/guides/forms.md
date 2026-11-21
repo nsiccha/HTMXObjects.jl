@@ -182,6 +182,37 @@ The Include box shows each enabled card's colour in order. A plot using the
 page's default categorical palette and the same category order matches those
 colours, including in dark mode or with a page-wide `--aov-category` palette.
 
+### Showing valid cards when another card has an error
+
+Give the list a `check` property when its views share a check. The property
+runs once per enabled card when the list is resolved. Here the summary uses its result
+and names the cards it omitted.
+
+```julia
+@htmx struct Samples
+    @param code::String = "A"
+    @param samples::Records = Records(:code; label="Sample", check=:identifier)
+    identifier = isempty(strip(code)) ?
+        throw(CallerFault(400, "Enter a sample code"; param=:code)) : uppercase(strip(code))
+    @get summary() = begin
+        cards = samples
+        rows = checked_records(cards)
+        faults = record_faults(cards)
+        isempty(rows) && !isempty(faults) && throw(first(faults).fault)
+        h.div(h.ul((h.li(r.record.label, " — ", r.value) for r in rows)...),
+              (h.p(f.record.label, ": ", f.fault.message) for f in faults)...)
+    end
+end
+```
+
+A field error keeps its card checked and editable. Its Include box uses no
+series colour. Fixing the field restores its colour and checked value. The
+one-based `index` in both lists counts unchecked cards too. Throwing a returned
+`fault` addresses the original field (for example `samples.3.code`). A check
+that fails on a shared input, or raises a server exception, propagates that
+error. Field conversion and declared option domains run before the check.
+Ordinary iteration over `samples` still yields every enabled entry.
+
 ## Resetting every input
 
 From 0.1.127, a `presentation=:tabs` page has a Reset button. It returns every

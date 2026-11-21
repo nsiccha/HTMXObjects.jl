@@ -4,7 +4,30 @@ using TestItemRunner
 @testmodule RecordsFixtures begin
     using HTMXObjects, HTTP, Sockets
     using HTMXObjects.DynamicObjects: option_domain
-    export ScenarioApp, PresetApp, sidebar_of, attrs_of, body_of, browser_outcome
+    export ScenarioApp, PresetApp, CheckedApp, sidebar_of, attrs_of, body_of, browser_outcome
+
+    @htmx struct CheckedApp
+        "Sample name"
+        @param sample::String = "A"
+        @param prefix::String = "run"
+        @param samples::Records = Records(:sample; check=:identifier, label_from=:sample,
+            presets=[(sample="A",), (sample="B",), (sample="C",)])
+        identifier = begin
+            prefix == "?" && throw(CallerFault(400, "Unknown prefix"; param=:prefix))
+            sample == "!" && error("Unexpected check failure")
+            sample == "?" && throw(CallerFault(400, "Enter a sample name"; param=:sample))
+            prefix * sample
+        end
+        @get series() = begin
+            cards = samples
+            kept, faults = checked_records(cards), record_faults(cards)
+            isempty(kept) && !isempty(faults) && throw(first(faults).fault)
+            h.p(join((r.value for r in kept), "|"))
+        end
+        @get counts() = h.p(length(checked_records(samples)), "/", length(samples))
+        @get index() = semantic_app(__self__; presentation=:tabs, active=:series,
+                                    select=e -> e.name !== :index)
+    end
 
     @htmx struct PresetApp
         @param regimen::String = "daily"
@@ -103,6 +126,99 @@ using TestItemRunner
         finally
             close(server)
         end
+    end
+end
+
+@testitem "a Records check returns usable values and addresses each local fault" setup=[RecordsFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    route!(CheckedApp(); operation_policy=:blocking)
+    request(path) = dispatch(:GET, path; headers=["HX-Request" => "true"])
+    mixed = "?samples.1.sample=A&samples.2.on=false&samples.2.sample=%21&samples.3.sample=%3F&samples.4.sample=A&samples.5.sample=%3F"
+    @test body_of(request("/series" * mixed)) == "<p>runA|runA</p>"
+    @test body_of(request("/counts" * mixed)) == "<p>2/4</p>"
+    page = sidebar_of(body_of(request("/" * mixed)))
+    @test count("Enter a sample name", page) == 2
+    @test count("data-htmxo-record-fault=\"sample\"", page) == 2
+    @test contains(page, r"<input [^>]*name=\"samples\.3\.sample\"[^>]*aria-invalid=\"true\"")
+    @test contains(page, r"<input [^>]*name=\"samples\.5\.sample\"[^>]*aria-invalid=\"true\"")
+    @test !contains(page, r"<input [^>]*name=\"samples\.[124]\.sample\"[^>]*aria-invalid")
+    @test HTTP.header(request("/series?samples.1.on=false&samples.2.sample=%3F"), "X-HTMXO-Error-Param") == "samples.2.sample"
+    @test HTTP.header(request("/series?prefix=%3F"), "X-HTMXO-Error-Param") == "prefix"
+    @test dispatch(:GET, "/series?samples.1.sample=%21").status == 500
+    @test [r.index => (r.record.label, r.value) for r in checked_records(CheckedApp().samples)] ==
+        [1 => ("A", "runA"), 2 => ("B", "runB"), 3 => ("C", "runC")]
+    @test isempty(record_faults(CheckedApp().samples))
+    @test_throws ArgumentError checked_records(ScenarioApp().scenarios)
+end
+
+@testitem "checked Records keep partial plots and their card colours in sync in a browser" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+        route!(CheckedApp(); operation_policy=:blocking)
+        outcome = browser_outcome(raw"""
+        window.addEventListener('load', async function() {
+          const cards = () => Array.from(document.querySelectorAll('.htmxo-record'));
+          const sample = i => document.querySelector('[name="samples.' + i + '.sample"]');
+          const box = i => cards()[i - 1].querySelector('.htmxo-record-on input');
+          const colour = i => box(i).style.getPropertyValue('--htmxo-series-color');
+          const result = () => document.querySelector('[data-htmxo-follow="/series"]').textContent;
+          const edit = (el, value) => {
+            el.value = value;
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+          };
+          async function until(check, label) {
+            const end = Date.now() + 10000;
+            while (!check()) {
+              if (Date.now() > end) throw new Error(label + ': ' + result());
+              await new Promise(r => setTimeout(r, 25));
+            }
+          }
+          const out = {};
+          try {
+            await until(() => result() === 'runA|runB|runC', 'initial series');
+            document.documentElement.style.setProperty('--aov-category', '#124, #832, #573');
+            await until(() => getComputedStyle(box(3)).accentColor === 'rgb(85, 119, 51)', 'palette');
+            const second = colour(2), third = colour(3);
+            edit(sample(2), '?');
+            await until(() => result() === 'runA|runC' && sample(2).hasAttribute('aria-invalid'), 'partial result');
+            const note = cards()[1].querySelector('.htmxo-field-error');
+            out.partial = box(2).checked && !colour(2) && colour(3) === second &&
+              getComputedStyle(box(3)).accentColor === 'rgb(136, 51, 34)' &&
+              getComputedStyle(box(2)).accentColor !== 'rgb(136, 51, 34)' &&
+              note.textContent === 'Enter a sample name' && sample(2).getAttribute('aria-describedby').split(' ').includes(note.id);
+            edit(sample(2), 'D');
+            await until(() => result() === 'runA|runD|runC' && !sample(2).hasAttribute('aria-invalid'), 'correction');
+            out.corrected = !document.querySelector('.htmxo-field-error') && colour(2) === second && colour(3) === third;
+            edit(sample(2), '?');
+            await until(() => result() === 'runA|runC' && !colour(2), 'second partial result');
+            cards()[1].querySelector('[data-htmxo-record-action="remove"]').click();
+            await until(() => cards().length === 2 && sample(2).value === 'C' && !document.querySelector('.htmxo-field-error'), 'remove');
+            document.querySelector('[data-htmxo-reset]').click();
+            await until(() => result() === 'runA|runB|runC' && colour(3) === third, 'reset');
+            edit(document.querySelector('[name="prefix"]'), 'set');
+            await until(() => result() === 'setA|setB|setC', 'shared input read only by check');
+            out.reset = true;
+            box(2).click();
+            await until(() => result() === 'setA|setC', 'disable second card');
+            box(3).click();
+            await until(() => result() === 'setA', 'disable third card');
+            edit(sample(1), '?');
+            const stale = () => document.querySelector('[data-htmxo-follow="/series"][data-htmxo-stale]');
+            await until(() => stale() && cards()[0].hasAttribute('data-htmxo-record-fault'), 'all cards omitted');
+            out.allInvalid = result() === 'setA' && box(1).checked && !colour(1) &&
+              cards()[0].querySelectorAll('.htmxo-field-error').length === 1;
+            edit(sample(1), 'E');
+            await until(() => result() === 'setE' && !sample(1).hasAttribute('aria-invalid'), 'recover from all invalid');
+            out.recovered = !stale() && !document.querySelector('.htmxo-field-error') && !!colour(1);
+          } catch (e) { out.error = String(e); }
+          fetch('/complete?' + new URLSearchParams(out));
+        });
+        """)
+        @test !haskey(outcome, "error") || outcome["error"] === nothing
+        @test outcome == Dict("partial"=>"true", "corrected"=>"true", "reset"=>"true",
+                              "allInvalid"=>"true", "recovered"=>"true")
     end
 end
 

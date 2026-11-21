@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.194
+
+- `Records(...; check=:property)` checks each enabled card. Use
+  `checked_records` for successful values and `record_faults` for omissions.
+  The editor shows each message at its field and assigns plot colours to
+  the successful cards in order.
+
 ## 0.1.193
 
 - Clicking a quoted reference in `pdf_panel` brings the first marked line
