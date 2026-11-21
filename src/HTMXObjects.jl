@@ -78,6 +78,7 @@ export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
 export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs, Records, record_view, all_records
+export checked_records, record_faults
 export NumberDomain, number_domain, number_record, number_control_script
 export browser_module, BrowserModule, bound_columns_attrs, semantic_browser_script
 
@@ -2745,6 +2746,7 @@ end
 
 # `Records` or `HTMXObjects.Records` as a `@param`'s declared type.
 _is_records_type_expr(t) = t === :Records ||
+    (t isa GlobalRef && t.name === :Records) ||
     (Meta.isexpr(t, :., 2) && t.args[2] == QuoteNode(:Records))
 
 # Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
@@ -11575,7 +11577,7 @@ _checked_relevance(relevant::Bool, _name) = relevant
 # --- A list of records (`@param name::Records = Records(fields...)`) ---
 
 """
-    Records(fields::Symbol...; label="Record", presets=nothing, label_from=nothing)
+    Records(fields::Symbol...; label="Record", presets=nothing, label_from=nothing, check=nothing)
 
 Declare a list of records as one request parameter. Each record supplies values for the named `fields`, which are other parameters of the same object.
 
@@ -11593,6 +11595,13 @@ values (`for s in scenarios; simulate(s.regimen, s.age); end`), so the app can
 memoize per record. [`record_view`](@ref) gives the struct as it answers one
 record, for the properties computed from those fields. [`all_records`](@ref)
 returns every record, those switched off included, with their `on` field.
+
+With `check=:scenario`, read the property `scenario` on each enabled record's
+view. [`checked_records`](@ref) gives the successful values and
+[`record_faults`](@ref) gives the card positions and field errors for captions
+or an all-invalid response. The editor shows each error under its field. Only
+successful cards use a series colour. Iterating the list still gives every
+enabled record.
 
 A request names a record's values `scenarios.<i>.<field>` (and
 `scenarios.<i>.label`, `scenarios.<i>.on`). Without record parameters it uses
@@ -11635,19 +11644,23 @@ struct Records <: AbstractVector{NamedTuple}
     presets::Vector{NamedTuple}
     label_from::Union{Nothing,Symbol}
     automatic::BitVector
+    check::Union{Nothing,Symbol}
+    checked::Vector{NamedTuple}
+    faults::Vector{NamedTuple}
     function Records(fields::Vector{Symbol}, label::AbstractString, entries::Vector{NamedTuple},
-                     presets=NamedTuple[(;)], label_from=nothing, automatic=falses(length(entries)))
+                     presets=NamedTuple[(;)], label_from=nothing, automatic=falses(length(entries)),
+                     check=nothing, checked=NamedTuple[], faults=NamedTuple[])
         isempty(fields) && throw(ArgumentError("Records needs at least one field"))
         allunique(fields) || throw(ArgumentError("Records names a field twice"))
         any(in((:label, :on)), fields) && throw(ArgumentError(
             "Records fields cannot be named `label` or `on`, which each record has"))
         isnothing(label_from) || label_from in fields || throw(ArgumentError(
             "Records label_from must name one of its fields, got $(repr(label_from))"))
-        new(fields, String(label), entries, presets, label_from, automatic)
+        new(fields, String(label), entries, presets, label_from, automatic, check, checked, faults)
     end
 end
 function Records(fields::Symbol...; label::AbstractString="Record", presets=nothing,
-                 label_from::Union{Symbol,Nothing}=nothing)
+                 label_from::Union{Symbol,Nothing}=nothing, check::Union{Symbol,Nothing}=nothing)
     defaults = isnothing(presets) ? NamedTuple[(;)] : NamedTuple[p for p in presets]
     isempty(defaults) && throw(ArgumentError("Records needs at least one preset"))
     for (i, preset) in enumerate(defaults)
@@ -11657,7 +11670,7 @@ function Records(fields::Symbol...; label::AbstractString="Record", presets=noth
         get(preset, :on, true) isa Bool || throw(ArgumentError("Records preset $i on must be a Bool"))
         get(preset, :label, "") isa AbstractString || throw(ArgumentError("Records preset $i label must be text"))
     end
-    Records(collect(fields), label, NamedTuple[], defaults, label_from)
+    Records(collect(fields), label, NamedTuple[], defaults, label_from, falses(0), check)
 end
 _enabled_records(r::Records) =
     NamedTuple[Base.structdiff(entry, NamedTuple{(:on,)}) for entry in r.entries if entry.on]
@@ -11672,6 +11685,29 @@ Every record of a [`Records`](@ref) list, those switched off included, each with
 its `label`, `on` and field values.
 """
 all_records(r::Records) = copy(r.entries)
+
+"""
+    checked_records(records::Records)
+
+For a list declared with `check=:property`, return each successfully checked
+enabled card as `(; index, record, value)` in displayed order. The one-based
+`index` counts all cards, including disabled ones. The `record` is the entry
+in [`all_records`](@ref) and `value` is the property's result.
+"""
+function checked_records(r::Records)
+    isnothing(r.check) && throw(ArgumentError("checked_records needs a Records declaration with check=:property"))
+    copy(r.checked)
+end
+
+"""
+    record_faults(records::Records)
+
+The enabled cards whose check threw a [`CallerFault`](@ref) naming one of
+their fields. Each entry is `(; index, record, field, fault)`. The `field` is
+the local name and `fault.param` is the full submitted name, e.g.
+`Symbol("scenarios.3.regimen")`. Other exceptions propagate to the caller.
+"""
+record_faults(r::Records) = copy(r.faults)
 
 _record_entry(r::Records, label, on, values) =
     NamedTuple{(:label, :on, r.fields...)}((String(label), on, values...))
@@ -11741,7 +11777,26 @@ function _resolve_records(obj, name, declared, raw)
         push!(used, label)
         entries[i] = merge(entries[i], (; label))
     end
-    Records(declared.fields, declared.label, entries, declared.presets, declared.label_from, automatic)
+    checked, faults = NamedTuple[], NamedTuple[]
+    if !isnothing(declared.check)
+        declared.check === name && throw(ArgumentError("a Records check cannot be the list itself"))
+        for (index, record) in enumerate(entries)
+            record.on || continue
+            value = try
+                getproperty(record_view(obj, record), declared.check)
+            catch err
+                cause = unwrap_error(err)
+                cause isa CallerFault && cause.param in declared.fields || rethrow()
+                field = cause.param
+                fault = _record_fault(cause, Symbol(name, ".", index, ".", field))
+                push!(faults, (; index, record, field, fault))
+                continue
+            end
+            push!(checked, (; index, record, value))
+        end
+    end
+    Records(declared.fields, declared.label, entries, declared.presets, declared.label_from,
+            automatic, declared.check, checked, faults)
 end
 
 function _record_name(view, field, value)
@@ -33245,6 +33300,7 @@ end
 # the parameter's `@relevant` condition or declared domain reads is none: the
 # default is the same for each of its values (`_default_closure`).
 function _with_default_reads(obj, param)
+    param.type === Records && return _with_record_check_reads(obj, param)
     _computed_default(param) || return param
     source = _param_declaring_object(obj, param.name)
     source === nothing && return param
@@ -33260,6 +33316,36 @@ function _with_default_reads(obj, param)
     params = Set{Symbol}(Base.invokelatest(_param_names, T))
     reads = Symbol[name for name in closure if name in params && name !== param.name]
     isempty(reads) ? param : merge(param, (; default_reads=sort!(reads)))
+end
+
+# Literal declarations need only reflection here: discovering a form's dependencies
+# must not run a card's check. A computed declaration can read any request input.
+function _with_record_check_reads(obj, param)
+    source = something(_param_declaring_object(obj, param.name), obj)
+    declared = param.default
+    check = missing
+    if Meta.isexpr(declared, :call) && _is_records_type_expr(declared.args[1])
+        check = nothing
+        for arg in declared.args[2:end]
+            keywords = Meta.isexpr(arg, :parameters) ? arg.args : (arg,)
+            for kw in keywords
+                if Meta.isexpr(kw, :kw) && kw.args[1] === :check
+                    check = kw.args[2] isa QuoteNode ? kw.args[2].value : missing
+                elseif Meta.isexpr(kw, :...)
+                    check = missing
+                end
+            end
+        end
+    end
+    isnothing(check) && return param
+    T = typeof(source)
+    inputs = Set{Symbol}(Base.invokelatest(_param_names, T))
+    if check isa Symbol
+        reads = _operation_reads(T, check)
+        reads.complete && intersect!(inputs, reads.names)
+    end
+    push!(inputs, param.name)
+    merge(param, (; record_check_reads=inputs))
 end
 
 # Evaluate the declared default with this choice omitted, keeping the other
@@ -33579,11 +33665,12 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
     help_ids = Dict{Symbol,String}(help.name => help.id for help in shared)
     function draw(source, list)
         record_views = [record_view(source, e) for e in list.entries]
+        faults = Dict(f.index => f for f in list.faults)
         nodes = map(eachindex(record_views)) do i
             entry = list.entries[i]
             values = Dict{Symbol,Any}(field => getfield(entry, field) for field in list.fields)
             _record_card(T, name, list, fields, i, entry, record_views[i], values, texts;
-                         radio_max, help_ids, live)
+                         radio_max, help_ids, live, fault=get(faults, i, nothing))
         end
         nodes, record_views
     end
@@ -33622,6 +33709,7 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
         Any[_records_help_note(help, views) for help in shared]..., templates...;
         class="htmxo-records", data_htmxo_records=name, data_htmxo_record_label=records.label,
         data_htmxo_record_copy=texts.record_copy,
+        (isnothing(records.check) ? (;) : (; data_htmxo_checked_records=""))...,
         (isnothing(records.label_from) ? (;) : (; data_htmxo_label_from=records.label_from))...,
         (submitted ? (; data_htmxo_record_submitted="") : (;))..., preset_attrs...)
 end
@@ -33676,7 +33764,7 @@ end
 
 function _record_card(T, name, records, fields, i, entry, view, values, texts;
                       radio_max::Int=_RADIO_MAX, help_ids=Dict{Symbol,String}(),
-                      live::Bool=false)
+                      live::Bool=false, fault=nothing)
     prefix = string(name, ".", i, ".")
     kept = Set{String}(Base.values(help_ids))
     # The fold control names the fields it shows and hides; the id carries
@@ -33703,15 +33791,23 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
         class="htmxo-record-head")
     # Its fields are laid out as a section's are: short ones share a row. A
     # help text the list shows once is named, not repeated.
-    controls = Any[h.div(_record_scoped(_semantic_control(view, T, field, values; radio_max,
-                                                          help_id=get(help_ids, field.name, nothing), live),
-                                        name, i, records.fields, kept);
-                         class="htmxo-input-field",
-                         (_semantic_short_field(view, T, field, values; radio_max) ?
-                             (; data_htmxo_width="short") : (;))...)
-                   for field in fields]
+    controls = map(fields) do field
+        control = _semantic_control(view, T, field, values; radio_max,
+                                    help_id=get(help_ids, field.name, nothing), live)
+        note, error_id = (), nothing
+        if fault !== nothing && fault.field === field.name
+            error_id = string("htmxo-record-error-", Base.Threads.atomic_add!(_HELP_SERIAL, UInt(1)))
+            note = (h.small(fault.fault.message; class="htmxo-field-error", role="alert",
+                            id=string(error_id, "--", name, "-", i)),)
+        end
+        h.div(_record_scoped(control, name, i, records.fields, kept; error_id), note...;
+              class="htmxo-input-field",
+              (_semantic_short_field(view, T, field, values; radio_max) ?
+                  (; data_htmxo_width="short") : (;))...)
+    end
     h.div(head, h.div(controls...; id=fields_id, class="htmxo-input-section-fields");
-          class="htmxo-record", data_htmxo_record=string(i))
+          class="htmxo-record", data_htmxo_record=string(i),
+          (fault === nothing ? (;) : (; data_htmxo_record_fault=fault.field))...)
 end
 
 # A field's control as the record `i` of the list `name` shows it: its fields
@@ -33720,10 +33816,16 @@ end
 # never share an id; the page runtime renumbers both when cards move. The ids
 # in `kept` name what the list shows once, outside the cards, and stay as
 # they are.
-_record_scoped(node, name, i, fields, kept=()) = node
-function _record_scoped(node::Node, name, i, fields, kept=())
+_record_scoped(node, name, i, fields, kept=(); error_id=nothing) = node
+function _record_scoped(node::Node, name, i, fields, kept=(); error_id=nothing)
     field_names = Set(string.(fields))
     attrs = copy(HTMX.attrs(node))
+    if error_id !== nothing && string(get(attrs, :name, "")) in field_names &&
+            get(attrs, :type, "") != "hidden"
+        key = Symbol("aria-describedby")
+        attrs[key] = haskey(attrs, key) ? string(attrs[key], " ", error_id) : error_id
+        attrs[Symbol("aria-invalid")] = "true"
+    end
     rename(v) = string(v) in field_names ? string(name, ".", i, ".", v) : v
     for key in (:name, Symbol("data-htmxo-relevant"))
         haskey(attrs, key) && (attrs[key] = rename(attrs[key]))
@@ -33740,7 +33842,7 @@ function _record_scoped(node::Node, name, i, fields, kept=())
         attrs[key] = join((token in kept ? token : token * suffix
                            for token in split(string(attrs[key]))), " ")
     end
-    Node(HTMX.tag(node), attrs, Any[_record_scoped(child, name, i, fields, kept)
+    Node(HTMX.tag(node), attrs, Any[_record_scoped(child, name, i, fields, kept; error_id)
                                     for child in HTMX.children(node)])
 end
 _record_condition(c::AbstractDict, rename) = Dict{String,Any}(
@@ -34647,7 +34749,8 @@ function _semantic_param_dependencies(param)
     defaulted = shown ? get(param, :default_reads, nothing) : nothing
     defaulted = isnothing(defaulted) ? nothing : Set{Symbol}(defaulted)
     reset = shown && haskey(param, :resets) ? Set{Symbol}(param.resets) : nothing
-    found = filter(!isnothing, Any[domain, read, explained, defaulted, reset])
+    checked = shown ? get(param, :record_check_reads, nothing) : nothing
+    found = filter(!isnothing, Any[domain, read, explained, defaulted, reset, checked])
     isempty(found) ? nothing : union(found...)
 end
 
@@ -34776,8 +34879,9 @@ _with_form_owner(node, form_id, name) = _with_field_attr(node, name, :form, form
 _with_field_attr(node, name, key, value) = node
 function _with_field_attr(node::Node, name, key, value)
     attrs = copy(HTMX.attrs(node))
+    field = string(get(attrs, :name, ""))
     if Symbol(lowercase(string(HTMX.tag(node)))) in (:input, :select, :textarea) &&
-            string(get(attrs, :name, "")) == string(name)
+            (field == string(name) || (key === :form && startswith(field, string(name, "."))))
         attrs[key] = value
     end
     Node(HTMX.tag(node), attrs, Any[_with_field_attr(child, name, key, value)
@@ -36222,6 +36326,9 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                       if _semantic_placed_input(param) && !(param.name in record_fields)]
         foreach(param -> param.name in placed || push!(placed, param.name), candidates)
         found = _operation_reads(typeof(spec.mounted), spec.base_entry.name)
+        for param in candidates
+            param.name in found.names && union!(found.names, get(param, :record_check_reads, ()))
+        end
         push!(reads, Set{Symbol}(param.name for param in candidates
             if param.name in found.names || _semantic_fixed_context(param)))
         push!(complete, found.complete)
@@ -39146,7 +39253,7 @@ semantic_refresh_script() = h.script(Raw(raw"""
   document.addEventListener('htmx:beforeSend', function(e) {
     var d = e.detail, config = d && d.requestConfig, target = d && d.target;
     if (!config || !/[?&]__htmxo_form=/.test(config.path || '') || !target ||
-        !target.querySelector('[data-htmxo-resets]')) return;
+        !target.querySelector('[data-htmxo-resets], [data-htmxo-checked-records]')) return;
     refreshInputs.set(d.xhr, {elt: d.elt, forms: sentForms(d.elt).map(function(form) {
       return {form: form, key: inputKey(form)};
     })});
@@ -39164,15 +39271,19 @@ semantic_refresh_script() = h.script(Raw(raw"""
       prior.elt.getAttribute('hx-trigger') === 'htmxo-refresh' ? 'htmxo-refresh' : 'change');
   });
   document.addEventListener('change', function(e) {
-    var t = e.target, name = t && t.name;
-    if (!name || !t.closest) return;
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var records = t.closest('[data-htmxo-checked-records]');
+    var name = records ? records.getAttribute('data-htmxo-records') : t.name;
+    if (!name) return;
     // A control placed in a tab (`place`) belongs to the group by `form=`.
+    var form = t.form || (records && records.querySelector('input').form);
     var group = t.closest('.htmxo-semantic-context[id]') ||
-      (t.form && t.form.matches('.htmxo-semantic-context[id]') ? t.form : null);
+      (form && form.matches('.htmxo-semantic-context[id]') ? form : null);
     if (!group) return;
     var reads = '[data-htmxo-depends~=' + quoted(name) + ']';
     group.querySelectorAll('.htmxo-semantic-context-control' + reads).forEach(function(el) {
-      if (!el.contains(t)) send(el);
+      if (records || !el.contains(t)) send(el);
     });
     document.querySelectorAll('[data-htmxo-context=' + quoted(group.id) + ']' + reads)
       .forEach(send);
@@ -39767,6 +39878,12 @@ semantic_follow_script() = h.script(Raw(raw"""
     var a = parsed(html).querySelector('article[data-htmxo-param]');
     return a && a.querySelector('p');
   }
+  function faultText(note) {
+    if (!note.querySelector('.htmxo-term-def')) return note.textContent;
+    var copy = note.cloneNode(true);
+    copy.querySelectorAll('.htmxo-term-def').forEach(function(def) { def.remove(); });
+    return copy.textContent;
+  }
   // The message's nodes move into the note. Their ids become the note's own,
   // and the references to them (a term link's `aria-describedby`) follow, since
   // a region with nothing to keep shows the fault's article too.
@@ -39814,25 +39931,35 @@ semantic_follow_script() = h.script(Raw(raw"""
     });
     return found;
   }
-  function clearField(name) {
-    document.querySelectorAll('[' + ERROR_FOR + '="' + CSS.escape(name) + '"]').forEach(function(n) {
-      var described = document.querySelectorAll('[aria-describedby~="' + n.id + '"]');
-      described.forEach(function(c) {
-        var rest = c.getAttribute('aria-describedby').split(' ').filter(function(i) { return i && i !== n.id; });
-        if (rest.length) c.setAttribute('aria-describedby', rest.join(' '));
-        else c.removeAttribute('aria-describedby');
+  function clearField(controls) {
+    var notes = new Set();
+    controls.forEach(function(c) {
+      if (!c.hasAttribute('data-htmxo-invalid')) return;
+      var stillInvalid = false;
+      var rest = (c.getAttribute('aria-describedby') || '').split(' ').filter(function(id) {
+        var note = document.getElementById(id);
+        if (note && note.hasAttribute(ERROR_FOR)) { notes.add(note); return false; }
+        if (note && note.classList.contains('htmxo-field-error')) stillInvalid = true;
+        return !!id;
       });
-      n.remove();
-    });
-    document.querySelectorAll('[data-htmxo-invalid="' + CSS.escape(name) + '"]').forEach(function(c) {
-      c.removeAttribute('aria-invalid');
+      if (rest.length) c.setAttribute('aria-describedby', rest.join(' '));
+      else c.removeAttribute('aria-describedby');
+      if (!stillInvalid) c.removeAttribute('aria-invalid');
       c.removeAttribute('data-htmxo-invalid');
+    });
+    notes.forEach(function(note) {
+      if (!document.querySelector('[aria-describedby~="' + CSS.escape(note.id) + '"]')) note.remove();
     });
   }
   function markField(region, name, message) {
     var controls = controlsNamed(region, name);
     if (!controls.length) return false;
-    clearField(name);
+    // The record check may already have drawn this exact fault (all enabled
+    // cards failed and the operation threw one of their scoped faults).
+    clearField(controls);
+    var holder = controls[0].closest('.htmxo-input-field');
+    var checkedNote = holder && holder.querySelector('.htmxo-field-error:not([' + ERROR_FOR + '])');
+    if (checkedNote && message && faultText(checkedNote) === faultText(message)) return true;
     var note = document.createElement('small');
     note.className = 'htmxo-field-error';
     note.id = 'htmxo-field-error-' + (++serial);
@@ -39865,10 +39992,14 @@ semantic_follow_script() = h.script(Raw(raw"""
     region.removeAttribute(STALE);
     var reads = region.getAttribute('data-htmxo-reads');
     var names = reads === null ? null : reads.split(' ');
-    document.querySelectorAll('[' + ERROR_FOR + ']').forEach(function(n) {
-      var field = n.getAttribute(ERROR_FOR);
-      if (names === null || names.indexOf(field) >= 0) clearField(field);
+    var invalid = [];
+    formsOf(region).forEach(function(form) {
+      Array.from(form.elements).forEach(function(c) {
+        if (c.hasAttribute('data-htmxo-invalid') && (names === null || readsName(names, c.name)))
+          invalid.push(c);
+      });
     });
+    clearField(invalid);
   });
   // A list of records (`Records`): Add copies the last card, Duplicate the
   // card after itself, Remove drops one (never the last). A copy is renamed
@@ -39990,6 +40121,8 @@ semantic_follow_script() = h.script(Raw(raw"""
     summary.textContent = '';
     if (!card.hasAttribute(FOLDED) || !fields) return;
     var parts = Array.prototype.map.call(fields.children, fieldSummary).filter(Boolean);
+    var fault = fields.querySelector('.htmxo-field-error');
+    if (fault) parts.push(faultText(fault));
     parts.forEach(function(part, i) {
       if (i) summary.appendChild(document.createTextNode(' '));
       var value = document.createElement('span');
@@ -40060,7 +40193,8 @@ semantic_follow_script() = h.script(Raw(raw"""
     var palette = recordPalette(group), n = 0;
     cardsOf(group).forEach(function(card) {
       var box = card.querySelector('.htmxo-record-on input');
-      if (box.checked) box.style.setProperty('--htmxo-series-color', palette[n++ % palette.length]);
+      if (box.checked && !card.hasAttribute('data-htmxo-record-fault'))
+        box.style.setProperty('--htmxo-series-color', palette[n++ % palette.length]);
       else box.style.removeProperty('--htmxo-series-color');
     });
   }
@@ -41074,6 +41208,11 @@ htmxo_utility_styles() = h.style(Raw("""
     accent-color: var(--htmxo-series-color);
     --pico-primary-background: var(--htmxo-series-color);
     --pico-primary-border: var(--htmxo-series-color);
+}
+.htmxo-record[data-htmxo-record-fault] .htmxo-record-on input:checked {
+    accent-color: var(--pico-muted-color, GrayText);
+    --pico-primary-background: var(--pico-muted-color, GrayText);
+    --pico-primary-border: var(--pico-muted-color, GrayText);
 }
 .htmxo-record-head > button { flex: 0 0 auto; width: auto; margin: 0; font-size: 0.85em; }
 .htmxo-semantic-inputs .htmxo-records { flex: 1 1 100%; }
