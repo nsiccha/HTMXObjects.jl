@@ -103,6 +103,19 @@ end
     @test occursin("href=\"/doc.pdf#page=1\"", plain)
     @test !occursin("data-htmxo-pdf-key", plain) && !occursin("data-htmxo-pdf-quote", plain) && !occursin("data-htmxo-pdf-hue", plain)
     @test !occursin("data-htmxo-pdf-quote", html(pdf_ref("x", "/doc.pdf"; panel="p", quoted="  ")))
+    cite(page; kw...) = pdf_ref("clause", "/doc.pdf"; panel="p", page, quoted="a continuing quotation", kw...)
+    span = cite(5:6)
+    @test strip(to_markdown_string(span)) == "[clause](/doc.pdf#page=5)"
+    @test occursin("href=\"/doc.pdf#page=5\"", html(span))
+    @test occursin("data-htmxo-pdf-page=\"5\"", html(span)) && occursin("data-htmxo-pdf-last=\"6\"", html(span))
+    @test html(cite(5:5)) == html(cite(5))
+    @test !occursin("data-htmxo-pdf-last", html(cite(5)))
+    @test match(r"data-htmxo-pdf-key=\"([^\"]+)\"", html(span))[1] != match(r"data-htmxo-pdf-key=\"([^\"]+)\"", html(cite(5)))[1]
+    @test html(cite(5:1:6)) == html(span)
+    for invalid in (0:2, 6:5, 6:-1:5, 5:2:9, [5, 6], 5.0:6.0)
+        @test_throws ArgumentError cite(invalid)
+    end
+    @test_throws ArgumentError cite(5:6; kind=:html)
     # its Markdown is the link
     @test strip(to_markdown_string(h.p("Siehe ", r, "."))) == "Siehe [(S. 12)](/files/k.pdf#page=12)."
     # refused
@@ -467,6 +480,12 @@ end
         pdf = tiny_pdf(PDF_PAGES)
         ref(id, text; kw...) = pdf_ref(text, "/doc.pdf"; panel="orig", id, kw...)
         two_lines = "every collector and of everyone who works with samples"
+        parts = ["Each", "qualified bidder shall supply", "the survey and the map",
+                 "together with two references", "for a final review marked", "OK"]
+        span_pdf = tiny_pdf(vcat([["Cover"]],
+            [["Booklet header", part, "Quality control footer"] for part in parts], [["OK"]]))
+        span_ref = pdf_ref("Clause, pp. 2–7", "/span.pdf"; page=2:7, panel="orig", id="span-ref",
+                           quoted=join(parts, " "), key="clause", hue=4)
         content = h.div(; id="content")(
             h.p(ref("a", "(p. 1)"; page=1, quoted=two_lines), " Sample tracking is everyone's task."),
             h.p("Records go to the shared catalog ", ref("b", "(p. 2)"; page=2, quoted="reported to the shared catalog"), "."),
@@ -479,6 +498,12 @@ end
                     quoted="The record names the material collected")); data_htmxo_link_key="req-1", id="row")];
                 link="orig-link", id="reqs"),
             h.template(; id="late")(ref("f", "(late)"; page=1, quoted="Other text on the first page")),
+            h.template(; id="late-span")(span_ref),
+            sortable_table(["Clause"], [h.tr(h.td("Review "; id="span-cell"); data_htmxo_link_key="clause",
+                id="span-row")]; link="orig-link", id="span-table"),
+            pdf_ref("Last page of the clause", "/span.pdf"; page=7, panel="orig", id="span-last"),
+            pdf_ref("Incomplete quotation", "/span.pdf"; page=3:7, panel="orig",
+                    quoted=parts[2] * " OK", key="missing-middle"),
             h.div(; style="height: 3000px"))
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function () {
@@ -602,7 +627,7 @@ end
                 await wait(() => hits(key('f')).length > 0);
                 check('late-marked', hits(key('f')).length === 1);
                 if (!hits(key('f')).length) check('late-debug ' + JSON.stringify({tasks: aside.htmxoPdfFile.boxes.map(e => !!e.task),
-                    drawn: aside.htmxoPdfFile.boxes.map(e => Object.keys(e.drawn)), f: key('f'), url: ref('f').dataset.htmxoPdfUrl,
+                    drawn: aside.htmxoPdfFile.boxes.map(e => Array.from(e.drawn)), f: key('f'), url: ref('f').dataset.htmxoPdfUrl,
                     refs: document.querySelectorAll('[data-htmxo-pdf-panel="orig"]').length, hits: aside.querySelectorAll('.htmxo-pdf-hit').length}), false);
                 // colours off: only the passages pointed at and gone to show
                 aside.querySelector('[data-htmxo-pdf-colours]').click();
@@ -627,6 +652,41 @@ end
                 // the toggle opens it as it was
                 ref('toggle').click();
                 check('reopened', !aside.hidden && aside.querySelectorAll('.htmxo-pdf-page').length === 2 && ref('toggle').getAttribute('aria-pressed') === 'true');
+                // Discover the citation from its last page, with its beginning off screen.
+                ref('span-last').click();
+                const pages = aside.querySelector('[data-htmxo-pdf-pages]');
+                const box = n => pages.querySelector('.htmxo-pdf-page[data-htmxo-pdf-page="' + n + '"]');
+                const ready = () => !pages.hasAttribute('aria-busy');
+                await wait(() => ready() && box(7)?.hasAttribute('data-htmxo-pdf-drawn') &&
+                    !box(2).hasAttribute('data-htmxo-pdf-drawn'));
+                const lateSpan = ref('late-span').content.firstElementChild.cloneNode(true);
+                ref('span-cell').appendChild(lateSpan);
+                lateSpan.dispatchEvent(new CustomEvent('htmx:load', {bubbles: true}));
+                const part = n => box(n).querySelector('.htmxo-pdf-hit[data-htmxo-pdf-key="clause"]');
+                await wait(() => part(7));
+                check('span-last-visible-first', part(7) && !part(2) && !box(2).hasAttribute('data-htmxo-pdf-drawn'));
+                // Visit each intervening page. All marks cover the second line (the body).
+                const visit = async n => {
+                    window.htmxoPdf.show(aside, {url: '/span.pdf', page: n});
+                    await wait(ready);
+                };
+                for (let n = 6; n >= 3; n--) await visit(n);
+                lateSpan.click();
+                await wait(() => ready() && part(2) && active(part(2)));
+                check('span-click-opens-start', pageLine() === 'page 2 of 8' && inPanel(part(2)) &&
+                    lateSpan.getAttribute('href') === '/span.pdf#page=2');
+                const all = hits('clause');
+                check('span-each-page-once', all.length === 6 && [2,3,4,5,6,7].every(n => part(n)) && all.every(active));
+                check('span-missing-middle', hits('missing-middle').length === 1 && box(3).contains(hits('missing-middle')[0]));
+                check('span-body-including-short-ends', all.every(el => el.style.top === part(3).style.top &&
+                    el.dataset.htmxoPdfHue === '4') && part(2).offsetWidth < part(3).offsetWidth &&
+                    part(7).offsetWidth < part(2).offsetWidth);
+                const spanScroll = aside.scrollTop;
+                over(lateSpan);
+                check('span-row-lights-every-part', all.every(lit) && aside.scrollTop === spanScroll);
+                over(document.body, lateSpan);
+                await visit(8);
+                check('span-stops-at-last', !part(8) && hits('clause').length === 6);
             } catch (error) {
                 check('error ' + error.message, false);
             }
@@ -646,6 +706,7 @@ end
             path = HTTP.URI(req.target).path
             path == "/" ? HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], page) :
             path == "/doc.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], pdf) :
+            path == "/span.pdf" ? HTTP.Response(200, ["Content-Type" => "application/pdf"], span_pdf) :
             path == "/tick" ? (sleep(0.05); HTTP.Response(200, "ok")) : HTTP.Response(404)
         end
         try
@@ -659,7 +720,7 @@ end
                     @test endswith(line, ":true")
                     endswith(line, ":true") || println("pdf_panel browser: ", line)
                 end
-                @test count(==('\n'), checks[1]) + 1 == 45
+                @test count(==('\n'), checks[1]) + 1 == 52
             end
         finally
             close(server)

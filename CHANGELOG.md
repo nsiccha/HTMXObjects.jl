@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.190
+
+- `pdf_ref(...; page=5:6, quoted=...)` cites one quotation across consecutive
+  PDF pages. Its link opens at the first page, and each part shares the
+  citation's highlight colour and hover key.
+
 ## 0.1.189
 
 - A result that computes in the browser (`@browser`) needs no view per value

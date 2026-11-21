@@ -235,7 +235,9 @@ that to go before it reads the page line.
 
 The passage is found where the page holds the quoted words, or the longest
 beginning of them (at least 24 letters), comparing letters and digits only, so
-line breaks, hyphenation and quotes in the PDF do not matter. Where neither
+line breaks, hyphenation and quotes in the PDF do not matter. For a cited range,
+the panel follows the quotation across consecutive pages, skipping text such as
+running headers and footers at the break. Where neither
 is on the page, the panel goes to the page's top and says so.
 
 **An HTML document** has no pages: a reference names its place as the
@@ -407,16 +409,18 @@ colour, more strongly while pointed at, most strongly once clicked. A
 modified click (new tab, new window) and a page without the panel open the
 document itself. Its Markdown is the link, `[text](url#page=12)`.
 
-- `page`: the page of a PDF the passage stands on, counted from 1 as a PDF
-  viewer counts, not the number printed on the page; 1 when not given. An
-  HTML document has no pages and refuses one.
+- `page`: the PDF viewer's page number (default 1), or a nonempty range of
+  consecutive pages such as `5:6`. The panel opens at the passage's first
+  words. The ordinary link opens the PDF at the first cited page.
+  An HTML document has no pages and refuses one.
 - `kind`: `:pdf` (the default) or `:html`, an HTML document the panel loads
   with an htmx GET. The `#anchor` of its address (`/methodik#annahmen`) names
   the element the passage stands in (a section's heading, say): the panel
   opens there, and looks for the quoted words from there on first.
-- `quoted`: the quoted words. Every reference with a quote marks its passage
-  (on its page of a PDF); one without opens the page's top (the anchor, else
-  the top, of an HTML document) and marks nothing.
+- `quoted`: the quoted words, given once even across a page break. Every
+  matching part shares the reference's key and colour. An unquoted reference
+  opens the top of the first cited PDF page, or the anchor in an HTML document.
+  An HTML reference without an anchor opens the top of the document.
 - `key`: the passage's key in the panel's hover-link group. References with
   one key share one mark (the same passage quoted twice), and a table row
   keyed alike (`link=`, **Hover linking**) lights it too. It defaults to a
@@ -448,7 +452,13 @@ function pdf_ref(text, url::AbstractString; page=nothing, panel::AbstractString,
     html && page !== nothing && throw(ArgumentError(
         "pdf_ref: an HTML document has no pages; name the passage's place as the address's `#anchor`, got page=$(repr(page))"))
     page = something(page, 1)
-    page isa Integer && page >= 1 || throw(ArgumentError("pdf_ref: `page` counts from 1, got $(repr(page))"))
+    if page isa AbstractRange{<:Integer} && step(page) == 1 && !isempty(page) && first(page) >= 1
+        start_page, end_page = first(page), last(page)
+    elseif page isa Integer && page >= 1
+        start_page = end_page = page
+    else
+        throw(ArgumentError("pdf_ref: `page` must be a positive page number or a nonempty range of consecutive pages such as 5:6, got $(repr(page))"))
+    end
     quoted === nothing || quoted isa AbstractString || throw(ArgumentError(
         "pdf_ref: `quoted` is the quoted words as a string, got $(repr(quoted))"))
     quoted isa AbstractString && isempty(strip(quoted)) && (quoted = nothing)
@@ -457,14 +467,16 @@ function pdf_ref(text, url::AbstractString; page=nothing, panel::AbstractString,
     file = _pdf_url(url)
     # An HTML document's place is its address's own fragment; a PDF's is its page.
     anchor = html ? _pdf_anchor(url) : nothing
-    place = html ? (anchor === nothing ? "" : "#" * anchor) : string("#page=", page)
-    key = key === nothing ? (quoted === nothing ? nothing : _thread_digest(string(file, place, "\n", quoted))) :
+    place = html ? (anchor === nothing ? "" : "#" * anchor) : string("#page=", start_page)
+    span = end_page == start_page ? nothing : string(end_page)
+    key_place = isnothing(span) ? place : string(place, ":", span)
+    key = key === nothing ? (quoted === nothing ? nothing : _thread_digest(string(file, key_place, "\n", quoted))) :
         string(key)
     hue = hue === nothing ? (key === nothing ? nothing : Int(_fnv1a(key) % _TALLY_PALETTE) + 1) : Int(hue)
     # The title is named here, from the address the app serves, so a static
     # export (which gives the file another address) titles it as the live page.
     h.a(; href=string(file, place), data_htmxo_pdf_ref="", data_htmxo_pdf_panel=panel,
-        data_htmxo_pdf_url=file, data_htmxo_pdf_page=html ? nothing : string(page),
+        data_htmxo_pdf_url=file, data_htmxo_pdf_page=html ? nothing : string(start_page), data_htmxo_pdf_last=span,
         data_htmxo_pdf_kind=html ? "html" : nothing, data_htmxo_pdf_anchor=anchor, data_htmxo_pdf_quote=quoted,
         data_htmxo_pdf_key=key, data_htmxo_pdf_hue=hue === nothing ? nothing : string(hue),
         data_htmxo_pdf_document=document === nothing ? _pdf_file_name(file) : string(document),
@@ -1511,7 +1523,7 @@ pdf_panel_script() = h.script(Raw(raw"""
     if (file && file.kind === 'pdf' && file.url === url && file.width === width) return file.ready;
     if (file && (file.url !== url || file.kind !== 'pdf')) { clear(aside); width = Math.max(200, view.clientWidth); }
     else if (file && file.observer) file.observer.disconnect();
-    file = {url: url, kind: 'pdf', width: width, boxes: []};
+    file = {url: url, kind: 'pdf', width: width, boxes: [], spans: new WeakMap()};
     aside.htmxoPdfFile = file;
     file.ready = load(aside.dataset.htmxoPdfjs, url).then(function (loaded) {
       file.lib = loaded.lib;
@@ -1537,7 +1549,7 @@ pdf_panel_script() = h.script(Raw(raw"""
         layer.className = 'htmxo-pdf-marks';
         box.append(document.createElement('canvas'), layer);
         view.append(box);
-        file.boxes.push({box: box, page: page, viewport: viewport, drawn: {}});
+        file.boxes.push({box: box, page: page, viewport: viewport, drawn: new Set()});
         file.observer.observe(box);
       });
       return file;
@@ -1576,21 +1588,19 @@ pdf_panel_script() = h.script(Raw(raw"""
   // one key share one passage), from the references on the page now, so a
   // reference that arrives later (a new message) is marked too.
   function passages(aside, url, n) {
-    var seen = {}, out = [];
+    var seen = new Set(), out = [];
     refs(aside).forEach(function (ref) {
       var key = ref.dataset.htmxoPdfKey, quote = ref.dataset.htmxoPdfQuote;
-      if (!key || !quote || seen[key] || ref.dataset.htmxoPdfUrl !== url || ref.dataset.htmxoPdfKind === 'html' ||
-          (Number(ref.dataset.htmxoPdfPage) || 1) !== n) return;
-      seen[key] = true;
-      out.push({key: key, quote: quote, hue: ref.dataset.htmxoPdfHue || '', label: ref.textContent.trim()});
+      var first = Number(ref.dataset.htmxoPdfPage) || 1, last = Number(ref.dataset.htmxoPdfLast) || first;
+      if (!key || !quote || seen.has(key) || ref.dataset.htmxoPdfUrl !== url ||
+          ref.dataset.htmxoPdfKind === 'html' || n < first || n > last) return;
+      seen.add(key);
+      out.push({ref: ref, key: key, quote: quote, first: first, last: last,
+                hue: ref.dataset.htmxoPdfHue || '', label: ref.textContent.trim()});
     });
     return out;
   }
-  // Mark the passages on page n not marked yet: each as the text runs its
-  // words cover there, the first and last run cut to the part they cover.
-  function marks(aside, file, n) {
-    var entry = file.boxes[n - 1];
-    if (!entry) return Promise.resolve();
+  function pageText(entry) {
     if (!entry.text) {
       entry.text = entry.page.getTextContent().then(function (content) {
         var all = '', starts = [], lengths = [], owner = [];
@@ -1605,35 +1615,110 @@ pdf_panel_script() = h.script(Raw(raw"""
       });
       entry.text.catch(function () { entry.text = null; });
     }
-    return entry.text.then(function (page) {
-      if (aside.htmxoPdfFile !== file) return;
-      var layer = entry.box.querySelector('.htmxo-pdf-marks');
-      passages(aside, file.url, n).forEach(function (passage) {
-        if (entry.drawn[passage.key]) return;
-        entry.drawn[passage.key] = true;
-        var at = found(page.letters, letters(passage.quote));
-        if (!at) return;
-        var from = at[0], to = at[0] + at[1], items = [];
-        page.owner.slice(from, to).forEach(function (i) { if (items.indexOf(i) < 0) items.push(i); });
-        items.forEach(function (i) {
-          var item = page.items[i], length = page.lengths[i] || 1;
-          var a = Math.max(0, from - page.starts[i]) / length, b = Math.min(length, to - page.starts[i]) / length;
-          var place = file.lib.Util.transform(entry.viewport.transform, item.transform);
-          var height = Math.hypot(place[2], place[3]), width = item.width * entry.viewport.scale;
-          var hit = document.createElement('div');
-          hit.className = 'htmxo-pdf-hit';
-          hit.dataset.htmxoPdfKey = passage.key;
-          if (passage.hue) hit.dataset.htmxoPdfHue = passage.hue;
-          hit.title = passage.label;
-          hit.style.left = (place[4] + a * width) + 'px';
-          hit.style.top = (place[5] - height) + 'px';
-          hit.style.width = Math.max(2, (b - a) * width) + 'px';
-          hit.style.height = (height * 1.2) + 'px';
-          layer.appendChild(hit);
-        });
-      });
-      light(aside);
+    return entry.text;
+  }
+  // Possible page breaks, longest first. A printed line ends a PDF text run.
+  // Trying those boundaries keeps a footer that happens to begin with the next
+  // quoted letter out of the mark, and lets a short but confirmed fragment count.
+  function pageBreaks(page, rest, continuing) {
+    var cuts = new Map(), text = page.letters;
+    for (var at = text.indexOf(rest[0]); at >= 0; at = text.indexOf(rest[0], at + 1)) {
+      if (continuing && at !== page.starts[page.owner[at]]) continue;
+      var pos = at;
+      for (var i = page.owner[at]; i < page.items.length; i++) {
+        var end = page.starts[i] + page.lengths[i];
+        if (end === pos) continue;
+        if (end - at >= rest.length || !rest.startsWith(text.slice(pos, end), pos - at)) break;
+        if (!cuts.has(end - at)) cuts.set(end - at, at);
+        pos = end;
+      }
+    }
+    return Array.from(cuts.entries()).sort(function (a, b) { return b[0] - a[0]; });
+  }
+  async function matchSpan(file, passage) {
+    var wanted = letters(passage.quote), last = Math.min(passage.last, file.boxes.length);
+    if (wanted.length < 8) return [];
+    var misses = new Set(), hits = [];
+    // Confirm the split against the following page, which can start with a
+    // running header. Cache failed splits when several text runs repeat.
+    async function complete(n, offset) {
+      var state = n + ':' + offset;
+      if (misses.has(state)) return false;
+      var page = await pageText(file.boxes[n - 1]), rest = wanted.slice(offset);
+      // A continuation starts on a new text run. A lone matching letter
+      // buried in an unrelated word cannot bridge a missing page.
+      var at = offset ? page.starts.find(function (start) { return page.letters.startsWith(rest, start); }) :
+                        page.letters.indexOf(rest);
+      if (at !== undefined && at >= 0) {
+        hits[n - passage.first] = [at, rest.length];
+        return true;
+      }
+      if (n < last) {
+        for (var [length, start] of pageBreaks(page, rest, offset !== 0)) {
+          if (await complete(n + 1, offset + length)) {
+            hits[n - passage.first] = [start, length];
+            return true;
+          }
+        }
+      }
+      misses.add(state);
+      return false;
+    }
+    if (await complete(passage.first, 0)) return hits;
+    // Inexact quotation: retain the established longest-prefix rule and stop
+    // at the first page that does not continue the words already matched.
+    for (var n = passage.first, offset = 0; n <= last && offset < wanted.length; n++) {
+      var page = await pageText(file.boxes[n - 1]);
+      var at = found(page.letters, wanted.slice(offset));
+      if (!at) break;
+      hits.push(at);
+      offset += at[1];
+    }
+    return hits;
+  }
+  function spanMatches(file, passage) {
+    if (!file.spans.has(passage.ref)) {
+      var result = matchSpan(file, passage);
+      file.spans.set(passage.ref, result);
+      result.catch(function () { file.spans.delete(passage.ref); });
+    }
+    return file.spans.get(passage.ref);
+  }
+  function markRuns(file, entry, page, passage, at) {
+    var layer = entry.box.querySelector('.htmxo-pdf-marks');
+    var from = at[0], to = at[0] + at[1];
+    new Set(page.owner.slice(from, to)).forEach(function (i) {
+      var item = page.items[i], length = page.lengths[i] || 1;
+      var a = Math.max(0, from - page.starts[i]) / length, b = Math.min(length, to - page.starts[i]) / length;
+      var place = file.lib.Util.transform(entry.viewport.transform, item.transform);
+      var height = Math.hypot(place[2], place[3]), width = item.width * entry.viewport.scale;
+      var hit = document.createElement('div');
+      hit.className = 'htmxo-pdf-hit';
+      hit.dataset.htmxoPdfKey = passage.key;
+      if (passage.hue) hit.dataset.htmxoPdfHue = passage.hue;
+      hit.title = passage.label;
+      hit.style.left = (place[4] + a * width) + 'px';
+      hit.style.top = (place[5] - height) + 'px';
+      hit.style.width = Math.max(2, (b - a) * width) + 'px';
+      hit.style.height = (height * 1.2) + 'px';
+      layer.appendChild(hit);
     });
+  }
+  // A visible page can be the middle of a passage. Matching reads text only;
+  // canvases and hit boxes still belong to the individual page being drawn.
+  async function marks(aside, file, n) {
+    var entry = file.boxes[n - 1];
+    if (!entry) return;
+    await Promise.all(passages(aside, file.url, n).map(async function (passage) {
+      if (entry.drawn.has(passage.key)) return;
+      var page = await pageText(entry);
+      var at = passage.first === passage.last ? found(page.letters, letters(passage.quote)) :
+               (await spanMatches(file, passage))[n - passage.first];
+      if (aside.htmxoPdfFile !== file || entry.drawn.has(passage.key)) return;
+      entry.drawn.add(passage.key);
+      if (at) markRuns(file, entry, page, passage, at);
+    }));
+    if (aside.htmxoPdfFile === file) light(aside);
   }
   // --- An HTML document: the fragment its address answers an htmx GET with,
   // swapped in as htmx swaps (so the page's scripts, its code highlighting
