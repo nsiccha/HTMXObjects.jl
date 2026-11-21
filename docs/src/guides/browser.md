@@ -96,9 +96,15 @@ println(String(response.body))
   `bound(fit; columns=(:half,))` with `half::Float64`, for a mark at that
   value such as a rule. One table holds vectors of one length or single
   values, not both, so a plot of both takes two: one per kind.
-- **Finite inputs** (a `Bool`, an enum, `@options`) that a result reads are
-  views of their own: the page carries the result rendered for each value (at
-  most 64) and shows the one the inputs select.
+- **Finite inputs** (a `Bool`, an enum, `@options`) that a result's view reads
+  itself are views of their own: the page carries the result rendered for
+  each value (at most 64) and shows the one the inputs select. A finite input
+  the view reads only through `@browser` properties, shown with `bound`, is
+  computed in the browser like a continuous one, however many such pills a
+  page has: the page renders the view at each of its values once and keeps
+  one view when they differ only in bound values. Where the view changes with
+  it otherwise, for instance by reading the property's value outside `bound`,
+  it is a view of its own too.
 - **While an input moves** (a slider held down, a number being typed), the
   result follows each of its `input` events, redrawn once an animation frame at
   most. A result asked of the server and the page address wait for the release

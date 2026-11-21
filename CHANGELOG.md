@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.189
+
+- A result that computes in the browser (`@browser`) needs no view per value
+  of a finite input (a `Bool`, an enum, `@options` pills) that its view reads
+  only through `@browser` properties and shows with `bound(...)`: the browser
+  computes it as it computes a continuous input. Until now every finite input
+  the result was sent multiplied its views, so nine pills (24,300
+  combinations) were refused at 64 even when every view differed only in its
+  bound values. The page renders the view once at each other value of such an
+  input; where it changes outside `bound` (the property's value read as it
+  is), the input stays a view of its own. A finite input the view reads
+  itself is one as before, and the refusal now names why each input needs
+  views (snag `semantic-app-bro-1606f2b8`).
+
 ## 0.1.188
 
 - `retained_roots(App)` returns the live source roots held for a routed app,
