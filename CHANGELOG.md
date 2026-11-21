@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.194
+
+- `max_sigdigits` lets `IntervalEstimate`, `format_interval` and `interval_cell`
+  limit the displayed precision of narrow intervals. Wider intervals still use
+  the precision their width supports. Sorting and CSV exports use the original values.
+
 ## 0.1.193
 
 - Clicking a quoted reference in `pdf_panel` brings the first marked line
