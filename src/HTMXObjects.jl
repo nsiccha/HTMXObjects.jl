@@ -25164,6 +25164,7 @@ function htmxoColumnsApply(table, held) {
         return col;
     }));
     table.style.width = held.fill ? '100%' : held.width + 'px';
+    table.toggleAttribute('data-htmxo-interval-tight', !!held.tight);
     table.dataset.htmxoColumns = 'held';
 }
 // How much an ancestor's transform or zoom (a report tile scaled to fit)
@@ -25187,8 +25188,7 @@ function htmxoColumnsMeasure(table, force) {
     if (!room) return;
     const held = window.htmxoColumnsHeld.get(table);
     if (held && !force && held.widths.length === cells.length && Math.abs(held.room - room) <= 40) {
-        if (table.dataset.htmxoColumns !== 'held' ||
-            !table.querySelector(':scope > colgroup[data-htmxo-columns]')) htmxoColumnsApply(table, held);
+        htmxoColumnsRestore(table, cells);
         return;
     }
     const group = table.querySelector(':scope > colgroup[data-htmxo-columns]');
@@ -25196,18 +25196,85 @@ function htmxoColumnsMeasure(table, force) {
     // Size with the table's own width, if the app gave it one.
     const own = held ? held.own : table.style.width;
     table.style.width = own;
+    table.removeAttribute('data-htmxo-interval-tight');
     table.dataset.htmxoColumns = 'sizing';
-    // Prefer enough room for whole intervals. If that makes the table
-    // overflow, let the browser measure the bounds with their usual breaks.
-    if (table.offsetWidth > room + 1 && table.querySelector('.htmxo-interval-bounds'))
+    const selector = ':scope > tbody > tr:not([id^="detail-"]) > [data-htmxo-interval]:not([data-htmxo-column-hidden]) > .htmxo-interval-bounds';
+    const crowded = table.offsetWidth > room + 1 && table.querySelector(selector);
+    const tight = !!(crowded && !table.hasAttribute('data-htmxo-density') &&
+        getComputedStyle(table).getPropertyValue('--pico-spacing'));
+    if (tight) table.setAttribute('data-htmxo-interval-tight', '');
+    const wrap = crowded && (!tight || table.offsetWidth > room + 1);
+    if (wrap)
         table.dataset.htmxoColumns = 'sizing-wrap';
     const box = table.getBoundingClientRect().width, scale = htmxoColumnsScale(table, box);
     const widths = cells.map(c => c.getBoundingClientRect().width / scale);
     let width = box / scale;
     if (!own && width - room > 1) width -= htmxoColumnsNarrow(table, cells, widths, width - room, room, scale);
-    const next = {room, own, width, fill: Math.abs(width - room) < 1, widths};
+    else if (wrap && width <= room + 1) htmxoColumnsFitIntervals(table, cells, table.querySelectorAll(selector), widths, scale);
+    const next = {room, own, width, fill: Math.abs(width - room) < 1, widths, tight};
     window.htmxoColumnsHeld.set(table, next);
     htmxoColumnsApply(table, next);
+}
+// The table fits only with breaks allowed. Keep its total column width,
+// but spend slack where it lets more cells show their whole range. All
+// geometry reads in each pass use one layout, including in a scaled tile.
+function htmxoColumnsFitIntervals(table, cells, bounds, widths, scale) {
+    table.style.width = '0px';
+    const floors = cells.map((c, i) => Math.min(widths[i], c.getBoundingClientRect().width / scale));
+    table.dataset.htmxoColumns = 'sizing';
+    // Use the column's physical start: hidden cells, grouped headers, and
+    // row/column spans can all make cellIndex differ from the shown column.
+    const columns = new Map(cells.map((c, i) => [c.getBoundingClientRect().left, i]));
+    const needs = cells.map(() => new Map());
+    for (const span of bounds) {
+        const cell = span.parentElement;
+        if (cell.colSpan !== 1) continue;
+        const i = columns.get(cell.getBoundingClientRect().left);
+        const box = span.getBoundingClientRect();
+        if (i === undefined || !box.width) continue;
+        const style = getComputedStyle(cell);
+        const borders = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+        const needed = box.width / scale + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) +
+            (style.borderCollapse === 'collapse' ? borders / 2 : borders);
+        // Reserve every range the natural layout already fits. Group longer
+        // ranges by whole layout pixels, so repeated values cost one step.
+        if (needed <= widths[i]) floors[i] = Math.max(floors[i], needed);
+        else {
+            const target = Math.ceil(needed);
+            needs[i].set(target, (needs[i].get(target) || 0) + 1);
+        }
+    }
+    const sum = xs => xs.reduce((a, b) => a + b, 0);
+    const budget = sum(widths);
+    let spare = budget - sum(floors);
+    const steps = needs.map(m => Array.from(m).sort((a, b) => a[0] - b[0]));
+    // Prefer the fewest extra pixels per additional intact range. Consider
+    // all affordable widths in a column: several ranges can fit together.
+    for (;;) {
+        let best, price = Infinity;
+        for (let i = 0; i < steps.length; i++) {
+            let gain = 0;
+            for (const [target, count] of steps[i]) {
+                const cost = target - floors[i];
+                if (cost <= 0) continue;
+                if (cost > spare) break;
+                gain += count;
+                if (cost / gain < price) {
+                    best = {i, target, cost};
+                    price = cost / gain;
+                }
+            }
+        }
+        if (!best) break;
+        floors[best.i] = best.target;
+        spare -= best.cost;
+    }
+    // Give unused room back in proportion to what each column lent. This
+    // also restores the original layout when no extra range can be kept.
+    const lent = widths.map((w, i) => Math.max(0, w - floors[i]));
+    const totalLent = sum(lent);
+    if (totalLent > 0)
+        floors.forEach((w, i) => { widths[i] = w + lent[i] * spare / totalLent; });
 }
 // A word longer than a column can be (an identifier, a URL, a long `code`
 // span) must not make the table wider than its room. A table wider than its
@@ -25283,10 +25350,10 @@ function htmxoColumnsTrack(elt) {
 }
 // Put back the widths a table holds if a swap dropped them, reading no
 // layout. False when it holds none, or none for its present columns.
-function htmxoColumnsRestore(table) {
-    const held = window.htmxoColumnsHeld.get(table), cells = htmxoColumnCells(table);
+function htmxoColumnsRestore(table, cells = htmxoColumnCells(table)) {
+    const held = window.htmxoColumnsHeld.get(table);
     if (!held || held.widths.length !== cells.length || cells.length !== cells.filter(Boolean).length) return false;
-    if (table.dataset.htmxoColumns !== 'held' ||
+    if (table.dataset.htmxoColumns !== 'held' || table.hasAttribute('data-htmxo-interval-tight') !== !!held.tight ||
         !table.querySelector(':scope > colgroup[data-htmxo-columns]')) htmxoColumnsApply(table, held);
     return true;
 }
@@ -30997,8 +31064,10 @@ upper; …)` and keeps the exact numbers:
 - for the ⬇ CSV, which writes the column as three columns: the estimate, the
   lower and the upper bound.
 
-The bounds move to the next line together when they fit there. In a narrow
-table an interval wider than its column can also wrap between its bounds.
+The bounds move to the next line together when they fit there. If whole
+ranges make a normal-density Pico table wider than its container, it halves
+the horizontal cell padding. Columns share spare width to keep more ranges
+whole. An interval still too wide for its column can wrap between its bounds.
 
 [`render_table`](@ref) and the master cells of [`master_detail_table`](@ref)
 make an [`IntervalEstimate`](@ref) this cell by themselves, with the value's
@@ -41814,6 +41883,9 @@ table[data-htmxo-sticky] > tbody > tr { scroll-margin-top: calc(var(--htmxo-stic
    (`break-word`), so a table inside it keeps the widths its words give it.
    `!important` beats Pico's `[hidden] { display: none !important }`. */
 .htmxo-interval-bounds { display: inline-block; max-inline-size: 100%; }
+:where(table[data-htmxo-interval-tight] > thead > tr, table[data-htmxo-interval-tight] > tbody > tr:not([id^="detail-"])) > :is(td, th) {
+    padding-inline: calc(var(--pico-spacing) / 2);
+}
 table[data-htmxo-columns="sizing"] > tbody > tr > [data-htmxo-interval] .htmxo-interval-bounds { white-space: nowrap; }
 table[data-htmxo-columns^="sizing"] > tbody > tr[hidden]:not([id^="detail-"]) { display: table-row !important; visibility: collapse; }
 table[data-htmxo-columns^="sizing"][data-htmxo-columns-break] > tbody > tr:not([id^="detail-"]) > td { overflow-wrap: anywhere; }

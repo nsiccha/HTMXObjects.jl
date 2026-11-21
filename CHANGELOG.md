@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.190
+
+- A crowded, normal-density Pico table halves its horizontal cell padding
+  when whole `interval_cell` ranges would push it past its container.
+  Columns share spare width to keep more ranges on one line. Wider tables
+  return to their usual spacing.
+
 ## 0.1.189
 
 - A result that computes in the browser (`@browser`) needs no view per value
