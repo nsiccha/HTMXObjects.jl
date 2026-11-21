@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.192
+
+- `pdf_ref(...; page=5:6, quoted=...)` cites one quotation across consecutive
+  PDF pages. Its link opens at the first page, and each part shares the
+  citation's highlight colour and hover key.
+
 ## 0.1.191
 
 - When a `Records` field reads another parameter and that value is invalid,
