@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.198
+
+- **Breaking:** With column-name groupings, `master_detail_table` now writes
+  each interval in `?plain` Markdown as one rounded cell, as displayed on the
+  page. Use the CSV download for the three exact numeric fields.
+
 ## 0.1.197
 
 - A column name in `master_detail_table`'s `groupings` folds that column

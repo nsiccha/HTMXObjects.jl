@@ -466,30 +466,17 @@ function _group_export_rows(headers, items, key, master, master_attrs, texts, kw
     _default_sort_rows(rows, _resolve_default_sort(order, table_headers), table_headers; hierarchy=false)
 end
 
-# The plain projection has one row per item and CSV's three exact fields
-# for an interval. Other cells retain their Markdown (links, emphasis, etc.).
-function _group_export_table(names, rows, intervals, hidden, texts)
-    headers = Node[]
-    for (i, name) in enumerate(names)
-        i in hidden && continue
-        push!(headers, h.th(name))
-        i in intervals && append!(headers, [h.th(name * " / " * t) for t in (texts.sort_lower, texts.sort_upper)])
-    end
+# Keep each leaf's displayed content in the first visible column of its span.
+function _group_markdown_table(names, rows, hidden)
+    headers = [h.th(name) for (i, name) in enumerate(names) if !(i in hidden)]
     body = map(rows) do row
         cells = Node[]
         at = 1
         for cell in _row_cells(row)
             span = _cell_span(cell)
-            shown = [c for c in at:at+span-1 if !(c in hidden)]
-            for (j, c) in enumerate(shown)
-                exact = j == 1 ? _node_attr(cell, "data-htmxo-interval") : nothing
-                value = j == 1 ? HTMX.children(cell) : ()
-                if c in intervals && !isnothing(exact)
-                    append!(cells, [h.td(v) for v in JSON.parse(exact)])
-                else
-                    push!(cells, h.td(value))
-                    c in intervals && append!(cells, (h.td(""), h.td("")))
-                end
+            shown = count(c -> !(c in hidden), at:at+span-1)
+            for j in 1:shown
+                push!(cells, h.td(j == 1 ? HTMX.children(cell) : ()))
             end
             at += span
         end

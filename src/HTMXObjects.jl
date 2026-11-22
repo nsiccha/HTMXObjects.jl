@@ -28242,7 +28242,7 @@ function sortable_table(headers, rows;
         for i in divided
             names[i] = _table_text(texts, :relative_column; name=names[i], reference=relative.default)
         end
-        flat_table = _group_export_table(names, _column_groups.rows, interval_cols, hidden, texts)
+        flat_table = _group_markdown_table(names, _column_groups.rows, hidden)
         # Eager tables export the live leaves. Lazy tables also need the values
         # that have not been requested by the browser yet.
         stored = _column_groups.lazy && download ? (_group_export_store(_column_groups.rows),) : ()
@@ -29881,8 +29881,10 @@ interactive-descendant click guard, state-reflecting `aria-expanded`, paired
   groups by the displayed leaf cell: `groupings=["Output", "Quantity", "None" => nothing]`.
   Its column folds into the heading while its level is active and returns
   when the reader turns that level off. With column-name groupings the CSV
-  and plain Markdown write the flat items once, with exact estimate/lower/upper
-  fields for each interval. For a computed grouping, `grouping(item)` returns a group key
+  and plain Markdown write each flat item once with its grouping labels.
+  Markdown keeps each displayed interval in one cell. CSV writes its exact
+  estimate, lower bound and upper bound in three fields.
+  For a computed grouping, `grouping(item)` returns a group key
   or several (the leaf is then listed under each) and `nothing` means the flat
   view. Replaces `children`, unless one grouping is `name => :children` (see
   *Tree grouping* below). Each group is a collapsible branch, in

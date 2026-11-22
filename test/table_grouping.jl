@@ -3612,10 +3612,16 @@ end
 
 @testitem "column groupings fold on first paint and export flat Markdown" setup=[ColumnGroupingFixtures] tags=[:unit] begin
     using HTMXObjects
-    import HTMXObjects: to_markdown_string
+    import HTMXObjects: h, to_markdown_string
+    table_lines(md) = filter(line -> startswith(line, "|"), split(md, '\n'))
     flat = to_markdown_string(column_groups(group_by=["None"]))
-    @test contains(flat, "| Output | Quantity | Percentile | Dose / 10 mg | Dose / 10 mg / Lower bound | Dose / 10 mg / Upper bound |")
-    @test contains(flat, "| Peak | 5th | 8.12345 | 0.12345 | 10.23456 |")
+    lines = table_lines(flat)
+    @test first(lines) == "| Output | Quantity | Percentile | Dose / 10 mg | Dose / 60 mg |"
+    for r in measurements
+        low_dose = format_interval(r.estimate, 0.12345, 10.23456)
+        high_dose = format_interval(2r.estimate, 0.12345, 20.23456)
+        @test "| **Plasma** | $(r.quantity) | $(r.percentile) | $low_dose | $high_dose |" in lines
+    end
     @test count("| **Plasma** |", flat) == length(measurements)
     for levels in (["Output", "Quantity"], ["Quantity"], ["Both"], ["Both", "Output"])
         @test to_markdown_string(column_groups(group_by=levels)) == flat
@@ -3625,7 +3631,16 @@ end
     @test contains(html, "data-htmxo-span=\"5\"")
     @test contains(repr("text/html", column_groups(group_by=["Quantity"])), "data-htmxo-columns-applied=\"2\"")
     @test_throws ArgumentError column_groups(groupings=["Absent"])
-    @test occursin("8.12345", to_markdown_string(column_groups(group_rows_url=(k, ms) -> "/rows")))
+    lazy = to_markdown_string(column_groups(group_rows_url=(k, ms) -> "/rows"))
+    @test table_lines(lazy) == lines
+    hidden = table_lines(to_markdown_string(column_groups(hidden_columns=["Dose / 10 mg"])))
+    @test first(hidden) == "| Output | Quantity | Percentile | Dose / 60 mg |"
+    @test length(hidden) == length(lines)
+    de = table_texts(:de)
+    localized = column_groups(master=r -> (h.td(r.output), h.td(r.quantity), h.td(r.percentile),
+        interval_cell(1.0, 1.0, 1.0000011; max_sigdigits=4, texts=de),
+        interval_cell(missing, 13.1, 34.2; texts=de)))
+    @test contains(to_markdown_string(localized), "| 1,000 (1,000–1,000) | – (13–34) |")
 end
 
 @testitem "column groupings restore columns, disclosures and flat CSV in a static page" setup=[ColumnGroupingFixtures, ChromeDump] tags=[:unit, :browser] begin

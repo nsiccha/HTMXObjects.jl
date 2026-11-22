@@ -24,10 +24,11 @@ A regroupable table can use its own columns as levels. For example,
 `groupings=["Output", "Quantity", "None" => nothing]` with
 `group_by=["Output", "Quantity"]` opens a `master_detail_table` grouped by
 output and then quantity. Each active level moves its repeated label into the
-group heading. Turning a level off brings its column back. CSV and `?plain`
-write one row per item in the flat schema, with an exact estimate and two
-bounds for each interval column. A column explicitly hidden through the
-Columns menu follows the usual export rules.
+group heading. Turning a level off brings its column back. Both `?plain` and
+CSV write one row per item with its grouping labels. In `?plain`, an interval
+occupies one cell with the same rounded text as on the page. The CSV download
+writes the exact estimate, lower bound and upper bound in three fields.
+A column explicitly hidden through the Columns menu follows the usual export rules.
 
 To let readers compare columns against one of their choice, pass
 `relative_to=RelativeTo(["Wren", "RKPPL", "Soss"])`. The toolbar then offers
