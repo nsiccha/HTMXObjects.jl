@@ -39666,7 +39666,9 @@ control is hidden) and one that shows its computed default are left out. Other p
 stay. The page shows the values its address names, so a reload or a shared
 link reopens the same inputs and results: the server applies them to a page
 it renders, and the script applies them to the controls when the page loads,
-which is what a static page (`export_site`) needs.
+which is what a static page (`export_site`) needs. A single choice the
+address names but its controls no longer offer keeps the choice the page
+drew: the default the server recovered for it, as its results use.
 
 On a page that shows apps of more than one address name (each form's
 `data-htmxo-url-scope`: the app's mount path with dots, empty for the root
@@ -40067,6 +40069,27 @@ semantic_follow_script() = h.script(Raw(raw"""
       if ((toggle ? c.checked : c.value) !== before) changed.push(c);
     });
   }
+  // Whether `name` is a single choice whose controls offer none of `wanted`:
+  // an address from before its options changed. The page then keeps the
+  // choice it drew, which is the default the server recovered for it
+  // (`_semantic_normalize_choice!`), or a static page's default. Clearing it
+  // would leave the control empty while its results show that default.
+  function unoffered(form, name, wanted) {
+    var choice = false, offered = false;
+    Array.prototype.forEach.call(form.elements, function(c) {
+      if (c.name !== name || PRESSED.test(c.type)) return;
+      if (c.hasAttribute('data-htmxo-choice-empty')) {
+        offered = offered || wanted.every(function(v) { return v === ''; });
+        return;
+      }
+      var values = c.type === 'radio' ? [c.value] : c.type === 'select-one' ?
+        Array.prototype.map.call(c.options, function(o) { return o.value; }) : null;
+      if (!values) return;
+      choice = true;
+      offered = offered || values.some(function(v) { return wanted.indexOf(v) >= 0; });
+    });
+    return choice && !offered;
+  }
   function applyAddress() {
     var params = new URLSearchParams(location.search), changed = [];
     document.querySelectorAll('form[data-htmxo-address]').forEach(function(form) {
@@ -40086,6 +40109,7 @@ semantic_follow_script() = h.script(Raw(raw"""
         if (key === own && !listed(form, name) &&
             wanted.every(function(v) { return v === ''; })) return;
         if (same(valuesOf(form, name) || [], wanted, numeric(form, name))) return;
+        if (unoffered(form, name, wanted)) return;
         setControls(form, name, wanted, changed);
       });
     });
