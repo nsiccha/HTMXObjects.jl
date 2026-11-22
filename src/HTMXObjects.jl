@@ -33509,10 +33509,9 @@ function _with_record_check_reads(obj, param)
     isnothing(check) || push!(inputs, param.name)
     client_reads = Set{Symbol}()
     if check !== missing
-        args = [arg for arg in declared.args[2:end] if !Meta.isexpr(arg, :parameters) && !Meta.isexpr(arg, :kw)]
-        all(arg -> arg isa QuoteNode && arg.value isa Symbol, args) ||
+        fields = _literal_record_fields(declared)
+        isnothing(fields) &&
             return merge(param, (; record_check_reads=Set(Base.invokelatest(_param_names, T))))
-        fields = Symbol[arg.value for arg in args]
         for field in fields
             local_param = _record_field_param(source, T, field)
             defaulted = local_param.type === Records ? local_param : _with_default_reads(source, local_param)
@@ -34072,18 +34071,21 @@ _record_condition(c::AbstractDict, rename) = Dict{String,Any}(
 _record_condition(c::AbstractVector, rename) = Any[_record_condition(x, rename) for x in c]
 _record_condition(c, _rename) = c
 
-# The fields a `@param name::Records = Records(:a, :b; …)` declaration names,
-# read from the declaration, else from the list's value.
+function _literal_record_fields(declared)
+    Meta.isexpr(declared, :call) && _is_records_type_expr(declared.args[1]) || return nothing
+    args = filter(arg -> !Meta.isexpr(arg, :parameters) && !Meta.isexpr(arg, :kw), declared.args[2:end])
+    all(arg -> arg isa QuoteNode && arg.value isa Symbol, args) || return nothing
+    Symbol[arg.value for arg in args]
+end
+
+# A partial list would draw the remaining fields a second time as standalone
+# controls. Read the declaration only when every field is named literally.
 function _records_declared_fields(obj, name::Symbol)
     source = something(_param_declaring_object(obj, name), obj)
     info = _reflect_local_param(typeof(source), name)
     declared = info === nothing ? nothing : info.default
-    if Meta.isexpr(declared, :call)
-        fields = Symbol[arg.value for arg in declared.args[2:end]
-                        if arg isa QuoteNode && arg.value isa Symbol]
-        isempty(fields) || return fields
-    end
-    _editor_records(source, name).fields
+    fields = _literal_record_fields(declared)
+    isnothing(fields) ? _editor_records(source, name).fields : fields
 end
 
 function _without_record_fields(obj, route)

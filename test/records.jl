@@ -237,6 +237,27 @@ end
     @test HTTP.header(bad, "X-HTMXO-Error-Param") == "cards.1.quantity"
 end
 
+@testitem "computed card fields stay scoped to their list when a shared choice is stale" setup=[RecordsFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    using HTMXObjects.DynamicObjects: option_domain
+    const EXTRA_CARD_FIELDS = (:quantity,)
+    @htmx struct ComputedFieldsApp
+        @param catalog::String = "open"
+        @options(catalog) = option_domain(["open"])
+        @param code::String = "A"
+        @param quantity::Int = length(catalog)
+        @param cards::Records = Records(:code, EXTRA_CARD_FIELDS...)
+        @get series() = h.p(length(cards))
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index)
+    end
+    route!(ComputedFieldsApp(); operation_policy=:blocking)
+    page = dispatch(:GET, "/?catalog=gone&cards.1.code=B")
+    @test page.status == 200
+    html = body_of(page)
+    @test occursin("name=\"cards.1.quantity\"", html)
+    @test !occursin("name=\"quantity\"", html)
+end
+
 @testitem "checked Records keep partial plots and their card colours in sync in a browser" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
     if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
         @test_skip true
