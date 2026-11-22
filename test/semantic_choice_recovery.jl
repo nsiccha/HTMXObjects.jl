@@ -72,7 +72,7 @@ end
         stale_form = String(stale.body)
         @test contains(stale_form, "htmxo-semantic-page")
         @test contains(stale_form, "value=\"one-detail\" checked=\"true\"") == !isempty(available)
-        rejected = dispatch(:GET, "/result?choice=gone"; headers=["Accept" => "text/markdown"])
+        rejected = dispatch(:GET, "/result?choice=gone")
         @test rejected.status == 400
         @test HTTP.header(rejected, "X-HTMXO-Error-Param") == "choice"
         response = dispatch(:GET, "/result"; headers=["HX-Request" => "true"])

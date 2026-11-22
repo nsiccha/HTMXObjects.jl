@@ -284,7 +284,7 @@ end
 function _tab_result_markdown(obj, route, current, target, sent, shown_names, states, static)
     params = Any[param for param in route.params if param.name in shown_names &&
                  param.source !== :path && get(param, :kind, nothing) !== nothing &&
-                 _param_relevant(obj, param.name)]
+                 _param_relevant(obj, param.name, current)]
     renderings = [_ResultRendering(_semantic_follow_url(target, obj, route, current, sent),
                                    _ShownAt(obj, route, params, current), nothing)]
     reads = Set{Symbol}(param.name for param in params)
