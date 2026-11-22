@@ -2403,6 +2403,7 @@ function _convert_params!(struct_expr; parent_params=())
         join(unique(n for n in browser if count(==(n), browser) > 1), ", "))))
     names = Symbol[]
     new_args = Any[]
+    record_inputs = Expr[]
     process_line! = inner -> begin
         delegated = _rewrite_param_delegation(inner)
         if delegated !== nothing
@@ -2423,6 +2424,9 @@ function _convert_params!(struct_expr; parent_params=())
             throw(ArgumentError("@htmx: `@resets($(rewritten[1]))` needs a `@param` with a default"))
         push!(names, rewritten[1])
         push!(new_args, rewritten[2])
+        if length(rewritten) == 3
+            push!(record_inputs, rewritten[3])
+        end
     end
     for arg in body.args
         _reset_declaration(arg) === nothing || continue
@@ -2495,7 +2499,7 @@ function _convert_params!(struct_expr; parent_params=())
             push!(new_args, arg)
         end
     end
-    body.args = new_args
+    body.args = append!(new_args, record_inputs)
     for (name, _) in relevance
         name in names || throw(ArgumentError(string(
             "@htmx: `@relevant($name)` names no `@param` of this struct; ",
@@ -2701,7 +2705,8 @@ function _rewrite_param_delegation(expr)
 end
 
 # Parse a single `name::T = default` / `name = default` / `name::T` / `name` form
-# and return `(name_sym, rewritten_assignment)` or `nothing` if unrecognized.
+# and return the name and public assignment, plus a private input assignment
+# for Records, or `nothing` if unrecognized.
 function _rewrite_param_line(expr, option_names=Set{Symbol}(), relevant_names=Set{Symbol}())
     default_expr = nothing
     lhs = expr
@@ -2728,7 +2733,9 @@ function _rewrite_param_line(expr, option_names=Set{Symbol}(), relevant_names=Se
             "`@param $name_sym::Records = Records(:field, …)`")))
         rhs = Expr(:call, _extract_records_param, :__self__, req_expr, QuoteNode(name_sym), t,
                    default_expr)
-        return (name_sym, Expr(:(=), name_sym, rhs))
+        input = _record_input_property(name_sym)
+        return (name_sym, Expr(:(=), name_sym, Expr(:call, _record_value, input)),
+                Expr(:(=), input, rhs))
     end
     extractor, args = if name_sym in option_names
         relevant ? (_extract_relevant_option_param,
@@ -11599,9 +11606,10 @@ returns every record, those switched off included, with their `on` field.
 With `check=:scenario`, read the property `scenario` on each enabled record's
 view. [`checked_records`](@ref) gives the successful values and
 [`record_faults`](@ref) gives the card positions and field errors for captions
-or an all-invalid response. The editor shows each error under its field. Only
-successful cards use a series colour. Iterating the list still gives every
-enabled record.
+or an all-invalid response. The editor shows each card-local error under its
+field and skips that card's series colour. If a shared input prevents the
+check, all enabled cards keep their colours and `checked_records` raises the
+original input error. Iterating a typed list still gives every enabled record.
 
 A request names a record's values `scenarios.<i>.<field>` (and
 `scenarios.<i>.label`, `scenarios.<i>.on`). Without record parameters it uses
@@ -11648,16 +11656,17 @@ struct Records <: AbstractVector{NamedTuple}
     check::Union{Nothing,Symbol}
     checked::Vector{NamedTuple}
     faults::Vector{NamedTuple}
+    shared_fault::Union{Nothing,Exception}
     function Records(fields::Vector{Symbol}, label::AbstractString, entries::Vector{NamedTuple},
                      presets=NamedTuple[(;)], label_from=nothing, automatic=falses(length(entries)),
-                     check=nothing, checked=NamedTuple[], faults=NamedTuple[])
+                     check=nothing, checked=NamedTuple[], faults=NamedTuple[], shared_fault=nothing)
         isempty(fields) && throw(ArgumentError("Records needs at least one field"))
         allunique(fields) || throw(ArgumentError("Records names a field twice"))
         any(in((:label, :on)), fields) && throw(ArgumentError(
             "Records fields cannot be named `label` or `on`, which each record has"))
         isnothing(label_from) || label_from in fields || throw(ArgumentError(
             "Records label_from must name one of its fields, got $(repr(label_from))"))
-        new(fields, String(label), entries, presets, label_from, automatic, check, checked, faults)
+        new(fields, String(label), entries, presets, label_from, automatic, check, checked, faults, shared_fault)
     end
 end
 function Records(fields::Symbol...; label::AbstractString="Record", presets=nothing,
@@ -11693,10 +11702,12 @@ all_records(r::Records) = copy(r.entries)
 For a list declared with `check=:property`, return each successfully checked
 enabled card as `(; index, record, value)` in displayed order. The one-based
 `index` counts all cards, including disabled ones. The `record` is the entry
-in [`all_records`](@ref) and `value` is the property's result.
+in [`all_records`](@ref) and `value` is the property's result. If the check
+fails on a shared input, this call raises its original request error.
 """
 function checked_records(r::Records)
     isnothing(r.check) && throw(ArgumentError("checked_records needs a Records declaration with check=:property"))
+    isnothing(r.shared_fault) || throw(r.shared_fault)
     copy(r.checked)
 end
 
@@ -11706,7 +11717,8 @@ end
 The enabled cards whose check threw a [`CallerFault`](@ref) naming one of
 their fields. Each entry is `(; index, record, field, fault)`. The `field` is
 the local name and `fault.param` is the full submitted name, e.g.
-`Symbol("scenarios.3.regimen")`. Other exceptions propagate to the caller.
+`Symbol("scenarios.3.regimen")`. A shared input error leaves this list empty.
+Unexpected exceptions propagate while resolving the list.
 """
 record_faults(r::Records) = copy(r.faults)
 
@@ -11760,6 +11772,36 @@ function _default_records(obj, name, declared)
     _resolve_records(obj, name, declared, raw)
 end
 
+# A field that depends on a rejected shared input cannot yet supply a typed
+# value. Keep its wire input solely for the editor. Reading the declared list
+# from an operation still requires every field to have resolved.
+struct _PendingRecordField
+    raw
+    fault::Exception
+end
+struct _PendingRecords
+    editor::Records
+end
+_record_input_property(name) = Symbol("__record_input_", name, "__")
+_record_value(r::Records) = r
+_record_value(r::_PendingRecords) = throw(r.editor.shared_fault)
+
+function _editor_records(obj, name)
+    try
+        getproperty(obj, name)
+    catch err
+        cause = unwrap_error(err)
+        cause isa Union{CallerFault,InvalidDomainValue,InvalidParamValue,MissingRequiredParam} || rethrow()
+        input = getproperty(obj, _record_input_property(name))
+        input isa _PendingRecords || rethrow()
+        input.editor
+    end
+end
+
+_shared_record_fault(cause, fields) =
+    cause isa Union{CallerFault,InvalidDomainValue,InvalidParamValue,MissingRequiredParam} &&
+    !(_fault_param(cause) in fields)
+
 function _resolve_records(obj, name, declared, raw)
     entries = NamedTuple[_typed_record(obj, name, declared, i, row) for (i, row) in enumerate(raw)]
     automatic = BitVector(declared.label_from !== nothing && isempty(strip(get(row, "label", ""))) for row in raw)
@@ -11779,7 +11821,10 @@ function _resolve_records(obj, name, declared, raw)
         entries[i] = merge(entries[i], (; label))
     end
     checked, faults = NamedTuple[], NamedTuple[]
-    if !isnothing(declared.check)
+    pending = (v for entry in entries for v in values(entry) if v isa _PendingRecordField)
+    blocked = iterate(pending)
+    shared_fault = isnothing(blocked) ? nothing : first(blocked).fault
+    if isnothing(blocked) && !isnothing(declared.check)
         declared.check === name && throw(ArgumentError("a Records check cannot be the list itself"))
         for (index, record) in enumerate(entries)
             record.on || continue
@@ -11787,6 +11832,12 @@ function _resolve_records(obj, name, declared, raw)
                 getproperty(record_view(obj, record), declared.check)
             catch err
                 cause = unwrap_error(err)
+                if _shared_record_fault(cause, declared.fields)
+                    shared_fault = cause
+                    empty!(checked)
+                    empty!(faults)
+                    break
+                end
                 cause isa CallerFault && cause.param in declared.fields || rethrow()
                 field = cause.param
                 fault = _record_fault(cause, Symbol(name, ".", index, ".", field))
@@ -11796,8 +11847,9 @@ function _resolve_records(obj, name, declared, raw)
             push!(checked, (; index, record, value))
         end
     end
-    Records(declared.fields, declared.label, entries, declared.presets, declared.label_from,
-            automatic, declared.check, checked, faults)
+    records = Records(declared.fields, declared.label, entries, declared.presets, declared.label_from,
+                      automatic, declared.check, checked, faults, shared_fault)
+    isnothing(blocked) ? records : _PendingRecords(records)
 end
 
 function _record_name(view, field, value)
@@ -11816,15 +11868,18 @@ function _typed_record(obj, name::Symbol, declared::Records, i::Int, raw)
     view = isempty(supplied) ? obj : _record_view(obj, supplied)
     values = map(declared.fields) do field
         try
-            getproperty(view, field)
+            value = getproperty(view, field)
+            if field === declared.label_from && isempty(label)
+                label = _record_name(view, field, value)
+            end
+            value
         catch err
             fault = unwrap_error(err)
+            _shared_record_fault(fault, declared.fields) &&
+                return _PendingRecordField(get(supplied, field, _NO_DEFAULT), fault)
             _fault_param(fault) === field || rethrow()
             throw(_record_fault(fault, Symbol(name, ".", i, ".", field)))
         end
-    end
-    if isempty(label) && declared.label_from !== nothing
-        label = _record_name(view, declared.label_from, getproperty(view, declared.label_from))
     end
     isempty(label) && (label = string(declared.label, " ", i))
     _record_entry(declared, label, on, values)
@@ -15900,10 +15955,13 @@ function _declared_input_domain(obj, input, domain, values)
     isdefined(DynamicObjects, :property_options) || return nothing
     source = obj
     declared = try
-        source = _declared_domain_object(obj, domain, values)
-        Base.invokelatest(
-            getproperty(DynamicObjects, :property_options), source, input.name)
+        _with_recovered_choices(obj, values) do view
+            source = _declared_domain_object(view, domain, values)
+            Base.invokelatest(getproperty(DynamicObjects, :property_options), source, input.name)
+        end
     catch err
+        fields = get(values, :__htmxo_record_fields__, nothing)
+        fields !== nothing && _shared_record_fault(unwrap_error(err), fields) && rethrow()
         declaration = get(domain, :declaration, nothing)
         expression = declaration === nothing ? "" :
             " (`@options $(input.name) = $(get(declaration, :expression_string, "?"))`)"
@@ -19595,6 +19653,9 @@ function _reflect_local_param(T, nm; unquote_default=true)
     info = Base.invokelatest(DynamicObjects.metafirst, T, nm)
     info === nothing && return nothing
     rhs = info.rhs
+    if Meta.isexpr(rhs, :call) && rhs.args[1] === _record_value
+        rhs = Base.invokelatest(DynamicObjects.metafirst, T, _record_input_property(nm)).rhs
+    end
     Meta.isexpr(rhs, :call) || return nothing
     extractor = rhs.args[1]
     type_index = extractor === _extract_param ? 4 :
@@ -33268,6 +33329,7 @@ function _semantic_context_value(obj, param)
     source = get(param, :context_source, nothing)
     source isa NamedTuple || return _NO_DEFAULT
     source_obj = _semantic_source_object(obj, source)
+    param.type === Records && return _editor_records(source_obj, source.property)
     try
         getproperty(source_obj, source.property)
     catch err
@@ -33320,6 +33382,31 @@ end
 function _semantic_dependency_value(values, name)
     _semantic_resolve_pending!(values, name)
     get(get(values, _SEMANTIC_CHOICE_DEFAULTS, (;)), name, values[name])
+end
+
+# A form can recover a stale choice even when a property several steps inside
+# another control's domain or visibility reads it from the original request.
+# Draw that control with the recovered value. Operations use the original object.
+function _with_recovered_choices(draw, obj, values)
+    haskey(values, _SEMANTIC_DOMAINS) || return draw(obj)
+    recovered = ()
+    while true
+        try
+            return draw(obj)
+        catch err
+            cause = unwrap_error(err)
+            cause isa InvalidDomainValue || rethrow()
+            name = cause.name
+            name in recovered && rethrow()
+            hasproperty(obj, name) || rethrow()
+            _semantic_resolve_pending!(values, name)
+            haskey(values[_SEMANTIC_DOMAINS], name) && haskey(values, name) || rethrow()
+            replacement = _semantic_dependency_value(values, name)
+            (isnothing(replacement) || replacement === _NO_DEFAULT) && rethrow()
+            obj = Base.invokelatest(DynamicObjects.remake, obj; name => replacement)
+            recovered = (recovered..., name)
+        end
+    end
 end
 
 # Expressions and bare identifiers need the declaring struct's property to
@@ -33441,15 +33528,33 @@ function _with_record_check_reads(obj, param)
             end
         end
     end
-    isnothing(check) && return param
     T = typeof(source)
-    inputs = Set{Symbol}(Base.invokelatest(_param_names, T))
+    inputs = isnothing(check) ? Set{Symbol}() : Set{Symbol}(Base.invokelatest(_param_names, T))
     if check isa Symbol
         reads = _operation_reads(T, check)
         reads.complete && intersect!(inputs, reads.names)
     end
-    push!(inputs, param.name)
-    merge(param, (; record_check_reads=inputs))
+    isnothing(check) || push!(inputs, param.name)
+    client_reads = Set{Symbol}()
+    if check !== missing
+        fields = _literal_record_fields(declared)
+        isnothing(fields) &&
+            return merge(param, (; record_check_reads=Set(Base.invokelatest(_param_names, T))))
+        for field in fields
+            local_param = _record_field_param(source, T, field)
+            defaulted = local_param.type === Records ? local_param : _with_default_reads(source, local_param)
+            reads = _semantic_param_dependencies(_with_domain_reads(source, defaulted))
+            isnothing(reads) || union!(inputs, setdiff(reads, fields))
+            # Even a client-side visibility expression needs a fresh field
+            # control after its shared input prevented the field from resolving.
+            relevance = get(local_param, :relevance, nothing)
+            if !isnothing(relevance) && !isnothing(relevance.client)
+                union!(client_reads, setdiff(_relevance_dependencies(T, field), fields))
+            end
+        end
+    end
+    isempty(client_reads) || (param = merge(param, (; record_visibility_reads=client_reads)))
+    isempty(inputs) ? param : merge(param, (; record_check_reads=inputs))
 end
 
 # Evaluate the declared default with this choice omitted, keeping the other
@@ -33761,18 +33866,20 @@ numbers them again, and folds a card to its head with a summary of its values.
 """
 function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX,
         live::Bool=false)
-    records = value isa Records ? value : getproperty(obj, param.name)
+    records = value isa Records ? value : _editor_records(obj, param.name)
     name = string(param.name)
     texts = _error_texts(obj)
     fields = NamedTuple[_record_field_param(obj, T, field) for field in records.fields]
     shared = _records_shared_help(fields)
     help_ids = Dict{Symbol,String}(help.name => help.id for help in shared)
     function draw(source, list)
-        record_views = [record_view(source, e) for e in list.entries]
+        record_views = [_record_view(source, Dict(field => _record_input(getfield(e, field))
+            for field in list.fields)) for e in list.entries]
         faults = Dict(f.index => f for f in list.faults)
         nodes = map(eachindex(record_views)) do i
             entry = list.entries[i]
             values = Dict{Symbol,Any}(field => getfield(entry, field) for field in list.fields)
+            values[:__htmxo_record_fields__] = list.fields
             _record_card(T, name, list, fields, i, entry, record_views[i], values, texts;
                          radio_max, help_ids, live, fault=get(faults, i, nothing))
         end
@@ -33797,12 +33904,13 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
                 try
                     base[string(field.name)] = _semantic_address_wire(getproperty(bare, field.name))
                 catch err
-                    unwrap_error(err) isa MissingRequiredParam || rethrow()
+                    cause = unwrap_error(err)
+                    cause isa MissingRequiredParam || _shared_record_fault(cause, records.fields) || rethrow()
                 end
             end
         end
         if !isempty(params)
-            defaults, _ = draw(bare, getproperty(bare, param.name))
+            defaults, _ = draw(bare, _editor_records(bare, param.name))
             templates = (h.template(defaults...; data_htmxo_record_defaults=""),)
         end
         preset_attrs = (; data_htmxo_record_presets=_schema_json(base))
@@ -33810,7 +33918,7 @@ function _records_control(obj, T, param, label, value; radio_max::Int=_RADIO_MAX
     h.fieldset(h.legend(label), cards...,
         h.button(_fill_text(texts.record_add; label=records.label); type="button",
                  class="outline secondary htmxo-record-add", data_htmxo_record_action="add"),
-        Any[_records_help_note(help, views) for help in shared]..., templates...;
+        Any[_records_help_note(help, views, records.fields) for help in shared]..., templates...;
         class="htmxo-records", data_htmxo_records=name, data_htmxo_record_label=records.label,
         data_htmxo_record_copy=texts.record_copy,
         (isnothing(records.check) ? (;) : (; data_htmxo_checked_records=""))...,
@@ -33841,11 +33949,19 @@ end
 # A field's help text under a list's cards: hidden while the field applies to
 # no card (`@relevant`), and shown or hidden in the browser with the field
 # where its condition reads the page's own inputs.
-function _records_help_note(help, views)
+function _records_help_note(help, views, fields)
     note = h.small(h.strong(help.label), ": ", _help_nodes(help.help)...;
                    id=help.id, class="htmxo-help")
     help.relevance === nothing && return h.div(note; class="htmxo-record-help")
-    hidden_attrs = any(view -> _param_relevant(view, help.name), views) ? (;) : (; hidden=true)
+    applies = any(views) do view
+        try
+            _param_relevant(view, help.name)
+        catch err
+            _shared_record_fault(unwrap_error(err), fields) || rethrow()
+            false
+        end
+    end
+    hidden_attrs = applies ? (;) : (; hidden=true)
     client_attrs = isnothing(help.relevance.client) ? (;) :
         (; data_show_when=_schema_json(help.relevance.client))
     h.div(note; class="htmxo-record-help", hidden_attrs..., client_attrs...)
@@ -33897,8 +34013,19 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
     # Its fields are laid out as a section's are: short ones share a row. A
     # help text the list shows once is named, not repeated.
     controls = map(fields) do field
-        control = _semantic_control(view, T, field, values; radio_max,
-                                    help_id=get(help_ids, field.name, nothing), live)
+        value = values[field.name]
+        control, short = if value isa _PendingRecordField
+            _pending_record_control(field, value.raw), false
+        else
+            try
+                (_semantic_control(view, T, field, values; radio_max,
+                    help_id=get(help_ids, field.name, nothing), live),
+                 _semantic_short_field(view, T, field, values; radio_max))
+            catch err
+                _shared_record_fault(unwrap_error(err), records.fields) || rethrow()
+                _pending_record_control(field, value), false
+            end
+        end
         note, error_id = (), nothing
         if fault !== nothing && fault.field === field.name
             error_id = string("htmxo-record-error-", Base.Threads.atomic_add!(_HELP_SERIAL, UInt(1)))
@@ -33907,12 +34034,29 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
         end
         h.div(_record_scoped(control, name, i, records.fields, kept; error_id), note...;
               class="htmxo-input-field",
-              (_semantic_short_field(view, T, field, values; radio_max) ?
-                  (; data_htmxo_width="short") : (;))...)
+              (short ? (; data_htmxo_width="short") : (;))...)
     end
     h.div(head, h.div(controls...; id=fields_id, class="htmxo-input-section-fields");
           class="htmxo-record", data_htmxo_record=string(i),
           (fault === nothing ? (;) : (; data_htmxo_record_fault=fault.field))...)
+end
+
+_record_input(value) = value
+_record_input(value::_PendingRecordField) = value.raw
+
+# Keep supplied wire values in the form until the shared input is corrected.
+# An omitted value must stay omitted so its default can then be evaluated.
+function _pending_record_control(field, value)
+    label = something(first(_doc_label_help(field.doc)), Long(field.name))
+    name = string(field.name)
+    if value isa AbstractVector
+        selected = _option_wire_string.(value)
+        options = [(; value=v, label=v) for v in selected]
+        return _semantic_checkboxes(name, label, (; options), selected)
+    end
+    input = value === _NO_DEFAULT ? h.input(; name, disabled=true) :
+        h.input(; name, value=_option_wire_string(value), readonly=true)
+    h.label(label, input)
 end
 
 # A field's control as the record `i` of the list `name` shows it: its fields
@@ -33955,18 +34099,36 @@ _record_condition(c::AbstractDict, rename) = Dict{String,Any}(
 _record_condition(c::AbstractVector, rename) = Any[_record_condition(x, rename) for x in c]
 _record_condition(c, _rename) = c
 
-# The fields a `@param name::Records = Records(:a, :b; …)` declaration names,
-# read from the declaration, else from the list's value.
+function _literal_record_fields(declared)
+    Meta.isexpr(declared, :call) && _is_records_type_expr(declared.args[1]) || return nothing
+    args = filter(arg -> !Meta.isexpr(arg, :parameters) && !Meta.isexpr(arg, :kw), declared.args[2:end])
+    all(arg -> arg isa QuoteNode && arg.value isa Symbol, args) || return nothing
+    Symbol[arg.value for arg in args]
+end
+
+# A partial list would draw the remaining fields a second time as standalone
+# controls. Read the declaration only when every field is named literally.
 function _records_declared_fields(obj, name::Symbol)
     source = something(_param_declaring_object(obj, name), obj)
     info = _reflect_local_param(typeof(source), name)
     declared = info === nothing ? nothing : info.default
-    if Meta.isexpr(declared, :call)
-        fields = Symbol[arg.value for arg in declared.args[2:end]
-                        if arg isa QuoteNode && arg.value isa Symbol]
-        isempty(fields) || return fields
+    fields = _literal_record_fields(declared)
+    isnothing(fields) ? _editor_records(source, name).fields : fields
+end
+
+function _without_record_fields(obj, route)
+    fields = Set{Symbol}()
+    for param in route.params
+        param.type === Records && union!(fields, _records_declared_fields(obj, param.name))
     end
-    getproperty(source, name).fields
+    isempty(fields) && return route
+    # The cards resolve their fields against each row. Resolving a second,
+    # unscoped control here would require its domain even to open the editor.
+    params = filter(route.params) do param
+        !(param.name in fields && param.source !== :path &&
+            get(param, :kind, nothing) in (nothing, :context))
+    end
+    merge(route, (; params))
 end
 
 # The page address and a result's first address carry a list of records as
@@ -33978,7 +34140,8 @@ function _records_wire_pairs(name, records::Records)
         push!(pairs, prefix * "label" => _record_wire_label(records, i))
         push!(pairs, prefix * "on" => entry.on ? "true" : "false")
         for field in records.fields
-            value = getfield(entry, field)
+            value = _record_input(getfield(entry, field))
+            value === _NO_DEFAULT && continue
             for v in (value isa AbstractVector ? (isempty(value) ? ("",) : value) : (value,))
                 push!(pairs, prefix * string(field) => _option_wire_string(v))
             end
@@ -33990,7 +34153,8 @@ end
 function _semantic_address_wire(records::Records)
     rows = map(eachindex(records.entries)) do i
         entry = records.entries[i]
-        fields = Dict(string(f) => _semantic_address_wire(getfield(entry, f)) for f in records.fields)
+        fields = Dict(string(f) => _semantic_address_wire(_record_input(getfield(entry, f)))
+                      for f in records.fields if _record_input(getfield(entry, f)) !== _NO_DEFAULT)
         (; label=_record_wire_label(records, i), on=entry.on, fields)
     end
     Dict("records" => (; entries=rows, presets=_has_record_presets(records)))
@@ -34130,7 +34294,7 @@ function _semantic_control(obj, owner, param, values;
     param.name in _semantic_follows(values) &&
         (control = _with_field_attr(control, param.name, _FOLLOWS_ATTR, ""))
     control = _with_reset_attr(control, param)
-    _relevance_wrapped(control, obj, param)
+    _relevance_wrapped(control, obj, param, values)
 end
 
 _with_reset_attr(control, param) = haskey(param, :resets) ?
@@ -34358,10 +34522,12 @@ end
 
 # Whether the `@param` `name` applies in the request `obj` answers; `true` for
 # one without a `@relevant` condition.
-function _param_relevant(obj, name::Symbol)
+function _param_relevant(obj, name::Symbol, values=(;))
     source = _relevance_source(obj, name)
     source === nothing && return true
-    _checked_relevance(getproperty(source.object, _relevance_property(name)), name)
+    _with_recovered_choices(source.object, values) do view
+        _checked_relevance(getproperty(view, _relevance_property(name)), name)
+    end
 end
 
 # A control of a `@relevant` input, shown while its condition holds: hidden
@@ -34370,10 +34536,10 @@ end
 # condition the browser cannot evaluate re-renders the control from the
 # server instead, when an input it reads changes
 # (`_semantic_param_dependencies`).
-function _relevance_wrapped(control, obj, param)
+function _relevance_wrapped(control, obj, param, values)
     relevance = get(param, :relevance, nothing)
     relevance === nothing && return control
-    hidden_attrs = _param_relevant(obj, param.name) ? (;) : (; hidden=true)
+    hidden_attrs = _param_relevant(obj, param.name, values) ? (;) : (; hidden=true)
     client_attrs = isnothing(relevance.client) ? (;) :
         (; data_show_when=_schema_json(relevance.client))
     h.div(control; class="htmxo-relevant", data_htmxo_relevant=string(param.name),
@@ -34571,7 +34737,13 @@ function _closure_complete(T::Type, closure)
         # The parameter's wire input inherits through the mount chain, but
         # reads no application properties beyond the parameter itself.
         (n in params || n === :__param_request__) && return true
-        n in opaque && return false
+        if n in opaque
+            # The private input of a Records parameter reads the request in
+            # exactly the same way as its public parameter did.
+            info = Base.invokelatest(DynamicObjects.metafirst, T, n)
+            rhs = info.rhs
+            Meta.isexpr(rhs, :call) && rhs.args[1] === _extract_records_param || return false
+        end
         descriptor = _property_descriptor(T, n)
         isnothing(descriptor) || !(:__parent__ in get(descriptor, :dependencies, ()))
     end
@@ -34627,6 +34799,13 @@ tab shows no input another tab owns.
 function _semantic_tabs_route(obj, route, shared, own)
     route = _semantic_lift_params(obj, route, union(shared, own))
     params = map(route.params) do param
+        if haskey(param, :record_visibility_reads) && (param.name in shared || param.name in own)
+            records = _editor_records(something(_param_declaring_object(obj, param.name), obj), param.name)
+            if !isnothing(records.shared_fault)
+                reads = union(param.record_visibility_reads, get(param, :record_check_reads, ()))
+                return merge(param, (; record_check_reads=reads))
+            end
+        end
         get(param, :kind, nothing) === :context &&
             get(param, :context_scope, :object) === :request &&
             !(param.name in shared) && !(param.name in own) || return param
@@ -35050,7 +35229,8 @@ function _operation_form_refresh(target, LeafT, name::Symbol, verb_inst::Verb,
     # The page lifted these `@param`s into visible controls; so does the
     # refresh, so it re-renders the controls the page showed.
     route = _semantic_lift_params(target.leaf, route, shared_context)
-    isnothing(lifted) || (route = _semantic_tabs_route(target.leaf, route, shared_context, lifted))
+    isnothing(lifted) || (route = _semantic_tabs_route(target.leaf,
+        _without_record_fields(target.leaf, route), shared_context, lifted))
     extracted = _operation_refresh_values(req, route, base, n_params)
     # The operation context retains the external path through stripping proxies.
     request_path = target.context.route
@@ -35353,7 +35533,7 @@ function operation_form(obj, route::NamedTuple; values=(;),
     route = _semantic_runtime_route(obj, route)
     # `lifted` (internal): the `@param`s a `:tabs` page shows in this form.
     lifted_names = isnothing(lifted) ? nothing : _semantic_context_names(lifted)
-    isnothing(lifted_names) || (route = _semantic_tabs_route(obj, route,
+    isnothing(lifted_names) || (route = _semantic_tabs_route(obj, _without_record_fields(obj, route),
         _semantic_context_names(shared_context), lifted_names))
     _check_mounted_include_child(obj, route)
     presentation in (:auto, :cards) || throw(ArgumentError(
@@ -36150,14 +36330,14 @@ function _semantic_follow_url(target, obj, route, current, names)
         param.name in names || continue
         if param.type isa Type && param.type <: Records
             records = get(current, param.name, nothing)
-            records isa Records || (records = getproperty(
+            records isa Records || (records = _editor_records(
                 something(_param_declaring_object(obj, param.name), obj), param.name))
             for (k, v) in _records_wire_pairs(param.name, records)
                 push!(query, HTTP.URIs.escapeuri(k) * "=" * HTTP.URIs.escapeuri(v))
             end
             continue
         end
-        _param_relevant(obj, param.name) || continue
+        _param_relevant(obj, param.name, current) || continue
         # An input that follows its computed default is not sent, as the page
         # sends it (`semantic_follow_script`).
         param.name in _semantic_follows(current) && continue
@@ -36308,7 +36488,7 @@ function _semantic_input_default(obj, param, bare)
             Base.invokelatest(getproperty(DynamicObjects, :remount), source;
                 __req__=nothing, __param_request__=nothing)
         end
-        return getproperty(unbound, param.name)
+        return param.type === Records ? _editor_records(unbound, param.name) : getproperty(unbound, param.name)
     end
     param.default isa Expr ? _NO_DEFAULT : param.default
 end
@@ -36432,7 +36612,8 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
         foreach(param -> param.name in placed || push!(placed, param.name), candidates)
         found = _operation_reads(typeof(spec.mounted), spec.base_entry.name)
         for param in candidates
-            param.name in found.names && union!(found.names, get(param, :record_check_reads, ()))
+            param.name in found.names && union!(found.names, get(param, :record_check_reads, ()),
+                                               get(param, :record_visibility_reads, ()))
         end
         push!(reads, Set{Symbol}(param.name for param in candidates
             if param.name in found.names || _semantic_fixed_context(param)))
@@ -36991,6 +37172,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         operation_submit = _semantic_app_setting(submit, base_entry)
         operation_submit_attrs = _semantic_app_setting(submit_attrs, base_entry)
         runtime_route = _semantic_runtime_route(mounted, local_route)
+        presentation === :tabs && (runtime_route = _without_record_fields(mounted, runtime_route))
         current = _semantic_form_values(mounted, runtime_route, operation_values)
         push!(specs, (; base_entry, mounted, local_route, runtime_route,
                        current, operation_values, operation_submit, operation_submit_attrs))

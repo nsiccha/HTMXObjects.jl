@@ -4,15 +4,17 @@ using TestItemRunner
 @testmodule RecordsFixtures begin
     using HTMXObjects, HTTP, Sockets
     using HTMXObjects.DynamicObjects: option_domain
-    export ScenarioApp, PresetApp, CheckedApp, sidebar_of, attrs_of, body_of, browser_outcome
+    export ScenarioApp, PresetApp, CheckedApp, CatalogApp, sidebar_of, attrs_of, body_of, browser_outcome
 
     @htmx struct CheckedApp
         "Sample name"
         @param sample::String = "A"
-        @param prefix::String = "run"
+        starting_prefix = "run"
+        @param prefix::String = starting_prefix
         @param samples::Records = Records(:sample; check=:identifier, label_from=:sample,
             presets=[(sample="A",), (sample="B",), (sample="C",)])
         identifier = begin
+            prefix == "none" && throw(CallerFault(404, "Choose a prefix"))
             prefix == "?" && throw(CallerFault(400, "Unknown prefix"; param=:prefix))
             sample == "!" && error("Unexpected check failure")
             sample == "?" && throw(CallerFault(400, "Enter a sample name"; param=:sample))
@@ -25,6 +27,35 @@ using TestItemRunner
             h.p(join((r.value for r in kept), "|"))
         end
         @get counts() = h.p(length(checked_records(samples)), "/", length(samples))
+        @get index() = semantic_app(__self__; presentation=:tabs, active=:series,
+                                    select=e -> e.name !== :index)
+    end
+
+    @htmx struct CatalogApp
+        @param catalog::String = ""
+        @options(catalog) = option_domain(["" => "None", "open" => "Open"])
+        available = isempty(catalog) ? throw(CallerFault(404, "Choose a catalog")) : ["a", "b"]
+        @param code::String = "A"
+        @param quantity::Int = length(available)
+        @param kind::String = "a"
+        @options(kind) = option_domain(available)
+        @param tags::Vector{String} = ["a"]
+        @options(tags) = option_domain(available)
+        """
+        Note
+
+        One note per item.
+        """
+        @param note::String = "ok"
+        @relevant(note) = "a" in available
+        @param cards::Records = Records(:code, :quantity, :kind, :tags, :note; label_from=:code,
+            check=:line, presets=[(code="A",), (code="A", on=false)])
+        line = begin
+            code == "?" && throw(CallerFault(400, "Enter a code"; param=:code))
+            string(catalog, "/", code, "/", quantity, "/", kind, "/", join(tags, ","), "/", note)
+        end
+        @get series() = h.p(join((r.value for r in checked_records(cards)), "|"))
+        @get count_rows() = h.p(length(cards))
         @get index() = semantic_app(__self__; presentation=:tabs, active=:series,
                                     select=e -> e.name !== :index)
     end
@@ -150,11 +181,81 @@ end
     @test !contains(page, r"<input [^>]*name=\"samples\.[124]\.sample\"[^>]*aria-invalid")
     @test HTTP.header(request("/series?samples.1.on=false&samples.2.sample=%3F"), "X-HTMXO-Error-Param") == "samples.2.sample"
     @test HTTP.header(request("/series?prefix=%3F"), "X-HTMXO-Error-Param") == "prefix"
+    page = sidebar_of(body_of(request("/?prefix=%3F" * replace(mixed, "?" => "&"; count=1))))
+    @test occursin("name=\"samples.5.sample\"", page)
+    @test !occursin("data-htmxo-record-fault=", page)
+    @test dispatch(:GET, "/?samples.1.sample=%21").status == 500
     @test dispatch(:GET, "/series?samples.1.sample=%21").status == 500
     @test [r.index => (r.record.label, r.value) for r in checked_records(CheckedApp().samples)] ==
         [1 => ("A", "runA"), 2 => ("B", "runB"), 3 => ("C", "runC")]
     @test isempty(record_faults(CheckedApp().samples))
     @test_throws ArgumentError checked_records(ScenarioApp().scenarios)
+    app = CheckedApp(; starting_prefix="none")
+    @test length(app.samples) == 3
+    @test isempty(record_faults(app.samples))
+    @test_throws CallerFault checked_records(app.samples)
+    route!(app; operation_policy=:blocking)
+    @test occursin("name=\"samples.3.sample\"", sidebar_of(body_of(request("/"))))
+    @test occursin("name=\"samples.3.sample\"", sidebar_of(body_of(request("/?prefix=run"))))
+    @test dispatch(:GET, "/counts").status == 404
+    @test body_of(request("/series?prefix=run")) == "<p>runA|runB|runC</p>"
+end
+
+@testitem "Records keep an editable page while a shared input blocks field resolution" setup=[RecordsFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    route!(CatalogApp(); operation_policy=:blocking)
+    edits = "&cards.1.code=B&cards.1.quantity=7&cards.1.kind=b&cards.1.tags=a&cards.1.tags=b&cards.1.note=keep&cards.2.code=%3F"
+    for (query, status, field) in [("", 404, ""), ("catalog=gone", 400, "catalog")]
+        for rows in ("", edits)
+            suffix = "?" * query * rows
+            page = dispatch(:GET, "/" * suffix)
+            @test page.status == 200
+            form = sidebar_of(body_of(page))
+            @test occursin("name=\"catalog\"", form)
+            @test occursin("name=\"cards.2.code\"", form)
+            @test !occursin("data-htmxo-record-fault=", form)
+            if isempty(rows)
+                @test occursin("A (2)", form)
+            else
+                @test occursin(r"name=\"cards\.1\.note\"[^>]*value=\"keep\"", form)
+            end
+            for path in ("/count_rows", "/series")
+                resp = dispatch(:GET, path * suffix)
+                @test resp.status == status
+                @test HTTP.header(resp, "X-HTMXO-Error-Param", "") == field
+                @test occursin(isempty(field) ? "Choose a catalog" : "gone", body_of(resp))
+            end
+        end
+    end
+    request(path) = dispatch(:GET, path; headers=["HX-Request" => "true"])
+    form = sidebar_of(body_of(request("/?catalog=open" * edits)))
+    @test occursin("Enter a code", form)
+    @test occursin(r"name=\"cards\.2\.code\"[^>]*aria-invalid=\"true\"", form)
+    @test body_of(request("/series?catalog=open" * edits)) == "<p>open/B/7/b/a,b/keep</p>"
+    bad = dispatch(:GET, "/series?catalog=open&cards.1.quantity=abc")
+    @test bad.status == 400
+    @test HTTP.header(bad, "X-HTMXO-Error-Param") == "cards.1.quantity"
+end
+
+@testitem "computed card fields stay scoped to their list when a shared choice is stale" setup=[RecordsFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    using HTMXObjects.DynamicObjects: option_domain
+    const EXTRA_CARD_FIELDS = (:quantity,)
+    @htmx struct ComputedFieldsApp
+        @param catalog::String = "open"
+        @options(catalog) = option_domain(["open"])
+        @param code::String = "A"
+        @param quantity::Int = length(catalog)
+        @param cards::Records = Records(:code, EXTRA_CARD_FIELDS...)
+        @get series() = h.p(length(cards))
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index)
+    end
+    route!(ComputedFieldsApp(); operation_policy=:blocking)
+    page = dispatch(:GET, "/?catalog=gone&cards.1.code=B")
+    @test page.status == 200
+    html = body_of(page)
+    @test occursin("name=\"cards.1.quantity\"", html)
+    @test !occursin("name=\"quantity\"", html)
 end
 
 @testitem "checked Records keep partial plots and their card colours in sync in a browser" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
@@ -195,7 +296,8 @@ end
               getComputedStyle(box(2)).accentColor !== 'rgb(136, 51, 34)' &&
               note.textContent === 'Enter a sample name' && sample(2).getAttribute('aria-describedby').split(' ').includes(note.id);
             edit(sample(2), 'D');
-            await until(() => result() === 'runA|runD|runC' && !sample(2).hasAttribute('aria-invalid'), 'correction');
+            await until(() => result() === 'runA|runD|runC' && !sample(2).hasAttribute('aria-invalid') &&
+              !document.querySelector('.htmxo-field-error') && colour(2) === second && colour(3) === third, 'correction');
             out.corrected = !document.querySelector('.htmxo-field-error') && colour(2) === second && colour(3) === third;
             edit(sample(2), '?');
             await until(() => result() === 'runA|runC' && !colour(2), 'second partial result');
@@ -216,7 +318,8 @@ end
             out.allInvalid = result() === 'setA' && box(1).checked && !colour(1) &&
               cards()[0].querySelectorAll('.htmxo-field-error').length === 1;
             edit(sample(1), 'E');
-            await until(() => result() === 'setE' && !sample(1).hasAttribute('aria-invalid'), 'recover from all invalid');
+            await until(() => result() === 'setE' && !sample(1).hasAttribute('aria-invalid') &&
+              !stale() && !document.querySelector('.htmxo-field-error') && colour(1), 'recover from all invalid');
             out.recovered = !stale() && !document.querySelector('.htmxo-field-error') && !!colour(1);
           } catch (e) { out.error = String(e); }
           fetch('/complete?' + new URLSearchParams(out));
@@ -225,6 +328,46 @@ end
         @test !haskey(outcome, "error") || outcome["error"] === nothing
         @test outcome == Dict("partial"=>"true", "corrected"=>"true", "reset"=>"true",
                               "allInvalid"=>"true", "recovered"=>"true")
+    end
+end
+
+@testitem "a reader can correct a stale shared choice without losing card edits" setup=[RecordsFixtures] tags=[:browser, :semantic] begin
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        using HTMXObjects
+        route!(CatalogApp(); operation_policy=:blocking)
+        path = "/?catalog=gone&cards.1.code=B&cards.1.quantity=7&cards.1.kind=b&cards.1.tags=a&cards.1.tags=b&cards.1.note=keep&cards.2.code=%3F"
+        outcome = browser_outcome(raw"""
+        window.addEventListener('load', async () => {
+          const cards = () => Array.from(document.querySelectorAll('.htmxo-record'));
+          const colour = card => card.querySelector('.htmxo-record-on input').style.getPropertyValue('--htmxo-series-color');
+          const result = () => document.querySelector('[data-htmxo-follow="/series"]').textContent;
+          async function until(check) {
+            const end = Date.now() + 10000;
+            while (!check()) {
+              if (Date.now() > end) throw Error(result());
+              await new Promise(r => setTimeout(r, 25));
+            }
+          }
+          const out = {};
+          try {
+            await until(() => cards().length === 2 && colour(cards()[1]));
+            out.unmarked = !cards().some(c => c.hasAttribute('data-htmxo-record-fault'));
+            document.querySelector('[name="catalog"][value="open"]').click();
+            await until(() => result() === 'open/B/7/b/a,b/keep' &&
+              cards()[1].querySelector('[name="cards.2.code"]').getAttribute('aria-invalid') === 'true');
+            out.corrected = !!colour(cards()[0]) && !colour(cards()[1]) &&
+              document.querySelector('[name="cards.1.note"]').value === 'keep';
+            document.querySelector('[data-htmxo-reset]').click();
+            await until(() => cards().length === 2 && !cards()[1].querySelector('.htmxo-record-on input').checked &&
+              document.querySelector('[name="cards.1.code"]').value === 'A');
+            out.reset = !cards().some(c => c.hasAttribute('data-htmxo-record-fault'));
+          } catch (e) { out.error = String(e); }
+          fetch('/complete?' + new URLSearchParams(out));
+        });
+        """; path)
+        @test outcome == Dict("unmarked"=>"true", "corrected"=>"true", "reset"=>"true")
     end
 end
 

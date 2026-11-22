@@ -67,6 +67,14 @@ end
         @test app.choice == (isempty(available) ? "" : "one")
         @test app.detail == (isempty(available) ? "" : "one-detail")
         @test app.direct == (isempty(available) ? "" : "one-direct")
+        stale = dispatch(:GET, "/?choice=gone")
+        @test stale.status == 200
+        stale_form = String(stale.body)
+        @test contains(stale_form, "htmxo-semantic-page")
+        @test contains(stale_form, "value=\"one-detail\" checked=\"true\"") == !isempty(available)
+        rejected = dispatch(:GET, "/result?choice=gone")
+        @test rejected.status == 400
+        @test HTTP.header(rejected, "X-HTMXO-Error-Param") == "choice"
         response = dispatch(:GET, "/result"; headers=["HX-Request" => "true"])
         @test response.status == 200
         @test contains(String(response.body), isempty(available) ?
