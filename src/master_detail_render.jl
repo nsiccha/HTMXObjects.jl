@@ -101,6 +101,8 @@ function _master_detail_table(headers, items;
     # `detail_url` may be a per-item `item -> url` callback or a bare String
     # (same URL for every row — unusual, but supported).
     _url = detail_url isa Union{Nothing,Function} ? detail_url : (_ -> detail_url)
+    folding = get(kwargs, :_column_groups, nothing)
+    foldable_first = !isnothing(folding) && 1 in values(folding.columns)
     rows = Any[]
     # Columns whose sort keys the table computes: (column, functions).
     sort_columns = [(i, Any[last(k) for k in hdr.sort_keys])
@@ -219,6 +221,9 @@ function _master_detail_table(headers, items;
             push!(details, label => body)
             push!(detail_rows, "row-$safe")
         end
+        caption = !isnothing(folding) && haskey(HTMX.attrs(first_cell), Symbol("data-htmxo-group-caption"))
+        separate = foldable_first && !caption
+        carry = separate ? (; data_htmxo_fold_from="1") : (;)
         if branch && branches_collapsible
             # An update names the child rows it renders; the runtime then
             # recomputes the list from the rows on the page.
@@ -228,12 +233,12 @@ function _master_detail_table(headers, items;
                 (isempty(child_ids) ? (;) : (; aria_controls=child_ids))...,
                 aria_expanded=string(open),
                 onclick="htmxoTreeToggle(this); event.stopPropagation()")
-            if !(has_detail && detail_toggle === :label) && !any(_md_interactive_label, label)
+            if !separate && !(has_detail && detail_toggle === :label) && !any(_md_interactive_label, label)
                 label = Any[_LabelledControl(h.button(label...; branch_attrs...,
                     data_htmxo_tree_label="", data_htmxo_label=""))]
             else
                 push!(controls, h.button(_md_disclosure_glyph(open); branch_attrs...,
-                    aria_label=texts.toggle_children))
+                    aria_label=texts.toggle_children, carry...))
             end
         end
         if has_detail
@@ -244,7 +249,7 @@ function _master_detail_table(headers, items;
             # Flat tables retain their compact disclosure control by default.
             # `:label` makes every plain label the control; a label holding a
             # control keeps the separate one in any mode (`_md_interactive_label`).
-            label_detail = !any(_md_interactive_label, label) &&
+            label_detail = !separate && !any(_md_interactive_label, label) &&
                 (detail_toggle === :label || (!isnothing(children) && !branch))
             toggle_label, label_attrs =
                 label_detail ? (label, (; data_htmxo_label="")) :
@@ -252,7 +257,7 @@ function _master_detail_table(headers, items;
                                        (; data_htmxo_disclosure="", aria_label=texts.details)) :
                 (Any["ⓘ"], (; aria_label=texts.details, title=texts.details))
             toggle = h.button(toggle_label...; type="button",
-                data_htmxo_detail_toggle="", label_attrs..., aria_controls="detail-$safe",
+                data_htmxo_detail_toggle="", label_attrs..., carry..., aria_controls="detail-$safe",
                 aria_expanded=string(detail_open), onclick="htmxoMdControl(this,event)")
             if label_detail
                 label = Any[_LabelledControl(toggle)]
@@ -265,6 +270,23 @@ function _master_detail_table(headers, items;
         marks = _level_marks && level > 1 ? (markdown_only("› "^(level - 1)),) : ()
         cells[1] = Node(HTMX.tag(first_cell), copy(HTMX.attrs(first_cell)),
             Any[controls..., marks..., h.span(; data_htmxo_row_label="")(label...), trailing_controls...])
+        if !isnothing(folding) && item isa _MDGroup
+            custom = !any(c -> !isnothing(_node_attr(c, "data-htmxo-group-caption")), cells)
+            column = 1
+            for (i, cell) in enumerate(cells)
+                _is_cell(cell) || continue
+                home = column
+                column += _cell_span(cell)
+                cell_attrs = HTMX.attrs(cell)
+                heading = custom ? i == 1 : haskey(cell_attrs, Symbol("data-htmxo-group-caption"))
+                summary = home in values(folding.columns) && (custom ? !heading :
+                    haskey(cell_attrs, Symbol("data-htmxo-group-summary")))
+                heading || summary || continue
+                marker = summary ? (; data_htmxo_fold_summary="") : (;)
+                cells[i] = Node(HTMX.tag(cell), cell_attrs,
+                    Any[h.span(HTMX.children(cell); data_htmxo_fold_from=i, marker...)])
+            end
+        end
         if !isnothing(children) && isnothing(body) && isnothing(url)
             # Group rows need no placeholder or detail request. Their children
             # are ordinary rows in this same tbody, visible from first paint.
@@ -308,7 +330,8 @@ function _master_detail_table(headers, items;
     # The rows in the `default_sort` order, as `sortable_table` would write
     # them, and the details written after the table in the same order. A
     # column of interval cells has their five sort keys (`interval_cell`).
-    table_headers = _interval_headers(headers, _interval_columns(rows), texts)
+    interval_rows = isnothing(folding) ? rows : folding.rows
+    table_headers = _interval_headers(headers, _interval_columns(interval_rows), texts)
     ds = _resolve_default_sort(get(kwargs, :default_sort, nothing), table_headers)
     if !isnothing(ds)
         rows = _default_sort_rows(rows, ds, table_headers; hierarchy=haskey(table_attrs, :data_htmxo_hierarchy))
@@ -332,10 +355,11 @@ function _master_detail_table(headers, items;
     # disagree on which style governs a break beside an atomic button, so a
     # control after the label and a glyph before it are joined by U+2060.
     rules = """
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle] { width: auto; margin: 0 .35em 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: inherit; vertical-align: baseline; }
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-tree-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle] { width: auto; margin: 0 0 0 .5em; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
-    [data-htmxo-hierarchy] > tbody > tr > td:first-child > button[data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    [data-htmxo-hierarchy] > tbody > tr > td > button[data-htmxo-tree-toggle] { width: auto; margin: 0 .35em 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; line-height: inherit; vertical-align: baseline; }
+    [data-htmxo-hierarchy] > tbody > tr > td > button[data-htmxo-tree-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    [data-htmxo-hierarchy] > tbody > tr > td > button[data-htmxo-detail-toggle] { width: auto; margin: 0 0 0 .5em; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--pico-muted-color, inherit); font: inherit; line-height: inherit; vertical-align: baseline; }
+    [data-htmxo-hierarchy] > tbody > tr > td > button[data-htmxo-detail-toggle]:focus-visible { outline: 2px solid var(--pico-primary, Highlight); outline-offset: .1em; }
+    [data-htmxo-group-columns] td > * + [data-htmxo-fold-summary] { margin-inline-start: .5em; }
     [data-htmxo-hierarchy] > tbody > tr[hidden] { display: none !important; }
     .htmxo-tree-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 calc(var(--pico-spacing, 1rem) / 2); }
     .htmxo-tree-controls > button { width: auto; margin: 0; padding: .15em .7em; font-size: .875em; }
@@ -397,4 +421,112 @@ function _master_detail_table(headers, items;
         _selectable_table(searched, rows, selectable; form=select_form, texts, sticky, toolbar=!scaffold,
             columns=scaffold ? nothing : menu) :
         scaffold || isnothing(menu) ? searched : _with_column_menu(searched, menu), texts)
+end
+
+function _cached_group_master(master)
+    rows = IdDict{Any,Any}()
+    item -> get!(() -> master(item), rows, item)
+end
+
+# Resolve a label in logical column coordinates, including cells spanning
+# several columns. Sort keys and help text are not the displayed label.
+function _column_group_key(row, column, texts)
+    cells, _ = _md_master_row(row, texts)
+    cell = _cell_in_column(cells, column; covering=true)
+    isnothing(cell) && throw(ArgumentError("groupings: master row has no cell for column $column"))
+    strip(replace(sprint(_text_content!, cell), r"\s+" => " "))
+end
+
+function _cell_in_column(cells, column; covering=false)
+    at = 1
+    for cell in cells
+        _is_cell(cell) || continue
+        at == column && return cell
+        at += _cell_span(cell)
+        at > column && return covering ? cell : nothing
+    end
+    nothing
+end
+
+_group_export_store(rows) = html_only(h.template(h.table(h.tbody(rows)); data_htmxo_export_leaves=""))
+
+function _group_export_rows(headers, items, key, master, master_attrs, texts, kwargs)
+    order = get(kwargs, :default_sort, nothing)
+    relative = _relative_spec(get(kwargs, :relative_to, nothing), headers, get(kwargs, :header_groups, nothing))
+    sort_columns = [(i, last.(hdr.sort_keys)) for (i, hdr) in enumerate(headers) if _computed_sort_keys(hdr)]
+    rows = map(enumerate(items)) do (i, item)
+        cells, attrs = _md_master_row(master(item), texts)
+        _md_sort_values!(cells, sort_columns, item, headers)
+        isnothing(relative) || isnothing(relative.comparable) || _relative_compare_cells!(cells, relative, item)
+        h.tr(cells; master_attrs(item)..., attrs..., data_htmxo_leaf=string(key(item)), data_htmxo_leaf_order=i)
+    end
+    rows = _relative_rows(rows, relative, texts)
+    isnothing(order) && return rows
+    table_headers = _interval_headers(headers, _interval_columns(rows), texts)
+    _default_sort_rows(rows, _resolve_default_sort(order, table_headers), table_headers; hierarchy=false)
+end
+
+# The plain projection has one row per item and CSV's three exact fields
+# for an interval. Other cells retain their Markdown (links, emphasis, etc.).
+function _group_export_table(names, rows, intervals, hidden, texts)
+    headers = Node[]
+    for (i, name) in enumerate(names)
+        i in hidden && continue
+        push!(headers, h.th(name))
+        i in intervals && append!(headers, [h.th(name * " / " * t) for t in (texts.sort_lower, texts.sort_upper)])
+    end
+    body = map(rows) do row
+        cells = Node[]
+        at = 1
+        for cell in _row_cells(row)
+            span = _cell_span(cell)
+            shown = [c for c in at:at+span-1 if !(c in hidden)]
+            for (j, c) in enumerate(shown)
+                exact = j == 1 ? _node_attr(cell, "data-htmxo-interval") : nothing
+                value = j == 1 ? HTMX.children(cell) : ()
+                if c in intervals && !isnothing(exact)
+                    append!(cells, [h.td(v) for v in JSON.parse(exact)])
+                else
+                    push!(cells, h.td(value))
+                    c in intervals && append!(cells, (h.td(""), h.td("")))
+                end
+            end
+            at += span
+        end
+        h.tr(cells)
+    end
+    h.table(h.thead(h.tr(headers)), h.tbody(body))
+end
+
+function _group_hidden_columns(hidden, folded, n)
+    isempty(folded) && return hidden
+    off = sort!(union(hidden, folded))
+    # Keep a leaf cell when every available column is itself a level.
+    length(off) == n && deleteat!(off, findlast(c -> !(c in hidden), off))
+    off
+end
+
+# A heading or disclosure from a folded cell travels with the first visible
+# cell. Its original cell index lets a browser regroup put the same node back.
+function _place_fold_controls!(cells)
+    shown = findfirst(c -> _is_cell(c) && isnothing(_node_attr(c, "data-htmxo-column-hidden")), cells)
+    isnothing(shown) && return cells
+    moved = Any[]
+    summaries = Any[]
+    for (i, cell) in enumerate(cells)
+        _is_cell(cell) && !isnothing(_node_attr(cell, "data-htmxo-column-hidden")) || continue
+        kids = HTMX.children(cell)
+        portable(k) = !isnothing(_node_attr(k, "data-htmxo-fold-from"))
+        any(portable, kids) || continue
+        for child in filter(portable, kids)
+            target = isnothing(_node_attr(child, "data-htmxo-fold-summary")) ? moved : summaries
+            push!(target, child)
+        end
+        cells[i] = Node(HTMX.tag(cell), HTMX.attrs(cell), filter(!portable, kids))
+    end
+    if !(isempty(moved) && isempty(summaries))
+        cell = cells[shown]
+        cells[shown] = Node(HTMX.tag(cell), HTMX.attrs(cell), Any[moved..., HTMX.children(cell)..., summaries...])
+    end
+    cells
 end

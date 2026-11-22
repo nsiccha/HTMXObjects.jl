@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.197
+
+- A column name in `master_detail_table`'s `groupings` folds that column
+  into its group headings while the level is active. CSV and plain Markdown
+  keep one flat row per item, including exact interval estimates and bounds.
+
 ## 0.1.196
 
 - Editable `Records` card names stay beside Include when they fit. Longer
