@@ -184,7 +184,12 @@ HTML(markup)
 A field error keeps its card checked and editable. Its Include box uses no
 series colour. Fixing the field restores its colour and checked value. The
 one-based `index` in both lists counts unchecked cards too. Throwing a returned
-`fault` addresses the original field (for example `samples.3.code`). A check
-that fails on a shared input, or raises a server exception, propagates that
-error. Field conversion and declared option domains run before the check.
-Ordinary iteration over `samples` still yields every enabled entry.
+`fault` addresses the original field (for example `samples.3.code`).
+
+From 0.1.198, if the check needs a missing or invalid shared input, the
+editor opens with the enabled cards coloured in order. `record_faults` is
+empty and `checked_records` raises the original request error. A reader can
+correct the shared input on the page. If a card field's default, options, or
+relevance also need that input, the editor keeps its submitted value until
+the field can be drawn again. Operations still require typed field values,
+and unexpected exceptions still surface when the list is resolved.

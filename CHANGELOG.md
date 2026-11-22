@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.198
+
+- A shared input error leaves the `Records` editor open and preserves submitted
+  card fields. `checked_records` raises the original error when an operation
+  needs the checked values. Field conversion errors still reach operations
+  that read the list directly.
+
 ## 0.1.197
 
 - A column name in `master_detail_table`'s `groupings` folds that column
