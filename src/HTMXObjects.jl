@@ -15955,9 +15955,10 @@ function _declared_input_domain(obj, input, domain, values)
     isdefined(DynamicObjects, :property_options) || return nothing
     source = obj
     declared = try
-        source = _declared_domain_object(obj, domain, values)
-        Base.invokelatest(
-            getproperty(DynamicObjects, :property_options), source, input.name)
+        _with_recovered_choices(obj, values) do view
+            source = _declared_domain_object(view, domain, values)
+            Base.invokelatest(getproperty(DynamicObjects, :property_options), source, input.name)
+        end
     catch err
         fields = get(values, :__htmxo_record_fields__, nothing)
         fields !== nothing && _shared_record_fault(unwrap_error(err), fields) && rethrow()
@@ -33381,6 +33382,31 @@ function _semantic_dependency_value(values, name)
     get(get(values, _SEMANTIC_CHOICE_DEFAULTS, (;)), name, values[name])
 end
 
+# A form can recover a stale choice even when a property several steps inside
+# another control's domain or visibility reads it from the original request.
+# Draw that control with the recovered value. Operations use the original object.
+function _with_recovered_choices(draw, obj, values)
+    haskey(values, _SEMANTIC_DOMAINS) || return draw(obj)
+    recovered = ()
+    while true
+        try
+            return draw(obj)
+        catch err
+            cause = unwrap_error(err)
+            cause isa InvalidDomainValue || rethrow()
+            name = cause.name
+            name in recovered && rethrow()
+            hasproperty(obj, name) || rethrow()
+            _semantic_resolve_pending!(values, name)
+            haskey(values[_SEMANTIC_DOMAINS], name) && haskey(values, name) || rethrow()
+            replacement = _semantic_dependency_value(values, name)
+            (isnothing(replacement) || replacement === _NO_DEFAULT) && rethrow()
+            obj = Base.invokelatest(DynamicObjects.remake, obj; name => replacement)
+            recovered = (recovered..., name)
+        end
+    end
+end
+
 # Expressions and bare identifiers need the declaring struct's property to
 # evaluate them. Runtime descriptors mark quoted Symbol defaults as literal
 # (`_with_default_reads`), preserving their ordinary form submission behavior.
@@ -34266,7 +34292,7 @@ function _semantic_control(obj, owner, param, values;
     param.name in _semantic_follows(values) &&
         (control = _with_field_attr(control, param.name, _FOLLOWS_ATTR, ""))
     control = _with_reset_attr(control, param)
-    _relevance_wrapped(control, obj, param)
+    _relevance_wrapped(control, obj, param, values)
 end
 
 _with_reset_attr(control, param) = haskey(param, :resets) ?
@@ -34494,10 +34520,12 @@ end
 
 # Whether the `@param` `name` applies in the request `obj` answers; `true` for
 # one without a `@relevant` condition.
-function _param_relevant(obj, name::Symbol)
+function _param_relevant(obj, name::Symbol, values=(;))
     source = _relevance_source(obj, name)
     source === nothing && return true
-    _checked_relevance(getproperty(source.object, _relevance_property(name)), name)
+    _with_recovered_choices(source.object, values) do view
+        _checked_relevance(getproperty(view, _relevance_property(name)), name)
+    end
 end
 
 # A control of a `@relevant` input, shown while its condition holds: hidden
@@ -34506,10 +34534,10 @@ end
 # condition the browser cannot evaluate re-renders the control from the
 # server instead, when an input it reads changes
 # (`_semantic_param_dependencies`).
-function _relevance_wrapped(control, obj, param)
+function _relevance_wrapped(control, obj, param, values)
     relevance = get(param, :relevance, nothing)
     relevance === nothing && return control
-    hidden_attrs = _param_relevant(obj, param.name) ? (;) : (; hidden=true)
+    hidden_attrs = _param_relevant(obj, param.name, values) ? (;) : (; hidden=true)
     client_attrs = isnothing(relevance.client) ? (;) :
         (; data_show_when=_schema_json(relevance.client))
     h.div(control; class="htmxo-relevant", data_htmxo_relevant=string(param.name),
@@ -36307,7 +36335,7 @@ function _semantic_follow_url(target, obj, route, current, names)
             end
             continue
         end
-        _param_relevant(obj, param.name) || continue
+        _param_relevant(obj, param.name, current) || continue
         # An input that follows its computed default is not sent, as the page
         # sends it (`semantic_follow_script`).
         param.name in _semantic_follows(current) && continue

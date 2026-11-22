@@ -7,7 +7,8 @@
 - A shared input error leaves the `Records` editor open and preserves submitted
   card fields. `checked_records` raises the original error when an operation
   needs the checked values. Field conversion errors still reach operations
-  that read the list directly.
+  that read the list directly. A form uses its recovered choice when drawing
+  another control whose options or visibility depend on that choice.
 
 ## 0.1.197
 
