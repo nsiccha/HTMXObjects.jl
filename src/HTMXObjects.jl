@@ -19693,6 +19693,7 @@ _ReflectCache() = _ReflectCache(Dict{Tuple{Type,Symbol},Any}(),
 
 _reflect_local_param(cache::_ReflectCache, T, nm) =
     get!(() -> _reflect_local_param(T, nm), cache.local_params, (T, nm))
+_reflect_local_param(::Nothing, T, nm) = _reflect_local_param(T, nm)
 
 # Build param descriptors for every `@param` of `OwnerT` (`_param_names`
 # includes names inherited from ancestors). A locally-declared param is read
@@ -20548,13 +20549,13 @@ prewarm_workload!(root; kwargs...) = _prewarm_workload!(root, nothing; kwargs...
 prewarm_workload!(streams::Function, root; kwargs...) =
     _prewarm_workload!(root, streams; kwargs...)
 
-function _semantic_request_context_param(param, SourceT)
-    _reflect_local_param(SourceT, param.name) === nothing && return nothing
+function _semantic_request_context_param(param, SourceT, cache=nothing)
     descriptor = _property_descriptor(SourceT, param.name)
     descriptor === nothing && return nothing
     domain = get(descriptor, :domain, nothing)
     domain === nothing && return nothing
     get(domain, :kind, :unrestricted) === :declared || return nothing
+    _reflect_local_param(cache, SourceT, param.name) === nothing && return nothing
     # A lowered @param property does not retain its output annotation in its
     # domain descriptor. Its request parameter still knows the container type.
     domain = merge(domain, (; multiple=get(domain, :multiple, false) || _vector_param(param.type)))
@@ -20566,7 +20567,7 @@ function _semantic_request_context_param(param, SourceT)
     ))
 end
 
-function _semantic_param(param, property, owner, parent_stack=Any[])
+function _semantic_param(param, property, owner, parent_stack, cache)
     if property !== nothing
         inputs = get(property, :inputs, NamedTuple[])
         input = findfirst(candidate -> candidate.name === param.name, inputs)
@@ -20577,7 +20578,7 @@ function _semantic_param(param, property, owner, parent_stack=Any[])
         end
     end
     for SourceT in (owner, Iterators.reverse(parent_stack)...)
-        promoted = _semantic_request_context_param(param, SourceT)
+        promoted = _semantic_request_context_param(param, SourceT, cache)
         promoted === nothing || return promoted
     end
     merge(param, (kind=nothing, domain=nothing))
@@ -20612,10 +20613,10 @@ function _semantic_context_params(property, verb::Symbol)
     [_semantic_context_param(input, verb) for input in _operation_context_inputs(property)]
 end
 
-function _semantic_route(owner, route, parent_stack=Any[])
+function _semantic_route(owner, route, parent_stack, cache)
     property = _property_descriptor(owner, route.name, route.verb)
     context_params = _semantic_context_params(property, route.verb)
-    route_params = [_semantic_param(param, property, owner, parent_stack)
+    route_params = [_semantic_param(param, property, owner, parent_stack, cache)
                     for param in route.params]
     context_names = Set(param.name for param in context_params)
     overlap = [param.name for param in route_params if param.name in context_names]
@@ -20719,12 +20720,11 @@ end
 # `_reflect_route` with the flat transport view, so a route cannot describe
 # itself one way in the graph and another way in `reflect`.
 function _nav_routes(T, path::AbstractString, parent_stack=Any[];
-                     enrich=(owner, route, parents) -> route)
+                     enrich=(owner, route, parents) -> route, cache=_ReflectCache())
     out = NamedTuple[]
     hasmethod(DynamicObjects.meta, Tuple{Type{T}}) || return out
     prefix = _nav_prefix_arg(path)
     origin = _node_origin(T)
-    cache = _ReflectCache()
     _walk_route_meta(T,
         (_name, _info, _nested) -> nothing,
         (name, info, method) -> begin
@@ -20773,7 +20773,8 @@ plain `struct` mounted somewhere in the tree.
 function _semantic_graph(T, name::Symbol=nameof(T), prefix::AbstractString="",
                          parent_stack=Any[];
                          indexed::Bool=false,
-                         selection::Vector{NamedTuple}=NamedTuple[])
+                         selection::Vector{NamedTuple}=NamedTuple[],
+                         cache=_ReflectCache())
     path = _nav_path(isempty(prefix) ? "" : "/" * prefix)
     is_dynamic = hasmethod(DynamicObjects.meta, Tuple{Type{T}})
     properties = is_dynamic ? _property_descriptors(T) : NamedTuple[]
@@ -20786,14 +20787,15 @@ function _semantic_graph(T, name::Symbol=nameof(T), prefix::AbstractString="",
                 push!(children, _semantic_graph(nested_type, child, nested_prefix,
                                                 push!(copy(parent_stack), T);
                                                 indexed=!isempty(child_selection),
-                                                selection=child_selection))
+                                                selection=child_selection, cache))
             end,
             (_name, _info, _method) -> nothing)
     end
     (; _nav_node(name, T, path; indexed, selection)...,
        properties,
        resources=_nav_resources(properties),
-       routes=_nav_routes(T, path, parent_stack; enrich=_semantic_route),
+       routes=_nav_routes(T, path, parent_stack; cache,
+           enrich=(owner, route, parents) -> _semantic_route(owner, route, parents, cache)),
        children)
 end
 
@@ -20826,13 +20828,15 @@ semantic_descriptor(obj) = semantic_descriptor(typeof(obj))
 
 function _build_semantic_descriptor(T)
     routes = NamedTuple[]
+    cache = _ReflectCache()
     # `_reflect_walk!` needs a route table to walk; `_semantic_graph` degrades to
     # an empty node on its own, so the non-`@htmx` case only has to skip the walk
     # — it must NOT hand back a differently-shaped hand-built graph, or a consumer
     # that handles the root uniformly breaks on exactly the degenerate input.
     hasmethod(DynamicObjects.meta, Tuple{Type{T}}) &&
-        _reflect_walk!(routes, T, ""; enrich=_semantic_route)
-    (type=T, graph=_semantic_graph(T), routes=routes)
+        _reflect_walk!(routes, T, ""; cache,
+            enrich=(owner, route, parents) -> _semantic_route(owner, route, parents, cache))
+    (type=T, graph=_semantic_graph(T; cache), routes=routes)
 end
 
 # --- Navigation ------------------------------------------------------------
@@ -34680,26 +34684,24 @@ _dependency_closure(T::Type, name::Symbol) = _dependency_closure(T, (name,))
 function _dependency_closure(T::Type, names; stop=())
     isdefined(DynamicObjects, :_semantic_dependency_closure) && return Base.invokelatest(
         getproperty(DynamicObjects, :_semantic_dependency_closure), T, Tuple(names))
-    isdefined(DynamicObjects, :metafirst) && isdefined(DynamicObjects, :meta) || return nothing
-    metafirst = getproperty(DynamicObjects, :metafirst)
-    meta = getproperty(DynamicObjects, :meta)
-    Base.invokelatest(applicable, meta, T) || return nothing
+    Base.invokelatest(applicable, DynamicObjects.meta, T) || return nothing
+    # The property index already holds DO's direct edges in declaration order.
+    # Re-reading meta(T) for each visited name rebuilds the whole table per edge.
+    index = _shared_property_index(T)
     closure = Set{Symbol}()
     pending = collect(Symbol, names)
     while !isempty(pending)
         current = pop!(pending)
         current in closure && continue
-        info = Base.invokelatest(metafirst, T, current)
-        info === nothing && continue
+        dependencies = get(index.dependencies, current, nothing)
+        dependencies === nothing && continue
         push!(closure, current)
         current in stop && continue
-        dependencies = get(info, :dependson, nothing)
-        dependencies === nothing && continue
         for dependency in dependencies
             dependency isa Symbol && push!(pending, dependency)
         end
     end
-    unique!(Symbol[n for (n, _) in Base.invokelatest(meta, T) if n in closure])
+    unique!(Symbol[d.name for d in index.descriptors if d.name in closure])
 end
 
 # The properties of `T` that hand `__self__` to other code, whose reads no
@@ -34895,7 +34897,12 @@ function _semantic_context_inputs(route, values)
         for node in _hidden_input(name, value)]
 end
 
-function _semantic_runtime_route(obj, route)
+function _semantic_runtime_param(obj, param)
+    _with_domain_reads(obj, _with_control(obj, _with_resets(obj,
+        _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param))))))
+end
+
+function _semantic_runtime_route(obj, route, param_cache=nothing)
     params = NamedTuple[route.params...]
     resolved_sources = Set{Symbol}()
     parent = hasproperty(obj, :__parent__) ? getproperty(obj, :__parent__) : nothing
@@ -34942,10 +34949,12 @@ function _semantic_runtime_route(obj, route)
         end
         parent = hasproperty(parent, :__parent__) ? getproperty(parent, :__parent__) : nothing
     end
-    merge(route, (params=NamedTuple[
-        _with_domain_reads(obj, _with_control(obj, _with_resets(obj,
-            _with_default_reads(obj, _with_help(obj, _with_relevance(obj, param))))))
-        for param in params],))
+    for i in eachindex(params)
+        param = params[i]
+        params[i] = isnothing(param_cache) ? _semantic_runtime_param(obj, param) :
+            get!(() -> _semantic_runtime_param(obj, param), param_cache, param)
+    end
+    merge(route, (; params))
 end
 
 # A mounted `@include` child resolves parent-supplied params through `__parent__`
@@ -37142,6 +37151,9 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     seen = Set{Tuple{Symbol,String}}()
     specs = Any[]
     selected = Int[]
+    # Routes of one mount often repeat the same input declaration. Only the
+    # form metadata is shared; values and options still resolve for each route.
+    mount_params = IdDict{Any,IdDict{NamedTuple,NamedTuple}}()
     for (index, route) in enumerate(descriptor.routes)
         identity = (route.verb, route.path)
         identity in seen && throw(ArgumentError(
@@ -37171,7 +37183,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         operation_values = _semantic_app_setting(values, base_entry)
         operation_submit = _semantic_app_setting(submit, base_entry)
         operation_submit_attrs = _semantic_app_setting(submit_attrs, base_entry)
-        runtime_route = _semantic_runtime_route(mounted, local_route)
+        param_cache = get!(IdDict{NamedTuple,NamedTuple}, mount_params, mounted)
+        runtime_route = _semantic_runtime_route(mounted, local_route, param_cache)
         presentation === :tabs && (runtime_route = _without_record_fields(mounted, runtime_route))
         current = _semantic_form_values(mounted, runtime_route, operation_values)
         push!(specs, (; base_entry, mounted, local_route, runtime_route,
