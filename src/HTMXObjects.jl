@@ -36427,11 +36427,56 @@ function _semantic_scoped_view(obj, scope::AbstractString)
     req isa HTTP.Request || return obj
     target = _semantic_scoped_target(req.target, scope)
     target === nothing && return obj
+    _semantic_request_view(obj, req, target)
+end
+
+function _semantic_request_view(obj, req, target)
     scoped = HTTP.Request(req.method, target, collect(req.headers), _request_body_bytes(req))
     # The field itself: HTTP 2's `req.context` is a view of it.
     setfield!(scoped, :context, getfield(req, :context))
-    Base.invokelatest(getproperty(DynamicObjects, :remount), obj;
-                      __req__=scoped, __param_request__=_param_request(scoped))
+    _semantic_request_view(obj, scoped)
+end
+
+function _semantic_request_view(obj, req)
+    parent = obj.__parent__
+    context = isnothing(parent) ? (;) : (; __parent__=_semantic_request_view(parent, req))
+    Base.invokelatest(DynamicObjects.remount, obj;
+                      __req__=req, __param_request__=_param_request(req), context...)
+end
+
+# Bind each recovered @param in the request used to draw this operation. All
+# derived properties, including per-record views, then read the same inputs.
+# The address itself stays available to the notice and to the browser.
+function _semantic_page_choice_view(obj, route, provided, query, views)
+    params = filter(route.params) do param
+        requested = get(query, string(param.name), nothing)
+        requested isa String && !isempty(requested) &&
+            get(param, :context_scope, nothing) === :request && _semantic_single_choice(param)
+    end
+    isempty(params) && return obj, (), ()
+    values = _semantic_values(provided)
+    for param in params
+        values[param.name] = query[string(param.name)]
+    end
+    recoveries = Set{Symbol}()
+    values[_SEMANTIC_ADDRESS_RECOVERIES] = recoveries
+    _semantic_normalize_choices!(obj, (; params), values)
+    filter!(name -> !isnothing(values[name]), recoveries)
+    isempty(recoveries) && return obj, (), ()
+    req = _req_of(obj)
+    effective = copy(query)
+    for name in recoveries
+        effective[string(name)] = _option_wire_string(values[name])
+    end
+    parts = String[]
+    for (key, value) in effective
+        _push_qparam!(parts, key, value)
+    end
+    target = first(_split_query(req.target)) * "?" * join(parts, '&')
+    view = get!(get!(Dict{String,Any}, views, obj), target) do
+        _semantic_request_view(obj, req, target)
+    end
+    view, recoveries, _semantic_follows(values)
 end
 
 # The value the page's address gives the input `param` of `obj`'s route, or
@@ -36464,7 +36509,7 @@ end
 function _semantic_address_current(obj, route, current, names)
     current = copy(current)
     current[_SEMANTIC_FOLLOWS] = Set{Symbol}(_semantic_follows(current))
-    current[_SEMANTIC_ADDRESS_RECOVERIES] = Set{Symbol}()
+    current[_SEMANTIC_ADDRESS_RECOVERIES] = Set{Symbol}(get(current, _SEMANTIC_ADDRESS_RECOVERIES, ()))
     for param in route.params
         _semantic_address_input(param) || continue
         isnothing(names) || param.name in names || continue
@@ -36638,7 +36683,7 @@ shows the values it names, and the script writes the inputs into it. With
 `reset`, a Reset button returns every one of those inputs to its default.
 `result_height` supplies one bound or a map keyed by the generated tab names.
 """
-function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
+function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active, query,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
         reset::Bool=true, sections=InputSection[], place=nothing,
         report_states=_ReportState[], url_scope::AbstractString="", result_height=:window)
@@ -36743,8 +36788,6 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     sidebar_defaults = _semantic_address_attrs(defaults,
         [entry.param for entry in context_entries]; key=defaults_key, scope=url_scope)
     notices = Any[]
-    req = _req_of(obj)
-    query = url_state && req isa HTTP.Request ? queryparams(req) : Dict{String,String}()
     texts = _error_texts(obj)
     if url_state
         for entry in context_entries
@@ -37200,6 +37243,10 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     # (`first.rate`) before the plain name.
     url_scope = presentation === :tabs ? _semantic_url_scope(obj) : ""
     obj = _semantic_scoped_view(obj, url_scope)
+    req = _req_of(obj)
+    address = presentation === :tabs && something(url_state, true) && req isa HTTP.Request ?
+        queryparams(req) : Dict{String,String}()
+    choice_views = IdDict{Any,Dict{String,Any}}()
     descriptor = _shared_semantic_descriptor(typeof(obj))
     root_prefix = hasproperty(obj, :__prefix__) ? getproperty(obj, :__prefix__) : ""
     mounts = Dict{Tuple{Any,String},Any}()
@@ -37242,8 +37289,15 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         operation_submit_attrs = _semantic_app_setting(submit_attrs, base_entry)
         param_cache = get!(IdDict{NamedTuple,NamedTuple}, mount_params, mounted)
         runtime_route = _semantic_runtime_route(mounted, local_route, param_cache)
+        mounted, recovered, following = isempty(address) || req.method != "GET" ? (mounted, (), ()) :
+            _semantic_page_choice_view(mounted, runtime_route, operation_values, address, choice_views)
         presentation === :tabs && (runtime_route = _without_record_fields(mounted, runtime_route))
         current = _semantic_form_values(mounted, runtime_route, operation_values)
+        if !isempty(recovered)
+            current[_SEMANTIC_ADDRESS_RECOVERIES] = recovered
+            union!(current[_SEMANTIC_FOLLOWS], following)
+            base_entry = merge(base_entry, (; object=mounted))
+        end
         push!(specs, (; base_entry, mounted, local_route, runtime_route,
                        current, operation_values, operation_submit, operation_submit_attrs))
     end
@@ -37253,7 +37307,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
         reset=something(reset, true), sections=input_sections, place, report_states=states,
-        url_scope, result_height, render_operation=render_operation === _default_semantic_operation ?
+        url_scope, result_height, query=address, render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
 

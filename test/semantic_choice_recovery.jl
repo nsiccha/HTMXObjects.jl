@@ -55,6 +55,61 @@ end
     @test !contains(page("fit=b"), "is unavailable for Fit model.")
 end
 
+@testitem "a recovered address choice supplies the whole form" tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP
+    @htmx struct FitPage
+        fits = ["alpha", "beta"]
+        "Fit"
+        @param fit::String = first(fits)
+        @options(fit) = fits
+        profile = fit == "alpha" ? (dose=60, group="A") : (dose=80, group="B")
+        @param dose::Int = profile.dose
+        @help(dose) = "Current dose: $dose"
+        @param group::String = profile.group
+        @options(group) = [profile.group, "other"]
+        @param note::String = ""
+        @relevant(note) = profile.dose > 60
+        @param cards::Records = Records(:group, :note)
+        @get result() = h.p(fit, dose, first(cards).group)
+        @get second() = h.p(fit, length(cards))
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index)
+    end
+    route!(FitPage(); operation_policy=:blocking)
+    function page(query)
+        response = dispatch(:GET, "/?" * query; headers=["HX-Request" => "true"])
+        @test response.status == 200
+        String(response.body)
+    end
+    for (query, dose, group) in [("fit=alpha", 60, "A"), ("fit=gone", 60, "A"),
+                                  ("fit=beta", 80, "B"), ("fit=gone&dose=31&cards.1.group=other", 31, "other")]
+        form = page(query)
+        @test occursin(Regex("name=\"dose\"[^>]* value=\"$dose\""), form)
+        @test contains(form, "Current dose: $dose")
+        @test contains(form, "name=\"cards.1.group\" value=\"$group\" checked=\"true\"")
+        note = match(r"<div[^>]*data-htmxo-relevant=\"cards.1.note\"[^>]*>", form)
+        @test !isnothing(note) && occursin("hidden=", note.match) == !endswith(query, "beta")
+        @test count("“gone” is unavailable for Fit. Showing “alpha”.", form) == startswith(query, "fit=gone")
+    end
+    rejected = dispatch(:GET, "/result?fit=gone")
+    @test rejected.status == 400
+    @test HTTP.header(rejected, "X-HTMXO-Error-Param") == "fit"
+
+    @htmx struct MountedFits
+        "Fit"
+        @param fit::String = "alpha"
+        @options(fit) = ["alpha", "beta"]
+        @include child = begin
+            @param dose::Int = fit == "alpha" ? 60 : 80
+            @get result() = h.p(fit, dose)
+        end
+        @get index() = semantic_app(child; presentation=:tabs)
+    end
+    route!(MountedFits(); operation_policy=:blocking)
+    scoped = page("fit=beta&child.fit=gone")
+    @test occursin(r"name=\"dose\"[^>]* value=\"60\"", scoped)
+    @test contains(scoped, "“gone” is unavailable for Fit. Showing “alpha”.")
+end
+
 @testitem "empty choices preserve typed defaults read by dependent relevance" tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP
     using HTMXObjects.DynamicObjects: option_domain
@@ -216,8 +271,9 @@ end
             "Dose (mg)"
             @param dose::Float64 = 60.0
             @options(dose) = [60.0, 80.0]
+            @param doses::String = fit == "alpha" ? "10, 25, 45, 80" : "20, 40"
             "Time course"
-            @get timecourse() = h.p("timecourse:", fit, ":", dose; class="result")
+            @get timecourse() = h.p("timecourse:", fit, ":", dose; class="result", data_doses=doses)
             @get index() = semantic_app(__self__; presentation=:tabs,
                                         select=entry -> entry.name !== :index)
         end
@@ -246,6 +302,7 @@ end
             await sleep(500);
             out.shown = shown().trim();
             out.checked = checked();
+            out.doses = document.querySelector('input[name="doses"]').value;
             out.notice = notices();
             out.address = new URLSearchParams(location.search).get('fit');
             // The reader's own choice still reaches the result and the address.
@@ -308,6 +365,7 @@ end
         outcome, asked = visit("/?fit=beta&tab=timecourse")
         @test get(outcome, "error", "") == ""
         @test get(outcome, "checked", nothing) == "beta"
+        @test get(outcome, "doses", nothing) == "20, 40"
         @test get(outcome, "shown", nothing) == "timecourse:beta:60.0"
         @test get(outcome, "notice", nothing) == ""
 
@@ -323,6 +381,7 @@ end
             local outcome, asked = visit("/?fit=$stale&tab=timecourse"; snapshot)
             @test get(outcome, "error", "") == ""
             @test get(outcome, "checked", nothing) == "alpha"
+            @test get(outcome, "doses", nothing) == "10, 25, 45, 80"
             @test get(outcome, "shown", nothing) == "timecourse:alpha:60.0"
             @test get(outcome, "notice", nothing) == "“$(stale)” is unavailable for Fit. Showing “Alpha fit”."
             @test get(outcome, "address", nothing) == stale
