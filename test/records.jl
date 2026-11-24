@@ -460,7 +460,7 @@ end
     # The fold control comes first in the head and names the card's fields;
     # the summary a folded card shows is (empty) after the label.
     @test contains(sidebar, "<div class=\"htmxo-record-head\"><button type=\"button\" class=\"htmxo-record-fold\" aria-expanded=\"true\" aria-controls=\"htmxo-record-fields--scenarios-1\" aria-label=\"Fields\" title=\"Fields\" data-htmxo-record-action=\"fold\"></button><input type=\"hidden\" name=\"scenarios.1.on\"")
-    @test contains(sidebar, "</textarea></span><span class=\"htmxo-record-summary\"></span><button type=\"button\" class=\"outline secondary\" data-htmxo-record-action=\"duplicate\">")
+    @test contains(sidebar, "</textarea></span><span class=\"htmxo-record-summary\"></span><span class=\"htmxo-record-actions\">")
     @test contains(sidebar, "</div><div id=\"htmxo-record-fields--scenarios-1\" class=\"htmxo-input-section-fields\">")
     @test contains(sidebar, "data-htmxo-record-action=\"add\">Add Scenario</button>")
     # Its fields as their own controls are, `@relevant` included, renamed for
@@ -669,6 +669,20 @@ end
           }
           const checks = {};
           checks.sidebar = form.offsetWidth === 350 && !!getComputedStyle(form).getPropertyValue('--pico-font-family');
+          const duplicate = card.querySelector('[data-htmxo-record-action="duplicate"]');
+          const remove = card.querySelector('[data-htmxo-record-action="remove"]');
+          type(regimen, '100% q 24 x 14');
+          checks.actionsTogether = true;
+          for (let width = 192; width <= 640; width += 8) {
+            form.style.width = width + 'px';
+            const first = duplicate.getBoundingClientRect(), second = remove.getBoundingClientRect();
+            const head = card.querySelector('.htmxo-record-head').getBoundingClientRect();
+            checks.actionsTogether &&= first.width > 0 && second.width > 0 && first.top === second.top &&
+              first.right <= second.left && second.right <= head.right + 1;
+            if (width === 304) checks.actionsBelow = first.top >= name.getBoundingClientRect().bottom;
+            if (width === 640) checks.actionsBeside = first.top < name.getBoundingClientRect().bottom;
+          }
+          form.style.width = '350px';
           for (const state of ['open', 'folded']) {
             if (state === 'folded') fold.click();
             type(regimen, 'Daily');
@@ -693,6 +707,9 @@ end
         });
         """; pico=true)
         @test get(outcome, "sidebar", "missing") == "true"
+        for key in ("actionsTogether", "actionsBelow", "actionsBeside")
+            @test (key => get(outcome, key, "missing")) == (key => "true")
+        end
         @test get(outcome, "singleLine", "missing") == "true"
         for state in ("open", "folded"), check in ("short", "long", "wrap", "automatic")
             key = "$state-$check"
@@ -725,7 +742,7 @@ end
           // The summary's text, its separators' no-break spaces as spaces.
           const text = c => line(c).textContent.replace(/\u00a0/g, ' ');
           const fieldsOf = c => c.querySelector('.htmxo-input-section-fields');
-          const shown = el => getComputedStyle(el).display !== 'none';
+          const shown = el => el.getClientRects().length > 0;
           const actions = c => Array.from(c.querySelectorAll('[data-htmxo-record-action="duplicate"], [data-htmxo-record-action="remove"]'));
           const isOpen = c => !c.hasAttribute('data-htmxo-folded') && toggle(c).getAttribute('aria-expanded') === 'true' &&
             shown(fieldsOf(c)) && !shown(line(c)) && actions(c).every(shown) &&
