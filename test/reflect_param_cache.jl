@@ -31,6 +31,33 @@ using TestItemRunner
     end
 end
 
+@testitem "semantic dependency walks use the first declaration and stop at supplied inputs" tags=[:unit, :semantic] begin
+    using HTMXObjects
+    import HTMXObjects: _dependency_closure
+
+    @htmx struct DependencyPage
+        first_input::Int
+        second_input::Int
+        intermediate = first_input + 1
+        @get result() = intermediate
+        @post result() = second_input
+    end
+
+    # GET and POST share a name but have different direct reads. A dependency
+    # walk follows the first declaration and returns names in declaration order.
+    expected = [:first_input, :intermediate, :result]
+    @test _dependency_closure(DependencyPage, :result) == expected
+    @test _dependency_closure(DependencyPage, (:absent, :result); stop=(:intermediate,)) ==
+        [:intermediate, :result]
+    @test isempty(_dependency_closure(DependencyPage, :absent))
+
+    # Editing the public description cannot redirect the inputs a form tracks.
+    page = semantic_descriptor(DependencyPage)
+    get_route = only(r for r in page.routes if r.name === :result && r.verb === :GET)
+    empty!(get_route.property.dependencies)
+    @test _dependency_closure(DependencyPage, :result) == expected
+end
+
 @testitem "reflect - cached inherited params keep each route's own answer" setup=[ReflectCacheFixtures] tags=[:unit] begin
     using HTMXObjects
     routes = HTMXObjects.reflect(RCRoot)

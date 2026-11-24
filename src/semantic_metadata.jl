@@ -2,6 +2,7 @@ struct _PropertyDescriptorIndex
     descriptors::Vector{NamedTuple}
     names::Dict{Symbol,NamedTuple}
     verbs::Dict{Tuple{Symbol,DataType},NamedTuple}
+    dependencies::Dict{Symbol,Vector{Symbol}}
 end
 
 const _property_descriptors_memo = _WorldMemo{_PropertyDescriptorIndex}()
@@ -20,7 +21,10 @@ _shared_property_index(T) = _world_memo!(_property_descriptors_memo, T) do
                 get!(verbs, (descriptor.name, type), descriptor)
         end
     end
-    _PropertyDescriptorIndex(descriptors, names, verbs)
+    # Consumers can edit the vectors in a public descriptor. Keep the direct
+    # edges that form controls depend on private to this index.
+    dependencies = Dict(name => copy(d.dependencies) for (name, d) in names)
+    _PropertyDescriptorIndex(descriptors, names, verbs, dependencies)
 end
 
 _shared_property_descriptors(T) = _shared_property_index(T).descriptors
