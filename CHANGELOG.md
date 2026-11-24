@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.200
+
+- When a link to a `semantic_app` tabs page names a removed or disabled
+  single choice, the page explains which option its controls and results use.
+  If there is no enabled default, the notice says the input has no selection.
+  Static pages can also explain an unavailable choice when opened from a link.
+
 ## 0.1.199
 
 - A shared input error leaves the `Records` editor open and preserves submitted

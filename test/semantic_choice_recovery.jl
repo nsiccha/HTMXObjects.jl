@@ -33,12 +33,35 @@ using TestItemRunner
     end
 end
 
+@testitem "a tabs page explains each unavailable address choice once" tags=[:unit, :semantic] begin
+    using HTMXObjects
+    @htmx struct SharedChoices
+        "Fit model"
+        @param fit::String = "a"
+        @options(fit) = ["a", "b"]
+        "Scale"
+        @param scale::Int = 3
+        @options(scale) = [1, 3]
+        @get first_result() = h.p(fit, scale)
+        @get second_result() = h.p(fit, scale)
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index)
+    end
+    route!(SharedChoices(); operation_policy=:blocking)
+    page(query) = String(dispatch(:GET, "/?" * query).body)
+    stale = page("fit=old&scale=7")
+    @test count("“old” is unavailable for Fit model. Showing “a”.", stale) == 1
+    @test count("“7” is unavailable for Scale. Showing “3”.", stale) == 1
+    @test !contains(page("fit=&scale=03"), "is unavailable for Scale.")
+    @test !contains(page("fit=b"), "is unavailable for Fit model.")
+end
+
 @testitem "empty choices preserve typed defaults read by dependent relevance" tags=[:unit, :semantic] begin
     using HTMXObjects, HTTP
     using HTMXObjects.DynamicObjects: option_domain
 
     @htmx struct EmptyChoicesPage
         available::Vector{String}
+        "Choice"
         @param choice::String = isempty(available) ? "" : first(available)
         @options(choice) = option_domain([
             (; value=name, label=name, columns=(Name=name,)) for name in available])
@@ -72,6 +95,10 @@ end
         stale_form = String(stale.body)
         @test contains(stale_form, "htmxo-semantic-page")
         @test contains(stale_form, "value=\"one-detail\" checked=\"true\"") == !isempty(available)
+        @test contains(stale_form, isempty(available) ?
+            "“gone” is unavailable for Choice. No option is selected." :
+            "“gone” is unavailable for Choice. Showing “one”.")
+        @test !contains(html, "“gone” is unavailable")
         rejected = dispatch(:GET, "/result?choice=gone")
         @test rejected.status == 400
         @test HTTP.header(rejected, "X-HTMXO-Error-Param") == "choice"
@@ -184,9 +211,11 @@ end
             fits = ["alpha", "beta"]
             "Fit"
             @param fit::String = isempty(fits) ? "" : first(fits)
-            @options(fit) = option_domain(fits)
+            @options(fit) = option_domain([(; value="alpha", label="Alpha fit"),
+                (; value="beta", label="Beta fit"), (; value="retired", label="Retired fit", disabled=true)])
             "Dose (mg)"
             @param dose::Float64 = 60.0
+            @options(dose) = [60.0, 80.0]
             "Time course"
             @get timecourse() = h.p("timecourse:", fit, ":", dose; class="result")
             @get index() = semantic_app(__self__; presentation=:tabs,
@@ -209,17 +238,22 @@ end
           }
           const shown = () => (document.querySelector('[data-htmxo-follow^="/timecourse"]') || {}).textContent || '';
           const checked = () => Array.from(document.querySelectorAll('input[name="fit"]:checked'), i => i.value).join('|');
+          const notices = () => Array.from(document.querySelectorAll('[data-htmxo-choice-message]:not([hidden])'),
+            p => p.textContent).join('|');
           const out = {};
           try {
             await until(() => shown().includes('timecourse:'), 'first result');
             await sleep(500);
             out.shown = shown().trim();
             out.checked = checked();
+            out.notice = notices();
+            out.address = new URLSearchParams(location.search).get('fit');
             // The reader's own choice still reaches the result and the address.
             document.querySelector('input[name="fit"][value="beta"]').click();
             await until(() => shown().includes('timecourse:beta'), 'beta');
             await until(() => new URLSearchParams(location.search).get('fit') === 'beta', 'address');
             out.picked = checked();
+            out.afterPick = notices();
           } catch (error) { out.error = String(error); }
           fetch('/complete?' + new URLSearchParams(Object.entries(out)));
         }, {once: true});
@@ -229,15 +263,17 @@ end
             assets="/test-assets", sse_version=nothing, ws_version=nothing,
             preload_version=nothing, pico_version=nothing,
             feedback=false, compose=false, overlay=false))
-        function visit(address)
+        function visit(address; snapshot=false)
             receipt = Channel{String}(1)
             asked = String[]
+            saved_page = snapshot ? render("/") : nothing
             socket = listen(Sockets.localhost, 0)
             port = Int(getsockname(socket)[2])
             close(socket)
             server = HTTP.serve!("127.0.0.1", port; verbose=false) do req
                 path = HTTP.URI(req.target).path
-                path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"], render(req.target))
+                path == "/" && return HTTP.Response(200, ["Content-Type" => "text/html"],
+                    snapshot ? saved_page : render(req.target))
                 haskey(assets, path) &&
                     return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
                 path == "/favicon.ico" && return HTTP.Response(204)
@@ -273,14 +309,26 @@ end
         @test get(outcome, "error", "") == ""
         @test get(outcome, "checked", nothing) == "beta"
         @test get(outcome, "shown", nothing) == "timecourse:beta:60.0"
+        @test get(outcome, "notice", nothing) == ""
+
+        # A snapshot accepts another spelling of an offered numeric option.
+        outcome, _ = visit("/?fit=beta&dose=080&tab=timecourse"; snapshot=true)
+        @test get(outcome, "error", "") == ""
+        @test get(outcome, "shown", nothing) == "timecourse:beta:80.0"
+        @test get(outcome, "notice", nothing) == ""
 
         # A fit no longer offered: the control shows the default its result
         # uses, and the page asks for that result once.
-        outcome, asked = visit("/?fit=gone&tab=timecourse")
-        @test get(outcome, "error", "") == ""
-        @test get(outcome, "checked", nothing) == "alpha"
-        @test get(outcome, "shown", nothing) == "timecourse:alpha:60.0"
-        @test get(outcome, "picked", nothing) == "beta"
-        @test count(url -> !contains(url, "fit="), asked) == 1
+        for (stale, snapshot) in (("gone", false), ("retired", false), ("gone", true), ("retired", true))
+            local outcome, asked = visit("/?fit=$stale&tab=timecourse"; snapshot)
+            @test get(outcome, "error", "") == ""
+            @test get(outcome, "checked", nothing) == "alpha"
+            @test get(outcome, "shown", nothing) == "timecourse:alpha:60.0"
+            @test get(outcome, "notice", nothing) == "“$(stale)” is unavailable for Fit. Showing “Alpha fit”."
+            @test get(outcome, "address", nothing) == stale
+            @test get(outcome, "picked", nothing) == "beta"
+            @test get(outcome, "afterPick", nothing) == ""
+            @test count(url -> !contains(url, "fit="), asked) == 1
+        end
     end
 end
