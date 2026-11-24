@@ -14692,6 +14692,8 @@ struct ErrorTexts
     choice_search::String              # a long choice list's search field
     choice_no_match::String            # ... when no option matches the search
     choice_selected::String            # a multiple choice's selected count
+    choice_recovered::String           # a stale page address, with a default to show
+    choice_unselected::String          # a stale page address without an enabled default
     log_entry::String                  # a shown cause's log entry (`__show_error_cause__`)
     message_omitted::String            # ... a message too long for the page
     log_omitted::String                # ... a log entry too long for the page
@@ -14716,6 +14718,7 @@ const _ERROR_TEXT_PLACEHOLDERS = (
     result_unavailable_detail = (:verb, :route),
     stalled_detail = (:label, :elapsed, :bound), stalled_not_repeated = (:verb,),
     loading_named = (:label,), choice_selected = (:count,), log_entry = (:path,), message_omitted = (:size,),
+    choice_recovered = (:label, :asked, :shown), choice_unselected = (:label, :asked),
     log_omitted = (:size,), record_add = (:label,), record_copy = (:label,),
 )
 
@@ -14750,6 +14753,8 @@ const _ERROR_TEXT_LOCALES = (
         choice_search = "Search…",
         choice_no_match = "No matching option",
         choice_selected = "{count} selected",
+        choice_recovered = "“{asked}” is unavailable for {label}. Showing “{shown}”.",
+        choice_unselected = "“{asked}” is unavailable for {label}. No option is selected.",
         log_entry = "Log entry {path}",
         message_omitted = "The message is {size} long, too long for this page; the log entry holds it.",
         log_omitted = "The log entry is {size} long, too long for this page; open the file to read it.",
@@ -14796,6 +14801,8 @@ const _ERROR_TEXT_LOCALES = (
         choice_search = "Suchen…",
         choice_no_match = "Keine passende Auswahl",
         choice_selected = "{count} ausgewählt",
+        choice_recovered = "„{asked}“ ist für {label} nicht verfügbar. Angezeigt wird „{shown}“.",
+        choice_unselected = "„{asked}“ ist für {label} nicht verfügbar. Keine Option ist ausgewählt.",
         log_entry = "Protokolleintrag {path}",
         message_omitted = "Die Meldung ist {size} lang, zu lang für diese Seite; der Protokolleintrag enthält sie.",
         log_omitted = "Der Protokolleintrag ist {size} lang, zu lang für diese Seite; öffnen Sie die Datei, um ihn zu lesen.",
@@ -33360,6 +33367,7 @@ end
 const _SEMANTIC_FOLLOWS = :__htmxo_follows__
 const _SEMANTIC_DOMAINS = :__htmxo_domains__
 const _SEMANTIC_CHOICE_DEFAULTS = :__htmxo_choice_defaults__
+const _SEMANTIC_ADDRESS_RECOVERIES = :__htmxo_address_recoveries__
 const _SEMANTIC_PENDING = :__htmxo_pending_choices__
 const _FOLLOWS_ATTR = Symbol("data-htmxo-follows")
 
@@ -33658,6 +33666,8 @@ function _semantic_normalize_choice!(obj, param, values)
     domain === nothing && return nothing
     selected = _semantic_choice_value(domain, get(values, param.name, _NO_DEFAULT), param)
     if selected === _NO_DEFAULT
+        haskey(values, _SEMANTIC_ADDRESS_RECOVERIES) &&
+            push!(values[_SEMANTIC_ADDRESS_RECOVERIES], param.name)
         default = _semantic_choice_default(obj, param, values)
         selected = _semantic_choice_value(domain, default, param)
         selected === _NO_DEFAULT && (values[_SEMANTIC_CHOICE_DEFAULTS][param.name] = default)
@@ -36454,6 +36464,7 @@ end
 function _semantic_address_current(obj, route, current, names)
     current = copy(current)
     current[_SEMANTIC_FOLLOWS] = Set{Symbol}(_semantic_follows(current))
+    current[_SEMANTIC_ADDRESS_RECOVERIES] = Set{Symbol}()
     for param in route.params
         _semantic_address_input(param) || continue
         isnothing(names) || param.name in names || continue
@@ -36461,6 +36472,34 @@ function _semantic_address_current(obj, route, current, names)
         value === _NO_DEFAULT || (current[param.name] = value)
     end
     _semantic_normalize_choices!(obj, route, current)
+end
+
+# One status per drawn choice. Its form owns it even when place= draws the
+# control in another tab. A snapshot carries the same words and chosen label
+# so the browser can explain a link that the rendering request never saw.
+function _semantic_choice_notice!(notices, form_id, param, current, query, texts)
+    domain = get(current[_SEMANTIC_DOMAINS], param.name, nothing)
+    isnothing(domain) && return
+    get(domain, :kind, :unrestricted) in (:interval, :unrestricted) && return
+    options = domain.options
+    selected = current[param.name]
+    i = findfirst(o -> !get(o, :disabled, false) && isequal(o.value, selected), options)
+    template = isnothing(i) ? texts.choice_unselected : texts.choice_recovered
+    shown = isnothing(i) ? "" : string(options[i].label)
+    label = string(something(first(_doc_label_help(param.doc)), Long(param.name)))
+    asked = get(query, string(param.name), nothing)
+    stale = !isnothing(asked) && !isempty(asked) && param.name in current[_SEMANTIC_ADDRESS_RECOVERIES]
+    message = stale ? _fill_text(template; label, asked, shown) : ""
+    # A saved page can also match equivalent spellings of numeric options.
+    number = param.type isa Type && param.type <: Integer && param.type !== Bool ? "integer" :
+             param.type in (Float64, AbstractFloat, Real) ? "float" :
+             param.type === Float32 ? "float32" : nothing
+    push!(notices, h.p(message; id=string(form_id, "-choice-notice-", param.name), role="status",
+        data_htmxo_choice_message=template, data_label=label, data_shown=shown,
+        (isnothing(number) ? (;) : (; data_htmxo_choice_number=number))...,
+        (isempty(options) ? (; data_htmxo_empty_domain="") : (;))...,
+        (isnothing(asked) ? (;) : (; data_htmxo_requested=asked))...,
+        (stale ? (;) : (; hidden=""))...))
 end
 
 # What an input shows when the address names nothing: its `values=` entry,
@@ -36703,6 +36742,15 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     end
     sidebar_defaults = _semantic_address_attrs(defaults,
         [entry.param for entry in context_entries]; key=defaults_key, scope=url_scope)
+    notices = Any[]
+    req = _req_of(obj)
+    query = url_state && req isa HTTP.Request ? queryparams(req) : Dict{String,String}()
+    texts = _error_texts(obj)
+    if url_state
+        for entry in context_entries
+            _semantic_choice_notice!(notices, context_id, entry.param, entry.current, query, texts)
+        end
+    end
     sidebar_form = isempty(context_entries) ? nothing :
         h.form(_sectioned_controls(sidebar_fields, sidebar_sections)...;
                id=context_id, class="htmxo-semantic-context htmxo-semantic-sidebar",
@@ -36728,6 +36776,11 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 radio_max, sections, live=true)
             inputs_id = base.target_id * "-inputs"
             own_params = _operation_control_params(route, shared_names)
+            if url_state
+                for param in own_params
+                    _semantic_choice_notice!(notices, inputs_id, param, current, query, texts)
+                end
+            end
             own_defaults = _semantic_address_attrs(defaults, own_params; key=defaults_key,
                                                    scope=url_scope)
             form = isempty(own_params) ? nothing :
@@ -36802,7 +36855,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
     # all placed in tabs stays on the page as their owner (`parts.context`).
     parts = (; object=obj, title, id=page_id,
                sidebar=isempty(sidebar_entries) ? nothing : sidebar_form, context=sidebar_form,
-               reset=reset_button,
+               reset=reset_button, choice_notices=notices,
                tabs=Pair[entry.title => render_operation(entry) for entry in operations],
                tab_names=names, active=open, url_scope, operations)
     layout(parts)
@@ -36857,7 +36910,8 @@ function _default_semantic_tabs_layout(parts)
     else
         isnothing(parts.context) ? tabs : h.div(parts.context, tabs)
     end
-    h.section(heading..., body; id=parts.id, class="htmxo-semantic-app htmxo-semantic-page")
+    h.section(heading..., parts.choice_notices..., body;
+              id=parts.id, class="htmxo-semantic-app htmxo-semantic-page")
 end
 
 """
@@ -36918,7 +36972,10 @@ search, CSV, the keyboard row moves and hover linking work as on the page; the
 page's Markdown is unchanged. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
-reopens the same page; `url_state=false` keeps only the tab. A page that shows
+reopens the same page; `url_state=false` keeps only the tab. If a link requests
+a single choice that is no longer available, a notice above the tabs names
+the requested value and the option shown. A custom layout can place these
+notices with `parts.choice_notices...`. A page that shows
 several apps keeps each app's inputs and open tab under the app's address
 name, its mount path with dots: apps mounted at `/first` and `/second` that
 both have an input `rate` write `?first.rate=5&second.rate=9&first.tab=other`,
@@ -39679,7 +39736,9 @@ control is hidden) and one that shows its computed default are left out. Other p
 stay. The page shows the values its address names, so a reload or a shared
 link reopens the same inputs and results: the server applies them to a page
 it renders, and the script applies them to the controls when the page loads,
-which is what a static page (`export_site`) needs.
+which is what a static page (`export_site`) needs. A single choice the
+address names but its controls no longer offer keeps the choice the page
+drew: the default the server recovered for it, as its results use.
 
 On a page that shows apps of more than one address name (each form's
 `data-htmxo-url-scope`: the app's mount path with dots, empty for the root
@@ -40080,6 +40139,45 @@ semantic_follow_script() = h.script(Raw(raw"""
       if ((toggle ? c.checked : c.value) !== before) changed.push(c);
     });
   }
+  function choiceNotice(form, name) {
+    return document.getElementById(form.id + '-choice-notice-' + name);
+  }
+  // Static pages only have the wire strings. Match a numeric spelling such
+  // as "03" to option "3", without rounding neighbouring 64-bit integers.
+  function choiceNumber(wire, kind) {
+    if (!kind || !wire.trim()) return null;
+    if (kind === 'integer') {
+      try { return BigInt(wire); } catch (_) { return null; }
+    }
+    var n = Number(wire);
+    return Number.isFinite(n) ? (kind === 'float32' ? Math.fround(n) : n) : null;
+  }
+  // Return null for a single choice a saved link can no longer select.
+  // Clearing that control would leave it empty while results use its default.
+  function offeredAddressValues(form, name, wanted, notice) {
+    if (notice && notice.hasAttribute('data-htmxo-empty-domain')) return null;
+    var choice = false, offered = false, equivalent = null;
+    var kind = notice && notice.dataset.htmxoChoiceNumber;
+    var number = wanted.length === 1 ? choiceNumber(wanted[0], kind) : null;
+    function consider(value) {
+      if (wanted.indexOf(value) >= 0) offered = true;
+      else if (number !== null && number === choiceNumber(value, kind)) equivalent = value;
+    }
+    Array.prototype.forEach.call(form.elements, function(c) {
+      if (c.name !== name || PRESSED.test(c.type)) return;
+      if (c.hasAttribute('data-htmxo-choice-empty')) {
+        offered = offered || wanted.every(function(v) { return v === ''; });
+        return;
+      }
+      if (c.type !== 'radio' && c.type !== 'select-one') return;
+      choice = true;
+      if (c.disabled) return;
+      if (c.type === 'radio') consider(c.value);
+      else Array.prototype.forEach.call(c.options, function(o) { if (!o.disabled) consider(o.value); });
+    });
+    if (!choice || offered) return wanted;
+    return equivalent === null ? null : [equivalent];
+  }
   function applyAddress() {
     var params = new URLSearchParams(location.search), changed = [];
     document.querySelectorAll('form[data-htmxo-address]').forEach(function(form) {
@@ -40093,13 +40191,29 @@ semantic_follow_script() = h.script(Raw(raw"""
         // The app's own name first, else the plain one.
         var own = scopeOf(form) ? scopeOf(form) + '.' + name : null;
         var key = own && params.has(own) ? own : name;
-        if (!params.has(key)) return;
+        var notice = choiceNotice(form, name);
         var wanted = params.getAll(key);
+        // The live page already resolved this exact input, including typed
+        // wire spellings such as "03" for the integer option 3.
+        if (notice && wanted.length === 1 && notice.dataset.htmxoRequested === wanted[0]) return;
+        if (notice) notice.hidden = true;
+        if (!wanted.length) return;
+        if (notice && wanted.length === 1 && wanted[0] === '') return;
         // Its own name with no value: the app shows its default.
         if (key === own && !listed(form, name) &&
             wanted.every(function(v) { return v === ''; })) return;
         if (same(valuesOf(form, name) || [], wanted, numeric(form, name))) return;
-        setControls(form, name, wanted, changed);
+        var offered = offeredAddressValues(form, name, wanted, notice);
+        if (offered === null) {
+          if (notice) {
+            var words = {label: notice.dataset.label, asked: wanted.join(', '), shown: notice.dataset.shown};
+            notice.textContent = notice.dataset.htmxoChoiceMessage.replace(/\{(label|asked|shown)\}/g,
+              function(_, key) { return words[key]; });
+            notice.hidden = false;
+          }
+          return;
+        }
+        setControls(form, name, offered, changed);
       });
     });
     if (!changed.length) return;
@@ -40118,6 +40232,10 @@ semantic_follow_script() = h.script(Raw(raw"""
   document.addEventListener('change', function(e) {
     var form = e.target && e.target.form;
     if (!form) return;
+    if (!applying) {
+      var notice = choiceNotice(form, e.target.name);
+      if (notice) notice.hidden = true;
+    }
     followChanges(form);
     // After the page's own listeners, which show and hide inputs that apply.
     // Applying the address on load writes nothing back.
@@ -40781,7 +40899,13 @@ semantic_follow_script() = h.script(Raw(raw"""
                               form.getAttribute('data-htmxo-defaults'));
       } catch (_) { return; }
       if (!defaults) return;
+      var clearedNotice = false;
       Object.keys(defaults).forEach(function(name) {
+        var notice = choiceNotice(form, name);
+        if (notice && !notice.hidden) {
+          notice.hidden = true;
+          clearedNotice = true;
+        }
         var d = defaults[name];
         if (d && d.records) { resetRecords(form, name, d.records, changed); return; }
         if (follows.indexOf(name) >= 0) {
@@ -40796,6 +40920,11 @@ semantic_follow_script() = h.script(Raw(raw"""
         }
         assignInput(form, name, d === null ? [''] : d, changed);
       });
+      // Reset can clear a stale link even when its fallback is already selected.
+      if (clearedNotice && kept(form)) {
+        touched = true;
+        setTimeout(function() { writeAddress(form); }, 0);
+      }
     });
     var forms = [];
     changed.concat(following).forEach(function(c) {

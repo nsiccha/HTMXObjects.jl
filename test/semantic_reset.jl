@@ -195,6 +195,13 @@ end
             const slider = document.querySelector('input[data-htmxo-number-slider]');
             const start = slider.value;
             await fetch('/mark?phase=start');
+            const notice = document.querySelector('[data-htmxo-choice-message]:not([hidden])');
+            if (!notice || notice.textContent !== '“old-view” is unavailable for Show. Showing “line”.')
+              throw new Error('missing saved-link notice: ' + (notice && notice.textContent));
+            if (new URLSearchParams(location.search).get('show') !== 'old-view')
+              throw new Error('the export rewrote the link on load');
+            document.querySelector('button[data-htmxo-reset]').click();
+            await until(() => notice.hidden && kept() === '', 'reset stale link at its default');
             type('a', '3'); type('b', '4');
             await until(() => shown() === '7|10|3|0.50', 'a=3 b=4: ' + shown());
             await until(() => relevant('extra'), 'extra applies (a*b > 10)');
@@ -254,7 +261,8 @@ end
             end
             try
                 mktempdir() do profile
-                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile http://127.0.0.1:$port/index.html`
+                    address = "http://127.0.0.1:$port/index.html?show=old-view"
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $address`
                     browser_log = joinpath(profile, "browser.log")
                     process = run(pipeline(cmd; stdout = devnull, stderr = browser_log); wait = false)
                     try

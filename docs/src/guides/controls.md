@@ -3,6 +3,15 @@
 Declare the values an input accepts; generated forms choose the corresponding
 control. See [Forms](forms.md) for request binding, shared inputs and resets.
 
+## Single choices in saved links
+
+Suppose a link opens `/?fit=archived` after that fit was removed. A
+`semantic_app(…; presentation=:tabs)` page selects the enabled declared default
+and names both the requested fit and the one its results use. If no enabled
+default exists, the notice says that no option is selected. Choosing another
+fit clears the notice and updates the link. The same notice works in a static
+snapshot. A direct request to an operation still validates its inputs.
+
 ## [Multiple choices](@id generated-multiple-choices)
 
 A vector input with `@options` uses checkbox pills for at most `radio_max`
