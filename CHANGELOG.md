@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.202
+
+- Tabbed semantic apps can set `sidebar_fold=(below=1100, label="Settings")`
+  to give results the full width below a viewport breakpoint. A button above
+  the tabs opens the shared inputs in place. Add `open=true` to start expanded.
+
 ## 0.1.201
 
 - When a saved tabs-page link opens with a fallback choice, dependent controls

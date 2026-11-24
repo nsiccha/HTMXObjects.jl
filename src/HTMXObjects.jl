@@ -36683,7 +36683,7 @@ shows the values it names, and the script writes the inputs into it. With
 `reset`, a Reset button returns every one of those inputs to its default.
 `result_height` supplies one bound or a map keyed by the generated tab names.
 """
-function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active, query,
+function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active, query, sidebar_fold,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
         reset::Bool=true, sections=InputSection[], place=nothing,
         report_states=_ReportState[], url_scope::AbstractString="", result_height=:window)
@@ -36901,7 +36901,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                reset=reset_button, choice_notices=notices,
                tabs=Pair[entry.title => render_operation(entry) for entry in operations],
                tab_names=names, active=open, url_scope, operations)
-    layout(parts)
+    layout(isnothing(sidebar_fold) ? parts : merge(parts, (; sidebar_fold)))
 end
 
 # The inputs `place` puts in an operation's tab, as `input => tab name`: each
@@ -36939,13 +36939,30 @@ function _default_semantic_tab(entry)
           data_verb=entry.verb, data_path=entry.path)
 end
 
-# Keep one tab list above the sidebar and panels. A context form whose inputs
-# are all placed in tabs stays on the page without a visible sidebar.
+function _sidebar_fold(; below::Integer, label::AbstractString, open::Bool=false)
+    below > 0 && !(below isa Bool) || throw(ArgumentError(
+        "sidebar_fold.below must be a positive viewport width in pixels"))
+    isempty(strip(label)) && throw(ArgumentError("sidebar_fold.label needs a visible label"))
+    (; below, label, open)
+end
+
+function _semantic_sidebar(parts, reset)
+    isnothing(parts.sidebar) && return nothing
+    controls = isnothing(reset) ? (parts.sidebar,) : (parts.sidebar, reset)
+    fold = get(parts, :sidebar_fold, nothing)
+    isnothing(fold) && return h.aside(controls...)
+    id = parts.id * "-sidebar-fields"
+    toggle = h.button(fold.label; type="button", class="secondary outline htmxo-sidebar-toggle",
+        aria_controls=id, aria_expanded=string(fold.open),
+        onclick="this.setAttribute('aria-expanded', String(this.getAttribute('aria-expanded') !== 'true'))")
+    h.aside(html_only(toggle), h.div(controls...; id); data_htmxo_fold_below=fold.below)
+end
+
+# A context form whose inputs are all placed in tabs stays on the page
+# without a visible sidebar.
 function _default_semantic_tabs_layout(parts)
     heading = isnothing(parts.title) ? Any[] : Any[h.header(h.h1(parts.title))]
-    reset = get(parts, :reset, nothing)
-    sidebar = isnothing(parts.sidebar) ? nothing :
-        h.aside(parts.sidebar, (isnothing(reset) ? () : (reset,))...)
+    sidebar = _semantic_sidebar(parts, get(parts, :reset, nothing))
     tabs = _tabset(sidebar, parts.tabs; id=parts.id * "-tabs", names=parts.tab_names,
                    active=parts.active, url_scope=get(parts, :url_scope, nothing))
     body = if !isnothing(sidebar)
@@ -36964,7 +36981,7 @@ end
                  select=entry -> true, presentation=:stacked, radio_max=8,
                  shared=nothing, active=nothing, url_state=true, reset=true,
                  sections=nothing, place=nothing, report_states=nothing,
-                 result_height=:window)
+                 result_height=:window, sidebar_fold=nothing)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -36996,7 +37013,12 @@ carries `data-htmxo-refreshes` naming the group; `semantic_refresh_script()`
 read in a sidebar (`shared=` chooses them), one tab per operation (`active=`
 the one it opens on), and results that follow their inputs. The default tab bar
 spans the app above the sidebar and result. Labels wrap when they need more
-than the app's full width. The page is as tall as
+than the app's full width. To give results the full width of a narrower window,
+pass `sidebar_fold=(below=1100, label="Scenario and settings")`. Below that
+viewport width in pixels, a button above the tabs opens the shared inputs in
+place. Add `open=true` to the named tuple to start expanded. The panel keeps
+the reader's choice across tab switches and resizes. A custom `layout(parts)`
+receives the option as `parts.sidebar_fold` when supplied. The page is as tall as
 its inputs and results, so it can be one part of a longer page, between
 paragraphs of an article or a report. A result taller than its bound (a
 table of a few hundred rows, say) scrolls inside itself instead of
@@ -37204,7 +37226,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
         reset=nothing, sections=nothing, place=nothing, report_states=nothing,
-        result_height=:window)
+        result_height=:window, sidebar_fold=nothing)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -37232,6 +37254,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app report_states= shows the results of presentation=:tabs at further states in a report"))
         result_height === :window || throw(ArgumentError(
             "semantic_app result_height= bounds the results of presentation=:tabs"))
+        isnothing(sidebar_fold) || throw(ArgumentError(
+            "semantic_app sidebar_fold= folds the shared inputs of presentation=:tabs"))
     end
     states = _report_states(report_states)
     input_sections = _input_sections(sections)
@@ -37306,6 +37330,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
     context_id = _semantic_context_panel_id(obj) * suffix
     presentation === :tabs && return _semantic_tabs(obj, specs, root_prefix, context_id;
         title, shared, active, radio_max, url_state=something(url_state, true),
+        sidebar_fold=isnothing(sidebar_fold) ? nothing : _sidebar_fold(; sidebar_fold...),
         reset=something(reset, true), sections=input_sections, place, report_states=states,
         url_scope, result_height, query=address, render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
@@ -41985,6 +42010,31 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
     .tabset.htmxo-app-layout > .tab-panel { grid-area: content; min-width: 0; }
     .htmxo-app-layout > aside > nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; }
 }
+.htmxo-app-layout > aside > .htmxo-sidebar-toggle { display: none; }
+.htmxo-app-layout[data-htmxo-sidebar-panel] { display: block; }
+.htmxo-app-layout[data-htmxo-sidebar-panel] > aside { border: 0; padding: 0 0 1rem; }
+.htmxo-app-layout[data-htmxo-sidebar-panel] > aside > .htmxo-sidebar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    width: 100%;
+    margin: 0;
+    text-align: start;
+    overflow-wrap: anywhere;
+}
+.htmxo-sidebar-toggle::after {
+    content: "";
+    flex: none;
+    width: 0.55em;
+    height: 0.55em;
+    border: solid currentColor;
+    border-width: 0 2px 2px 0;
+    transform: rotate(-45deg);
+}
+.htmxo-sidebar-toggle[aria-expanded="true"]::after { transform: rotate(45deg); }
+[data-htmxo-sidebar-panel] > aside > .htmxo-sidebar-toggle[aria-expanded="true"] + div { padding-top: 1rem; }
+[data-htmxo-sidebar-panel] > aside > .htmxo-sidebar-toggle[aria-expanded="false"] + div { display: none; }
 .u-bg-soft { background: var(--pico-card-background-color, #f8f8f8); }
 .u-btn-sm { padding: 0.3rem 0.8rem; }
 .u-btn-xs { padding: 0.2rem 0.6rem; }
@@ -44292,6 +44342,26 @@ tabset_script() = h.script(Raw("""
         return a ? a.dataset.tabName : null;
     };
 
+    // Move the tab bar, never the form, so the keyboard and the visible page
+    // follow the same order on either side of the breakpoint. The button owns
+    // the reader's last choice even while the wide layout hides the button.
+    const placeSidebar = aside => {
+        const ts = aside.parentElement;
+        const narrow = !matchMedia('(min-width: ' + aside.dataset.htmxoFoldBelow + 'px)').matches;
+        if (narrow === ts.hasAttribute('data-htmxo-sidebar-panel')) return;
+        const nav = ts.querySelector(':scope > nav');
+        const toggle = aside.querySelector(':scope > .htmxo-sidebar-toggle');
+        const focused = document.activeElement;
+        const before = narrow ? aside.nextElementSibling : aside;
+        if (ts.moveBefore && ts.isConnected) ts.moveBefore(nav, before);
+        else ts.insertBefore(nav, before);
+        ts.toggleAttribute('data-htmxo-sidebar-panel', narrow);
+        if (nav.contains(focused)) focused.focus({preventScroll: true});
+        else if (!narrow && focused === toggle) nav.querySelector('[aria-selected="true"]').focus();
+        else if (narrow && aside.contains(focused) && toggle.getAttribute('aria-expanded') === 'false') toggle.focus();
+    };
+    const resizeSidebars = () => document.querySelectorAll('.tabset > aside[data-htmxo-fold-below]').forEach(placeSidebar);
+
     // Shows tab `a` before htmx has processed the tabset. A lazy panel that is
     // shown loads itself once visible, a hidden one from its tab's first click
     // (`_tabset_panel` / `_tabset_lazy_link_attrs`), so those attributes move
@@ -44330,6 +44400,11 @@ tabset_script() = h.script(Raw("""
     // htmx's settle-time processing. The URL's tab shows from the start.
     const warned = new Set();
     window.htmxoTabset = ts => {
+        const aside = ts.querySelector(':scope > aside[data-htmxo-fold-below]');
+        if (aside) {
+            placeSidebar(aside);
+            window.addEventListener('resize', resizeSidebars);
+        }
         if (!recording(ts)) return;
         const params = new URLSearchParams(location.search);
         const key = readKey(ts, params);

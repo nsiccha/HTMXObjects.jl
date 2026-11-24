@@ -1273,6 +1273,63 @@ end
     end
 end
 
+@testitem "a tabs page can fold its shared inputs above the tabs" setup=[SemanticPageFixtures, ChromeDump] tags=[:semantic, :browser] begin
+    using HTMXObjects
+    app = FitsPage()
+    route!(app; operation_policy=:blocking)
+    surface(; kw...) = semantic_app(app; presentation=:tabs, kw...)
+    fold = (below=1100, label="Scenario and settings")
+    page = surface(; sidebar_fold=fold)
+    toggle_attrs(node) = tag_attrs(repr("text/html", node), r"<button [^>]*htmxo-sidebar-toggle[^>]*>")
+    @test toggle_attrs(page)["aria-expanded"] == "false"
+    @test toggle_attrs(surface(; sidebar_fold=merge(fold, (open=true,))))["aria-expanded"] == "true"
+    @test !contains(repr("text/html", surface()), "htmxo-sidebar-toggle")
+    @test !contains(repr("text/html", surface(; sidebar_fold=fold, shared=[])), "htmxo-sidebar-toggle")
+    @test repr("text/markdown", page) == repr("text/markdown", surface())
+    @test_throws "viewport width" surface(; sidebar_fold=merge(fold, (below=0,)))
+    @test_throws "visible label" surface(; sidebar_fold=merge(fold, (label=" ",)))
+    @test_throws "presentation=:tabs" semantic_app(app; sidebar_fold=fold)
+
+    if get(ENV, "HTMXO_BROWSER_TESTS", "") == "1"
+        chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+        driver = h.script(Raw(raw"""
+        window.addEventListener('load', () => {
+            const layout = document.querySelector('.htmxo-app-layout');
+            const nav = layout.querySelector('nav'), side = layout.querySelector('aside');
+            const button = side.querySelector('button'), fields = document.getElementById(button.getAttribute('aria-controls'));
+            const form = fields.querySelector('form'), result = layout.querySelector('.tab-panel');
+            const width = () => Math.round(result.getBoundingClientRect().width);
+            const full = Math.round(layout.getBoundingClientRect().width);
+            const narrow = innerWidth < 1100;
+            const shown = el => el.getClientRects().length > 0;
+            let ok = shown(button) === narrow;
+            if (narrow) {
+                ok &&= side.nextElementSibling === nav && width() === full;
+                ok &&= shown(form) === (button.getAttribute('aria-expanded') === 'true');
+                const startedOpen = shown(form);
+                button.click();
+                ok &&= shown(form) !== startedOpen && width() === full;
+                button.click();
+                ok &&= shown(form) === startedOpen && form === fields.querySelector('form');
+            } else {
+                ok &&= nav.nextElementSibling === side && shown(form) && width() < full;
+            }
+            document.body.dataset.fold = String(ok);
+        });
+        """))
+        mktempdir() do dir
+            for (width, opened) in ((980, false), (1099, true), (1100, false), (1400, true))
+                body = surface(; sidebar_fold=merge(fold, (open=opened,)))
+                head = h.head(htmxo_utility_styles(), tabset_script(), driver)
+                fixture = joinpath(dir, "page.html")
+                write(fixture, repr("text/html", h.html(head, h.body(body))))
+                dom = dump_dom(`$chrome --headless=new --no-sandbox --disable-dev-shm-usage --window-size=$width,900 --dump-dom --user-data-dir=$dir/profile file://$fixture`)
+                @test (width, opened, occursin("<body data-fold=\"true\">", dom)) == (width, opened, true)
+            end
+        end
+    end
+end
+
 @testitem "a tabs page fits its content and its tab bar spans the sidebar and result" setup=[ChromeDump] tags=[:browser, :semantic] begin
     # A `presentation=:tabs` surface is one part of a page: between paragraphs
     # of an article, or under the page's title. It took the window's height as
