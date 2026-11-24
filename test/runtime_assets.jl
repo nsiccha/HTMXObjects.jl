@@ -19,6 +19,17 @@
     end
 end
 
+@testitem "table heads and feet carry a constant break rule in the shared page styles" tags=[:unit] begin
+    using HTMXObjects
+
+    rule = r"thead,\s*tfoot\s*\{\s*break-inside:\s*avoid;\s*\}"
+    for shell in (htmx, HTMXObjects.pico_page)
+        page = shell(h.p("Report"); tables=false)
+        @test occursin(rule, repr("text/html", page))
+    end
+    @test occursin(rule, HTMXObjects._runtime_text(:utility_styles))
+end
+
 @testitem "runtime catalog notices extension provider installation without a new method world" tags=[:unit] begin
     using HTMXObjects
     import HTMXObjects: _polling_page_assets_impl, _runtime_catalog, _runtime_text
