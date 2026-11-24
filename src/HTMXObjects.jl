@@ -41762,7 +41762,9 @@ htmxo_utility_styles() = h.style(Raw("""
 .htmxo-semantic-inputs .htmxo-records { flex: 1 1 100%; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex-basis: 6rem; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
-.htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > :not(.htmxo-record-head),
+/* Name the fields explicitly: a broad child selector here slows Chromium
+   resizes on pages that refresh fragments, even pages without Records. */
+.htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > .htmxo-input-section-fields,
 .htmxo-record:has(> .htmxo-record-head input[type="checkbox"]:not(:checked)) > .htmxo-record-head > .htmxo-record-summary {
     opacity: 0.5;
 }

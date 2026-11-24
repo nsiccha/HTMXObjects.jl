@@ -764,9 +764,18 @@ end
             await until(() => text(cards()[0]) === '100% q 24 x 14 · Female · Age (years): 33 · Weight (kg): 70', 'typical');
             // While folded, the card's values are still sent: switched off and
             // on again from its head, it is computed with its age.
-            cards()[0].querySelector('.htmxo-record-on input').click();
+            const card = cards()[0], include = card.querySelector('.htmxo-record-on input');
+            // Only the fields and summary dim. An unrelated direct child catches
+            // a return to the broad selector that slowed resizes on other pages.
+            const extra = card.appendChild(document.createElement('span'));
+            const opacity = el => getComputedStyle(el).opacity;
+            include.click();
+            out.dimmed = opacity(fieldsOf(card)) === '0.5' && opacity(line(card)) === '0.5' &&
+              opacity(include.closest('.htmxo-record-head')) === '1' && opacity(extra) === '1';
+            extra.remove();
             await until(() => result() === '', 'switched off');
             cards()[0].querySelector('.htmxo-record-on input').click();
+            out.restored = opacity(fieldsOf(cards()[0])) === '1' && opacity(line(cards()[0])) === '1';
             await until(() => result() === 'Scenario 1=100% q 24 x 14/false/33.0/70.0', 'switched on');
             out.sent = isFolded(cards()[0]) && address().get('scenarios.1.age') === '33';
             // Added cards open, copying the last card (folded) as it is
@@ -799,7 +808,7 @@ end
         });
         """)
         @test get(outcome, "error", "") == ""
-        for key in ("open", "folded", "parts", "unchanged", "sent", "added", "copies", "renumbered", "unfolded")
+        for key in ("open", "folded", "parts", "unchanged", "dimmed", "restored", "sent", "added", "copies", "renumbered", "unfolded")
             @test (key => get(outcome, key, "missing")) == (key => "true")
         end
         @test get(outcome, "line", "missing") == "100% q 24 x 14 · Female · Age (years): 33 · Weight (kg): 70"
