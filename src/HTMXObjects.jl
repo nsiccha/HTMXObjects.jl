@@ -42103,6 +42103,9 @@ td[data-status], th[data-status], span[data-status], small[data-status] { font-w
    `render_table` and `master_detail_table` too): a table wider than its
    column scrolls inside this wrapper instead of widening the page. */
 .table-wrap { overflow-x: auto; }
+/* Chromium r1612691 made the built-in break-inside value conditional.
+   Restyling table heads and feet then makes later window resizes slower. */
+thead, tfoot { break-inside: avoid; }
 /* Status banner — colored left-border callout. State via data-status. */
 .htmxo-status-banner { padding: 0.5rem 1rem; margin-bottom: 0.5rem; min-width: 0; overflow: hidden; background: var(--pico-card-background-color, transparent); border-left: 4px solid var(--htmxo-border); }
 .htmxo-status-banner[data-status="success"] { border-left-color: var(--htmxo-success); }
