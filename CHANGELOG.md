@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.201
+
+- When a saved tabs-page link opens with a fallback choice, dependent controls
+  and `Records` cards use that choice for their defaults, options, visibility
+  and help text. Other edits in the link are preserved.
+
 ## 0.1.200
 
 - When a link to a `semantic_app` tabs page names a removed or disabled

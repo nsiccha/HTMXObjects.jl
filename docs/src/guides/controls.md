@@ -7,8 +7,10 @@ control. See [Forms](forms.md) for request binding, shared inputs and resets.
 
 Suppose a link opens `/?fit=archived` after that fit was removed. A
 `semantic_app(…; presentation=:tabs)` page selects the enabled declared default
-and names both the requested fit and the one its results use. If no enabled
-default exists, the notice says that no option is selected. Choosing another
+and names both the requested fit and the one its results use. The form's
+defaults, options, visibility and help, including fields inside `Records`
+cards, use the displayed fit. Other values in the link keep their edits. If no
+enabled default exists, the notice says that no option is selected. Choosing another
 fit clears the notice and updates the link. The same notice works in a static
 snapshot. A direct request to an operation still validates its inputs.
 
