@@ -34019,10 +34019,11 @@ function _record_card(T, name, records, fields, i, entry, view, values, texts;
         # A folded card summarises its values here, after its label; the page
         # runtime writes it when the reader folds the card.
         h.span(; class="htmxo-record-summary"),
-        h.button(texts.record_duplicate; type="button", class="outline secondary",
-                 data_htmxo_record_action="duplicate"),
-        h.button(texts.record_remove; type="button", class="outline secondary",
-                 data_htmxo_record_action="remove");
+        h.span(h.button(texts.record_duplicate; type="button", class="outline secondary",
+                        data_htmxo_record_action="duplicate"),
+               h.button(texts.record_remove; type="button", class="outline secondary",
+                        data_htmxo_record_action="remove");
+               class="htmxo-record-actions");
         class="htmxo-record-head")
     # Its fields are laid out as a section's are: short ones share a row. A
     # help text the list shows once is named, not repeated.
@@ -41758,7 +41759,8 @@ htmxo_utility_styles() = h.style(Raw("""
     --pico-primary-background: var(--pico-muted-color, GrayText);
     --pico-primary-border: var(--pico-muted-color, GrayText);
 }
-.htmxo-record-head > button { flex: 0 0 auto; width: auto; margin: 0; font-size: 0.85em; }
+.htmxo-record-head button { width: auto; margin: 0; font-size: 0.85em; }
+.htmxo-record-actions { display: flex; gap: inherit; max-width: 100%; overflow-wrap: anywhere; }
 .htmxo-semantic-inputs .htmxo-records { flex: 1 1 100%; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"] { flex-basis: 6rem; }
 .htmxo-record .htmxo-input-section-fields > .htmxo-input-field[data-htmxo-width="short"]:has(fieldset) { flex-basis: auto; }
@@ -41782,6 +41784,7 @@ htmxo_utility_styles() = h.style(Raw("""
    address. */
 .htmxo-record-head > .htmxo-record-fold {
     display: flex;
+    flex: none;
     --pico-form-element-spacing-horizontal: 0.375rem;
 }
 /* One text line high, as the label of the head's other buttons is. */
@@ -41797,7 +41800,7 @@ htmxo_utility_styles() = h.style(Raw("""
 }
 .htmxo-record-fold[aria-expanded="false"]::before { transform: rotate(-90deg); }
 .htmxo-record[data-htmxo-folded] > .htmxo-input-section-fields,
-.htmxo-record[data-htmxo-folded] > .htmxo-record-head > button:not(.htmxo-record-fold),
+.htmxo-record[data-htmxo-folded] > .htmxo-record-head > .htmxo-record-actions,
 .htmxo-record:not([data-htmxo-folded]) > .htmxo-record-head > .htmxo-record-summary { display: none; }
 .htmxo-record-head > .htmxo-record-summary {
     flex: 1 1 12rem;
