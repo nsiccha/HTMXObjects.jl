@@ -445,7 +445,7 @@ with `auto`. To size both pools equally, compute shell-side:
 """
 serve(; kwargs...) = _serve(ROUTER; kwargs...)
 
-function _serve(router, warm_pages=nothing; host="127.0.0.1", port=8080, async=false, parallel=false,
+function _serve(router; workload=false, host="127.0.0.1", port=8080, async=false, parallel=false,
         revise=nothing, middleware=[], check_origin::Union{Nothing,Function}=nothing,
         access_log=_timed_access_log, operation_log=_default_operation_log,
         runtime_tracking::Bool=true, compress::Bool=true, prestart::Bool=true,
@@ -468,13 +468,13 @@ function _serve(router, warm_pages=nothing; host="127.0.0.1", port=8080, async=f
     handle = _stream_handler(
         _served_middleware(_request_pipeline(middleware, access_log, Revise,
                                              tracker; operation_stream, router,
-                                             compute_trace, dev=dev_mode), warm_pages),
+                                             compute_trace, dev=dev_mode)),
         check_origin, compress)
     pool, warning = _request_threadpool(parallel, Threads.nthreads(:interactive),
         Threads.nthreads(:default), pkgversion(HTTP))
     # A package workload exercises the spawned handler even on a one-thread
     # precompile worker. Its pool size says nothing about the live server.
-    if warning !== nothing && warm_pages === nothing
+    if warning !== nothing && !workload
         @warn warning
     end
     handle = _spawning_stream_handler(handle, pool)
@@ -520,13 +520,14 @@ end
 # response prestarts its fragments (`_prestart_wanted`).
 struct _ServedHandler{F} <: Function
     handler::F
-    warm_pages::Union{Nothing,_WarmPages}
 end
-_served_middleware(handler, warm_pages=nothing) = _ServedHandler(handler, warm_pages)
+_served_middleware(handler) = _ServedHandler(handler)
 function (served::_ServedHandler)(req::HTTP.Request)
     req.context[:htmxo_served] = true
-    pages = served.warm_pages
-    if pages !== nothing && HTTP.header(req, "HTMXO-Warm-Page", "") == pages.key
+    key = HTTP.header(req, "HTMXO-Warm-Page", "")
+    if !isempty(key)
+        pages = lock(() -> get(_warm_pages, key, nothing), _operation_poll_lock)
+        pages === nothing && return HTTP.Response(409, "Warm navigation has ended")
         req.context[:htmxo_warm_page] = pages
     end
     served.handler(req)
@@ -10048,8 +10049,10 @@ function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=fal
     end
     # A write to a page that has left fails at the latest with the keep-alive
     # comment; closing `events` then ends a stream whose operations never do.
+    pages = get(req.context, :htmxo_warm_page, nothing)
     left = Timer(1.0; interval=1.0) do timer
-        isopen(sse) || (close(events); close(timer))
+        closed = pages !== nothing && lock(() -> pages.closed, _operation_poll_lock)
+        (!isopen(sse) || closed) && (close(events); close(timer))
     end
     ticked = Threads.Atomic{Bool}(false)
     clock = push ? Timer(_OPERATION_PUSH_INTERVAL;
@@ -20294,7 +20297,7 @@ function _prewarm_rows(row::NamedTuple, operations::Bool, timeout::Real)
 end
 
 """
-    prewarm_routes!(base_url, coll; include_post=false, timeout=45, operations=false) -> Vector{NamedTuple}
+    prewarm_routes!(base_url, coll; include_post=false, timeout=45, operations=false, browser=operations) -> Vector{NamedTuple}
     prewarm_routes!(::Type{T}, base_url, coll=nothing; kwargs...) -> Vector{NamedTuple}
 
 Validate selected routes post-listen with real HTTP requests — the live half
@@ -20363,6 +20366,14 @@ answers at once. Rows then gain `transport` (`:plain`, `:htmx`, `:page`) and
 another process, which does not know the token, or that race), `1` a plain
 request, and `0` a skipped route.
 
+On a loopback URL served by this process, `browser=true` (the default with
+`operations=true`) also navigates each successful selected GET once. It
+attaches to the fragments the page starts and requests the initially open
+semantic tab with its rendered inputs. A pending answer uses the built-in
+push stream when enabled and polls otherwise. Each extra request adds a row
+with its concrete URL and transport `:browser` or `:stream`. Use
+`browser=false` to run just the original transport probes.
+
 ```julia
 @compile_workload begin
     route!(MyApp())
@@ -20377,11 +20388,14 @@ end
 ```
 """
 function prewarm_routes!(base_url::AbstractString, coll;
-        include_post::Bool=false, timeout::Real=45, operations::Bool=false)
+        include_post::Bool=false, timeout::Real=45, operations::Bool=false,
+        browser::Bool=operations)
     limit = _prewarm_timeout(timeout)
     _with_compile_clock() do
-        _prewarm_urls!(_prewarm_base(base_url), coll, include_post, limit,
-                       operations)
+        base = _prewarm_base(base_url)
+        rows = _prewarm_urls!(base, coll, include_post, limit, operations)
+        browser && append!(rows, _warm_linked_pages(base, rows, nothing, limit))
+        rows
     end
 end
 
@@ -20417,7 +20431,7 @@ end
 
 function prewarm_routes!(::Type{T}, base_url::AbstractString, coll=nothing;
         include_post::Bool=false, timeout::Real=45,
-        operations::Bool=false) where {T}
+        operations::Bool=false, browser::Bool=operations) where {T}
     limit = _prewarm_timeout(timeout)
     base = _prewarm_base(base_url)
     _with_compile_clock() do
@@ -20427,6 +20441,7 @@ function prewarm_routes!(::Type{T}, base_url::AbstractString, coll=nothing;
                 _prewarm_descriptor(base, route, include_post, limit),
                 operations, limit))
         end
+        browser && append!(out, _warm_linked_pages(base, out, nothing, limit))
         out
     end
 end
@@ -20470,7 +20485,6 @@ function _prewarm_workload!(root, streams; routes=nothing, urls=(),
     checks = urls isa AbstractString ? [urls] : collect(urls)
     fragments in (:linked, :selected) ||
         throw(ArgumentError("fragments must be :linked or :selected"))
-    pages = operations ? _WarmPages(fragments) : nothing
     settings = merge((; host="127.0.0.1", port=0, listenany=true,
                        async=true, revise=nothing, parallel=operations), server_kwargs)
     settings.host == "127.0.0.1" && settings.port == 0 &&
@@ -20478,19 +20492,21 @@ function _prewarm_workload!(root, streams; routes=nothing, urls=(),
         throw(ArgumentError("prewarm_workload! requires a loopback, ephemeral, asynchronous server (host=\"127.0.0.1\", port=0, listenany=true, async=true)"))
     _prewarm_timeout(timeout)
 
-    server = _serve(ROUTER, pages; settings...)
+    server = _serve(ROUTER; workload=operations, settings...)
     finished = false
     try
         base = "http://127.0.0.1:$(HTTP.port(server))"
         route_rows = _require_prewarm_success(
-            prewarm_routes!(T, base, selected; operations, include_post, timeout),
+            prewarm_routes!(T, base, selected; operations, include_post, timeout, browser=false),
             "route")
         url_rows = _require_prewarm_success(
             prewarm_routes!(base, checks; timeout), "URL")
-        if pages !== nothing
+        if operations
+            allowed = fragments === :linked ? nothing : Set(
+                chop(r.url; head=length(base), tail=0) for r in Iterators.flatten((route_rows, url_rows))
+                if r.verb === :GET && startswith(r.url, base * "/"))
             _with_compile_clock() do
-                _warm_linked_pages!(pages, base, route_rows, url_rows, Float64(timeout),
-                                    get(settings, :operation_stream, true))
+                _warm_linked_pages(base, route_rows, allowed, Float64(timeout); workload=true)
             end
         end
         streams === nothing || streams(base)
@@ -20503,7 +20519,6 @@ function _prewarm_workload!(root, streams; routes=nothing, urls=(),
         # A failure may be a request the server never finished, and a graceful
         # close waits for that request, so after a failure the server closes at
         # once.
-        pages === nothing || _reset_warm_pages!(pages; close=true)
         finished ? close(server) : HTTP.forceclose(server)
     end
 end
@@ -36853,9 +36868,12 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 form, _browser_region(browser_page, spec, route, current, target, sent,
                                       region_attrs, browser; markdown)
             else
-                initial = names[i] == open ?
-                    Any[lazy(_semantic_follow_url(target, spec.mounted, route, current, sent))] :
-                    Any[]
+                initial = Any[]
+                if names[i] == open
+                    url = _semantic_follow_url(target, spec.mounted, route, current, sent)
+                    _warm_initial_view!(_req_of(obj), url, base.target_id)
+                    push!(initial, lazy(url))
+                end
                 form, h.div(initial..., markdown; region_attrs...)
             end
         else
