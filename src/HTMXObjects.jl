@@ -77,7 +77,7 @@ export OperationContext, RootProvider, RootRetention, retained_roots, OperationP
 export SSEStream, last_event_id, sse_region
 export KeySubscriptions, subscribe_key!, unsubscribe_key!, serve_key_feed!,
     invalidate_key!, live_fragment, live_region, live_region_script, stream_probe_script
-export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs, Records, record_view, all_records
+export semantic_descriptor, operation_form, semantic_app, semantic_control, semantic_follow_script, internal_input, InputSection, set_inputs, open_tab, Records, record_view, all_records
 export checked_records, record_faults
 export NumberDomain, number_domain, number_record, number_control_script
 export browser_module, BrowserModule, bound_columns_attrs, semantic_browser_script
@@ -39776,8 +39776,27 @@ arrives; then the page follows the change as if the reader had made it
 and Markdown carries nothing of it. A value no control offers within 30 s is
 dropped.
 """
-set_inputs(; inputs...) = h.template(; data_htmxo_set_inputs=_schema_json(
-    Dict{String,Any}(string(name) => _semantic_address_wire(value) for (name, value) in pairs(inputs))))
+set_inputs(; inputs...) = h.template(; data_htmxo_set_inputs=_semantic_input_settings(inputs))
+
+_semantic_input_settings(inputs) = _schema_json(
+    Dict{String,Any}(string(name) => _semantic_address_wire(value) for (name, value) in pairs(inputs)))
+
+"""
+    open_tab(name; inputs...)
+
+Open a named tab in the [`semantic_app`](@ref) that receives a mutation's
+answer. Include this empty template in the response, optionally with input
+values as for [`set_inputs`](@ref). For example, after adding a fit, return
+`hx_response(open_tab("timecourse"; fit=name); toast="Added the fit")`.
+
+Once the app's controls offer the requested values, the page activates the
+tab as a click would, updating its address and loading its result in place.
+Other inputs keep their values. A template outside the apps can target the
+only semantic tabset on a page. An ambiguous destination or an unknown tab
+is ignored. If an input is still unavailable after 30 seconds, the tab stays put.
+"""
+open_tab(name::Union{AbstractString,Symbol}; inputs...) =
+    h.template(; data_htmxo_open_tab=string(name), data_htmxo_set_inputs=_semantic_input_settings(inputs))
 
 """
     semantic_follow_script()
@@ -40819,24 +40838,30 @@ semantic_follow_script() = h.script(Raw(raw"""
     if (window.htmx) window.htmx.process(group);
     group.dispatchEvent(new Event('change', {bubbles: true}));
   });
-  // `set_inputs(…)` in an answer (a mutation that added a fit makes it the
-  // choice): each input it names takes its value once a control of the
-  // page's forms offers that value. A refreshed control may bring the option
-  // only after the answer, so a setting waits for later settles, and one no
-  // control offers within 30 s is dropped.
-  var wanted = [];
-  function pageControls(name) {
+  // The option a mutation added can arrive in a control refresh after its
+  // answer. Keep the outstanding inputs together so open_tab can activate
+  // the destination with the selected values on its first request.
+  var wanted = new Set();
+  function semanticTabset(node) {
+    var selector = '.tabset[data-htmxo-url-scope]';
+    var inside = node.closest(selector);
+    if (inside) return inside;
+    var page = node.closest('.htmxo-semantic-page') || document;
+    var sets = page.querySelectorAll(selector);
+    return sets.length === 1 ? sets[0] : null;
+  }
+  function pageControls(name, tabset) {
     var found = [];
     Array.prototype.forEach.call(document.forms, function(form) {
-      if (!form.matches('.htmxo-semantic-context, [data-htmxo-address]')) return;
+      if (!form.matches('.htmxo-semantic-context, .htmxo-semantic-inputs, [data-htmxo-address]')) return;
       Array.prototype.forEach.call(form.elements, function(c) {
-        if (c.name === name && !PRESSED.test(c.type)) found.push(c);
+        if (c.name === name && !PRESSED.test(c.type) && (!tabset || semanticTabset(c) === tabset)) found.push(c);
       });
     });
     return found;
   }
-  function setInput(name, values) {
-    var controls = pageControls(name), first = controls[0], value = values[0];
+  function setInput(name, values, tabset) {
+    var controls = pageControls(name, tabset), first = controls[0], value = values[0];
     if (!first) return false;
     // A setting is the reader's choice, even of the value a field already
     // shows as its computed default.
@@ -40857,12 +40882,13 @@ semantic_follow_script() = h.script(Raw(raw"""
       return true;
     }
     if (first.type === 'radio') {
-      var radio = controls.filter(function(c) { return c.value === value; })[0];
+      var radio = controls.find(function(c) { return c.value === value && !c.matches(':disabled'); });
       if (!radio) return false;
       chosen();
       if (!radio.checked) radio.click();
       return true;
     }
+    if (first.matches(':disabled')) return false;
     if (first.type === 'checkbox') {
       var on = value === 'true';
       chosen();
@@ -40871,9 +40897,12 @@ semantic_follow_script() = h.script(Raw(raw"""
     }
     if (first.tagName === 'SELECT') {
       var options = Array.prototype.slice.call(first.options);
-      if (!options.some(function(o) { return values.indexOf(o.value) >= 0; })) return false;
+      var selection = first.multiple && values.length === 1 && value === '' ? [] : values;
+      if ((!first.multiple && selection.length !== 1) || !selection.every(function(v) {
+        return options.some(function(o) { return o.value === v && !o.matches(':disabled'); });
+      })) return false;
       chosen();
-      options.forEach(function(o) { o.selected = values.indexOf(o.value) >= 0; });
+      options.forEach(function(o) { o.selected = selection.indexOf(o.value) >= 0; });
     } else {
       chosen();
       first.value = value === undefined ? '' : value;
@@ -40882,25 +40911,47 @@ semantic_follow_script() = h.script(Raw(raw"""
     return true;
   }
   function settleWanted() {
-    var now = Date.now();
-    wanted = wanted.filter(function(w) { return now < w.until && !setInput(w.name, w.values); });
+    Array.from(wanted).forEach(function(w) {
+      if (Date.now() >= w.until || (w.tab && !w.tab.isConnected)) { wanted.delete(w); return; }
+      w.inputs = w.inputs.filter(function(pair) { return !setInput(pair[0], pair[1], w.tabset); });
+      if (w.inputs.length || !wanted.delete(w)) return;
+      if (w.tab) {
+        var panel = document.activeElement && document.activeElement.closest('.tab-panel');
+        var moveFocus = panel && w.tabset.contains(panel) && w.tab.getAttribute('aria-selected') !== 'true';
+        // A newly swapped tabset may itself still be settling. Arm its tab's
+        // normal click handlers before sending the click, including a lazy GET.
+        if (window.htmx) window.htmx.process(w.tab);
+        if (window._hyperscript) window._hyperscript.processNode(w.tab);
+        w.tab.click();
+        if (moveFocus) w.tab.focus({preventScroll: true});
+      }
+    });
   }
   function collectWanted(root) {
     var found = root.matches && root.matches('template[data-htmxo-set-inputs]') ? [root] : [];
     if (root.querySelectorAll) found = found.concat(Array.prototype.slice.call(
       root.querySelectorAll('template[data-htmxo-set-inputs]')));
     found.forEach(function(t) {
-      var map = {};
-      try { map = JSON.parse(t.getAttribute('data-htmxo-set-inputs')); } catch (_) {}
+      var name = t.getAttribute('data-htmxo-open-tab');
+      var ts = name !== null && semanticTabset(t);
       t.remove();
-      Object.keys(map).forEach(function(name) {
-        wanted.push({name: name, values: map[name], until: Date.now() + 30000});
-      });
+      var tab = ts && Array.from(ts.querySelectorAll(':scope > nav a[data-tab-name]'))
+        .find(function(a) { return a.dataset.tabName === name; });
+      if (name !== null && !tab) {
+        console.warn('open_tab: cannot find "' + name + '" in a receiving semantic tabset');
+        return;
+      }
+      var inputs;
+      try { inputs = Object.entries(JSON.parse(t.getAttribute('data-htmxo-set-inputs'))); }
+      catch (_) { return; }
+      // A more recent navigation in this app supersedes one waiting on a control.
+      if (ts) wanted.forEach(function(w) { if (w.tabset === ts) wanted.delete(w); });
+      wanted.add({tabset: ts, tab: tab, inputs: inputs, until: Date.now() + 30000});
     });
     if (found.length) settleWanted();
   }
   document.addEventListener('htmx:load', function(e) { collectWanted(e.target); });
-  document.addEventListener('htmx:afterSettle', function() { if (wanted.length) settleWanted(); });
+  document.addEventListener('htmx:afterSettle', function() { if (wanted.size) settleWanted(); });
   // A page's Reset (`semantic_app(…; reset)`): every input of the forms the
   // button names (`data-htmxo-reset`) takes what the page shows when its
   // address names nothing (`data-htmxo-address`, or `data-htmxo-defaults` on

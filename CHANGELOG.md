@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.203
+
+- A mutation can return `open_tab("timecourse"; fit=name)` to select a newly
+  added fit and open its result in place. The tab waits for the fit's control
+  to refresh. The response can show a toast and the reader keeps other inputs.
+
 ## 0.1.202
 
 - Tabbed semantic apps can set `sidebar_fold=(below=1100, label="Settings")`

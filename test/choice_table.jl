@@ -8,7 +8,7 @@ using TestItemRunner
 @testmodule ChoiceTableFixtures begin
     using HTMXObjects
     using HTMXObjects.DynamicObjects: option_domain, TrackedDirectory
-    export FitsPage, FITS_DIR, FIT_INFO, reset_fits!, tab_of, sidebar_of, attrs_of
+    export FitsPage, MountedFits, FITS_DIR, FIT_INFO, reset_fits!, tab_of, sidebar_of, attrs_of
 
     const FITS_DIR = mktempdir()
     const FIT_INFO = Dict{String,Any}()
@@ -41,10 +41,14 @@ using TestItemRunner
         @post upload(; name::String) = begin
             FIT_INFO[name] = (label=uppercase(name), model="new", subjects=1, draws=10)
             write(joinpath(FITS_DIR, name), "fit")
-            h.div(h.p("added:", name), set_inputs(fit=name))
+            hx_response(h.div(h.p("added:", name), open_tab("timecourse"; fit=name));
+                toast="Added the fit " * name)
         end
         @get index() = semantic_app(__self__; presentation=:tabs, title="Simulator",
             select=entry -> entry.name !== :index, place=(fit=:upload,))
+    end
+    @htmx struct MountedFits
+        @include other = FitsPage()
     end
 
     sidebar_of(html) = match(r"<form id=\"htmxo-semantic-context-[^\"]*\"[^>]*>.*?</form>"s, html).match
@@ -139,6 +143,13 @@ end
     json = replace(match(r"data-htmxo-set-inputs=\"([^\"]*)\"", html).captures[1], "&quot;" => "\"")
     @test HTMXObjects.JSON.parse(json) == Dict("fit" => ["new-fit"], "doses" => ["5", "10"], "on" => ["true"])
     @test strip(HTMXObjects.to_markdown_string(h.div(h.p("added"), set_inputs(fit="x")))) == "added"
+    command = open_tab(:timecourse; tab="input value", doses=[5, 10])
+    html = repr("text/html", command)
+    @test occursin("data-htmxo-open-tab=\"timecourse\"", html)
+    settings = match(r"data-htmxo-set-inputs=\"([^\"]*)\"", html).captures[1]
+    @test HTMXObjects.JSON.parse(replace(settings, "&quot;" => "\"")) ==
+        Dict("tab" => ["input value"], "doses" => ["5", "10"])
+    @test isempty(strip(HTMXObjects.to_markdown_string(command)))
 end
 
 @testitem "a table choice follows a click, and an added fit becomes the choice, in a browser" setup=[ChoiceTableFixtures] tags=[:browser, :semantic] begin
@@ -151,6 +162,7 @@ end
         isnothing(chrome) && error("HTMXO_BROWSER_TESTS=1 requires google-chrome or chromium")
         reset_fits!()
         route!(FitsPage(); operation_policy=:blocking)
+        route!(MountedFits(); operation_policy=:blocking)
         receipt = Channel{String}(1)
         driver = h.script(Raw(raw"""
         window.addEventListener('load', async function() {
@@ -187,22 +199,59 @@ end
             document.querySelector('a[data-tab-name="upload"]').click();
             await sleep(100);
             const form = document.querySelector('form[hx-post="/upload"]');
-            form.querySelector('input[name="name"]').value = 'fresh';
+            const tab = document.querySelector('a[data-tab-name="timecourse"]');
+            tab.addEventListener('click', () => { out.ordered = chosen() === 'z-fresh'; },
+              {capture:true, once:true});
+            const dose = document.querySelector('input[name="dose"]');
+            dose.value = '95';
+            dose.dispatchEvent(new Event('change', {bubbles:true}));
+            form.querySelector('input[name="name"]').value = 'z-fresh';
+            form.querySelector('[type="submit"]').focus();
             form.requestSubmit();
-            await until(() => row('FRESH') && chosen() === 'fresh', 'added fit chosen');
+            await until(() => row('Z-FRESH') && chosen() === 'z-fresh' &&
+              result().includes('timecourse:z-fresh:95.0'), 'added fit opened at the chosen dose');
+            const params = () => new URLSearchParams(location.search);
             out.added = document.querySelectorAll('[data-htmxo-choice-row]').length === 3 &&
-              new URLSearchParams(location.search).get('fit') === 'fresh' &&
+              params().get('fit') === 'z-fresh' && Number(params().get('dose')) === 95 &&
               !document.querySelector('template[data-htmxo-set-inputs]');
-            document.querySelector('a[data-tab-name="timecourse"]').click();
-            await until(() => result().includes('timecourse:fresh'), 'result of the added fit');
-            out.addedFollow = true;
-          } catch (e) { out.error = String(e); }
+            out.opened = tab.getAttribute('aria-selected') === 'true' && tab.tabIndex === 0 &&
+              tab === document.activeElement && params().get('tab') === 'timecourse' &&
+              document.getElementById(tab.getAttribute('aria-controls')).checkVisibility();
+            out.toast = Array.from(document.querySelectorAll('.htmxo-toast-success > span'))
+              .some(el => el.textContent === 'Added the fit z-fresh');
+
+            // Both apps offer the same tab and fit names. A response in the
+            // second one must affect only its controls, tab and address key.
+            await htmx.ajax('GET', '/other', {target:'#second-app'});
+            const other = document.getElementById('second-app');
+            const sink = other.querySelector('.htmxo-semantic-tab').appendChild(document.createElement('div'));
+            const tabField = document.createElement('input');
+            tabField.name = 'tab';
+            other.querySelector('form.htmxo-semantic-context').appendChild(tabField);
+            const answer = path => htmx.ajax('GET', path, {target:sink});
+            await answer('/show-summary');
+            const selected = () => other.querySelector('[role="tab"][aria-selected="true"]').dataset.tabName;
+            await until(() => selected() === 'summary' && params().get('other.fit') === 'synthetic', 'second app');
+            out.scoped = tabField.value === 'field value' &&
+              other.querySelector('input[name="fit"]:checked').value === 'synthetic' &&
+              params().get('other.tab') === 'summary' && tab.getAttribute('aria-selected') === 'true' &&
+              chosen() === 'z-fresh' && params().get('tab') === 'timecourse';
+            await answer('/same-tab');
+            await answer('/unknown-tab');
+            out.unknown = selected() === 'summary' && params().get('other.tab') === 'summary' &&
+              other.querySelector('input[name="fit"]:checked').value === 'synthetic';
+          } catch (e) {
+            const state = Array.from(document.querySelectorAll('.tabset'), ts =>
+              [ts.dataset.htmxoUrlScope, ts.querySelector('[aria-selected="true"]')?.dataset.tabName,
+               ts.querySelector('input[name="fit"]:checked')?.value]);
+            out.error = String(e) + ' at ' + location.search + ', apps ' + JSON.stringify(state);
+          }
           fetch('/complete?' + new URLSearchParams(Object.entries(out).map(([k, v]) => [k, String(v)])));
         });
         """))
         assets = Dict("/test-assets/htmx.min.js" => read(HTMXObjects._vendor_file(:htmx), String),
             "/test-assets/_hyperscript.min.js" => read(HTMXObjects._vendor_file(:hyperscript), String))
-        page = repr("text/html", htmx(Raw(String(dispatch(:GET, "/"; headers=["HX-Request" => "true"]).body)), driver;
+        page = repr("text/html", htmx(Raw(String(dispatch(:GET, "/"; headers=["HX-Request" => "true"]).body)), h.div(; id="second-app"), driver;
             assets="/test-assets", sse_version=nothing, ws_version=nothing, preload_version=nothing,
             pico_version=nothing, feedback=false, compose=false, overlay=false))
         socket = listen(Sockets.localhost, 0)
@@ -214,6 +263,9 @@ end
             haskey(assets, path) &&
                 return HTTP.Response(200, ["Content-Type" => "application/javascript"], assets[path])
             path == "/favicon.ico" && return HTTP.Response(204)
+            path == "/show-summary" && return to_response(open_tab("summary"; fit="synthetic", tab="field value"))
+            path == "/same-tab" && return to_response(open_tab("summary"))
+            path == "/unknown-tab" && return to_response(open_tab("missing"; fit="pkpd-2024"))
             if path == "/complete"
                 isready(receipt) || put!(receipt, String(req.target))
                 return HTTP.Response(204)
@@ -229,7 +281,7 @@ end
                     @test timedwait(() -> isready(receipt) || process_exited(process), 60; pollint=0.05) === :ok
                     outcome = isready(receipt) ? Dict(HTTP.URIs.queryparams(HTTP.URI(take!(receipt)))) : Dict{String,String}()
                     @test get(outcome, "error", "") == ""
-                    for key in ("click", "enter", "follow", "added", "addedFollow")
+                    for key in ("click", "enter", "follow", "added", "ordered", "opened", "toast", "scoped", "unknown")
                         @test get(outcome, key, "missing") == "true"
                     end
                 finally
