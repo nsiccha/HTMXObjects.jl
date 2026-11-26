@@ -101,6 +101,19 @@ default 100 ms return inline. Otherwise, progress appears beside the previous
 result. With Treebars 0.1.5 or later, ordinary HTML arrives on the page stream.
 The browser fetches responses carrying htmx headers or recorded errors over HTTP.
 
+## Opening a result after a mutation
+
+Return [`open_tab`](@ref) from an upload to select its new fit and open Time course.
+
+```@example forms
+name = "new-fit"
+answer = hx_response(open_tab("timecourse"; fit=name); toast="Added the fit")
+println(String(to_response(answer).body))
+```
+
+The tab waits for the refreshed choice. Other inputs keep their values.
+Omit `fit` to open the tab with the current selection.
+
 ## Several apps on one page
 
 A generated tabbed app places its tab bar above its shared-input sidebar
