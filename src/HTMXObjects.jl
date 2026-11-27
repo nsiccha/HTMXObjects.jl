@@ -9792,7 +9792,8 @@ function _prestart!(walk::_PrestartWalk, url::String, attrs)
     pages = get(walk.req.context, :htmxo_warm_page, nothing)
     pages === nothing || _warm_fragment_allowed!(pages, route) || return nothing
     walk.count[] += 1
-    request = HTTP.Request("GET", route, _prestart_headers(walk, attrs), UInt8[])
+    # Match a bodyless network GET, including HTTP 2.x's EmptyBody type.
+    request = HTTP.Request("GET", route, _prestart_headers(walk, attrs))
     slot = Ref{Union{Nothing,String}}(nothing)
     request.context[:htmxo_prestart] = slot
     pages === nothing || (request.context[:htmxo_warm_page] = pages)
@@ -10049,8 +10050,10 @@ function _operation_stream_body(sse, req, tokens::Vector{String}; push::Bool=fal
     end
     # A write to a page that has left fails at the latest with the keep-alive
     # comment; closing `events` then ends a stream whose operations never do.
-    pages = get(req.context, :htmxo_warm_page, nothing)
+    # Both warm-up and ordinary streams capture the same context type.
+    context = req.context
     left = Timer(1.0; interval=1.0) do timer
+        pages = get(context, :htmxo_warm_page, nothing)
         closed = pages !== nothing && lock(() -> pages.closed, _operation_poll_lock)
         (!isopen(sse) || closed) && (close(events); close(timer))
     end
@@ -10138,7 +10141,7 @@ function _operation_push!(sse, req, token::String; final::Bool)
         return ended(send("ready"))
     end
     poll = HTTP.Request("GET", target,
-        _inner_htmx_headers(req, HTTP.header(req, "Referer", "")), UInt8[])
+        _inner_htmx_headers(req, HTTP.header(req, "Referer", "")))
     poll.context[:htmxo_served] = true
     poll.context[:htmxo_push] = true
     pages = get(req.context, :htmxo_warm_page, nothing)
@@ -10152,7 +10155,7 @@ function _operation_push!(sse, req, token::String; final::Bool)
     if response.status == 200
         return send("progress", String(_message_body_bytes(response))) ? :running : :closed
     end
-    _store_pushed_answer!(token, _request_route_path(poll), response, pages)
+    _store_pushed_answer!(token, _request_route_path(poll), response, req.context)
     _operation_pushable(response) ?
         ended(send("result", String(_message_body_bytes(response)))) :
         ended(send("ready"))
@@ -10187,10 +10190,11 @@ const _PUSHED_ANSWER_LIMIT = 256
 const _PUSHED_ANSWER_TTL = 600.0
 const _pushed_answers = Dict{String,@NamedTuple{path::String,response::HTTP.Response,at::Float64}}()
 
-function _store_pushed_answer!(token::String, path::String, response::HTTP.Response, pages=nothing)
+function _store_pushed_answer!(token::String, path::String, response::HTTP.Response, context)
     now = _operation_poll_now()
     stored = _copy_mutation_terminal(response)
     lock(_operation_poll_lock) do
+        pages = get(context, :htmxo_warm_page, nothing)
         pages !== nothing && !haskey(pages.tokens, token) && return
         filter!(((_, kept),) -> now - kept.at <= _PUSHED_ANSWER_TTL, _pushed_answers)
         while length(_pushed_answers) >= _PUSHED_ANSWER_LIMIT
@@ -18077,6 +18081,36 @@ function _operation_unmarked_url(target::AbstractString)
     isempty(kept) ? String(path) : string(path, '?', join(kept, '&'))
 end
 
+# Start, attach and poll share the callbacks' definitions and transport shape.
+# A fast warm-up may reach Treebars only on its forced fresh probe; that must
+# compile the same callbacks a slow browser attach and stream will use later.
+function _operation_poll_transport(policy, descriptor, name, req, entry;
+        poll_url, retain::Bool=false, settle_bare::Bool=false,
+        page_load_id=nothing, replace_page_load::Bool=false,
+        grace_period=0.0, stalled=nothing, queued::Bool=false)
+    token = entry.token
+    (
+        poll_url,
+        label=_operation_poll_label(descriptor, name),
+        poll_interval=policy.poll_interval,
+        keep_progress=_operation_treebars_keep(policy),
+        keep_terminal_tree=policy.keep_terminal_tree,
+        settle_bare,
+        page_load_id,
+        replace_page_load,
+        error_obj=entry.error_obj,
+        req=entry.request,
+        grace_period,
+        retain=() -> retain && _retain_operation!(entry, descriptor, name; track=queued),
+        cleanup=() -> _delete_operation_poll!(token),
+        ended=outcome -> _record_operation_end!(entry, outcome),
+        failed=(err, uid) -> _note_operation_failure!(req, err, uid),
+        stalled,
+        stream=_operation_stream_wanted(req),
+        sent_ahead=() -> _sent_ahead_carriers(req, entry),
+    )
+end
+
 function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
         name, verb_inst, idx_vals, kw_pairs, req, prefix, token, entry)
     _runtime_job_polled!(req, entry.started)
@@ -18096,38 +18130,26 @@ function _execute_operation_resume(policy::OperationPolicy, descriptor, target,
     probe = (_operation_prewarm_request(req) || first_attach) ?
         (ready=false, value=nothing) :
         _operation_ready_probe(policy,
-            value -> _finish_operation_poll(token, value), entry.started;
+            Base.Fix1(_finish_operation_poll, token), entry.started;
             replace_page_load)
     probe.ready && return _operation_page_runtime(req, probe.value)
     # A follow-up poll already carries its marker; an attach promotes its
     # marker-free URL to one for the live poller that the attach response
     # establishes.
     request_url = _operation_request_url(req, prefix)
-    transport = (
+    transport = _operation_poll_transport(policy, descriptor, name, req, entry;
         poll_url=_operation_poll_request(req) ? request_url :
                  _operation_marker_url(request_url, "__htmxo_poll"),
-        label=_operation_poll_label(descriptor, name),
-        poll_interval=policy.poll_interval,
-        keep_progress=_operation_treebars_keep(policy),
-        keep_terminal_tree=policy.keep_terminal_tree,
         settle_bare=first_attach,
         page_load_id,
         replace_page_load,
-        error_obj=entry.error_obj,
-        req=entry.request,
         grace_period=first_attach ? _operation_grace_period(policy, req) : 0.0,
-        retain=() -> nothing,
-        cleanup=() -> _delete_operation_poll!(token),
-        ended=outcome -> _record_operation_end!(entry, outcome),
-        failed=(err, uid) -> _note_operation_failure!(req, err, uid),
         stalled=_operation_stall(entry, age, descriptor, name, verb_inst, req,
                                  prefix),
-        stream=_operation_stream_wanted(req),
-        sent_ahead=() -> _sent_ahead_carriers(req, entry),
     )
     entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
-        value -> _finish_operation_poll(token, value),
+        Base.Fix1(_finish_operation_poll, token),
         entry.started, entry.prop, entry.keys, entry.call_kwargs, transport))
 end
 
@@ -18144,7 +18166,7 @@ function _operation_await_resume(entry::_OperationPollEntry, token,
     budget = bound === nothing ? Inf :
         max(bound - (_operation_poll_now() - entry.created_at), 0.1)
     awaited = try
-        _operation_grace_fetch(value -> _finish_operation_poll(token, value),
+        _operation_grace_fetch(Base.Fix1(_finish_operation_poll, token),
                                entry.started, budget)
     catch
         _end_operation_poll!(token, :failed)
@@ -18205,29 +18227,19 @@ function _execute_operation_heal(policy::OperationPolicy, descriptor, target,
     replace_page_load =
         !_operation_treebars_keep(policy) && !isnothing(page_load_id)
     probe = _operation_ready_probe(policy,
-        value -> _finish_operation_poll(token, value), started;
+        Base.Fix1(_finish_operation_poll, token), started;
         replace_page_load)
     probe.ready && return _operation_page_runtime(req, probe.value)
-    transport = (poll_url=_operation_heal_poll_url(req, token, prefix),
-                 label=_operation_poll_label(descriptor, name),
-                 poll_interval=policy.poll_interval,
-                 keep_progress=_operation_treebars_keep(policy),
-                 keep_terminal_tree=policy.keep_terminal_tree,
+    transport = _operation_poll_transport(policy, descriptor, name, req, entry;
+                 poll_url=_operation_heal_poll_url(req, token, prefix),
                  settle_bare=false,
                  page_load_id,
                  replace_page_load,
-                 error_obj=target.leaf, req=req,
                  grace_period=0.0,
-                 retain=() -> _retain_operation!(entry, descriptor, name;
-                                                 track=queued),
-                 cleanup=() -> _delete_operation_poll!(token),
-                 ended=outcome -> _record_operation_end!(entry, outcome),
-                 failed=(err, uid) -> _note_operation_failure!(req, err, uid),
-                 stream=_operation_stream_wanted(req),
-                 sent_ahead=() -> _sent_ahead_carriers(req, entry))
+                 retain=true, queued)
     entry.poll_url = transport.poll_url
     _operation_page_runtime(req, _operation_polling(
-        value -> _finish_operation_poll(token, value),
+        Base.Fix1(_finish_operation_poll, token),
         started, prop, keys, call_kwargs, transport))
 end
 
@@ -18397,26 +18409,16 @@ function _execute_operation_fresh(policy::OperationPolicy, descriptor, target,
             error_obj, req, now, now, job)
         entry.stall_after = _operation_stall_after(policy, queued)
         page_load_id = _operation_page_load_id(req)
-        transport = (poll_url=_operation_poll_url(req, token, prefix, verb_inst),
-                     label=_operation_poll_label(descriptor, name),
-                     poll_interval=policy.poll_interval,
-                     keep_progress=_operation_treebars_keep(policy),
-                     keep_terminal_tree=policy.keep_terminal_tree,
+        transport = _operation_poll_transport(policy, descriptor, name, req, entry;
+                     poll_url=_operation_poll_url(req, token, prefix, verb_inst),
                      settle_bare=true,
                      page_load_id,
                      replace_page_load=false,
-                     error_obj=error_obj, req=req,
                      grace_period=_operation_grace_period(policy, req),
-                     retain=() -> _retain_operation!(entry, descriptor, name;
-                                                 track=queued),
-                     cleanup=() -> _delete_operation_poll!(token),
-                     ended=outcome -> _record_operation_end!(entry, outcome),
-                     failed=(err, uid) -> _note_operation_failure!(req, err, uid),
-                     stream=_operation_stream_wanted(req),
-                     sent_ahead=() -> _sent_ahead_carriers(req, entry))
+                     retain=true, queued)
         entry.poll_url = transport.poll_url
         value = _operation_page_runtime(req, _operation_polling(
-            value -> _finish_operation_poll(token, value),
+            Base.Fix1(_finish_operation_poll, token),
             started, prop, keys, call_kwargs, transport))
         return _cache_mutation_terminal!(entry, value)
     end

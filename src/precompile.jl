@@ -20,7 +20,7 @@ function _precompile_page_paths()
         precompile(_gzip_write, (_GzipFrames, stream, Ptr{UInt8}, UInt, Cint))
         precompile(_finish_sse_body, (SSEStream, Nothing, request, Nothing))
         precompile(_operation_pushable, (HTTP.Response{String},))
-        precompile(_store_pushed_answer!, (String, String, HTTP.Response{String}, Nothing))
+        precompile(_store_pushed_answer!, (String, String, HTTP.Response{String}, Dict{Symbol,Any}))
     end
     nothing
 end

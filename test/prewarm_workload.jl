@@ -426,6 +426,75 @@ end
     end
 end
 
+@testitem "fast warmup covers a pending view's attach and pushed polling signatures" setup=[HTMXOTestImports, StandaloneWarmFixture] tags=[:integration, :server] begin
+    using Treebars
+    signatures = Dict(:warm => Set{Any}(), :live => Set{Any}())
+    requests = Tuple{Bool,DataType}[]
+    phase = Ref(:warm)
+    polling = HTMXObjects._operation_polling_impl[]
+    HTMXObjects._operation_polling_impl[] = (args...) -> begin
+        push!(signatures[phase[]], typeof(args))
+        polling(args...)
+    end
+    function observe(handler)
+        function (req)
+            inner = haskey(req.context, :htmxo_prestart) || haskey(req.context, :htmxo_push)
+            push!(requests, (inner, typeof(req)))
+            answer = handler(req)
+            # The first push must render the still-pending operation before
+            # releasing it. The next stream event then carries its answer.
+            haskey(req.context, :htmxo_push) && notify(gate[])
+            answer
+        end
+    end
+    route!(WarmForm())
+    vendorfiles()
+    server = serve(; port=0, listenany=true, async=true, prestart=true,
+                   operation_stream=true, middleware=[observe], access_log=nothing)
+    base = "http://127.0.0.1:$(HTTP.port(server))"
+    path = "/landing?heading=edited"
+    hx = ["HX-Request" => "true", "HX-Current-URL" => base * path]
+    try
+        gate[] = Base.Event()
+        notify(gate[])
+        rows = prewarm_routes!(base, [path, "/first_view?heading=edited"]; operations=true)
+        @test all(r -> r.error === nothing && r.status in (200, 286), rows)
+
+        phase[] = :live
+        empty!(requests)
+        gate[] = Base.Event()
+        page = String(HTTP.get(base * path, ["Accept" => "text/html"]; retry=false).body)
+        attach = HTMXObjects._site_attribute_text(only(match(
+            r"\shx-get=\"(/first_view\?[^\"]*__htmxo_operation=[^\"]*)\"", page).captures))
+        pending = HTTP.get(base * attach, hx; retry=false)
+        @test pending.status == 200
+        address = HTMXObjects._prewarm_next(String(pending.body))
+        token = HTTP.queryparams(HTTP.URI(address))["__htmxo_operation"]
+        stream = HTTP.get(base * "/landing?__htmxo_operations=$token&__htmxo_push=1",
+            ["Accept" => "text/event-stream", "Referer" => base * path];
+            retry=false, readtimeout=15)
+        events = String(stream.body)
+        @test occursin("event: progress", events)
+        @test occursin("event: result", events)
+        @test occursin("edited|one / two", events)
+        replay = HTTP.get(base * address, hx; retry=false)
+        @test replay.status == 286 && occursin("edited|one / two", String(replay.body))
+
+        # Fast warm-up reaches the forced fresh probe; a slower real page
+        # needs attach and push callbacks too. Their method instances must
+        # already be represented in the warmed calls, regardless of timing.
+        @test !isempty(signatures[:live])
+        @test issubset(signatures[:live], signatures[:warm])
+        @test any(first, requests) && any(q -> !first(q), requests)
+        @test length(unique(last.(requests))) == 1
+        @test isempty(HTMXObjects._warm_pages)
+    finally
+        notify(gate[])
+        close(server)
+        HTMXObjects._operation_polling_impl[] = polling
+    end
+end
+
 @testitem "a timed-out standalone stream leaves an ordinary pending view intact" setup=[HTMXOTestImports, StandaloneWarmFixture] tags=[:integration, :server] begin
     using Treebars
     route!(WarmForm())
