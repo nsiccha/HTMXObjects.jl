@@ -36690,6 +36690,20 @@ function _semantic_result_bounds(heights::Union{NamedTuple,AbstractDict}, names)
     [get(bounds, name, default) for name in names]
 end
 
+# After how many seconds a `:tabs` page's result gives way to the progress of
+# a refresh that is still running (`semantic_app(…; progress_after)`), as the
+# attribute `live_refresh_script` reads on the result; `nothing` writes none,
+# so the result stays until the next one arrives.
+_semantic_progress_after(::Nothing) = (;)
+function _semantic_progress_after(seconds)
+    seconds isa Real && !(seconds isa Bool) && isfinite(seconds) && seconds >= 0 ||
+        throw(ArgumentError(string(
+            "semantic_app progress_after must be a number of seconds, 0 or more, or nothing, got ",
+            repr(seconds))))
+    value = Float64(seconds)
+    (; data_htmxo_progress_after=isinteger(value) ? string(Int(value)) : string(value))
+end
+
 """
     _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active,
                    render_operation, layout, url_state, reset)
@@ -36701,13 +36715,17 @@ and every read's result following its inputs (`semantic_follow_script`). With
 shows the values it names, and the script writes the inputs into it. With
 `reset`, a Reset button returns every one of those inputs to its default.
 `result_height` supplies one bound or a map keyed by the generated tab names.
+`progress_after` is the number of seconds after which a refresh that is still
+running shows its progress in place of the result on screen.
 """
 function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, active, query, sidebar_fold,
         render_operation, layout, radio_max::Int=_RADIO_MAX, url_state::Bool=true,
         reset::Bool=true, sections=InputSection[], place=nothing,
-        report_states=_ReportState[], url_scope::AbstractString="", result_height=:window)
+        report_states=_ReportState[], url_scope::AbstractString="", result_height=:window,
+        progress_after=3)
     isempty(specs) && throw(ArgumentError(
         "semantic_app presentation=:tabs needs at least one operation"))
+    takeover = _semantic_progress_after(progress_after)
     # What each operation reads of the inputs the page places. The fields of
     # a list of records are inputs of its cards, not of the page.
     record_fields = Set{Symbol}()
@@ -36860,7 +36878,7 @@ function _semantic_tabs(obj, specs, root_prefix, context_id; title, shared, acti
                 data_htmxo_follow=string(target), data_htmxo_inputs=join(selectors, ' '),
                 (isnothing(key_reads) ? (;) :
                     (; data_htmxo_reads=_semantic_names_attr(key_reads)))...,
-                data_htmxo_live="", hx_sync="this:replace", result_bound...)
+                data_htmxo_live="", hx_sync="this:replace", takeover..., result_bound...)
             # The page's Markdown writes the result its address answers, at the
             # inputs it reads (`_tab_result_markdown`).
             markdown = _tab_result_markdown(spec.mounted, route, current, target, sent,
@@ -37003,7 +37021,7 @@ end
                  select=entry -> true, presentation=:stacked, radio_max=8,
                  shared=nothing, active=nothing, url_state=true, reset=true,
                  sections=nothing, place=nothing, report_states=nothing,
-                 result_height=:window, sidebar_fold=nothing)
+                 result_height=:window, sidebar_fold=nothing, progress_after=3)
 
 Compile the complete mounted semantic `@htmx` graph rooted at `obj` into an
 operation surface. Routes are discovered in declaration order from
@@ -37056,7 +37074,13 @@ its bound. Unknown tab names throw and list the page's names. A result that
 fits its bound stays in the page as it is. Inside the box a table's controls and
 header stick to the box top, a wide table's own box fits in it, and sorting,
 search, CSV, the keyboard row moves and hover linking work as on the page; the
-page's Markdown is unchanged. Its page address
+page's Markdown is unchanged. While a slow result computes, a tab with no
+result yet shows the operation's progress. A tab that shows a result keeps it
+on screen, the progress collapsed to a line under it, and once the refresh has
+run for `progress_after` seconds (3 by default) the progress takes the result's
+place until the new one arrives; `progress_after=nothing` keeps the result for
+the whole wait. A tab that a mutation's [`open_tab`](@ref) opens for other
+inputs shows the progress at once. Its page address
 keeps the open tab and every input the reader set away from its default, and
 the page shows the values its address names, so a reload or a shared link
 reopens the same page; `url_state=false` keeps only the tab. If a link requests
@@ -37248,7 +37272,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         select=_select_every_operation, presentation::Symbol=:stacked,
         shared=nothing, active=nothing, radio_max::Int=_RADIO_MAX, url_state=nothing,
         reset=nothing, sections=nothing, place=nothing, report_states=nothing,
-        result_height=:window, sidebar_fold=nothing)
+        result_height=:window, sidebar_fold=nothing, progress_after=3)
     results in (:each, :shared) || throw(ArgumentError(
         "semantic_app results must be :each or :shared, got $(repr(results))"))
     presentation in (:stacked, :tabs) || throw(ArgumentError(
@@ -37278,6 +37302,8 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
             "semantic_app result_height= bounds the results of presentation=:tabs"))
         isnothing(sidebar_fold) || throw(ArgumentError(
             "semantic_app sidebar_fold= folds the shared inputs of presentation=:tabs"))
+        progress_after == 3 || throw(ArgumentError(
+            "semantic_app progress_after= times the results of presentation=:tabs"))
     end
     states = _report_states(report_states)
     input_sections = _input_sections(sections)
@@ -37285,6 +37311,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         "semantic_app url_state must be true or false, got $(repr(url_state))"))
     isnothing(reset) || reset isa Bool || throw(ArgumentError(
         "semantic_app reset must be true or false, got $(repr(reset))"))
+    presentation === :tabs && _semantic_progress_after(progress_after)
     # An app page reads what the page address keeps under the app's name
     # (`first.rate`) before the plain name.
     url_scope = presentation === :tabs ? _semantic_url_scope(obj) : ""
@@ -37354,7 +37381,7 @@ function semantic_app(obj; values=(;), title=nothing, submit=nothing, submit_att
         title, shared, active, radio_max, url_state=something(url_state, true),
         sidebar_fold=isnothing(sidebar_fold) ? nothing : _sidebar_fold(; sidebar_fold...),
         reset=something(reset, true), sections=input_sections, place, report_states=states,
-        url_scope, result_height, query=address, render_operation=render_operation === _default_semantic_operation ?
+        url_scope, result_height, progress_after, query=address, render_operation=render_operation === _default_semantic_operation ?
             _default_semantic_tab : render_operation,
         layout=layout === _default_semantic_layout ? _default_semantic_tabs_layout : layout)
 
@@ -38207,6 +38234,20 @@ _opening_element_js() = raw"""
   }
 """
 
+# What stands in for an answer that is still on its way, shared by the page
+# scripts that ask whether an element already shows a result
+# (`live_refresh_script`, `semantic_follow_script`): an indeterminate progress
+# bar, as `semantic_follow_script` draws in a result asked for the first time,
+# or a placeholder that loads its first answer when it appears (`lazy`: its
+# trigger is the load event). The shell must not spell such a trigger attribute
+# out: its tests read it as a load request.
+_awaits_first_answer_js() = raw"""
+  function awaitsFirstAnswer(c) {
+    if (c.localName === 'progress' && !c.hasAttribute('value')) return true;
+    return /(^|[\s,])load(?![\w-])/.test(c.getAttribute('hx-trigger') || '');
+  }
+"""
+
 """
     live_refresh_script()
 
@@ -38240,7 +38281,19 @@ lands. `target`, `selectOverride` and `isError` are not re-read.
 Periodic targets are automatic — no consumer wiring. An event-driven target
 opts in by carrying `data-htmxo-live`: once it holds settled (non-poller)
 content it diverts exactly like a periodic target, whatever trigger or
-requesting element the refresh came from. The marker is presence-only (its
+requesting element the refresh came from. What stands in for a first answer
+is not settled content: an indeterminate `<progress>` (as
+[`semantic_follow_script`](@ref) draws in a result asked for the first time)
+or a placeholder that loads its first answer ([`lazy`](@ref)). A slow first
+answer therefore shows its progress in the target itself, as a page load
+does, whoever asked for it. A marked target refreshed into (`innerHTML`) can
+bound how long a refresh stays quiet: with `data-htmxo-progress-after="3"`,
+a refresh still running after 3 seconds moves its poller into the target in
+place of the content there, where it draws its progress and its answer lands
+as a first one does, so the target is offered no diverted terminal for it
+([`semantic_app`](@ref)'s tabs set it from `progress_after`). Parts sent
+ahead that already replaced the content keep their place, and the poller
+stays beside them. The marker is presence-only (its
 value is ignored) and inert for htmx itself (`data-*` attributes never
 inherit, unlike `hx-swap`, so it is safe on aggregate wrappers). Detection
 uses the same Treebars markers the poller/terminal already carry
@@ -38353,13 +38406,20 @@ live_refresh_script() = h.script(Raw(raw"""
     return rep;
   }
   // A marked target holds settled content when it shows something other than
-  // a running poller: a server-rendered aggregate stamps at page load (so its
-  // first event refresh already diverts), while an empty placeholder or a
-  // first-paint poller stays unstamped until a terminal arrives.
+  // a running poller or what stands in for a first answer: a server-rendered
+  // aggregate stamps at page load (so its first event refresh already
+  // diverts), while an empty placeholder, a first-time progress bar, a
+  // placeholder that loads its first answer, or a first-paint poller stays
+  // unstamped until a terminal arrives. Its first slow answer then shows its
+  // progress in the target itself, as a page load does, not in the reporter
+  // beside a bar that says nothing.
+""" * _awaits_first_answer_js() * raw"""
   function holdsSettledContent(el) {
     if (el.querySelector && el.querySelector('.treebar-poller-inner')) return false;
-    if (el.children && el.children.length > 0) return true;
-    return (el.textContent || '').replace(/\s+/g, '').length > 0;
+    for (var n = el.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 1 ? !awaitsFirstAnswer(n) : (n.nodeType === 3 && /\S/.test(n.nodeValue))) return true;
+    }
+    return false;
   }
   function stampLiveMarkers() {
     document.querySelectorAll('[' + MARKER + ']:not([' + SETTLED + '])').forEach(function(el) {
@@ -38569,6 +38629,46 @@ live_refresh_script() = h.script(Raw(raw"""
     landed(t, rep, seqOf(o.detail));
   });
 
+  // A live element may say after how many seconds a refresh that is still
+  // running stops being a quiet one (`data-htmxo-progress-after`, as
+  // `semantic_app` writes on a tab's result): the result on screen then gives
+  // way to the running operation's poller, which draws its progress in the
+  // element as a first load does, and its answer lands there as a first
+  // answer does. Only for an element refreshed into (`innerHTML`), and not
+  // once parts sent ahead have taken the old result's place already.
+  function takeOverLater(target, rep) {
+    var after = parseFloat(target.getAttribute('data-htmxo-progress-after'));
+    if (!(after >= 0)) return;
+    var cycle = rep.__htmxoCycle = {};
+    setTimeout(function() {
+      var live = rep.__htmxoLiveTarget;
+      if (rep.__htmxoCycle !== cycle || rep.hidden || !live || !live.isConnected) return;
+      if (!rep.querySelector('.treebar-poller-inner[hx-trigger]')) return;
+      if (bareSwapStyle(rep.__htmxoSwapStyle || '') !== 'innerHTML') return;
+      if (live.querySelector('.htmxo-sent-ahead')) return;
+      live.replaceChildren.apply(live, Array.prototype.slice.call(rep.childNodes));
+      rep.hidden = true;
+      rep.__htmxoCycleKey = null;
+      live.removeAttribute(BUSY);
+    }, after * 1000);
+  }
+  // A live element starts over: what it showed is dropped by its page (a tab
+  // that `open_tab` opens for other inputs), so its next answer is a first
+  // one again, and a refresh still running beside it is over.
+  window.htmxoLiveStartOver = function(el) {
+    var rep = el && el.__htmxoReporter;
+    if (rep) {
+      rep.__htmxoCycle = null;
+      rep.__htmxoCycleKey = null;
+      rep.innerHTML = '';
+      rep.hidden = true;
+    }
+    if (el && el.removeAttribute) {
+      el.removeAttribute(BUSY);
+      el.removeAttribute(SETTLED);
+    }
+  };
+
   document.addEventListener('htmx:configRequest', function(evt) {
     var d = evt.detail; if (!d || !d.target) return;
     if (!isLive(d.target)) return;
@@ -38633,6 +38733,7 @@ live_refresh_script() = h.script(Raw(raw"""
       rep.hidden = false;
       rep.innerHTML = resp;
       if (window.htmx && window.htmx.process) window.htmx.process(rep);
+      takeOverLater(target, rep);
       return;
     }
 
@@ -39812,6 +39913,10 @@ values as for [`set_inputs`](@ref). For example, after adding a fit, return
 
 Once the app's controls offer the requested values, the page activates the
 tab as a click would, updating its address and loading its result in place.
+While a slow result computes the tab draws its operation's progress, also
+when it showed a result before: that one belongs to other inputs, so the
+tab starts over as one opened for the first time. A tab whose inputs the
+call leaves as they are keeps its result while the page asks for it again.
 Other inputs keep their values. A template outside the apps can target the
 only semantic tabset on a page. An ambiguous destination or an unknown tab
 is ignored. If an input is still unavailable after 30 seconds, the tab stays put.
@@ -39842,8 +39947,13 @@ A hidden input is not sent, nor is one that shows its computed default until
 the reader sets it (`data-htmxo-follows`, see [`semantic_refresh_script`](@ref)),
 and an unchecked checkbox sends `false`. A new
 request replaces one still running (`hx-sync`), and the shown result stays on
-screen while the next one computes (`data-htmxo-live`); a result asked for the
-first time shows a `<progress>` until it arrives. After a mutation of
+screen while the next one computes (`data-htmxo-live`), its progress reported
+beside it, and gives way to that progress once the refresh has run for the
+page's `progress_after` seconds (`data-htmxo-progress-after`); a result asked
+for the first time shows a `<progress>` until it arrives, and a slow one then
+shows its operation's progress in the result, as the page's first load does.
+The tab a mutation's [`open_tab`](@ref) opens for other inputs starts over the
+same way. After a mutation of
 the page finishes, every other result is asked for again when next shown.
 
 It also keeps the page's inputs in the page address (`semantic_app(…;
@@ -39974,11 +40084,24 @@ semantic_follow_script() = h.script(Raw(raw"""
     if (!window.htmx || !visible(region) || !valid(region) || formsOf(region).some(busy)) return;
     var pairs = pairsOf(region);
     var key = keyOf(region, pairs);
+    var opened = region.__htmxoOpened;
+    delete region.__htmxoOpened;
     if (region.getAttribute('data-htmxo-shown') === key) return;
     region.setAttribute('data-htmxo-shown', key);
+    // The inputs of the result on screen, kept when a mutation marks every
+    // result to be asked for again.
+    var held = region.__htmxoKey;
+    region.__htmxoKey = key;
     // A result computed in the browser (`@browser`) asks nothing of the server.
     if (region.hasAttribute('data-htmxo-browser') && window.__htmxoBrowserCompute) {
       return window.__htmxoBrowserCompute(region, pairs);
+    }
+    // The tab a mutation's `open_tab` opens for other inputs shows its new
+    // result as a tab opened for the first time does: what it showed belongs
+    // to the old ones. With its inputs unchanged it keeps its result.
+    if (opened && Date.now() < opened.until && held !== key) {
+      if (window.htmxoLiveStartOver) window.htmxoLiveStartOver(region);
+      region.replaceChildren();
     }
     // A result asked for the first time shows that it is coming.
     if (!region.children.length) region.appendChild(document.createElement('progress'));
@@ -40038,7 +40161,8 @@ semantic_follow_script() = h.script(Raw(raw"""
       if (seen.has(region)) return;
       seen.add(region);
       if (region.children.length && !region.hasAttribute('data-htmxo-shown')) {
-        region.setAttribute('data-htmxo-shown', keyOf(region, pairsOf(region)));
+        region.__htmxoKey = keyOf(region, pairsOf(region));
+        region.setAttribute('data-htmxo-shown', region.__htmxoKey);
       }
       if (observer) observer.observe(region);
       else later(region);
@@ -40449,14 +40573,14 @@ semantic_follow_script() = h.script(Raw(raw"""
     var answer = parsed(html);
     return !!answer.querySelector(POLLING);
   }
-  // What a region shows that is no result to keep: its first-load progress,
-  // a placeholder `lazy` renders to load its first answer (its trigger is the
-  // load event), a running operation, or an error answer. (The shell must not
-  // spell such a trigger attribute out: its tests read it as a load request.)
+  // What a region shows that is no result to keep: what stands in for its
+  // first answer (its first-load progress, or a placeholder `lazy` renders to
+  // load it), a running operation, or an error answer.
+""" * _awaits_first_answer_js() * raw"""
   function holdsResult(region) {
     return Array.prototype.some.call(region.children, function(c) {
-      if (c.matches('progress, article[aria-invalid], ' + POLLING) || c.querySelector(POLLING)) return false;
-      if (/(^|[\s,])load(?![\w-])/.test(c.getAttribute('hx-trigger') || '')) return false;
+      if (awaitsFirstAnswer(c)) return false;
+      if (c.matches('article[aria-invalid], ' + POLLING) || c.querySelector(POLLING)) return false;
       return !c.querySelector('article[aria-invalid]:first-child');
     });
   }
@@ -40931,11 +41055,26 @@ semantic_follow_script() = h.script(Raw(raw"""
     first.dispatchEvent(new Event('change', {bubbles: true}));
     return true;
   }
+  // The results of the tab a waiting `open_tab` opens: their next request is
+  // for what the mutation sent the reader to, so it starts over (`consider`).
+  function opening(w, on) {
+    var panel = w.tab && document.getElementById(w.tab.getAttribute('aria-controls'));
+    if (!panel) return [];
+    var results = Array.prototype.slice.call(panel.querySelectorAll('[data-htmxo-follow]'));
+    results.forEach(function(r) {
+      if (on) r.__htmxoOpened = w;
+      else if (r.__htmxoOpened === w) delete r.__htmxoOpened;
+    });
+    return results;
+  }
   function settleWanted() {
     Array.from(wanted).forEach(function(w) {
-      if (Date.now() >= w.until || (w.tab && !w.tab.isConnected)) { wanted.delete(w); return; }
+      if (Date.now() >= w.until || (w.tab && !w.tab.isConnected)) { wanted.delete(w); opening(w, false); return; }
+      var results = opening(w, true);
       w.inputs = w.inputs.filter(function(pair) { return !setInput(pair[0], pair[1], w.tabset); });
       if (w.inputs.length || !wanted.delete(w)) return;
+      // A tab that is open already comes into view by no event: look again.
+      results.forEach(function(r) { later(r); });
       if (w.tab) {
         var panel = document.activeElement && document.activeElement.closest('.tab-panel');
         var moveFocus = panel && w.tabset.contains(panel) && w.tab.getAttribute('aria-selected') !== 'true';
@@ -40965,7 +41104,7 @@ semantic_follow_script() = h.script(Raw(raw"""
       try { inputs = Object.entries(JSON.parse(t.getAttribute('data-htmxo-set-inputs'))); }
       catch (_) { return; }
       // A more recent navigation in this app supersedes one waiting on a control.
-      if (ts) wanted.forEach(function(w) { if (w.tabset === ts) wanted.delete(w); });
+      if (ts) wanted.forEach(function(w) { if (w.tabset === ts) { wanted.delete(w); opening(w, false); } });
       wanted.add({tabset: ts, tab: tab, inputs: inputs, until: Date.now() + 30000});
     });
     if (found.length) settleWanted();

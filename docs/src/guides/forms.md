@@ -98,7 +98,13 @@ parameters already supplied by visible controls.
 Committing a valid edit (for example, on blur) refreshes the visible tab on the
 next browser turn once dependent controls settle. Results ready within the
 default 100 ms return inline. Otherwise, progress appears beside the previous
-result. With Treebars 0.1.5 or later, ordinary HTML arrives on the page stream.
+result, collapsed to a line that opens on hover. A refresh still running after
+three seconds shows its progress in place of the previous result until the new
+one arrives. Set the delay with `semantic_app(app; presentation=:tabs,
+progress_after=10)`, in seconds, or pass `progress_after=nothing` to keep the
+previous result for the whole wait. A tab with no result yet draws its
+operation's progress in the result itself, as the page's first load does. With
+Treebars 0.1.5 or later, ordinary HTML arrives on the page stream.
 The browser fetches responses carrying htmx headers or recorded errors over HTTP.
 
 ## Opening a result after a mutation
@@ -112,7 +118,10 @@ println(String(to_response(answer).body))
 ```
 
 The tab waits for the refreshed choice. Other inputs keep their values.
-Omit `fit` to open the tab with the current selection.
+Omit `fit` to open the tab with the current selection. While a slow result
+computes, the opened tab draws its operation's progress, also when it showed a
+result for other inputs before. A tab whose inputs the call leaves as they are
+keeps its result.
 
 ## Several apps on one page
 

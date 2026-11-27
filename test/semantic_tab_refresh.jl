@@ -26,7 +26,11 @@ using TestItemRunner
         @param setting::Int = 0
         "Preview"
         @get tab_preview() = answer(setting)
-        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name === :tab_preview)
+        # These trials follow a refresh that stays beside its result, one of
+        # them for over three seconds: the result keeps its place throughout
+        # (`progress_after`; test/semantic_first_result.jl covers the default).
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name === :tab_preview,
+            progress_after=nothing)
         __page__(body) = htmx(h.main(body), driver; assets=:vendor, pico_version=nothing,
             hyperscript_version=nothing, feedback=false, compose=false, overlay=false)
     end

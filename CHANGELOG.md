@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.206
+
+- A result that a tabs page asks for the first time shows its operation's
+  progress in the result while it computes, as the page's first load does:
+  a tab the reader opens, a tab `open_tab` opens, and an input changed before
+  the first answer arrived. Before, the first-time progress bar counted as a
+  shown result, so the progress tree ran collapsed beside a bar that said
+  nothing.
+- A tab that `open_tab` opens for other inputs drops the result it showed and
+  starts over as a tab opened for the first time, so the reader sees the new
+  result's progress at once.
+- `semantic_app(…; presentation=:tabs, progress_after=3)`: a refresh of a
+  result on screen that is still running after that many seconds shows its
+  progress in place of the old result. Quicker refreshes keep the old result
+  as before; `progress_after=nothing` keeps it for the whole wait.
+
 ## 0.1.205
 
 - A `tabset` opens its tabs without hyperscript. `tabset_script`, which every
