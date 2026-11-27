@@ -11792,7 +11792,7 @@ end
         # once: warm the code, then assert on the second run.
         prewarm_routes!(WarmupOperationApp, base; operations=true, include_post=true)
         rows = prewarm_routes!(WarmupOperationApp, base; operations=true,
-                               include_post=true)
+                               browser=false, include_post=true)
         # A deferred answer ends with its poll's stop-polling status 286.
         @test all(r -> r.status in (200, 286) && r.error === nothing, rows)
         by = Dict((r.name, r.transport) => r for r in rows)

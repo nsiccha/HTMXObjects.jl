@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.204
+
+- Standalone `prewarm_routes!(…; operations=true)` follows a selected page
+  on the running loopback server, warms its initial semantic view with the
+  rendered form values, and records the built-in push stream for pending
+  answers. Pass `browser=false` to keep the original request sequence.
+
 ## 0.1.203
 
 - A mutation can return `open_tab("timecourse"; fit=name)` to select a newly

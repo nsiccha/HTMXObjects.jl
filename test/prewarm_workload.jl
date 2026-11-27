@@ -306,3 +306,149 @@ end
         notify(release)
     end
 end
+
+@testmodule StandaloneWarmFixture begin
+    using HTMXObjects
+    export WarmForm, gate
+    const gate = Ref(Base.Event())
+    @htmx struct WarmForm
+        @param label_text::String = "A & B"
+        @param cards::Records = Records(:label_text; presets=[(label_text="one / two",)])
+        @param heading::String = "current"
+        @get first_view() = begin
+            wait(gate[])
+            h.p(string(heading, "|", first(cards).label_text); id="first-view-answer")
+        end
+        @direct @get health() = h.p("ready")
+        @direct @get landing() = semantic_app(__self__; presentation=:tabs,
+            select=e -> e.name === :first_view)
+        __page__(body) = htmx(body, h.script(Raw(raw"""
+            const timer = setInterval(() => {
+              const answer = document.getElementById('first-view-answer');
+              if (!answer) return;
+              clearInterval(timer);
+              fetch('/report?answer=' + encodeURIComponent(answer.textContent));
+            }, 30);
+            """)); assets=:vendor, runtime=:linked, pico_version=nothing)
+    end
+end
+
+@testitem "standalone warmup joins and starts the open semantic view" setup=[HTMXOTestImports, StandaloneWarmFixture] tags=[:integration, :server] begin
+    using Treebars
+    @test Base.get_extension(HTMXObjects, :HTMXObjectsTreebarsExt) !== nothing
+    requests = NamedTuple[]
+    report = Channel{String}(1)
+    function observe(handler)
+        function (req)
+            target = String(req.target)
+            if startswith(target, "/report?")
+                put!(report, HTTP.queryparams(HTTP.URI(target))["answer"])
+                return HTTP.Response(204)
+            end
+            stream = HTMXObjects._operation_stream_tokens(req) !== nothing
+            poll = HTMXObjects._operation_poll_request(req)
+            inner = haskey(req.context, :htmxo_prestart) || haskey(req.context, :htmxo_push)
+            push!(requests, (; target, stream, poll, inner,
+                warm=haskey(req.context, :htmxo_warm_page),
+                current=HTTP.header(req, "HX-Current-URL", ""),
+                element=HTTP.header(req, "HX-Target", "")))
+            (stream || poll) && notify(gate[])
+            handler(req)
+        end
+    end
+    route!(WarmForm())
+    vendorfiles()
+    path = "/landing?heading=edited"
+    view(q) = HTMXObjects._operation_unmarked_url(q.target)
+    isview(q) = !q.inner && !q.poll && startswith(q.target, "/first_view?")
+    for (prestart, operation_stream) in ((true, true), (false, true), (false, false))
+        server = serve(; port=0, listenany=true, async=true, prestart, operation_stream,
+                       middleware=[observe], access_log=nothing)
+        base = "http://127.0.0.1:$(HTTP.port(server))"
+        try
+            empty!(requests)
+            gate[] = Base.Event()
+            rows = prewarm_routes!(base, [path]; operations=true)
+            @test all(r -> r.error === nothing && r.status in (200, 286), rows)
+            views = filter(q -> q.warm && isview(q), requests)
+            fresh = only(filter(q -> !occursin("__htmxo_operation=", q.target), views))
+            @test fresh.current == base * path
+            @test !isempty(fresh.element)
+            @test count(q -> occursin("__htmxo_operation=", q.target), views) == Int(prestart)
+            params = HTTP.queryparams(HTTP.URI(fresh.target))
+            @test params["cards.1.label_text"] == "one / two"
+            @test params["heading"] == "edited"
+            @test all(q -> view(q) == fresh.target, views)
+            streams = filter(q -> q.stream, requests)
+            @test [r.url for r in rows if r.transport === :stream] == [base * q.target for q in streams]
+            @test isempty(streams) == !operation_stream
+            @test all(q -> startswith(q.target, "/landing?__htmxo_operations=") &&
+                           endswith(q.target, "&__htmxo_push=1"), streams)
+            @test any(q -> q.warm && q.poll, requests)
+            @test any(q -> q.warm && q.poll && !q.inner, requests) == !operation_stream
+            @test isempty(HTMXObjects._warm_pages)
+            @test all(e -> !haskey(e.request.context, :htmxo_warm_page),
+                      values(HTMXObjects._operation_poll_snapshot()))
+
+            # The inventory entry point has the same default. An immediate
+            # direct answer opens no stream, and opting out preserves the rows.
+            if prestart
+                for browser in (true, false)
+                    rows = prewarm_routes!(WarmForm, base, :health; operations=true, browser)
+                    @test count(r -> r.transport === :browser, rows) == Int(browser)
+                    @test all(r -> r.status == 200 && r.transport !== :stream, rows)
+                end
+            end
+
+            if prestart && get(ENV, "HTMXO_BROWSER_TESTS", "") == "1"
+                empty!(requests)
+                gate[] = Base.Event()
+                mktempdir() do profile
+                    chrome = something(Sys.which("google-chrome"), Sys.which("chromium"))
+                    cmd = `$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=$profile $(base * path)`
+                    proc = run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+                    try
+                        @test timedwait(() -> isready(report) || process_exited(proc), 90) == :ok
+                        isready(report) || error("Chromium did not receive the first view")
+                        @test take!(report) == "edited|one / two"
+                        @test view(only(filter(isview, requests))) == fresh.target
+                        @test any(q -> q.stream, requests)
+                    finally
+                        process_exited(proc) || kill(proc)
+                        wait(proc)
+                    end
+                end
+            end
+        finally
+            notify(gate[])
+            close(server)
+        end
+    end
+end
+
+@testitem "a timed-out standalone stream leaves an ordinary pending view intact" setup=[HTMXOTestImports, StandaloneWarmFixture] tags=[:integration, :server] begin
+    using Treebars
+    route!(WarmForm())
+    gate[] = Base.Event()
+    server = serve(; port=0, listenany=true, async=true, prestart=false, access_log=nothing)
+    base = "http://127.0.0.1:$(HTTP.port(server))"
+    try
+        ordinary = HTTP.get(base * "/first_view?heading=other", ["HX-Request" => "true"])
+        address = HTMXObjects._prewarm_next(String(ordinary.body))
+        token = HTTP.queryparams(HTTP.URI(address))["__htmxo_operation"]
+        rows = prewarm_routes!(base, "/landing"; browser=true, timeout=2)
+        stream = only(filter(r -> get(r, :transport, nothing) === :stream, rows))
+        @test stream.status === nothing && occursin("outside compilation", stream.error)
+        @test stream.requests == 1
+        @test isempty(HTMXObjects._warm_pages)
+        snapshot = HTMXObjects._operation_poll_snapshot()
+        @test haskey(snapshot, token)
+        @test all(e -> !haskey(e.request.context, :htmxo_warm_page), values(snapshot))
+        notify(gate[])
+        answer = HTTP.get(base * address, ["HX-Request" => "true"])
+        @test answer.status == 286 && occursin("other|one / two", String(answer.body))
+    finally
+        notify(gate[])
+        HTTP.forceclose(server)
+    end
+end
