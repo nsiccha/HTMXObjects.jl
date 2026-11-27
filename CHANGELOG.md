@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.206
+
+- A result that a tabs page asks for the first time shows its operation's
+  progress in the result while it computes, as the page's first load does:
+  a tab the reader opens, a tab `open_tab` opens, and an input changed before
+  the first answer arrived. Before, the first-time progress bar counted as a
+  shown result, so the progress tree ran collapsed beside a bar that said
+  nothing. A result already on screen still stays until its next answer.
+
 ## 0.1.205
 
 - A `tabset` opens its tabs without hyperscript. `tabset_script`, which every

@@ -98,7 +98,9 @@ parameters already supplied by visible controls.
 Committing a valid edit (for example, on blur) refreshes the visible tab on the
 next browser turn once dependent controls settle. Results ready within the
 default 100 ms return inline. Otherwise, progress appears beside the previous
-result. With Treebars 0.1.5 or later, ordinary HTML arrives on the page stream.
+result. A tab with no result yet draws its operation's progress in the result
+itself, as the page's first load does. With Treebars 0.1.5 or later, ordinary
+HTML arrives on the page stream.
 The browser fetches responses carrying htmx headers or recorded errors over HTTP.
 
 ## Opening a result after a mutation
@@ -112,7 +114,9 @@ println(String(to_response(answer).body))
 ```
 
 The tab waits for the refreshed choice. Other inputs keep their values.
-Omit `fit` to open the tab with the current selection.
+Omit `fit` to open the tab with the current selection. The opened tab loads
+like any other: a tab not shown before draws its progress while a slow result
+computes, and one that already shows a result keeps it until the new one arrives.
 
 ## Several apps on one page
 

@@ -38207,6 +38207,20 @@ _opening_element_js() = raw"""
   }
 """
 
+# What stands in for an answer that is still on its way, shared by the page
+# scripts that ask whether an element already shows a result
+# (`live_refresh_script`, `semantic_follow_script`): an indeterminate progress
+# bar, as `semantic_follow_script` draws in a result asked for the first time,
+# or a placeholder that loads its first answer when it appears (`lazy`: its
+# trigger is the load event). The shell must not spell such a trigger attribute
+# out: its tests read it as a load request.
+_awaits_first_answer_js() = raw"""
+  function awaitsFirstAnswer(c) {
+    if (c.localName === 'progress' && !c.hasAttribute('value')) return true;
+    return /(^|[\s,])load(?![\w-])/.test(c.getAttribute('hx-trigger') || '');
+  }
+"""
+
 """
     live_refresh_script()
 
@@ -38240,7 +38254,12 @@ lands. `target`, `selectOverride` and `isError` are not re-read.
 Periodic targets are automatic — no consumer wiring. An event-driven target
 opts in by carrying `data-htmxo-live`: once it holds settled (non-poller)
 content it diverts exactly like a periodic target, whatever trigger or
-requesting element the refresh came from. The marker is presence-only (its
+requesting element the refresh came from. What stands in for a first answer
+is not settled content: an indeterminate `<progress>` (as
+[`semantic_follow_script`](@ref) draws in a result asked for the first time)
+or a placeholder that loads its first answer ([`lazy`](@ref)). A slow first
+answer therefore shows its progress in the target itself, as a page load
+does, whoever asked for it. The marker is presence-only (its
 value is ignored) and inert for htmx itself (`data-*` attributes never
 inherit, unlike `hx-swap`, so it is safe on aggregate wrappers). Detection
 uses the same Treebars markers the poller/terminal already carry
@@ -38353,13 +38372,20 @@ live_refresh_script() = h.script(Raw(raw"""
     return rep;
   }
   // A marked target holds settled content when it shows something other than
-  // a running poller: a server-rendered aggregate stamps at page load (so its
-  // first event refresh already diverts), while an empty placeholder or a
-  // first-paint poller stays unstamped until a terminal arrives.
+  // a running poller or what stands in for a first answer: a server-rendered
+  // aggregate stamps at page load (so its first event refresh already
+  // diverts), while an empty placeholder, a first-time progress bar, a
+  // placeholder that loads its first answer, or a first-paint poller stays
+  // unstamped until a terminal arrives. Its first slow answer then shows its
+  // progress in the target itself, as a page load does, not in the reporter
+  // beside a bar that says nothing.
+""" * _awaits_first_answer_js() * raw"""
   function holdsSettledContent(el) {
     if (el.querySelector && el.querySelector('.treebar-poller-inner')) return false;
-    if (el.children && el.children.length > 0) return true;
-    return (el.textContent || '').replace(/\s+/g, '').length > 0;
+    for (var n = el.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 1 ? !awaitsFirstAnswer(n) : (n.nodeType === 3 && /\S/.test(n.nodeValue))) return true;
+    }
+    return false;
   }
   function stampLiveMarkers() {
     document.querySelectorAll('[' + MARKER + ']:not([' + SETTLED + '])').forEach(function(el) {
@@ -39811,8 +39837,10 @@ values as for [`set_inputs`](@ref). For example, after adding a fit, return
 `hx_response(open_tab("timecourse"; fit=name); toast="Added the fit")`.
 
 Once the app's controls offer the requested values, the page activates the
-tab as a click would, updating its address and loading its result in place.
-Other inputs keep their values. A template outside the apps can target the
+tab as a click would, updating its address and loading its result in place:
+a tab not shown before draws its operation's progress while a slow result
+computes, and a tab that already shows a result keeps it until the new one
+arrives. Other inputs keep their values. A template outside the apps can target the
 only semantic tabset on a page. An ambiguous destination or an unknown tab
 is ignored. If an input is still unavailable after 30 seconds, the tab stays put.
 """
@@ -39842,8 +39870,10 @@ A hidden input is not sent, nor is one that shows its computed default until
 the reader sets it (`data-htmxo-follows`, see [`semantic_refresh_script`](@ref)),
 and an unchecked checkbox sends `false`. A new
 request replaces one still running (`hx-sync`), and the shown result stays on
-screen while the next one computes (`data-htmxo-live`); a result asked for the
-first time shows a `<progress>` until it arrives. After a mutation of
+screen while the next one computes (`data-htmxo-live`), its progress reported
+beside it; a result asked for the first time shows a `<progress>` until it
+arrives, and a slow one then shows its operation's progress in the result, as
+the page's first load does. After a mutation of
 the page finishes, every other result is asked for again when next shown.
 
 It also keeps the page's inputs in the page address (`semantic_app(…;
@@ -40449,14 +40479,14 @@ semantic_follow_script() = h.script(Raw(raw"""
     var answer = parsed(html);
     return !!answer.querySelector(POLLING);
   }
-  // What a region shows that is no result to keep: its first-load progress,
-  // a placeholder `lazy` renders to load its first answer (its trigger is the
-  // load event), a running operation, or an error answer. (The shell must not
-  // spell such a trigger attribute out: its tests read it as a load request.)
+  // What a region shows that is no result to keep: what stands in for its
+  // first answer (its first-load progress, or a placeholder `lazy` renders to
+  // load it), a running operation, or an error answer.
+""" * _awaits_first_answer_js() * raw"""
   function holdsResult(region) {
     return Array.prototype.some.call(region.children, function(c) {
-      if (c.matches('progress, article[aria-invalid], ' + POLLING) || c.querySelector(POLLING)) return false;
-      if (/(^|[\s,])load(?![\w-])/.test(c.getAttribute('hx-trigger') || '')) return false;
+      if (awaitsFirstAnswer(c)) return false;
+      if (c.matches('article[aria-invalid], ' + POLLING) || c.querySelector(POLLING)) return false;
       return !c.querySelector('article[aria-invalid]:first-child');
     });
   }
