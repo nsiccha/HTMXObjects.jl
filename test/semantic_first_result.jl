@@ -6,11 +6,16 @@ using TestItemRunner
 # first load does. What stands in for the first answer (the first-time
 # progress bar, the load placeholder) is no result to keep on screen while the
 # poller reports beside it (snag `open-tab-view-sh-28514d74`).
+#
+# A result on screen stays while its next answer computes, the progress beside
+# it, and gives way to the progress after the page's `progress_after` seconds.
+# A tab `open_tab` opens for other inputs starts over at once (user pick on
+# decision `0ap3o0p`).
 
 @testmodule FirstResultFixtures begin
     using HTMXObjects
     using HTMXObjects.DynamicObjects: option_domain
-    export FirstResultApp, hold!, release!
+    export FirstResultApp, ProgressAfterApp, hold!, release!
 
     const HELD = Dict{String,Base.Event}()
     const HELD_LOCK = ReentrantLock()
@@ -42,10 +47,47 @@ using TestItemRunner
         @get opened() = answer("opened", setting)
         "Add"
         @post add(; name::String) = hx_response(open_tab("opened"; setting=name); toast="Added " * name)
-        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index)
+        # The delay is short for the test, and long enough to see the result
+        # kept first.
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name !== :index,
+            progress_after=1.5)
         __page__(body) = htmx(h.main(body), driver; assets=:vendor, pico_version=nothing,
             feedback=false, compose=false, overlay=false)
     end
+
+    @htmx struct ProgressAfterApp
+        "Setting"
+        @param setting::String = "a"
+        "View"
+        @get view() = h.p("view:", setting)
+        @get index() = semantic_app(__self__; presentation=:tabs, select=e -> e.name === :view)
+        @get never() = semantic_app(__self__; presentation=:tabs, select=e -> e.name === :view,
+            progress_after=nothing)
+        @get later() = semantic_app(__self__; presentation=:tabs, select=e -> e.name === :view,
+            progress_after=7.5)
+    end
+end
+
+@testitem "a tabs page's results say after how long a refresh shows its progress" setup=[FirstResultFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    route!(ProgressAfterApp(); operation_policy=:blocking)
+    page(path) = String(dispatch(:GET, path; headers=["HX-Request" => "true"]).body)
+    result(html) = match(r"<div id=\"[^\"]*\" class=\"htmxo-semantic-operation-result\"[^>]*>", html).match
+    @test contains(result(page("/")), " data-htmxo-progress-after=\"3\"")
+    @test contains(result(page("/later")), " data-htmxo-progress-after=\"7.5\"")
+    @test !contains(page("/never"), "data-htmxo-progress-after")
+    @test contains(result(page("/never")), " data-htmxo-live")
+    # The page script reads it where it diverts a refresh, and lets a page
+    # start a result over.
+    script = repr("text/html", HTMXObjects.live_refresh_script())
+    @test contains(script, "data-htmxo-progress-after")
+    @test contains(script, "htmxoLiveStartOver")
+    for bad in (-1, NaN, Inf, "3", true)
+        @test_throws "progress_after must be a number of seconds" semantic_app(
+            ProgressAfterApp(); presentation=:tabs, progress_after=bad)
+    end
+    @test_throws "progress_after= times the results of presentation=:tabs" semantic_app(
+        ProgressAfterApp(); progress_after=5)
 end
 
 @testitem "page scripts agree on what stands in for a first answer" tags=[:unit, :semantic] begin
@@ -80,7 +122,7 @@ end
                 handler(req)
             end
         end
-        hold!("initial:a", "initial:b", "clicked:b", "clicked:c", "opened:a")
+        hold!("initial:a", "initial:b", "clicked:b", "clicked:c", "opened:a", "opened:b")
         HTMXObjects._clear_operation_polls!()
         route!(FirstResultApp())
         vendorfiles()
@@ -112,9 +154,22 @@ end
                         @test contains(seen["text"], label)
                     end
                     @test report["opened"]["tab"] == "true"
-                    # Once a result is shown, its next slow answer reports beside it.
+                    # Once a result is shown, its next slow answer reports beside it...
                     @test report["refresh"]["kept"] && report["refresh"]["beside"]
                     @test !report["refresh"]["inResult"]
+                    # ...and after the page's `progress_after` takes its place.
+                    taken = report["takeover"]
+                    @test taken["inResult"] && taken["tree"] && contains(taken["text"], "Clicked view")
+                    @test !taken["beside"] && !taken["kept"] && !taken["busy"]
+                    @test taken["landed"]
+                    # A tab `open_tab` opens for another setting starts over at once.
+                    again = report["reopened"]
+                    @test again["inResult"] && again["tree"] && contains(again["text"], "Opened view")
+                    @test !again["beside"] && !again["kept"] && !again["standIn"]
+                    @test again["landed"]
+                    # Opened for the setting it shows, it keeps its result.
+                    @test report["same"]["requests"] == 1
+                    @test !report["same"]["bar"] && report["same"]["kept"]
                 finally
                     process_exited(proc) || kill(proc)
                     wait(proc)
