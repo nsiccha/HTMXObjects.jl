@@ -49,11 +49,14 @@
         nothing
     end
     wait_for(b, js) = timedwait(() -> evaluate(b, "String(Boolean($js))") == "true", 15; pollint=0.05) === :ok
-    function open_page(b::Browser, url)
+    # `ready`: what the page has once it can be driven. The default waits for
+    # hyperscript, which a default `htmx()` page loads last; a page without it
+    # names something else (`ready="true"`).
+    function open_page(b::Browser, url; ready="window._hyperscript")
         call(b, "Page.navigate", "{\"url\":\"$url\"}")
-        # The new document, loaded: hyperscript processes the page when it is ready.
+        # The new document, loaded.
         sleep(0.1)
-        wait_for(b, "document.readyState === 'complete' && window._hyperscript")
+        wait_for(b, "document.readyState === 'complete' && $ready")
     end
     focused(b) = evaluate(b, "document.activeElement.id")
 end
@@ -293,7 +296,7 @@ end
 
                     # A tabset that arrives in a fragment works the same.
                     @test wait_for(b, "document.getElementById('frag-tablink-1')")
-                    sleep(0.3)  # htmx settles it, and hyperscript processes it on htmx:load.
+                    sleep(0.3)  # htmx settles it.
                     evaluate(b, "document.getElementById('frag-tablink-1').focus(); ''")
                     press(b, "ArrowRight")
                     @test focused(b) == "frag-tablink-2"
