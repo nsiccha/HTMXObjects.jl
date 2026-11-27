@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.205
+
+- A `tabset` opens its tabs without hyperscript. `tabset_script`, which every
+  `htmx()` page carries, shows the clicked tab's panel, and a page without that
+  script falls back to the call each tabset carries. So tabs work on a page
+  that leaves hyperscript out (`htmx(...; hyperscript_version=nothing)`), on
+  one without htmx, and in their static exports. Until now such a page wrote
+  the tab's name to its address and kept showing the first panel, with no
+  message. Tab links no longer carry a `_` attribute. A tab click is still
+  not followed as a link and still does not reach click handlers around the
+  tabset. `htmx_tabset` and `nav_sidebar` still move their highlight with
+  hyperscript.
+
 ## 0.1.204
 
 - Standalone `prewarm_routes!(…; operations=true)` follows a selected page
