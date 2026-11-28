@@ -18,6 +18,11 @@ using TestItemRunner
             numbers::Vector{Float64}=[9.0], enabled::Bool=false, data::Dict{String,Int}=Dict{String,Int}(),
             fields...) = answer((; text, nullable, numbers, enabled, data, fields=(; fields...)))
         @post record(; item::Item) = answer((; item.name, item.value))
+        @post lists(; texts::Vector{String}=String[], maybe::Union{Nothing,Vector{Int}}=nothing,
+            items::Vector{Item}=Item[], anything::Vector=[],
+            abstract::AbstractVector{String}=String[]) = answer((; texts, maybe, abstract,
+            items=[(; item.name, item.value) for item in items],
+            anything, anything_type=string(typeof(anything))))
         @post raw() = HTTP.Response(200, copy(__req__.body))
         @include params = begin
             @param count::Int = 1
@@ -93,8 +98,56 @@ using TestItemRunner
             @test request("/item", payload).status == 400
         end
         for payload in ("{\"nullable\":1.5}", "{\"numbers\":[\"bad\"]}", "{\"enabled\":{}}",
-                "{\"numbers\":null}", "{\"numbers\":3}", "{\"numbers\":\"abc\"}", "{\"data\":null}")
+                "{\"numbers\":null}", "{\"numbers\":\"abc\"}", "{\"numbers\":\"3\"}",
+                "{\"numbers\":[3,null]}", "{\"data\":null}")
             @test request("/values", payload).status == 400
+        end
+        # One JSON value for a Vector binds as the one-element array, as one
+        # form value does (snag `json-body-scalar-f50a0315`).
+        response = request("/values", """{"numbers":3}""")
+        @test response.status == 200
+        @test JSON.parse(response.body)["numbers"] == [3.0]
+        for (payload, expected) in (
+                """{"texts":"Resume 2026-11-27"}""" => ["Resume 2026-11-27"],
+                """{"texts":["a","b"]}""" => ["a", "b"],
+                """{"texts":""}""" => [""],
+                """{"texts":[]}""" => String[])
+            response = request("/lists", payload)
+            @test response.status == 200
+            @test JSON.parse(response.body)["texts"] == expected
+        end
+        response = request("/lists", "texts=one"; content_type="application/x-www-form-urlencoded")
+        @test JSON.parse(response.body)["texts"] == ["one"]
+        for (payload, expected) in ("""{"maybe":2}""" => [2], """{"maybe":[2,3]}""" => [2, 3],
+                                    """{"maybe":null}""" => nothing, "{}" => nothing)
+            response = request("/lists", payload)
+            @test response.status == 200
+            @test JSON.parse(response.body)["maybe"] == expected
+        end
+        response = request("/lists", """{"items":{"name":"one","value":2}}""")
+        @test response.status == 200
+        @test JSON.parse(response.body)["items"] == [Dict("name" => "one", "value" => 2.0)]
+        for payload in ("""{"anything":"x"}""", """{"anything":["x"]}""")
+            response = request("/lists", payload)
+            @test response.status == 200
+            @test JSON.parse(response.body)["anything"] == ["x"]
+            @test JSON.parse(response.body)["anything_type"] == "Vector{Any}"
+        end
+        # An abstract vector declaration decodes as a Vector of its element type.
+        for (payload, expected) in ("""{"abstract":["a","b"]}""" => ["a", "b"],
+                                    """{"abstract":"a"}""" => ["a"])
+            response = request("/lists", payload)
+            @test response.status == 200
+            @test JSON.parse(response.body)["abstract"] == expected
+        end
+        @test request("/lists", """{"abstract":[1]}""").status == 400
+        response = request("/lists", """{"texts":null}""")
+        @test response.status == 400
+        @test occursin("send [] for none", String(response.body))
+        @test !occursin("applyeach", String(response.body))
+        for payload in ("""{"texts":3}""", """{"texts":{}}""", """{"maybe":"2"}""",
+                        """{"items":"one"}""", """{"items":[{"name":"one"}]}""")
+            @test request("/lists", payload).status == 400
         end
         # Raw-body routes with no bound inputs do not force JSON decoding.
         response = request("/raw", "not JSON")

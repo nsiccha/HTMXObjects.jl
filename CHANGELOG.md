@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.1.208
+
+- A JSON request that sends one value for a keyword or `@param` declared as a
+  `Vector` binds it as a one-element vector, as the same form field does:
+  `{"tags":"x"}` binds `["x"]` and `{"values":3}` binds `[3.0]`. It used to
+  answer 400 with JSON.jl's `applyeach not applicable …`. The value is decoded
+  as strictly as an array element (`"3"` is still no `Float64`), JSON `""`
+  binds `[""]` (a form's blank field still selects nothing), and `null` stays a
+  400 unless the type is nullable, now with "a Vector takes a JSON array or one
+  value, not null; send [] for none". `Union{Nothing,Vector{T}}` takes one value
+  the same way.
+- A JSON array for a keyword or `@param` declared with an abstract vector type
+  such as `AbstractVector{String}` binds as a `Vector` of its element type. It
+  answered 400, because JSON.jl builds only concrete arrays.
+- A JSON array sent to an `@options`-backed vector `@param` selects each element
+  from the domain. It was compared as a whole against each option, so every
+  array answered 400 and a JSON client could not select two options. A single
+  JSON `""` there is now the one-element selection `[""]` (a 400 unless `""` is
+  an option) instead of an empty selection; send `[]` for none.
+
 ## 0.1.207
 
 - `formparams(req)` reads a `multipart/form-data` body's text fields, in the

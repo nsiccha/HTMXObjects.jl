@@ -54,14 +54,15 @@ println(result)
 ```
 
 JSON fields retain their native values. Typed fields use JSON.jl's conversion,
-including arrays, dictionaries, and records; send numbers as JSON numbers.
-Missing fields fall back to the query string, then to the declared default, or
-answer 400 when required. Explicit `null`, `""`, and `[]` are supplied values:
-they override query fallback and defaults. To accept null, declare a nullable
-type such as `Union{Nothing,Float64}` (or leave the field untyped).
+including arrays, dictionaries, and records; send numbers as JSON numbers. A
+`Vector` also accepts one value, as `[value]`. Missing fields fall back to the
+query string, then the declared default, or answer 400 when required. Explicit
+`null`, `""`, and `[]` override query fallback and defaults. To accept null,
+declare a nullable type such as `Union{Nothing,Float64}` (or leave the field
+untyped).
 
 Malformed JSON, a non-object body, and values the declared type rejects answer
-400. A route without bound inputs can still read its raw body itself. Keyword
+400. A route without bound inputs can still read its raw body. Keyword
 splats retain native JSON values, and `__undeclared_params__` checks JSON field
 names too. OpenAPI advertises both JSON and form request bodies.
 

@@ -114,3 +114,93 @@ end
         HTTP.Request("GET", "/?selected=03"), :selected, Vector{Int}) == [3]
     @test choices == [first_choice, second_choice]
 end
+
+@testitem "a JSON vector @param binds an array, or one value, against its options" tags=[:unit, :semantic] begin
+    using HTMXObjects, HTTP, JSON
+    using HTMXObjects.DynamicObjects: option_domain
+
+    @htmx struct JSONVectorOptionParams
+        @param drawn_quantities::Vector{String} = ["auc", "min_change"]
+        @options(drawn_quantities) = option_domain([
+            "auc" => "Area", "min_change" => "Minimum change",
+            (; value="disabled", label="Unavailable", disabled=true)])
+        @param doses::Vector{Int} = [1, 2]
+        @options(doses) = [1, 2, 3]
+        @param tags::Vector{Symbol} = [:auc]
+        @options(tags) = [:auc, :min_change]
+        @param plain::Vector{String} = ["default"]
+        @param scalar::String = "auc"
+        @options(scalar) = ["auc", "min_change"]
+        @post index() = HTTP.Response(200, ["Content-Type" => "application/json"], JSON.json((;
+            drawn_quantities, doses, tags, plain, scalar,
+            typed=drawn_quantities isa Vector{String} && doses isa Vector{Int} &&
+                  tags isa Vector{Symbol} && plain isa Vector{String} && scalar isa String)))
+    end
+
+    route!(JSONVectorOptionParams(); operation_policy=:blocking)
+    function request(payload)
+        req = HTTP.Request("POST", "/", ["Content-Type" => "application/json"], payload)
+        first(HTTP.Handlers.gethandler(HTMXObjects.ROUTER, req))(req)
+    end
+
+    # Arrays, the documented shape, select each element from the domain.
+    response = request("""{"drawn_quantities":["auc","min_change"],"doses":[3,1],
+        "tags":["min_change","auc"],"plain":["one","two"]}""")
+    @test response.status == 200
+    if response.status == 200
+        value = JSON.parse(response.body)
+        @test value["drawn_quantities"] == ["auc", "min_change"]
+        @test value["doses"] == [3, 1]
+        @test value["tags"] == ["min_change", "auc"]
+        @test value["plain"] == ["one", "two"]
+        @test value["typed"] === true
+    end
+    # One value selects as the one-element array (snag `json-body-scalar-f50a0315`).
+    response = request("""{"drawn_quantities":"min_change","doses":3,"tags":"min_change",
+        "plain":"one","scalar":"min_change"}""")
+    @test response.status == 200
+    if response.status == 200
+        value = JSON.parse(response.body)
+        @test value["drawn_quantities"] == ["min_change"]
+        @test value["doses"] == [3]
+        @test value["tags"] == ["min_change"]
+        @test value["plain"] == ["one"]
+        @test value["scalar"] == "min_change"
+        @test value["typed"] === true
+    end
+    response = request("""{"drawn_quantities":[],"doses":[],"plain":""}""")
+    @test response.status == 200
+    if response.status == 200
+        value = JSON.parse(response.body)
+        @test isempty(value["drawn_quantities"]) && isempty(value["doses"])
+        @test value["plain"] == [""]
+    end
+    # JSON `""` is one value, not a form's empty selection.
+    for payload in ("""{"drawn_quantities":""}""", """{"drawn_quantities":["auc","unknown"]}""",
+                    """{"drawn_quantities":["disabled"]}""", """{"drawn_quantities":"disabled"}""",
+                    """{"drawn_quantities":null}""", """{"doses":[4]}""", """{"doses":4}""",
+                    """{"doses":[1.5]}""", """{"doses":[1,"x"]}""", """{"plain":null}""")
+        @testset "$payload" begin
+            @test request(payload).status == 400
+        end
+    end
+
+    # Options whose values have no string parser resolve by their wire spelling.
+    abstract type Choice end
+    struct NamedChoice <: Choice
+        key::Symbol
+    end
+    first_choice, second_choice = NamedChoice(:first), NamedChoice(:second)
+    options(_name) = option_domain([first_choice, second_choice])
+    extract(payload, T) = HTMXObjects._extract_option_param(options,
+        HTTP.Request("POST", "/", ["Content-Type" => "application/json"], payload), :selected, T)
+    for T in (Vector{NamedChoice}, Vector{Choice}, AbstractVector{Choice}, Vector, AbstractVector)
+        one = extract("""{"selected":"first"}""", T)
+        @test one isa T
+        @test only(one) === first_choice
+        many = extract("""{"selected":["second","first"]}""", T)
+        @test many isa T
+        @test many == [second_choice, first_choice]
+    end
+    @test_throws HTMXObjects.InvalidDomainValue extract("""{"selected":["first","third"]}""", Vector{Choice})
+end

@@ -1449,7 +1449,9 @@ _multipart_rejection(err) = nothing
 
 The request-body parameter source for POST/PUT/PATCH keywords and `@param`.
 `application/json` reads a JSON object, preserving its native values (including
-`nothing` for null). `multipart/form-data` uses [`multipartparams`](@ref), with
+`nothing` for null). A typed keyword or `@param` decodes its JSON field with
+JSON.jl, and one JSON value for a `Vector` declaration binds as `[value]`, as
+one form value does. `multipart/form-data` uses [`multipartparams`](@ref), with
 text fields as strings and files as [`Upload`](@ref). Other requests use
 `formparams`, which reads urlencoded forms and otherwise returns an empty dict.
 So in a route body, `keys(bodyparams(req))` names every field a request
@@ -11235,15 +11237,39 @@ function _convert_submitted(converter, val, T, name)
     end
 end
 
+# The vector a declaration binds, nullable or not; `nothing` for any other type.
+_json_vector_type(_T) = nothing
+_json_vector_type(::Type{V}) where {V<:AbstractVector} = V
+_json_vector_type(::Type{Union{Nothing,V}}) where {V<:AbstractVector} = V
+# JSON.jl builds only a concrete array (`AbstractVector{String}` has no
+# `undef` constructor), so an abstract vector declaration decodes as a Vector
+# of its element type, which it accepts.
+_json_decode_type(T) = T === nothing ? Any : T
+_json_decode_type(::Type{V}) where {V<:AbstractVector} =
+    isconcretetype(V) || !(Vector{eltype(V)} <: V) ? V : Vector{eltype(V)}
+
 # Use JSON.jl's typed decoder on the original field, including nested records,
 # arrays and nullable types; never stringify a JSON field into a form. Generic
 # StructUtils.make on native values would accept null/scalars as empty arrays.
+# One JSON value for a Vector binds as the one-element array would, as one form
+# value does: its element is decoded as strictly as an array element (`"3"` is
+# no `Float64`), and `null` is no element (snag `json-body-scalar-f50a0315`).
 function _convert_json_param(raw, T)
     try
         if T isa Type && (T <: Enum || T === MultilineText)
             return _convert_param(JSON.parse(raw, String), T)
         end
-        JSON.parse(raw, T === nothing ? Any : T)
+        V = _json_vector_type(T)
+        style = JSON.StructUtils.DefaultStyle()
+        if V !== nothing && !JSON.StructUtils.arraylike(style, raw)
+            if !JSON.StructUtils.nulllike(style, raw)
+                E = eltype(V)
+                return convert(V, E[JSON.parse(raw, E)])
+            end
+            V === T && throw(ArgumentError(
+                "a Vector takes a JSON array or one value, not null; send [] for none"))
+        end
+        JSON.parse(raw, _json_decode_type(T))
     catch err
         # Unsupported convert methods describe a mismatched JSON value, unlike
         # a missing form parser. Leave errors in application constructors alone.
@@ -11571,15 +11597,28 @@ function _lookup_option_param(options, src::_JSONParams, fallback, name, T)
     val = src[String(name)]
     declared = _declared_param_domain(options, name)
     records = _declared_param_records(declared)
-    # Option wire strings may represent application objects without a parser.
-    if records !== nothing && val isa AbstractString
-        return _convert_option_param(options, val, name, T)
+    # Option wire strings may represent application objects without a parser,
+    # so strings resolve against the domain's wire spellings. One JSON string
+    # for a vector selects as the one-element array would (`""` included, unlike
+    # a form's blank, which selects nothing).
+    if records !== nothing
+        vector = _vector_param(T)
+        vector && val isa AbstractString && (val = [val])
+        if val isa AbstractString ||
+           (vector && val isa AbstractVector && all(x -> x isa AbstractString, val))
+            return _convert_option_param(options, val, name, T)
+        end
     end
     converted = _lookup_param(src, nothing, name, T)
     if records !== nothing
         allowed = Any[option.value for option in records if !get(option, :disabled, false)]
-        any(candidate -> isequal(candidate, converted), allowed) ||
-            throw(InvalidDomainValue(Symbol(name), converted, allowed))
+        # A vector declaration selects each of its elements from the domain.
+        selected = _json_vector_type(T) !== nothing && converted isa AbstractVector ?
+            converted : (converted,)
+        for x in selected
+            any(candidate -> isequal(candidate, x), allowed) ||
+                throw(InvalidDomainValue(Symbol(name), x, allowed))
+        end
     else
         _check_number_domain(declared, converted, name)
     end
