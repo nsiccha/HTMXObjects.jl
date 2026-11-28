@@ -11186,16 +11186,29 @@ _convert_param(val::AbstractString, ::Type{V}) where {T, V<:AbstractVector{T}} =
 _convert_param(val::AbstractString, T::Type{<:AbstractVector}) = isempty(val) ? String[] : [val]  # bare ::Vector (no element type): single/empty → vector
 # Multipart Upload values flow through the same lookup path. Untyped (`::Nothing`)
 # is already covered by the `_convert_param(val, ::Nothing) = val` catch-all above.
-_convert_param(val::Upload, ::Type{Upload}) = val
-_convert_param(val::Upload, T::Type{<:AbstractVector}) = [val]  # single file declared as a Vector
+# A type the file already is (`Upload`, `Any`, `Union{Nothing,Upload}`) receives
+# it unchanged. Any other type means a file part arrived where a text field was
+# declared (`curl -F command=@script.sh` for `command::String`, or for `n::Int`):
+# the request sent the wrong kind of value, the mirror of the text-for-`Upload`
+# case below. A file part is not a text field, as in `formparams`, so its bytes
+# are not read as the value.
+_convert_param(val::Upload, T::Type) = val isa T ? val :
+    throw(ArgumentError("got an uploaded file; send its content as a text field instead"))
+# One file declared as an element-typed Vector: convert it as the element type,
+# as a single text value is (`Vector{Upload}` gets `[val]`, `Vector{String}` the
+# refusal above). A bare `::Vector` (no element type) keeps the file.
+_convert_param(val::Upload, ::Type{V}) where {T, V<:AbstractVector{T}} =
+    convert(V, [_convert_param(val, T)])
+_convert_param(val::Upload, T::Type{<:AbstractVector}) = [val]
 # A text field where a file was declared (a urlencoded form, a hand-built
 # request): the request sent the wrong kind of value.
 _convert_param(val::AbstractString, ::Type{Upload}) =
     throw(ArgumentError("expected an uploaded file, got a text value"))
 
 # The declared type rejected the submitted value: its `parse`, or one of the
-# decoders above, threw. A type with no `parse` method at all (`MethodError`)
-# is the declaration's fault, not the caller's, and stays a server fault.
+# decoders above, threw, including a file part for a non-file type. A type with
+# no `parse` method at all (`MethodError`) is the declaration's fault, not the
+# caller's, and stays a server fault.
 _rejects_value(::Union{ArgumentError,OverflowError}) = true
 _rejects_value(_err) = false
 _rejection_reason(err::Union{ArgumentError,OverflowError}) = err.msg

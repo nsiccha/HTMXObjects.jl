@@ -198,6 +198,108 @@ end
     end
 end
 
+# A multipart file part where a non-file type is declared is the mirror of a
+# text value for an `Upload`: the request sent the wrong kind of value, a 400.
+# Before, no conversion existed, so `command::String` given
+# `curl -F command=@script.sh` was a recorded 500 `MethodError` (snag
+# upload-sent-wher-e5171211: the KB's `POST /mac_jobs`). A file for a single
+# element-typed Vector converts as its element, and a type the file already is
+# keeps it.
+@testitem "a file part for a non-file type is a 400; file types still receive it" tags=[:unit, :server] begin
+    using HTMXObjects, HTTP, Logging
+    import HTMXObjects: h
+
+    @enum FilePartStage fp_draft fp_final
+    @htmx struct FilePartApp
+        @post fp_text(; command::String="") = h.p("command=$(repr(command))")
+        @post fp_note(; note::MultilineText=MultilineText()) = h.p("note=$(repr(String(note)))")
+        @post fp_int(; n::Int=0) = h.p("n=$n")
+        @post fp_flag(; f::Bool=false) = h.p("f=$f")
+        @post fp_stage(; stage::FilePartStage=fp_draft) = h.p("stage=$stage")
+        @post fp_sym(; s::Symbol=:none) = h.p("s=$s")
+        @post fp_list(; outputs::Vector{String}=String[]) = h.p("outputs=$(join(outputs, ","))")
+        @post fp_file(; file::Upload) = h.p("file=$(file.filename)")
+        @post fp_files(; files::Vector{Upload}=Upload[]) =
+            h.p("files=$(join((f.filename for f in files), ",")) $(nameof(eltype(files)))")
+        @post fp_bare(; xs::Vector=String[]) = h.p("xs=$(length(xs)) $(nameof(eltype(xs)))")
+        @post fp_any(; x::Any=nothing) = h.p("x=$(nameof(typeof(x)))")
+        @post fp_untyped(; x=nothing) = h.p("x=$(nameof(typeof(x)))")
+    end
+    route!(FilePartApp())
+    boundary = "htmxoFilePartBoundary"
+    function multipart(parts)
+        mp = IOBuffer()
+        for (name, value) in parts
+            print(mp, "--", boundary, "\r\n")
+            if value isa Tuple
+                print(mp, "Content-Disposition: form-data; name=\"", name, "\"; filename=\"", value[1],
+                      "\"\r\nContent-Type: application/octet-stream\r\n\r\n", value[2], "\r\n")
+            else
+                print(mp, "Content-Disposition: form-data; name=\"", name, "\"\r\n\r\n", value, "\r\n")
+            end
+        end
+        print(mp, "--", boundary, "--\r\n")
+        take!(mp)
+    end
+    post(path, parts) = dispatch(:POST, path;
+        headers=["Content-Type" => "multipart/form-data; boundary=$(boundary)"], body=multipart(parts))
+    body_text(r) = String(r.body isa AbstractString ? r.body : copy(r.body))
+    script = ("script.sh", "echo hi\n")
+    other = ("run.sh", "ls\n")
+    file_repr = "Upload(&quot;script.sh&quot;, &quot;application/octet-stream&quot;, 8 bytes)"
+    old_dir = HTMXObjects.ERROR_DIR[]
+    mktempdir() do dir
+        HTMXObjects.ERROR_DIR[] = dir
+        try
+            rejected = [
+                (post("/fp_text", ["command" => script]),
+                 "parameter command: $(file_repr); expected String (got an uploaded file; send its content as a text field instead)"),
+                (post("/fp_note", ["note" => script]), "MultilineText (got an uploaded file"),
+                (post("/fp_int", ["n" => script]), "parameter n: $(file_repr); expected Int64 (got an uploaded file"),
+                (post("/fp_sym", ["s" => script]), "expected Symbol (got an uploaded file"),
+                (post("/fp_list", ["outputs" => script]), "expected Vector{String} (got an uploaded file"),
+                (post("/fp_list", ["outputs" => script, "outputs" => other]),
+                 "expected Vector{String} (got an uploaded file"),
+                (post("/fp_list", ["outputs" => "a", "outputs" => script]),
+                 "expected Vector{String} (got an uploaded file"),
+                (post("/fp_text", ["command" => script, "command" => other]), "expected one value, got 2"),
+                # A closed domain lists what is allowed instead of a type.
+                (post("/fp_flag", ["f" => script]), "parameter f: $(file_repr); allowed values: false, true"),
+                (post("/fp_stage", ["stage" => script]), "parameter stage: $(file_repr); allowed values: "),
+            ]
+            status_of(uid) = match(r"\nstatus: +(\d+)\n", read(joinpath(dir, uid * ".log"), String))[1]
+            for (response, message) in rejected
+                @test response.status == 400
+                @test status_of(HTTP.header(response, "X-HTMXO-Error-Id", "")) == "400"
+                @test contains(body_text(response), "<header>Bad Request</header>")
+                @test contains(body_text(response), message)
+            end
+
+            # Text parts and the types a file already is still reach the bodies.
+            accepted = [
+                (post("/fp_text", ["command" => "echo hi"]), "command=&quot;echo hi&quot;"),
+                (post("/fp_list", ["outputs" => "a", "outputs" => "b"]), "outputs=a,b"),
+                (post("/fp_file", ["file" => script]), "file=script.sh"),
+                (post("/fp_files", ["files" => script]), "files=script.sh Upload"),
+                (post("/fp_files", ["files" => script, "files" => other]), "files=script.sh,run.sh Upload"),
+                (post("/fp_bare", ["xs" => script]), "xs=1 Upload"),
+                (post("/fp_any", ["x" => script]), "x=Upload"),
+                (post("/fp_untyped", ["x" => script]), "x=Upload"),
+            ]
+            for (response, message) in accepted
+                @test response.status == 200
+                @test contains(body_text(response), message)
+            end
+            # The mirror, unchanged: text where a file is declared.
+            text_for_file = post("/fp_file", ["file" => "notes.txt"])
+            @test text_for_file.status == 400
+            @test contains(body_text(text_for_file), "expected an uploaded file, got a text value")
+        finally
+            HTMXObjects.ERROR_DIR[] = old_dir
+        end
+    end
+end
+
 # An `__error__` hook that returns a `MIMEResponse` answers with it: a JSON
 # API's error stays JSON, with the status the error would have had (500 for a
 # server fault, 400 for a caller fault), instead of the escaped repr inside the
