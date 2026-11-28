@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.207
+
+- `formparams(req)` reads a `multipart/form-data` body's text fields, in the
+  value shape it returns for a urlencoded body: a `String`, or a
+  `Vector{String}` for a repeated field. A file part is left out
+  (`multipartparams`, or an `Upload` keyword, reads it). Until now it returned
+  an empty dict for every multipart body, so a route body that read it, for
+  example to refuse fields it does not take, saw none once its form gained a
+  file input or a client sent `curl -F`. A multipart body that does not parse
+  throws `HTMXObjects.UnreadableBody` (a 400), as `multipartparams` does.
+- `formdata(req)` is `formparams` with a repeated field's last value, so it
+  reads the same bodies. It used to parse any body as urlencoded, which threw
+  `ArgumentError` on a `%` in a multipart or JSON body and otherwise invented
+  keys from it. A JSON or other non-form body now gives an empty dict, and a bad
+  `%` escape in a form stays literal, as in `formparams`.
+
 ## 0.1.206
 
 - A result that a tabs page asks for the first time shows its operation's
