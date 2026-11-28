@@ -11098,6 +11098,10 @@ end
 # The instance each root type was routed with (`_default_root_factory`).
 const _root_templates = Dict{DataType,Any}()
 const _operation_policies = Dict{DataType,OperationPolicy}()
+# Root types `semantic_app` has rendered. Written by a request's first render and
+# read by every operation, so it is read and written only under
+# `_root_providers_lock`: two first renders inserting one type unlocked can
+# raise `UndefRefError` (snag `semantic-app-fir-3ff305e1`).
 const _semantic_root_types = Set{Type}()
 # Convert a string value to the target type. Strings pass through as-is.
 # Called from generated _extract_args methods with actual Types (resolved at compile time).
@@ -15691,7 +15695,7 @@ function _operation_target(provider::RootProvider, RootT, chain::Vector,
     retention = provider.factory isa _ManagedRootFactory ?
         (; max_entries=provider.factory.retention.max_entries,
            ttl=provider.factory.retention.ttl) : nothing
-    governed = RootT in _semantic_root_types
+    governed = @lock _root_providers_lock RootT in _semantic_root_types
     (; context, root, leaf, objects, chain, root_segs, request=req, retention,
        governed)
 end
@@ -36102,8 +36106,8 @@ end
 function _activate_semantic_root_provider!(obj)
     root = _semantic_root(obj)
     RootT = typeof(root)
-    push!(_semantic_root_types, RootT)
     provider = lock(_root_providers_lock) do
+        push!(_semantic_root_types, RootT)
         current = get(_root_providers, RootT, RootProvider())
         current.scope === :request && current.factory === _default_root_factory ||
             return current

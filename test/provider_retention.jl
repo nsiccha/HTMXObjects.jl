@@ -455,6 +455,54 @@ end
     @test instance_get("/instance/show?fit=first-fit").status == 400
 end
 
+# A fresh server's first requests render `semantic_app` from several tasks at
+# once, and each records the root type in one global set. Two unlocked first
+# inserts of one type raised `UndefRefError` inside Base's Dict (snag
+# `semantic-app-fir-3ff305e1`), so the set changes only under the root-provider
+# lock: while another task holds it, a first render waits before touching it.
+@testmodule SemanticRootLockFixtures begin
+    using HTMXObjects
+    export LockedRootApp
+
+    @htmx struct LockedRootApp
+        @get index() = semantic_app(__self__; title="locked")
+        "Say hello"
+        @direct @get hello() = "hello"
+    end
+end
+
+@testitem "a first semantic_app render records its root type under the root-provider lock" setup=[SemanticRootLockFixtures] tags=[:unit, :semantic] begin
+    using HTMXObjects
+    import HTMXObjects: _activate_semantic_root_provider!, _root_providers,
+        _root_providers_lock, _semantic_root_types, _is_semantic_root_provider
+
+    entered = Base.Event()
+    render = lock(_root_providers_lock) do
+        task = Threads.@spawn (notify(entered); _activate_semantic_root_provider!(LockedRootApp()))
+        wait(entered)
+        # Long enough for an unlocked insert to have happened.
+        sleep(0.5)
+        @test !istaskdone(task)
+        @test !(LockedRootApp in _semantic_root_types)
+        task
+    end
+    @test _is_semantic_root_provider(fetch(render))
+    @test @lock _root_providers_lock LockedRootApp in _semantic_root_types
+
+    # Many first renders of one type at once all succeed and record it.
+    lock(_root_providers_lock) do
+        delete!(_semantic_root_types, LockedRootApp)
+        delete!(_root_providers, LockedRootApp)
+    end
+    go = Threads.Atomic{Bool}(false)
+    renders = [Threads.@spawn (while !go[]; yield(); end;
+                               _activate_semantic_root_provider!(LockedRootApp()))
+               for _ in 1:max(4, 2Threads.nthreads())]
+    go[] = true
+    @test all(_is_semantic_root_provider ∘ fetch, renders)
+    @test @lock _root_providers_lock LockedRootApp in _semantic_root_types
+end
+
 # A fresh-per-request app can still keep one object across requests: hand it to
 # `route!` as a constructor override or a fixed field. Every request root
 # receives that same object, and the request-boundary `sync!` reaches it through
