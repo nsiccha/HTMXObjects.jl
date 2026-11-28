@@ -11241,6 +11241,12 @@ end
 _json_vector_type(_T) = nothing
 _json_vector_type(::Type{V}) where {V<:AbstractVector} = V
 _json_vector_type(::Type{Union{Nothing,V}}) where {V<:AbstractVector} = V
+# JSON.jl builds only a concrete array (`AbstractVector{String}` has no
+# `undef` constructor), so an abstract vector declaration decodes as a Vector
+# of its element type, which it accepts.
+_json_decode_type(T) = T === nothing ? Any : T
+_json_decode_type(::Type{V}) where {V<:AbstractVector} =
+    isconcretetype(V) || !(Vector{eltype(V)} <: V) ? V : Vector{eltype(V)}
 
 # Use JSON.jl's typed decoder on the original field, including nested records,
 # arrays and nullable types; never stringify a JSON field into a form. Generic
@@ -11263,7 +11269,7 @@ function _convert_json_param(raw, T)
             V === T && throw(ArgumentError(
                 "a Vector takes a JSON array or one value, not null; send [] for none"))
         end
-        JSON.parse(raw, T === nothing ? Any : T)
+        JSON.parse(raw, _json_decode_type(T))
     catch err
         # Unsupported convert methods describe a mismatched JSON value, unlike
         # a missing form parser. Leave errors in application constructors alone.

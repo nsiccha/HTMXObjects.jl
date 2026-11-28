@@ -19,7 +19,8 @@ using TestItemRunner
             fields...) = answer((; text, nullable, numbers, enabled, data, fields=(; fields...)))
         @post record(; item::Item) = answer((; item.name, item.value))
         @post lists(; texts::Vector{String}=String[], maybe::Union{Nothing,Vector{Int}}=nothing,
-            items::Vector{Item}=Item[], anything::Vector=[]) = answer((; texts, maybe,
+            items::Vector{Item}=Item[], anything::Vector=[],
+            abstract::AbstractVector{String}=String[]) = answer((; texts, maybe, abstract,
             items=[(; item.name, item.value) for item in items],
             anything, anything_type=string(typeof(anything))))
         @post raw() = HTTP.Response(200, copy(__req__.body))
@@ -132,6 +133,14 @@ using TestItemRunner
             @test JSON.parse(response.body)["anything"] == ["x"]
             @test JSON.parse(response.body)["anything_type"] == "Vector{Any}"
         end
+        # An abstract vector declaration decodes as a Vector of its element type.
+        for (payload, expected) in ("""{"abstract":["a","b"]}""" => ["a", "b"],
+                                    """{"abstract":"a"}""" => ["a"])
+            response = request("/lists", payload)
+            @test response.status == 200
+            @test JSON.parse(response.body)["abstract"] == expected
+        end
+        @test request("/lists", """{"abstract":[1]}""").status == 400
         response = request("/lists", """{"texts":null}""")
         @test response.status == 400
         @test occursin("send [] for none", String(response.body))

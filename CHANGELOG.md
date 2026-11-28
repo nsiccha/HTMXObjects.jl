@@ -13,6 +13,9 @@
   400 unless the type is nullable, now with "a Vector takes a JSON array or one
   value, not null; send [] for none". `Union{Nothing,Vector{T}}` takes one value
   the same way.
+- A JSON array for a keyword or `@param` declared with an abstract vector type
+  such as `AbstractVector{String}` binds as a `Vector` of its element type. It
+  answered 400, because JSON.jl builds only concrete arrays.
 - A JSON array sent to an `@options`-backed vector `@param` selects each element
   from the domain. It was compared as a whole against each option, so every
   array answered 400 and a JSON client could not select two options. A single
