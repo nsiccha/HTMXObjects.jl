@@ -1270,26 +1270,28 @@ end
 """
     formparams(req::HTTP.Request) -> Dict{String, Union{String, Vector{String}}}
 
-Parse a urlencoded request body into a multi-value-preserving Dict. The
-`formparams` analogue of `queryparams` — repeated body fields (`image=a&image=b`)
-become a `Vector{String}` instead of collapsing to the last value, which is
-what [`formdata`](@ref) (a thin wrapper over `HTTP.queryparams`) does. Used by
-the `@post`/`@put`/`@patch` argument extractor so a `Vector`-typed kwarg
-receives every posted value.
+The text fields a form submitted, in either form encoding: an
+`application/x-www-form-urlencoded` body, or the text parts of a
+`multipart/form-data` body (what a browser sends for a form with a file input).
+A field sent once is a `String`; a repeated field (`image=a&image=b`) is a
+`Vector{String}` in the order sent, where [`formdata`](@ref) keeps only the
+last value. A file part is left out: read it with [`multipartparams`](@ref), or
+declare an `Upload` keyword.
 
-Reads a non-destructive copy of the request body; an empty body yields an empty
-dict. Bodies with a different Content-Type yield an empty dictionary.
-Repeated keys retain all values in order.
+A body without a Content-Type reads as urlencoded. A JSON or other body yields
+an empty dict; [`bodyparams`](@ref) reads every encoding, JSON objects with
+their native values. A multipart body that does not parse throws
+`HTMXObjects.UnreadableBody`, answered 400, as [`multipartparams`](@ref) does.
+Reads a copy of the request body, so the body stays intact.
 """
 function formparams(req::HTTP.Request)
-    # Only an `application/x-www-form-urlencoded` body is parseable here — it's
-    # the wire format `_parse_form_encoded` understands. A `multipart/form-data`
-    # (file upload), JSON, or other binary body must NOT be fed to the
-    # urlencoded parser at all: its bytes are not key/value pairs, so parsing
-    # them can only invent keys. Such handlers read the raw body themselves
-    # (e.g. `HTTP.parse_multipart_form`); any kwargs they declare fall back to
-    # `queryparams`. Parse only when the content-type says urlencoded, or is
-    # absent (a headerless client posting a urlencoded body).
+    # The two form encodings each have their own parser. A multipart body's
+    # text parts come from `multipartparams`, so the two readers agree on which
+    # part is a file. JSON and other bodies must NOT reach the urlencoded
+    # parser: their bytes are not key/value pairs, so parsing them can only
+    # invent keys (and `formdata` used to throw on a `%` in them). Parse as
+    # urlencoded only when the content-type says so, or is absent (a headerless
+    # client posting a urlencoded body).
     #
     # This gate is a CORRECTNESS filter, not a safety net: a caller that
     # mislabels a binary payload as urlencoded (curl's `--data-binary` default,
@@ -1297,6 +1299,7 @@ function formparams(req::HTTP.Request)
     # survivable in the parser itself, which is why `_parse_form_encoded` is
     # non-throwing (snag `bodyparams-form-525c2ab8`).
     ct = lowercase(HTTP.header(req, "Content-Type", ""))
+    occursin("multipart/form-data", ct) && return _multipart_text_fields(req)
     isempty(ct) || occursin("application/x-www-form-urlencoded", ct) ||
         return Dict{String, Union{String, Vector{String}}}()
     # `String(::Vector{UInt8})` takes ownership and empties the vector, so the
@@ -1304,13 +1307,31 @@ function formparams(req::HTTP.Request)
     _parse_form_encoded(String(_request_body_bytes(req)))
 end
 
+# A multipart body's text parts in `formparams`' value shape: once is a
+# `String`, repeated is a `Vector{String}` in the order sent. Before this,
+# `formparams` returned an empty dict for every multipart body, so a route body
+# reading it saw no fields once its form gained a file input (snag
+# `formparams-ignor-9e11e246`).
+function _multipart_text_fields(req::HTTP.Request)
+    d = Dict{String, Union{String, Vector{String}}}()
+    for (name, value) in multipartparams(req)
+        for v in (value isa AbstractVector ? value : (value,))
+            v isa String || continue
+            d[name] = haskey(d, name) ? _form_append(d[name], v) : v
+        end
+    end
+    d
+end
+
 """
     formdata(req::HTTP.Request) -> Dict{String, String}
 
-Parse a urlencoded request body into a `Dict`; a repeated field keeps only its
-last value. See `formparams` for the multi-value form.
+The fields [`formparams`](@ref) reads, with a repeated field keeping only its
+last value. It reads the same bodies: urlencoded, and the text parts of
+multipart. Any other body yields an empty dict.
 """
-formdata(req::HTTP.Request) = HTTP.queryparams(String(_request_body_bytes(req)))
+formdata(req::HTTP.Request) =
+    Dict{String,String}(k => (v isa AbstractVector ? last(v) : v) for (k, v) in formparams(req))
 
 """
     Upload
@@ -1431,7 +1452,9 @@ The request-body parameter source for POST/PUT/PATCH keywords and `@param`.
 `nothing` for null). `multipart/form-data` uses [`multipartparams`](@ref), with
 text fields as strings and files as [`Upload`](@ref). Other requests use
 `formparams`, which reads urlencoded forms and otherwise returns an empty dict.
-Malformed JSON or multipart bodies, and non-object JSON, throw
+So in a route body, `keys(bodyparams(req))` names every field a request
+submitted, whatever its encoding, where [`formparams`](@ref) has only a form's
+text fields. Malformed JSON or multipart bodies, and non-object JSON, throw
 `HTMXObjects.UnreadableBody`, which a route answers 400. Parsing copies the
 body bytes, so reading parameters does not consume the request body.
 """
@@ -10492,8 +10515,9 @@ updates the struct.
   both `GET /filter/{a}/{b}` and `GET /filter/{a}` (with `b=1` filled in)
 - Kwargs (via call syntax) auto-extract from query params or form data:
   `@get search(; q="", page::Int=1)` extracts `q` and `page` from the query string
-  (`GET` / `DELETE` → `queryparams`, `POST` / `PUT` / `PATCH` → `formparams`).
-  Both parsers preserve multi-value keys, so a `Vector`-typed kwarg receives
+  (`GET` / `DELETE` → `queryparams`; `POST` / `PUT` / `PATCH` → `bodyparams`, a
+  urlencoded, multipart or JSON body, then the query string).
+  Both preserve multi-value keys, so a `Vector`-typed kwarg receives
   every repeated value (`?tag=a&tag=b` or repeated `image=a&image=b` body fields).
 - A submitted value its declared type rejects — `?page=abc` for `page::Int`, a
   path segment, `@param`, `@header` or indexed-mount key that does not parse, a
