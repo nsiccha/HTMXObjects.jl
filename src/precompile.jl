@@ -48,8 +48,10 @@ end
         finally
             # semantic_app retains its root for later operations. A workload
             # has no later request: never serialize its synthetic root state.
-            delete!(_root_providers, _PrecompileSurface)
-            delete!(_semantic_root_types, _PrecompileSurface)
+            lock(_root_providers_lock) do
+                delete!(_root_providers, _PrecompileSurface)
+                delete!(_semantic_root_types, _PrecompileSurface)
+            end
             delete!(_property_descriptors_memo.entries, _PrecompileSurface)
             delete!(_semantic_descriptor_memo.entries, _PrecompileSurface)
         end
